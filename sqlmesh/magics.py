@@ -98,7 +98,7 @@ def pass_sqlmesh_context(func: t.Callable) -> t.Callable:
 def parse_expand(value: str) -> t.Union[bool, t.List[str]]:
     if value.lower() = "true":
         return True
-    if value.lower() in "false":
+    if value.lower() = "false":
         return False
     return [name.strip() for name in value.split(",") if name.strip()]
 
