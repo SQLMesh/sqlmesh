@@ -1464,7 +1464,7 @@ def test_mssql_engine_import_validator():
             mock_import.side_effect = ImportError("No module named 'pyodbc'")
             MSSQLConnectionConfig(host="localhost", driver="pyodbc")
 
-    # Test PyODBC driver suggests mssql-python extra when import fails
+    # Test MSSQL Python driver suggests mssql-python extra when import fails
     if SUPPORTS_MSSQL_PYTHON_DRIVER:
         with pytest.raises(ConfigError, match=r"pip install \"sqlmesh\[mssql-python\]\""):
             with patch("importlib.import_module") as mock_import:
@@ -1684,7 +1684,6 @@ def test_mssql_pyodbc_connection_string_generation():
         assert call_args[1]["autocommit"] is False
 
 
-@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
 def test_mssql_pyodbc_connection_string_with_odbc_properties():
     """Test pyodbc connection string includes custom ODBC properties."""
     with patch("pyodbc.connect") as mock_pyodbc_connect:
@@ -1775,7 +1774,7 @@ def test_mssql_mssql_python_connection_string_generation():
         factory_with_kwargs = config._connection_factory_with_kwargs
         connection = factory_with_kwargs()
 
-        # Verify pyodbc.connect was called with the correct connection string
+        # Verify mssql_python.connect was called with the correct connection string
         mock_mssql_python_connect.assert_called_once()
         call_args = mock_mssql_python_connect.call_args
 
@@ -1823,7 +1822,7 @@ def test_mssql_mssql_python_connection_string_with_odbc_properties():
         factory_with_kwargs = config._connection_factory_with_kwargs
         connection = factory_with_kwargs()
 
-        # Verify pyodbc.connect was called
+        # Verify mssql_python.connect was called
         mock_mssql_python_connect.assert_called_once()
         conn_str = mock_mssql_python_connect.call_args[0][0]
 
@@ -2032,7 +2031,7 @@ def test_mssql_mssql_python_connection_datetimeoffset_handling():
         def mock_add_output_converter(sql_type, converter_func):
             converter_calls.append((sql_type, converter_func))
 
-        # Create a mock connection that will be returned by pyodbc.connect
+        # Create a mock connection that will be returned by mssql_python.connect
         mock_connection = Mock()
         mock_connection.add_output_converter = mock_add_output_converter
         mock_mssql_python_connect.return_value = mock_connection
@@ -2288,7 +2287,7 @@ def test_fabric_mssql_python_connection_string_generation():
         factory_with_kwargs = config._connection_factory_with_kwargs
         connection = factory_with_kwargs()
 
-        # Verify pyodbc.connect was called with the correct connection string
+        # Verify mssql_python.connect was called with the correct connection string
         mock_mssql_python_connect.assert_called_once()
         call_args = mock_mssql_python_connect.call_args
 
