@@ -14,6 +14,17 @@ pip install "sqlmesh[azuresql]"
 ```
 pip install "sqlmesh[azuresql-odbc]"
 ```
+Set `driver: "pyodbc"` in your connection options.
+
+
+#### Python Driver (Official Microsoft driver for Azure SQL):
+See [`mssql-python`](https://pypi.org/project/mssql-python/) for more information.
+```
+pip install "sqlmesh[azuresql-mssql-python]"
+```
+
+Set `driver: "mssql-python"` in your connection options.
+
 
 ### Connection options
 

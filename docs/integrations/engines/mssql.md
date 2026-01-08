@@ -6,10 +6,20 @@
 ```
 pip install "sqlmesh[mssql]"
 ```
+
 ### Microsoft Entra ID / Azure Active Directory Authentication:
 ```
 pip install "sqlmesh[mssql-odbc]"
 ```
+Set `driver: "pyodbc"` in your connection options.
+
+#### Python Driver (Official Microsoft driver for Azure SQL):
+See [`mssql-python`](https://pypi.org/project/mssql-python/) for more information.
+```
+pip install "sqlmesh[fabric-mssql-python]"
+```
+Set `driver: "mssql-python"` in your connection options.
+
 
 ## Incremental by unique key `MERGE`
 
