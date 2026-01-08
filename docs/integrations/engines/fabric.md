@@ -14,6 +14,13 @@ NOTE: Fabric Warehouse is not recommended to be used for the SQLMesh [state conn
 pip install "sqlmesh[fabric]"
 ```
 
+#### Python Driver (Official Microsoft driver for Azure SQL):
+See [`mssql-python`](https://pypi.org/project/mssql-python/) for more information.
+```
+pip install "sqlmesh[fabric-mssql-python]"
+```
+Set `driver: "mssql-python"` in your connection options.
+
 ### Connection options
 
 | Option            | Description                                                  |     Type     | Required |
