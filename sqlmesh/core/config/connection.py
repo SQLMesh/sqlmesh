@@ -1594,6 +1594,13 @@ class MSSQLConnectionConfig(ConnectionConfig):
             base_keys.discard("conn_properties")
 
         elif self.driver == "mssql-python":
+            base_keys.update(
+                {
+                    "trust_server_certificate",
+                    "encrypt",
+                    "odbc_properties",
+                }
+            )
             # Remove pymssql-specific parameters
             base_keys.discard("tds_version")
             base_keys.discard("conn_properties")
@@ -1637,9 +1644,9 @@ class MSSQLConnectionConfig(ConnectionConfig):
                     conn_str_parts.append(f"Database={database}")
 
                 # Add security options
-                conn_str_parts.append(f"Encrypt={'YES' if encrypt else 'NO'}")
+                conn_str_parts.append(f"Encrypt={'yes' if encrypt else 'no'}")
                 if trust_server_certificate:
-                    conn_str_parts.append("TrustServerCertificate=YES")
+                    conn_str_parts.append("TrustServerCertificate=yes")
 
                 conn_str_parts.append(f"ConnectRetryCount={login_attempts}")
                 conn_str_parts.append(f"ConnectRetryInterval={min(int(login_timeout), 60)}")
