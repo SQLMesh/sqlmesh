@@ -42,7 +42,7 @@ classifiers = [
 athena = ["PyAthena[Pandas]"]
 azuresql = ["pymssql"]
 azuresql-odbc = ["pyodbc>=5.0.0"]
-azuresql-mssql-python = ["mssql-python>=1.1.0"]
+azuresql-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 bigquery = [
     "google-cloud-bigquery[pandas]",
     "google-cloud-bigquery-storage"
@@ -85,7 +85,7 @@ dev = [
     "PyAthena[Pandas]",
     "PyGithub>=2.6.0",
     "pyodbc>=5.0.0",
-    "mssql-python>=1.1.0",
+    "mssql-python>=1.1.0;python_version>=\"3.10\"",
     "pyperf",
     "pyspark~=3.5.0",
     "pytest",
@@ -111,13 +111,13 @@ dbt = ["dbt-core<2"]
 dlt = ["dlt"]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
-fabric-mssql-python = ["mssql-python>=1.1.0"]
+fabric-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 gcppostgres = ["cloud-sql-python-connector[pg8000]>=1.8.0"]
 github = ["PyGithub>=2.6.0"]
 motherduck = ["duckdb>=1.2.0"]
 mssql = ["pymssql"]
 mssql-odbc = ["pyodbc>=5.0.0"]
-mssql-python = ["mssql-python>=1.1.0"]
+mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 mysql = ["pymysql"]
 mwaa = ["boto3"]
 postgres = ["psycopg2"]

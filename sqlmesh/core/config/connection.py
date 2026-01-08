@@ -10,6 +10,7 @@ import re
 import typing as t
 from enum import Enum
 from functools import partial
+from sys import version_info
 
 import pydantic
 from packaging import version
@@ -60,6 +61,7 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
+SUPPORTS_MSSQL_PYTHON_DRIVER = (version_info.major, version_info.minor) >= (3, 10)
 
 
 def _get_engine_import_validator(
@@ -1621,6 +1623,9 @@ class MSSQLConnectionConfig(ConnectionConfig):
         if self.driver == "mssql-python":
             # The `mssql-python` implementation is API-compatible with
             # with the `pyodbc` equivalent for documented parameters.
+
+            if not SUPPORTS_MSSQL_PYTHON_DRIVER:
+                raise ConfigError("The `mssql-python` driver requires Python 3.10 or higher.")
 
             def connect_mssql_python(**kwargs: t.Any) -> t.Callable:
                 # Extract parameters for connection string
