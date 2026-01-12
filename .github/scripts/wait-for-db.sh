@@ -50,6 +50,34 @@ spark_ready() {
     probe_port 15002
 }
 
+starrocks_ready() {
+    probe_port 9030
+
+    echo "Checking for 1 alive StarRocks backends..."
+    sleep 5
+
+    while true; do
+        echo "Checking StarRocks backends..."
+        ALIVE_BACKENDS=$(docker exec -i starrocks-fe mysql -h127.0.0.1 -P9030 -uroot -e "show backends \G" | grep -c "^ *Alive: true *$")
+
+        # fallback value if failed to get number
+        if ! [[ "$ALIVE_BACKENDS" =~ ^[0-9]+$ ]]; then
+            echo "WARN: Unable to parse number of alive backends, got: '$ALIVE_BACKENDS'"
+            ALIVE_BACKENDS=0
+        fi
+
+        echo "Found $ALIVE_BACKENDS alive backends"
+
+        if [ "$ALIVE_BACKENDS" -ge 1 ]; then
+            echo "StarRocks has 1 or more alive backends"
+            break
+        fi
+
+        echo "Waiting for more backends to become alive..."
+        sleep 5
+    done
+}
+
 trino_ready() {
     # Trino has a built-in healthcheck script, just call that
     docker compose -f tests/core/engine_adapter/integration/docker/compose.trino.yaml exec trino /bin/bash -c '/usr/lib/trino/bin/health-check'

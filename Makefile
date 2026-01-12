@@ -212,6 +212,9 @@ trino-test: engine-trino-up
 risingwave-test: engine-risingwave-up
 	pytest -n auto -m "risingwave" --reruns 3 --junitxml=test-results/junit-risingwave.xml
 
+starrocks-test: engine-starrocks-up
+	pytest -n auto -m "starrocks" --reruns 3 --junitxml=test-results/junit-starrocks.xml
+
 #################
 # Cloud Engines #
 #################

@@ -1,0 +1,27 @@
+services:
+  starrocks-fe:
+    image: starrocks/fe-ubuntu:3.5-latest
+    container_name: starrocks-fe
+    hostname: starrocks-fe
+    environment:
+      - FE_SERVERS=fe1:starrocks-fe:9030
+    ports:
+      - "9030:9030"  # MySQL protocol port for tests
+      - "8030:8030"  # HTTP port
+    networks:
+      - starrocks_net
+
+  starrocks-be:
+    image: starrocks/be-ubuntu:3.5-latest
+    container_name: starrocks-be
+    hostname: starrocks-be
+    depends_on:
+      - starrocks-fe
+    environment:
+      - FE_SERVERS=starrocks-fe:9030
+    networks:
+      - starrocks_net
+
+networks:
+  starrocks_net:
+    driver: bridge

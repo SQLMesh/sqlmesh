@@ -777,6 +777,8 @@ def test_insert_overwrite_by_time_partition(ctx_query_and_df: TestContext):
         ds_type = "datetime"
     if ctx.dialect == "tsql":
         ds_type = "varchar(max)"
+    if ctx.dialect == "starrocks":
+        ds_type = "datetime"
 
     ctx.columns_to_types = {"id": "int", "ds": ds_type}
     table = ctx.table("test_table")
@@ -865,6 +867,8 @@ def test_insert_overwrite_by_time_partition_source_columns(ctx_query_and_df: Tes
         ds_type = "datetime"
     if ctx.dialect == "tsql":
         ds_type = "varchar(max)"
+    if ctx.dialect == "starrocks":
+        ds_type = "datetime"
 
     ctx.columns_to_types = {"id": "int", "ds": ds_type}
     columns_to_types = {
@@ -2579,6 +2583,7 @@ def test_dialects(ctx: TestContext):
                 "mysql": pd.Timestamp("2020-01-01 00:00:00"),
                 "spark": pd.Timestamp("2020-01-01 00:00:00"),
                 "databricks": pd.Timestamp("2020-01-01 00:00:00"),
+                "starrocks": pd.Timestamp("2020-01-01 00:00:00"),
             },
         ),
         (

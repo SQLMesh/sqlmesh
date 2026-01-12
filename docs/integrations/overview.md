@@ -26,4 +26,5 @@ SQLMesh supports the following execution engines for running SQLMesh projects (e
 * [Redshift](./engines/redshift.md) (redshift)
 * [Snowflake](./engines/snowflake.md) (snowflake)
 * [Spark](./engines/spark.md) (spark)
+* [StarRocks](./engines/starrocks.md) (starrocks)
 * [Trino](./engines/trino.md) (trino)
