@@ -1476,7 +1476,7 @@ class PropertyValidator:
             >>> validated = PropertyValidator.validate_and_normalize_property("distributed_by", "RANDOM")
             >>> # Result: "RANDOM" (string from EnumType)
         """
-        logger.debug("validate_and_normalize_property. value: %s, type: %s", value, type(value))
+        # logger.debug("validate_and_normalize_property. value: %s, type: %s", value, type(value))
 
         # Step 1: Optionally preprocess string with parentheses
         if preprocess_parentheses:
@@ -2178,25 +2178,16 @@ class StarRocksEngineAdapter(
         # Use setdefault to simplify table_properties access
         table_properties = kwargs.setdefault("table_properties", {})
 
-        # Log entry point
-        logger.debug(
-            "_create_table_from_columns: table=%s, primary_key=%s (from model param), "
-            "table_properties.keys=%s",
-            table_name,
-            primary_key,
-            list(table_properties.keys()),
-        )
-
         # Extract and validate key columns from table_properties
         # Priority: parameter primary_key > table_properties (already handled above)
         key_type, key_columns = self._extract_and_validate_key_columns(
             table_properties, primary_key
         )
-        logger.debug(
-            "_create_table_from_columns: extracted key_type=%s, key_columns=%s",
-            key_type,
-            key_columns,
-        )
+        # logger.debug(
+        #     "_create_table_from_columns: extracted key_type=%s, key_columns=%s",
+        #     key_type,
+        #     key_columns,
+        # )
 
         # IMPORTANT: Normalize parameter primary_key into table_properties for unified handling
         # This ensures _build_table_properties_exp() can access primary_key even when
@@ -2205,24 +2196,24 @@ class StarRocksEngineAdapter(
             table_properties["primary_key"] = primary_key
             logger.debug("_create_table_from_columns: unified primary_key into table_properties")
         elif key_type:
-            logger.debug(
-                "table key type '%s' may be handled in _build_table_key_property", key_type
-            )
+            # logger.debug(
+            #     "table key type '%s' may be handled in _build_table_key_property", key_type
+            # )
+            pass
 
         # StarRocks key column ordering constraint: All key types need reordering
         if key_columns:
             target_columns_to_types = self._reorder_columns_for_key(
                 target_columns_to_types, key_columns, key_type or "key"
             )
-            logger.debug("_create_table_from_columns: reordered columns for %s", key_type)
 
         # IMPORTANT: Do NOT pass primary_key to base class!
         # Unlike other databases, StarRocks requires PRIMARY KEY to be in POST_SCHEMA location
         # (in properties section after columns), not inside schema (inside column definitions).
         # We handle ALL key types (including PRIMARY KEY) in _build_table_key_property.
-        logger.debug(
-            "_create_table_from_columns: NOT passing primary_key to base class (handled in _build_table_key_property)"
-        )
+        # logger.debug(
+        #     "_create_table_from_columns: NOT passing primary_key to base class (handled in _build_table_key_property)"
+        # )
         super()._create_table_from_columns(
             table_name=table_name,
             target_columns_to_types=target_columns_to_types,
@@ -2275,11 +2266,11 @@ class StarRocksEngineAdapter(
                 self.get_data_object(view_name), DataObjectType.MATERIALIZED_VIEW
             )
             self.drop_view(view_name, ignore_if_not_exists=True, materialized=True)
-        logger.debug(
-            f"Creating materialized view: {view_name}, materialized: {materialized}, "
-            f"materialized_properties: {materialized_properties}, "
-            f"view_properties: {view_properties}, create_kwargs: {create_kwargs}, "
-        )
+        # logger.debug(
+        #     f"Creating materialized view: {view_name}, materialized: {materialized}, "
+        #     f"materialized_properties: {materialized_properties}, "
+        #     f"view_properties: {view_properties}, create_kwargs: {create_kwargs}, "
+        # )
 
         return self._create_materialized_view(
             view_name=view_name,
@@ -2359,12 +2350,12 @@ class StarRocksEngineAdapter(
             partitioned_by = materialized_properties.get("partitioned_by")
             clustered_by = materialized_properties.get("clustered_by")
             partition_interval_unit = materialized_properties.get("partition_interval_unit")
-            logger.debug(
-                f"Get info from materialized_properties: {materialized_properties}, "
-                f"partitioned_by: {partitioned_by}, "
-                f"clustered_by: {clustered_by}, "
-                f"partition_interval_unit: {partition_interval_unit}"
-            )
+            # logger.debug(
+            #     f"Get info from materialized_properties: {materialized_properties}, "
+            #     f"partitioned_by: {partitioned_by}, "
+            #     f"clustered_by: {clustered_by}, "
+            #     f"partition_interval_unit: {partition_interval_unit}"
+            # )
 
         properties_exp = self._build_table_properties_exp(
             catalog_name=target_table.catalog,
@@ -2488,10 +2479,10 @@ class StarRocksEngineAdapter(
         """
         properties: t.List[exp.Expression] = []
         table_properties_copy = dict(table_properties) if table_properties else {}
-        logger.debug(
-            "_build_table_properties_exp: table_properties=%s",
-            table_properties.keys() if table_properties else [],
-        )
+        # logger.debug(
+        #     "_build_table_properties_exp: table_properties=%s",
+        #     table_properties.keys() if table_properties else [],
+        # )
 
         is_mv = table_kind == "MATERIALIZED_VIEW"
         if is_mv:
@@ -2508,7 +2499,6 @@ class StarRocksEngineAdapter(
             property_description="key type",
             table_properties=table_properties_copy,
         )
-        logger.debug("_build_table_properties_exp: active_key_type='%s'", active_key_type)
         if is_mv and active_key_type:
             raise SQLMeshError(
                 f"You can't specify the table type when the table is a materialized view. "
@@ -2525,22 +2515,11 @@ class StarRocksEngineAdapter(
                 key_type, key_expr, preprocess_parentheses=True
             )
             key_columns = tuple(col.name for col in normalized)
-            logger.debug(
-                "_build_table_properties_exp: key_type=%s, key_columns=%s",
-                key_type,
-                key_columns,
-            )
 
         # 1. Handle key constraints (ALL types including PRIMARY KEY)
         key_prop = self._build_table_key_property(table_properties_copy, active_key_type)
         if key_prop:
             properties.append(key_prop)
-            logger.debug(
-                "_build_table_properties_exp: generated key_prop=%s",
-                type(key_prop).__name__,
-            )
-        else:
-            logger.debug("_build_table_properties_exp: key_prop skipped (not defined)")
 
         # 2. Add table comment (it must be ahead of other properties except the talbe key/type)
         if table_description:
@@ -2562,46 +2541,22 @@ class StarRocksEngineAdapter(
         )
         if partition_prop:
             properties.append(partition_prop)
-            logger.debug(
-                "_build_table_properties_exp: generated partition_prop=%s",
-                type(partition_prop).__name__,
-            )
-        else:
-            logger.debug("_build_table_properties_exp: partition_prop skipped (not defined)")
 
         # 4. Handle distributed_by (DISTRIBUTED BY HASH/RANDOM)
         distributed_prop = self._build_distributed_by_property(table_properties_copy, key_columns)
         if distributed_prop:
             properties.append(distributed_prop)
-            logger.debug(
-                "_build_table_properties_exp: generated distributed_prop=%s",
-                type(distributed_prop).__name__,
-            )
-        else:
-            logger.debug("_build_table_properties_exp: distributed_prop skipped (not defined)")
 
         # 5. Handle refresh_property (REFRESH ...)
         if is_mv:
             refresh_prop = self._build_refresh_property(table_properties_copy)
             if refresh_prop:
                 properties.append(refresh_prop)
-                logger.debug(
-                    "_build_table_properties_exp: generated refresh_prop=%s",
-                    type(refresh_prop).__name__,
-                )
-            else:
-                logger.debug("_build_table_properties_exp: refresh_prop skipped (not defined)")
 
         # 6. Handle order_by/clustered_by (ORDER BY ...)
         order_prop = self._build_order_by_property(table_properties_copy, clustered_by or None)
         if order_prop:
             properties.append(order_prop)
-            logger.debug(
-                "_build_table_properties_exp: generated order_prop=%s",
-                type(order_prop).__name__,
-            )
-        else:
-            logger.debug("_build_table_properties_exp: order_prop skipped (not defined)")
 
         # 5. Handle other properties (replication_num, storage_medium, etc.)
         other_props = self._build_other_properties(table_properties_copy)
@@ -2670,10 +2625,7 @@ class StarRocksEngineAdapter(
             Key property expression for the active key type, or None
         """
         if not active_key_type:
-            logger.debug("_build_table_key_property: no active_key_type, skipped")
             return None
-
-        logger.debug("_build_table_key_property: processing %s", active_key_type)
 
         # Configuration: key_name -> Property class (excluding primary_key)
         KEY_PROPERTY_CLASSES: t.Dict[str, t.Type[exp.Expression]] = {
@@ -2714,11 +2666,6 @@ class StarRocksEngineAdapter(
         )
         # normalized is List[exp.Column] as defined in TableKeyInputSpec
         result = property_class(expressions=list(normalized))
-        logger.debug(
-            "_build_table_key_property: generated %s with columns=%s",
-            type(result).__name__,
-            [col.name for col in normalized],
-        )
         return result
 
     def _build_partition_property(
@@ -2761,22 +2708,10 @@ class StarRocksEngineAdapter(
         )
 
         # If parameter was provided, it takes priority
-        if partitioned_by:
-            logger.debug(
-                "_build_partition_property: using partitioned_by from model param=%s",
-                partitioned_by,
-            )
-        elif not partitioned_by and partition_param_name:
+        if not partitioned_by and partition_param_name:
             # Get from table_properties
             partitioned_by = table_properties.pop(partition_param_name, None)
-            logger.debug(
-                "_build_partition_property: using partitioned_by from table_properties[%s]=%s",
-                partition_param_name,
-                partitioned_by,
-            )
-
         if not partitioned_by:
-            logger.debug("_build_partition_property: no 'partitioned_by' defined, skipped")
             return None
 
         # Parse partition expressions to extract columns and kind (RANGE/LIST)
@@ -2809,7 +2744,6 @@ class StarRocksEngineAdapter(
         # Get partition definitions (RANGE/LIST partitions)
         # Note: Expression-based partitioning (partition_kind=None) does not support pre-created partitions
         if partitions := table_properties.pop("partitions", None):
-            logger.debug("Pre-created partitions: %s", partitions)
             if partition_kind is None:
                 logger.warning(
                     "[StarRocks] 'partitions' parameter is ignored for expression-based partitioning. "
@@ -2831,7 +2765,6 @@ class StarRocksEngineAdapter(
             partitions=partitions,
             partition_kind=partition_kind,
         )
-        logger.debug("_build_partition_property: generated %s", result)
         return result
 
     def _parse_partition_expressions(
@@ -2930,12 +2863,6 @@ class StarRocksEngineAdapter(
         """
         partition_kind = kwargs.get("partition_kind")
         partitions: t.Optional[t.List[str]] = kwargs.get("partitions")
-        logger.debug(
-            "_build_partitioned_by_exp: partition_kind=%s, partitioned_by=%s, partitions=%s",
-            partition_kind,
-            partitioned_by,
-            partitions,
-        )
 
         # Process partitions to create_expressions
         # partitions is already List[str] after SPEC normalization
@@ -2989,20 +2916,10 @@ class StarRocksEngineAdapter(
 
         # No default - if not set, return None
         if distributed_by is None:
-            logger.debug("_build_distributed_by_property: no 'distributed_by' defined, skipped")
             return None
-
-        logger.debug(
-            "_build_distributed_by_property: using distributed_by from table_properties=%s",
-            distributed_by,
-        )
 
         # Try to parse complex string with BUCKETS first
         unified = self._parse_distribution_with_buckets(distributed_by)
-        logger.debug(
-            "_build_distributed_by_property: parsed distribution with buckets: %s",
-            unified,
-        )
         if unified is None:
             # Fall back to SPEC-based parsing
             normalized = PropertyValidator.validate_and_normalize_property(
@@ -3043,10 +2960,6 @@ class StarRocksEngineAdapter(
             expressions=expressions_list,
             buckets=buckets_expr,
             order=None,
-        )
-        logger.debug(
-            "_build_distributed_by_property: generated DistributedByProperty: %s",
-            result,
         )
         return result
 
@@ -3171,11 +3084,6 @@ class StarRocksEngineAdapter(
             (The output function will still handle "HASH(id)" without BUCKETS)
         """
         # Only handle string or Literal string values
-        logger.debug(
-            "_parse_distribution_with_buckets: distributed_by: %s, type: %s",
-            distributed_by,
-            type(distributed_by),
-        )
         if isinstance(distributed_by, str):
             text = distributed_by
         elif isinstance(distributed_by, exp.Literal) and distributed_by.is_string:
@@ -3197,11 +3105,6 @@ class StarRocksEngineAdapter(
 
         # Parse the HASH/RANDOM part via SPEC
         normalized = PropertyValidator.validate_and_normalize_property("distributed_by", hash_part)
-        logger.debug(
-            "_parse_distribution_with_buckets: parsed hash part: %s, type: %s",
-            normalized,
-            type(normalized),
-        )
 
         return DistributionTupleOutputType.to_unified_dict(normalized, int(buckets_str))
 
@@ -3236,12 +3139,7 @@ class StarRocksEngineAdapter(
         )
 
         # If parameter was provided, it takes priority
-        if clustered_by:
-            logger.debug(
-                "_build_order_by_property: using clustered_by from model param=%s",
-                clustered_by,
-            )
-        elif clustered_by is None and order_by_param_name:
+        if clustered_by is None and order_by_param_name:
             # Get order_by from table_properties (already validated by check_at_most_one)
             order_by = table_properties.pop(order_by_param_name, None)
             if order_by is not None:
@@ -3249,18 +3147,11 @@ class StarRocksEngineAdapter(
                     "clustered_by", order_by, preprocess_parentheses=True
                 )
                 clustered_by = list(normalized)
-                logger.debug(
-                    "_build_order_by_property: using clustered_by from table_properties[%s]=%s",
-                    order_by_param_name,
-                    clustered_by,
-                )
 
         if clustered_by:
             result = exp.Cluster(expressions=clustered_by)
-            logger.debug("_build_order_by_property: generated Cluster")
             return result
         else:  # noqa: RET505
-            logger.debug("_build_order_by_property: no 'clustered_by' defined, skipped")
             return None
 
     def _build_other_properties(self, table_properties: t.Dict[str, t.Any]) -> t.List[exp.Property]:
@@ -3337,7 +3228,6 @@ class StarRocksEngineAdapter(
             table_properties=table_properties,
             parameter_value=primary_key,
         )
-        logger.debug("get table key: %s", {active_key_type})
 
         # If parameter primary_key was provided, return it
         if primary_key:
@@ -3354,12 +3244,6 @@ class StarRocksEngineAdapter(
             active_key_type, key_expr, preprocess_parentheses=True
         )
         key_columns = tuple(col.name for col in normalized)
-
-        logger.debug(
-            "Extracted '%s' from table_properties, value=%s",
-            active_key_type,
-            key_columns,
-        )
 
         return (active_key_type, key_columns)
 
