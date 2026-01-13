@@ -65,21 +65,33 @@ def _model_name_from_table(table: exp.Table) -> str:
 def normalize_sql(sql: str) -> str:
     """Normalizes a SQL string for comparison."""
     # Remove comments
-    sql = re.sub(r'--.*\n', '', sql)
+    sql = re.sub(r"--.*\n", "", sql)
     # Replace newlines and tabs with spaces
-    sql = sql.replace('\n', ' ').replace('\t', '')
+    sql = sql.replace("\n", " ").replace("\t", "")
     # Collapse multiple spaces into one
-    sql = re.sub(r'\s+', ' ', sql)
+    sql = re.sub(r"\s+", " ", sql)
     # Remove spaces around parentheses, commas, and equals for consistency
-    sql = re.sub(r'\s*\(\s*', '(', sql)
-    sql = re.sub(r'\s*\)\s*', ')', sql)
-    sql = re.sub(r'\s*,\s*', ',', sql)
-    sql = re.sub(r'\s*=\s*', '=', sql)
+    sql = re.sub(r"\s*\(\s*", "(", sql)
+    sql = re.sub(r"\s*\)\s*", ")", sql)
+    sql = re.sub(r"\s*,\s*", ",", sql)
+    sql = re.sub(r"\s*=\s*", "=", sql)
     # Remove all paired backticks around identifiers
-    sql = re.sub(r'`([^`]+)`', r'\1', sql)
-    sql = re.sub(r'\'', '"', sql)
+    sql = re.sub(r"`([^`]+)`", r"\1", sql)
+    sql = re.sub(r"\'", '"', sql)
 
     return sql.strip()
+
+
+Row = t.Tuple[t.Any, ...]
+
+
+def expect_row(row: t.Optional[Row]) -> Row:
+    assert row is not None
+    return row
+
+
+def fetchone_or_fail(adapter: StarRocksEngineAdapter, query: t.Any) -> Row:
+    return expect_row(adapter.fetchone(query))
 
 
 # =============================================================================
@@ -101,13 +113,13 @@ def starrocks_connection_config() -> t.Dict[str, t.Any]:
     return {
         "host": os.getenv("STARROCKS_HOST", "localhost"),
         "port": int(os.getenv("STARROCKS_PORT", "9030")),
-        "user": os.getenv("STARROCKS_USER", "myname"),
-        "password": os.getenv("STARROCKS_PASSWORD", "pswd1234"),
+        "user": os.getenv("STARROCKS_USER", "root"),
+        "password": os.getenv("STARROCKS_PASSWORD", ""),
     }
 
 
 @pytest.fixture
-def ctx(tmp_path, starrocks_connection_config) -> t.Iterable[TestContext]:
+def ctx(tmp_path, starrocks_connection_config) -> t.Generator[TestContext, None, None]:
     """
     A lightweight TestContext fixture which avoids loading the full integration gateway config.
 
@@ -143,7 +155,9 @@ def engine_adapter(ctx: TestContext) -> StarRocksEngineAdapter:
 
 
 @pytest.fixture(scope="module")
-def starrocks_adapter(starrocks_connection_config) -> StarRocksEngineAdapter:
+def starrocks_adapter(
+    starrocks_connection_config,
+) -> t.Generator[StarRocksEngineAdapter, None, None]:
     """Create a real StarRocks adapter connected to database.
     It's still used in a lot of tests, so it can't be removed yet.
     """
@@ -155,6 +169,62 @@ def starrocks_adapter(starrocks_connection_config) -> StarRocksEngineAdapter:
     yield adapter
 
     # Cleanup: adapter will auto-close connection
+
+
+@pytest.fixture(scope="module", autouse=True)
+def init_test_integration_env(starrocks_adapter: StarRocksEngineAdapter) -> None:
+    """
+    Auto-adjust default_replication_num for small shared-nothing clusters.
+
+    If run_mode is shared_nothing and available backends < 3, set default_replication_num = 1
+    to prevent replica-creation failures in tests.
+    """
+
+    def _get_config_value(name: str) -> t.Optional[str]:
+        try:
+            row = starrocks_adapter.fetchone(f"ADMIN SHOW FRONTEND CONFIG LIKE '{name}'")
+        except Exception as e:  # pragma: no cover - defensive for older SR versions
+            logger.warning("Skipping config lookup %s: %s", name, e)
+            return None
+        if not row or len(row) < 3:
+            logger.warning("Unexpected result for %s: %s", name, row)
+            return None
+        return str(row[2]).strip()
+
+    run_mode = _get_config_value("run_mode")
+    if not run_mode or run_mode.lower() != "shared_nothing":
+        return
+
+    try:
+        backends = starrocks_adapter.fetchall("SHOW BACKENDS")
+    except Exception as e:  # pragma: no cover - defensive for older SR versions
+        logger.warning("Skipping backend count check: %s", e)
+        return
+
+    be_count = len(backends)
+    if be_count >= 3:
+        return
+
+    current_replication = _get_config_value("default_replication_num")
+    try:
+        current_replication_int = int(current_replication) if current_replication is not None else None
+    except Exception:
+        current_replication_int = None
+
+    if current_replication_int is not None and current_replication_int <= be_count:
+        return
+
+    try:
+        starrocks_adapter.execute('ADMIN SET FRONTEND CONFIG ("default_replication_num" = "1")')
+        logger.info(
+            "Set default_replication_num=1 for shared_nothing cluster with %s backends (was %s)",
+            be_count,
+            current_replication,
+        )
+    except Exception as e:  # pragma: no cover - do not break tests if lacking privilege
+        logger.warning(
+            "Failed to set default_replication_num for shared_nothing cluster: %s", e
+        )
 
 
 class TestBasicOperations:
@@ -171,22 +241,21 @@ class TestBasicOperations:
 
         # CREATE DATABASE
         engine_adapter.create_schema(db_name, ignore_if_exists=True)
-        result = engine_adapter.fetchone(
-            f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{db_name}'"
+        result = fetchone_or_fail(
+            engine_adapter,
+            f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{db_name}'",
         )
-        assert result is not None, "CREATE DATABASE failed"
         assert result[0] == db_name
 
         # DROP DATABASE
         engine_adapter.drop_schema(db_name)
-        result = engine_adapter.fetchone(
+        result: t.Optional[Row] = engine_adapter.fetchone(
             f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{db_name}'"
         )
         assert result is None, "DROP DATABASE failed"
 
     def test_create_drop_table(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
-        """Test CREATE TABLE and DROP TABLE (TestContext version).
-        """
+        """Test CREATE TABLE and DROP TABLE (TestContext version)."""
         table = ctx.table("sr_test_table")
 
         engine_adapter.create_table(
@@ -246,18 +315,18 @@ class TestBasicOperations:
         engine_adapter.create_table_like(target, source, exists=True)
 
         # Like should not copy data.
-        src_count = engine_adapter.fetchone(
-            f"SELECT COUNT(*) FROM {source.sql(dialect=ctx.dialect, identify=True)}"
+        src_count = fetchone_or_fail(
+            engine_adapter, f"SELECT COUNT(*) FROM {source.sql(dialect=ctx.dialect, identify=True)}"
         )[0]
-        tgt_count = engine_adapter.fetchone(
-            f"SELECT COUNT(*) FROM {target.sql(dialect=ctx.dialect, identify=True)}"
+        tgt_count = fetchone_or_fail(
+            engine_adapter, f"SELECT COUNT(*) FROM {target.sql(dialect=ctx.dialect, identify=True)}"
         )[0]
         assert src_count == 2
         assert tgt_count == 0
 
         # Like should preserve key metadata (engine-defined behavior).
-        ddl = engine_adapter.fetchone(
-            f"SHOW CREATE TABLE {target.sql(dialect=ctx.dialect, identify=True)}"
+        ddl = fetchone_or_fail(
+            engine_adapter, f"SHOW CREATE TABLE {target.sql(dialect=ctx.dialect, identify=True)}"
         )[1]
         ddl_upper = ddl.upper()
         assert "PRIMARY KEY" in ddl_upper
@@ -283,7 +352,6 @@ class TestBasicOperations:
         with pytest.raises(Exception):
             engine_adapter.create_table_like(target, source, exists=False)
 
-
     def test_delete(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
         """Test DELETE operation (TestContext version)."""
         table = ctx.table("sr_test_table")
@@ -301,7 +369,7 @@ class TestBasicOperations:
         )
 
         engine_adapter.delete_from(table, "id = 2")
-        count = engine_adapter.fetchone(f"SELECT COUNT(*) FROM {table_sql}")
+        count = fetchone_or_fail(engine_adapter, f"SELECT COUNT(*) FROM {table_sql}")
         assert count[0] == 1, "DELETE failed"
 
     def test_rename_table(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
@@ -339,7 +407,7 @@ class TestBasicOperations:
         )
         assert new_exists is not None, "New table should exist after rename"
 
-        count = engine_adapter.fetchone(f"SELECT COUNT(*) FROM {new_table_sql}")
+        count = fetchone_or_fail(engine_adapter, f"SELECT COUNT(*) FROM {new_table_sql}")
         assert count[0] == 1, "Data should be preserved after rename"
 
     def test_create_index(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
@@ -358,8 +426,8 @@ class TestBasicOperations:
         # CREATE INDEX (should be skipped silently)
         engine_adapter.create_index(table, "idx_name", ("name",))
 
-        count = engine_adapter.fetchone(f"SELECT COUNT(*) FROM {table_sql}")
-        assert count is not None, "Table should still be functional after skipped index creation"
+        count = fetchone_or_fail(engine_adapter, f"SELECT COUNT(*) FROM {table_sql}")
+        assert count[0] >= 0, "Table should still be functional after skipped index creation"
 
     def test_create_drop_view(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
         """Test CREATE VIEW and DROP VIEW (TestContext version)."""
@@ -379,18 +447,19 @@ class TestBasicOperations:
 
         db_name = view.db
         view_name = view.name
-        result = engine_adapter.fetchone(
+        result = fetchone_or_fail(
+            engine_adapter,
             f"SELECT TABLE_NAME FROM information_schema.VIEWS "
-            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = '{view_name}'"
+            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = '{view_name}'",
         )
-        assert result is not None, "CREATE VIEW failed"
+        assert result, "CREATE VIEW failed"
 
         engine_adapter.drop_view(view)
-        result = engine_adapter.fetchone(
+        result_optional: t.Optional[Row] = engine_adapter.fetchone(
             f"SELECT TABLE_NAME FROM information_schema.VIEWS "
             f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = '{view_name}'"
         )
-        assert result is None, "DROP VIEW failed"
+        assert result_optional is None, "DROP VIEW failed"
 
 
 class TestViewAndMaterializedViewFeatures:
@@ -442,7 +511,7 @@ class TestViewAndMaterializedViewFeatures:
             view_properties=model.virtual_properties,
         )
 
-        ddl = engine_adapter.fetchone(f"SHOW CREATE VIEW {view_sql_ident}")[1]
+        ddl = fetchone_or_fail(engine_adapter, f"SHOW CREATE VIEW {view_sql_ident}")[1]
         assert "SECURITY INVOKER" in ddl.upper()
 
     def test_create_view_replace_flag(
@@ -460,9 +529,7 @@ class TestViewAndMaterializedViewFeatures:
                 "name": exp.DataType.build("VARCHAR(100)"),
             },
         )
-        engine_adapter.execute(
-            f"INSERT INTO {source_sql_ident} (id, name) VALUES (1, 'A')"
-        )
+        engine_adapter.execute(f"INSERT INTO {source_sql_ident} (id, name) VALUES (1, 'A')")
 
         model_sql = f"""
         MODEL (
@@ -584,17 +651,21 @@ class TestViewAndMaterializedViewFeatures:
             column_descriptions=model.column_descriptions,
         )
 
-        ddl = engine_adapter.fetchone(f"SHOW CREATE MATERIALIZED VIEW {mv_sql}")[1]
+        ddl = fetchone_or_fail(engine_adapter, f"SHOW CREATE MATERIALIZED VIEW {mv_sql}")[1]
         logger.debug(f"mv ddl: {ddl}")
         ddl_upper = normalize_sql(ddl).upper()
         assert "REFRESH DEFERRED ASYNC" in ddl_upper
-        assert "START('2025-01-01 00:00:00')EVERY(INTERVAL 5 MINUTE)" in ddl_upper \
+        assert (
+            "START('2025-01-01 00:00:00')EVERY(INTERVAL 5 MINUTE)" in ddl_upper
             or 'START("2025-01-01 00:00:00")EVERY(INTERVAL 5 MINUTE)' in ddl_upper
+        )
         assert "PARTITION BY(EVENT_DATE)" in ddl_upper
         assert "ORDER BY(CUSTOMER_ID,REGION)" in ddl_upper
         assert "DISTRIBUTED BY HASH(ORDER_ID)BUCKETS 8" in ddl_upper
-        assert "COMMENT 'MV COMBO A DESCRIPTION'" in ddl_upper \
+        assert (
+            "COMMENT 'MV COMBO A DESCRIPTION'" in ddl_upper
             or 'COMMENT "MV COMBO A DESCRIPTION"' in ddl_upper
+        )
 
     def test_materialized_view_combo_all_properties_block(
         self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter
@@ -657,7 +728,7 @@ class TestViewAndMaterializedViewFeatures:
             column_descriptions=model.column_descriptions,
         )
 
-        ddl = engine_adapter.fetchone(f"SHOW CREATE MATERIALIZED VIEW {mv_sql}")[1]
+        ddl = fetchone_or_fail(engine_adapter, f"SHOW CREATE MATERIALIZED VIEW {mv_sql}")[1]
         ddl_upper = normalize_sql(ddl).upper()
         assert "REFRESH MANUAL" in ddl_upper
         assert "PARTITION P202401" not in ddl_upper  # ignored when MV
@@ -665,8 +736,10 @@ class TestViewAndMaterializedViewFeatures:
         assert "PARTITION BY(EVENT_DATE)" in ddl_upper
         assert "ORDER BY(ORDER_ID,EVENT_DATE)" in ddl_upper
         assert "DISTRIBUTED BY HASH(ORDER_ID,CUSTOMER_ID)BUCKETS 4" in ddl_upper
-        assert "COMMENT 'ANALYTICS MV COMBO B'" in ddl_upper \
+        assert (
+            "COMMENT 'ANALYTICS MV COMBO B'" in ddl_upper
             or 'COMMENT "ANALYTICS MV COMBO B"' in ddl_upper
+        )
 
 
 class TestTableFeatures:
@@ -677,7 +750,9 @@ class TestTableFeatures:
     Focus on independent functionality like comments and data type compatibility.
     """
 
-    def test_table_and_column_comments(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
+    def test_table_and_column_comments(
+        self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter
+    ):
         """Test table and column comments."""
         table = ctx.table("sr_comment_table")
         db_name = table.db
@@ -698,9 +773,10 @@ class TestTableFeatures:
         )
 
         # Verify table comment
-        result = engine_adapter.fetchone(
+        result = fetchone_or_fail(
+            engine_adapter,
             f"SELECT TABLE_COMMENT FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = '{table_name}'"
+            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = '{table_name}'",
         )
         assert result[0] == "Test table comment", "Table comment not set"
 
@@ -773,11 +849,13 @@ class TestTableFeatures:
         )
 
         # Verify insertion
-        count = engine_adapter.fetchone(f"SELECT COUNT(*) FROM {table_sql}")
+        count = fetchone_or_fail(engine_adapter, f"SELECT COUNT(*) FROM {table_sql}")
         assert count[0] == 1, "Data insertion with basic types failed"
 
         # Verify data retrieval
-        result = engine_adapter.fetchone(f"SELECT col_int, col_varchar, col_date FROM {table_sql}")
+        result = fetchone_or_fail(
+            engine_adapter, f"SELECT col_int, col_varchar, col_date FROM {table_sql}"
+        )
         assert result[0] == 2147483647
         assert result[1] == "test varchar"
 
@@ -859,12 +937,12 @@ class TestTableFeatures:
         )
 
         # Verify insertion
-        count = engine_adapter.fetchone(f"SELECT COUNT(*) FROM {table_sql}")
+        count = fetchone_or_fail(engine_adapter, f"SELECT COUNT(*) FROM {table_sql}")
         assert count[0] == 1, "Data insertion with complex nested types failed"
 
         # Verify data retrieval for simple types
-        result = engine_adapter.fetchone(
-            f"SELECT col_array_simple, col_struct_simple FROM {table_sql}"
+        result = fetchone_or_fail(
+            engine_adapter, f"SELECT col_array_simple, col_struct_simple FROM {table_sql}"
         )
         assert result is not None, "Failed to retrieve complex type data"
 
@@ -983,7 +1061,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 1 DDL:\n{ddl}")
 
@@ -999,17 +1077,16 @@ class TestEndToEndModelParsing:
             # Verify function expression and column references
             assert (
                 # "from_unixtime" in part_cols or "ts" in part_cols
-                "__generated_partition_column_" in part_cols
-                and "region" in part_cols
+                "__generated_partition_column_" in part_cols and "region" in part_cols
             ), f"Expected partition expression with generated column/region, got {part_cols}"
 
             # Verify ORDER BY from clustered_by
             order_match = re.search(r"ORDER BY\s*\(([^)]+)\)", ddl)
             assert order_match, "ORDER BY clause not found"
             order_cols = order_match.group(1)
-            assert (
-                "order_id" in order_cols and "customer_id" in order_cols
-            ), f"Expected ORDER BY (order_id, customer_id), got {order_cols}"
+            assert "order_id" in order_cols and "customer_id" in order_cols, (
+                f"Expected ORDER BY (order_id, customer_id), got {order_cols}"
+            )
 
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
@@ -1019,9 +1096,7 @@ class TestEndToEndModelParsing:
     # Covers: primary_key (tuple), distributed_by (string multi-col), order_by (tuple), generic props
     # ========================================
 
-    def test_e2e_physical_properties_core(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_e2e_physical_properties_core(self, starrocks_adapter: StarRocksEngineAdapter):
         """
         Test Case 2: Core physical_properties.
 
@@ -1061,7 +1136,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 2 DDL:\n{ddl}")
 
@@ -1077,17 +1152,15 @@ class TestEndToEndModelParsing:
             dist_match = re.search(r"DISTRIBUTED BY HASH\s*\(([^)]+)\)", ddl)
             assert dist_match, "DISTRIBUTED BY HASH clause not found"
             dist_cols = dist_match.group(1)
-            assert (
-                "customer_id" in dist_cols and "region" in dist_cols
-            ), f"Expected HASH(customer_id, region), got HASH({dist_cols})"
+            assert "customer_id" in dist_cols and "region" in dist_cols, (
+                f"Expected HASH(customer_id, region), got HASH({dist_cols})"
+            )
             assert "BUCKETS 16" in ddl
 
             # Verify ORDER BY
             order_match = re.search(r"ORDER BY\s*\(([^)]+)\)", ddl)
             assert order_match, "ORDER BY clause not found"
-            assert "order_id" in order_match.group(1) and "region" in order_match.group(
-                1
-            )
+            assert "order_id" in order_match.group(1) and "region" in order_match.group(1)
 
             # assert "replication_num" not in ddl
 
@@ -1099,9 +1172,7 @@ class TestEndToEndModelParsing:
     # Covers: primary_key = "id, dt" auto-conversion
     # ========================================
 
-    def test_e2e_string_no_paren_auto_wrap(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_e2e_string_no_paren_auto_wrap(self, starrocks_adapter: StarRocksEngineAdapter):
         """
         Test Case 3: String form without parentheses auto-wrap.
 
@@ -1134,7 +1205,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 3 DDL:\n{ddl}")
 
@@ -1144,16 +1215,16 @@ class TestEndToEndModelParsing:
             pk_match = re.search(r"PRIMARY KEY\s*\(([^)]+)\)", ddl)
             assert pk_match, "PRIMARY KEY clause not found"
             pk_clause = pk_match.group(1)
-            assert (
-                "order_id" in pk_clause and "event_date" in pk_clause
-            ), f"Expected both order_id and event_date in PRIMARY KEY, got {pk_clause}"
+            assert "order_id" in pk_clause and "event_date" in pk_clause, (
+                f"Expected both order_id and event_date in PRIMARY KEY, got {pk_clause}"
+            )
 
             # Verify distributed_by with exact columns
             dist_match = re.search(r"DISTRIBUTED BY HASH\s*\(([^)]+)\)", ddl)
             assert dist_match, "DISTRIBUTED BY HASH clause not found"
-            assert "order_id" in dist_match.group(
-                1
-            ), f"Expected HASH(order_id), got HASH({dist_match.group(1)})"
+            assert "order_id" in dist_match.group(1), (
+                f"Expected HASH(order_id), got HASH({dist_match.group(1)})"
+            )
             assert "BUCKETS 10" in ddl
 
         finally:
@@ -1164,9 +1235,7 @@ class TestEndToEndModelParsing:
     # Covers: kind=HASH (unquoted), kind=RANDOM
     # ========================================
 
-    def test_e2e_distribution_structured_hash(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_e2e_distribution_structured_hash(self, starrocks_adapter: StarRocksEngineAdapter):
         """Test Case 4A: Structured HASH distribution with unquoted kind."""
         db_name = "sr_e2e_dist_hash_db"
         table_name = f"{db_name}.sr_dist_hash_table"
@@ -1194,7 +1263,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 4A DDL:\n{ddl}")
 
@@ -1204,17 +1273,13 @@ class TestEndToEndModelParsing:
             assert "DISTRIBUTED BY HASH" in ddl
             dist_match = re.search(r"DISTRIBUTED BY HASH\s*\(([^)]+)\)", ddl)
             assert dist_match, "DISTRIBUTED BY HASH clause not found"
-            assert "customer_id" in dist_match.group(
-                1
-            ) and "region" in dist_match.group(1)
+            assert "customer_id" in dist_match.group(1) and "region" in dist_match.group(1)
             assert "BUCKETS 16" in ddl
 
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
 
-    def test_e2e_distribution_structured_random(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_e2e_distribution_structured_random(self, starrocks_adapter: StarRocksEngineAdapter):
         """Test Case 4B: Structured RANDOM distribution."""
         db_name = "sr_e2e_dist_random_db"
         table_name = f"{db_name}.sr_dist_random_table"
@@ -1243,7 +1308,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 4B DDL:\n{ddl}")
 
@@ -1294,7 +1359,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 5 DDL:\n{ddl}")
 
@@ -1351,7 +1416,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 6 DDL:\n{ddl}")
 
@@ -1403,7 +1468,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 7A DDL:\n{ddl}")
 
@@ -1412,9 +1477,9 @@ class TestEndToEndModelParsing:
 
             dup_match = re.search(r"DUPLICATE KEY\s*\(([^)]+)\)", ddl)
             assert dup_match, "DUPLICATE KEY clause not found"
-            assert "id" in dup_match.group(1) and "dt" in dup_match.group(
-                1
-            ), f"Expected DUPLICATE KEY(id, dt), got DUPLICATE KEY({dup_match.group(1)})"
+            assert "id" in dup_match.group(1) and "dt" in dup_match.group(1), (
+                f"Expected DUPLICATE KEY(id, dt), got DUPLICATE KEY({dup_match.group(1)})"
+            )
 
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
@@ -1448,7 +1513,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Case 7B DDL:\n{ddl}")
 
@@ -1535,7 +1600,7 @@ class TestEndToEndModelParsing:
             params = self._parse_model_and_get_all_params(model_sql)
             starrocks_adapter.create_table(table_name, **params)
 
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Comprehensive DDL:\n{ddl}")
 
@@ -1553,9 +1618,9 @@ class TestEndToEndModelParsing:
             part_match = re.search(r"PARTITION BY[^(]*\(([^)]+)\)", ddl)
             assert part_match, "PARTITION BY clause not found"
             part_cols = part_match.group(1)
-            assert (
-                "event_date" in part_cols
-            ), f"Expected event_date in PARTITION BY, got {part_cols}"
+            assert "event_date" in part_cols, (
+                f"Expected event_date in PARTITION BY, got {part_cols}"
+            )
 
             # Verify DISTRIBUTED BY
             assert "DISTRIBUTED BY HASH" in ddl
@@ -1564,9 +1629,7 @@ class TestEndToEndModelParsing:
             # Verify ORDER BY
             order_match = re.search(r"ORDER BY\s*\(([^)]+)\)", ddl)
             assert order_match, "ORDER BY clause not found"
-            assert "order_id" in order_match.group(
-                1
-            ) and "event_date" in order_match.group(1)
+            assert "order_id" in order_match.group(1) and "event_date" in order_match.group(1)
 
             # Verify PROPERTIES
             assert "replication_num" in ddl
@@ -1578,10 +1641,11 @@ class TestEndToEndModelParsing:
                 f"VALUES (1001, '2024-01-15', 100, 1234.56, 'completed')"
             )
 
-            result = starrocks_adapter.fetchone(
-                f"SELECT order_id, customer_id FROM {table_name} WHERE order_id = 1001"
+            result = fetchone_or_fail(
+                starrocks_adapter,
+                f"SELECT order_id, customer_id FROM {table_name} WHERE order_id = 1001",
             )
-            assert result is not None, "INSERT/SELECT failed"
+            assert result, "INSERT/SELECT failed"
             assert result[0] == 1001, "order_id mismatch"
 
         finally:
@@ -1592,9 +1656,7 @@ class TestEndToEndModelParsing:
     # Tests single quotes vs double quotes in MODEL parsing
     # ========================================
 
-    def test_e2e_quote_character_handling(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_e2e_quote_character_handling(self, starrocks_adapter: StarRocksEngineAdapter):
         """
         Test Case: Quote Character Handling (Single vs Double Quotes).
 
@@ -1670,7 +1732,7 @@ class TestEndToEndModelParsing:
             starrocks_adapter.create_table(table_name, **params)
 
             # Verify via SHOW CREATE TABLE
-            show_create = starrocks_adapter.fetchone(f"SHOW CREATE TABLE {table_name}")
+            show_create = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")
             ddl = show_create[1]
             logger.info(f"Quote Handling Test DDL:\n{ddl}")
 
@@ -1712,10 +1774,11 @@ class TestEndToEndModelParsing:
                 f"VALUES (100, '2024-01-01', 'US', 1001)"
             )
 
-            result = starrocks_adapter.fetchone(
-                f"SELECT id, region, customer_id FROM {table_name} WHERE id = 100"
+            result = fetchone_or_fail(
+                starrocks_adapter,
+                f"SELECT id, region, customer_id FROM {table_name} WHERE id = 100",
             )
-            assert result is not None, "INSERT/SELECT failed"
+            assert result, "INSERT/SELECT failed"
             assert result == (100, "US", 1001), f"Data mismatch: {result}"
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
@@ -1742,7 +1805,7 @@ class TestStarRocksAbility:
     @pytest.fixture(scope="class")
     def test_tables(
         self, starrocks_adapter: StarRocksEngineAdapter
-    ) -> t.Dict[str, str]:
+    ) -> t.Generator[t.Dict[str, str], None, None]:
         """
         Pre-create tables of different types for testing.
 
@@ -1769,9 +1832,10 @@ class TestStarRocksAbility:
         """
         )
         # Verify table creation
-        result = starrocks_adapter.fetchone(
+        result = fetchone_or_fail(
+            starrocks_adapter,
             f"SELECT COUNT(*) FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'pk_table'"
+            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'pk_table'",
         )
         assert result[0] == 1, f"PRIMARY KEY table {pk_table} creation failed"
         tables["primary_key"] = pk_table
@@ -1790,9 +1854,10 @@ class TestStarRocksAbility:
         """
         )
         # Verify table creation
-        result = starrocks_adapter.fetchone(
+        result = fetchone_or_fail(
+            starrocks_adapter,
             f"SELECT COUNT(*) FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'dup_table'"
+            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'dup_table'",
         )
         assert result[0] == 1, f"DUPLICATE KEY table {dup_table} creation failed"
         tables["duplicate_key"] = dup_table
@@ -1811,9 +1876,10 @@ class TestStarRocksAbility:
         """
         )
         # Verify table creation
-        result = starrocks_adapter.fetchone(
+        result = fetchone_or_fail(
+            starrocks_adapter,
             f"SELECT COUNT(*) FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'unique_table'"
+            f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'unique_table'",
         )
         assert result[0] == 1, f"UNIQUE KEY table {unique_table} creation failed"
         tables["unique_key"] = unique_table
@@ -1839,17 +1905,18 @@ class TestStarRocksAbility:
         try:
             # CREATE
             starrocks_adapter.execute(f"CREATE {sql_keyword} IF NOT EXISTS {test_name}")
-            result = starrocks_adapter.fetchone(
-                f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{test_name}'"
+            result = fetchone_or_fail(
+                starrocks_adapter,
+                f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{test_name}'",
             )
-            assert result is not None, f"CREATE {sql_keyword} failed"
+            assert result, f"CREATE {sql_keyword} failed"
 
             # DROP
             starrocks_adapter.execute(f"DROP {sql_keyword} IF EXISTS {test_name}")
-            result = starrocks_adapter.fetchone(
+            result_optional: t.Optional[Row] = starrocks_adapter.fetchone(
                 f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{test_name}'"
             )
-            assert result is None, f"DROP {sql_keyword} failed"
+            assert result_optional is None, f"DROP {sql_keyword} failed"
 
         finally:
             starrocks_adapter.execute(f"DROP {sql_keyword} IF EXISTS {test_name}")
@@ -1900,7 +1967,9 @@ class TestStarRocksAbility:
             starrocks_adapter.execute(
                 f"UPDATE {table_name} SET name = 'Alice Updated' WHERE id = 1"
             )
-            result = starrocks_adapter.fetchone(f"SELECT name FROM {table_name} WHERE id = 1")
+            result = fetchone_or_fail(
+                starrocks_adapter, f"SELECT name FROM {table_name} WHERE id = 1"
+            )
             assert result == ("Alice Updated",), f"UPDATE failed: {result}"
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
@@ -1965,9 +2034,7 @@ class TestStarRocksAbility:
         starrocks_adapter.execute(f"INSERT INTO {table_name} VALUES {test_data}")
 
         # Format delete clause (for subquery/using with table reference)
-        delete_sql = (
-            f"DELETE FROM {table_name} {delete_clause.format(table=table_name)}"
-        )
+        delete_sql = f"DELETE FROM {table_name} {delete_clause.format(table=table_name)}"
 
         # Debug: Log the SQL before execution
         logger.info(f"Executing DELETE SQL: {delete_sql}")
@@ -1976,13 +2043,11 @@ class TestStarRocksAbility:
         starrocks_adapter.execute(delete_sql)
 
         # Verify result
-        count = starrocks_adapter.fetchone(f"SELECT COUNT(*) FROM {table_name}")[0]
-        logger.info(
-            f"After DELETE: {count} rows remaining (expected {expected_remaining})"
+        count = fetchone_or_fail(starrocks_adapter, f"SELECT COUNT(*) FROM {table_name}")[0]
+        logger.info(f"After DELETE: {count} rows remaining (expected {expected_remaining})")
+        assert count == expected_remaining, (
+            f"Expected {expected_remaining} rows, got {count} for {table_type} with {delete_clause}"
         )
-        assert (
-            count == expected_remaining
-        ), f"Expected {expected_remaining} rows, got {count} for {table_type} with {delete_clause}"
 
     # ==================== DELETE Operations - Failure Cases ====================
 
@@ -2033,9 +2098,7 @@ class TestStarRocksAbility:
         Expected: DELETE fails with specific error message.
         """
         table_name = test_tables[table_type]
-        delete_sql = (
-            f"DELETE FROM {table_name} {delete_clause.format(table=table_name)}"
-        )
+        delete_sql = f"DELETE FROM {table_name} {delete_clause.format(table=table_name)}"
 
         # This should raise an exception
         with pytest.raises(Exception) as exc_info:
@@ -2045,9 +2108,9 @@ class TestStarRocksAbility:
         import re
 
         error_msg = str(exc_info.value).lower()
-        assert re.search(
-            error_pattern, error_msg
-        ), f"Expected error pattern '{error_pattern}', got: {exc_info.value}"
+        assert re.search(error_pattern, error_msg), (
+            f"Expected error pattern '{error_pattern}', got: {exc_info.value}"
+        )
 
     # ==================== COMMENT Syntax Tests ====================
 
@@ -2105,9 +2168,7 @@ class TestStarRocksAbility:
 
             # Generate SQL based on template
             if "table" in comment_type:
-                sql = sql_template.format(
-                    table=table_name, comment=f"test {comment_type}"
-                )
+                sql = sql_template.format(table=table_name, comment=f"test {comment_type}")
             else:  # column
                 sql = sql_template.format(
                     table=table_name, column="col1", comment=f"test {comment_type}"
@@ -2119,24 +2180,26 @@ class TestStarRocksAbility:
 
                 # Verify comment was set
                 if "table" in comment_type:
-                    result = starrocks_adapter.fetchone(
+                    result = fetchone_or_fail(
+                        starrocks_adapter,
                         f"SELECT TABLE_COMMENT FROM information_schema.TABLES "
-                        f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_comment'"
+                        f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_comment'",
                     )[0]
-                    assert (
-                        f"test {comment_type}" in result
-                    ), f"Comment not set correctly for {comment_type}"
+                    assert f"test {comment_type}" in result, (
+                        f"Comment not set correctly for {comment_type}"
+                    )
                 else:  # column
-                    result_row = starrocks_adapter.fetchone(
+                    result_row = fetchone_or_fail(
+                        starrocks_adapter,
                         f"SELECT COLUMN_NAME, COLUMN_COMMENT FROM information_schema.COLUMNS "
                         f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_comment' "
-                        f"AND COLUMN_NAME = 'col1'"
+                        f"AND COLUMN_NAME = 'col1'",
                     )
                     logger.info(f"Column comment: {result_row}")
                     result = result_row[1]
-                    assert (
-                        f"test {comment_type}" in result
-                    ), f"Comment not set correctly for {comment_type}"
+                    assert f"test {comment_type}" in result, (
+                        f"Comment not set correctly for {comment_type}"
+                    )
 
                 logger.info(f"✅ {comment_type}: SUPPORTED")
 
@@ -2225,13 +2288,12 @@ class TestStarRocksAbility:
             )
 
             # Verify table comment
-            table_comment = starrocks_adapter.fetchone(
+            table_comment = fetchone_or_fail(
+                starrocks_adapter,
                 f"SELECT TABLE_COMMENT FROM information_schema.TABLES "
-                f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_create_comment'"
+                f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_create_comment'",
             )[0]
-            assert (
-                table_comment == "test table"
-            ), f"Table comment mismatch: {table_comment}"
+            assert table_comment == "test table", f"Table comment mismatch: {table_comment}"
 
             # Verify column comments
             column_comments = {}
@@ -2243,12 +2305,12 @@ class TestStarRocksAbility:
                 if col_comment:  # Skip empty comments
                     column_comments[col_name] = col_comment
 
-            assert (
-                column_comments.get("id") == "id column"
-            ), f"Column comment mismatch: {column_comments}"
-            assert (
-                column_comments.get("name") == "name column"
-            ), f"Column comment mismatch: {column_comments}"
+            assert column_comments.get("id") == "id column", (
+                f"Column comment mismatch: {column_comments}"
+            )
+            assert column_comments.get("name") == "name column", (
+                f"Column comment mismatch: {column_comments}"
+            )
 
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
@@ -2266,9 +2328,7 @@ class TestCommentMethods:
     - Future ALTER TABLE support
     """
 
-    def test_build_create_comment_table_exp(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_build_create_comment_table_exp(self, starrocks_adapter: StarRocksEngineAdapter):
         """
         Test _build_create_comment_table_exp generates correct ALTER TABLE COMMENT SQL.
 
@@ -2304,32 +2364,29 @@ class TestCommentMethods:
 
             # Verify: SQL format is correct
             assert "ALTER TABLE" in comment_sql, f"Invalid SQL format: {comment_sql}"
-            assert (
-                "COMMENT =" in comment_sql
-            ), f"Missing COMMENT = in SQL: {comment_sql}"
+            assert "COMMENT =" in comment_sql, f"Missing COMMENT = in SQL: {comment_sql}"
             assert new_comment in comment_sql, f"Comment not in SQL: {comment_sql}"
 
             # Execute the generated SQL
             starrocks_adapter.execute(comment_sql)
 
             # Verify: Comment was actually updated
-            result = starrocks_adapter.fetchone(
+            result = fetchone_or_fail(
+                starrocks_adapter,
                 f"SELECT TABLE_COMMENT FROM information_schema.TABLES "
-                f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_table'"
+                f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_table'",
             )
-            assert result is not None, "Table not found after comment update"
-            assert (
-                result[0] == new_comment
-            ), f"Comment not updated. Expected: {new_comment}, Got: {result[0]}"
+            assert result, "Table not found after comment update"
+            assert result[0] == new_comment, (
+                f"Comment not updated. Expected: {new_comment}, Got: {result[0]}"
+            )
 
             logger.info("✅ _build_create_comment_table_exp generates valid SQL")
 
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
 
-    def test_build_create_comment_column_exp(
-        self, starrocks_adapter: StarRocksEngineAdapter
-    ):
+    def test_build_create_comment_column_exp(self, starrocks_adapter: StarRocksEngineAdapter):
         """
         Test _build_create_comment_column_exp generates correct ALTER TABLE MODIFY COLUMN SQL.
 
@@ -2369,9 +2426,7 @@ class TestCommentMethods:
 
             # Verify: SQL format is correct
             assert "ALTER TABLE" in comment_sql, f"Invalid SQL format: {comment_sql}"
-            assert (
-                "MODIFY COLUMN" in comment_sql
-            ), f"Missing MODIFY COLUMN in SQL: {comment_sql}"
+            assert "MODIFY COLUMN" in comment_sql, f"Missing MODIFY COLUMN in SQL: {comment_sql}"
             assert "COMMENT" in comment_sql, f"Missing COMMENT in SQL: {comment_sql}"
             assert new_comment in comment_sql, f"Comment not in SQL: {comment_sql}"
 
@@ -2379,22 +2434,21 @@ class TestCommentMethods:
             starrocks_adapter.execute(comment_sql)
 
             # Verify: Column comment was actually updated
-            result = starrocks_adapter.fetchone(
+            result = fetchone_or_fail(
+                starrocks_adapter,
                 f"SELECT COLUMN_TYPE, COLUMN_COMMENT FROM information_schema.COLUMNS "
-                f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_table' AND COLUMN_NAME = 'name'"
+                f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'test_table' AND COLUMN_NAME = 'name'",
             )
             assert result is not None, "Column not found after comment update"
             column_type, column_comment = result
-            assert (
-                column_comment == new_comment
-            ), f"Comment not updated. Expected: {new_comment}, Got: {column_comment}"
-            assert (
-                "varchar(100)" in column_type.lower()
-            ), f"Column type changed unexpectedly: {column_type}"
-
-            logger.info(
-                "✅ _build_create_comment_column_exp generates valid SQL with correct type"
+            assert column_comment == new_comment, (
+                f"Comment not updated. Expected: {new_comment}, Got: {column_comment}"
             )
+            assert "varchar(100)" in column_type.lower(), (
+                f"Column type changed unexpectedly: {column_type}"
+            )
+
+            logger.info("✅ _build_create_comment_column_exp generates valid SQL with correct type")
 
         finally:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)

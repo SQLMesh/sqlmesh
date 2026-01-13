@@ -21,7 +21,7 @@ import typing as t
 
 import pytest
 from sqlglot import expressions as exp
-from sqlglot import parse, parse_one
+from sqlglot import parse_one
 from pytest_mock.plugin import MockerFixture
 from sqlmesh.core.engine_adapter.shared import DataObjectType
 from sqlmesh.utils.errors import SQLMeshError
@@ -38,6 +38,11 @@ def _load_sql_model(model_sql: str) -> SqlModel:
     """Parse StarRocks MODEL SQL into a SqlModel instance."""
     expressions = parse(model_sql, default_dialect="starrocks")
     return t.cast(SqlModel, load_sql_based_model(expressions))
+
+
+def _columns(model: SqlModel) -> t.Dict[str, exp.DataType]:
+    assert model.columns_to_types is not None
+    return model.columns_to_types
 
 
 # =============================================================================
@@ -71,9 +76,7 @@ class TestSchemaOperations:
             "CREATE SCHEMA `test_schema`",
         ]
 
-    def test_drop_schema(
-        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
-    ):
+    def test_drop_schema(self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]):
         """Test DROP DATABASE statement generation."""
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.drop_schema("test_schema")
@@ -137,7 +140,7 @@ class TestDataObjectQuery:
                 return df[mask].reset_index(drop=True)
             return df.reset_index(drop=True)
 
-        adapter.fetchdf = mocker.Mock(side_effect=fetchdf_side_effect)
+        adapter.fetchdf = mocker.Mock(side_effect=fetchdf_side_effect)  # type: ignore[assignment]
 
         mv1 = adapter.get_data_object("test_db.mv1")
         assert mv1 is not None
@@ -244,21 +247,15 @@ class TestTableOperations:
 
         # Test 1: Simple table names (no database qualifier)
         adapter.rename_table("old_table", "new_table")
-        adapter.cursor.execute.assert_called_with(
-            "ALTER TABLE `old_table` RENAME `new_table`"
-        )
+        adapter.cursor.execute.assert_called_with("ALTER TABLE `old_table` RENAME `new_table`")
 
         # Test 2: Database-qualified names - RENAME only uses table name
         adapter.cursor.execute.reset_mock()
         adapter.rename_table("db.old_table", "db.new_table")
         # StarRocks RENAME clause requires unqualified table name
-        adapter.cursor.execute.assert_called_with(
-            "ALTER TABLE `db`.`old_table` RENAME `new_table`"
-        )
+        adapter.cursor.execute.assert_called_with("ALTER TABLE `db`.`old_table` RENAME `new_table`")
 
-    def test_delete_from(
-        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
-    ):
+    def test_delete_from(self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]):
         """Test DELETE statement generation."""
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.delete_from(exp.to_table("test_table"), "id = 1")
@@ -277,9 +274,7 @@ class TestTableOperations:
         # StarRocks skips index creation - verify no execute call was made
         adapter.cursor.execute.assert_not_called()
 
-    def test_create_view(
-        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
-    ):
+    def test_create_view(self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]):
         """Test CREATE VIEW statement generation."""
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_view("test_view", parse_one("SELECT a FROM tbl"))
@@ -583,7 +578,9 @@ class TestWhereClauseTransformations:
 
         adapter.delete_from(
             exp.to_table("test_table"),
-            parse_one("(dt BETWEEN '2024-01-01' AND '2024-06-30') OR (dt BETWEEN '2024-07-01' AND '2024-12-31')"),
+            parse_one(
+                "(dt BETWEEN '2024-01-01' AND '2024-06-30') OR (dt BETWEEN '2024-07-01' AND '2024-12-31')"
+            ),
         )
 
         sql = to_sql_calls(adapter)[0]
@@ -650,7 +647,7 @@ class TestKeyPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -694,7 +691,7 @@ class TestKeyPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -724,7 +721,7 @@ class TestKeyPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -754,7 +751,7 @@ class TestKeyPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -799,9 +796,7 @@ class TestKeyPropertyBuilding:
         customer_id_pos = col_defs.find("`customer_id`")
 
         assert order_id_pos < event_date_pos, "order_id must appear before event_date"
-        assert (
-            event_date_pos < customer_id_pos
-        ), "event_date must appear before customer_id"
+        assert event_date_pos < customer_id_pos, "event_date must appear before customer_id"
 
 
 # =============================================================================
@@ -814,9 +809,9 @@ class TestPartitionPropertyBuilding:
         "partition_expr,expected_clause",
         [
             # Expression partitioning - single column
-            ("'dt'", "PARTITION BY dt"),
+            ("'dt'", "PARTITION BY (dt)"),
             # Expression partitioning - multi-column
-            ("(year, month)", "PARTITION BY year, month"),
+            ("(year, month)", "PARTITION BY (year, month)"),
             # RANGE partitioning
             ("RANGE (dt)", "PARTITION BY RANGE (`dt`) ()"),
             # LIST partitioning
@@ -849,7 +844,7 @@ class TestPartitionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             partitioned_by=model.partitioned_by,
             table_properties=model.physical_properties,
         )
@@ -880,13 +875,13 @@ class TestPartitionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             partitioned_by=model.partitioned_by,
             table_properties=model.physical_properties,
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY year, month" in sql
+        assert "PARTITION BY (year, month)" in sql
 
     def test_partitioned_by_as_model_parameter(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
@@ -909,12 +904,12 @@ class TestPartitionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             partitioned_by=model.partitioned_by,
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY year, month" in sql
+        assert "PARTITION BY (year, month)" in sql
 
     def test_partitions_value_forms(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
@@ -941,7 +936,7 @@ class TestPartitionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             partitioned_by=model.partitioned_by,
             table_properties=model.physical_properties,
         )
@@ -974,7 +969,7 @@ class TestPartitionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             partitioned_by=model.partitioned_by,
             table_properties=model.physical_properties,
         )
@@ -1032,7 +1027,7 @@ class TestDistributionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -1083,7 +1078,7 @@ class TestDistributionPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -1149,7 +1144,7 @@ class TestOrderByPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -1184,7 +1179,7 @@ class TestOrderByPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             table_properties=model.physical_properties,
         )
 
@@ -1213,7 +1208,7 @@ class TestOrderByPropertyBuilding:
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
         adapter.create_table(
             model.name,
-            model.columns_to_types,
+            _columns(model),
             clustered_by=model.clustered_by,
         )
 
@@ -1312,7 +1307,7 @@ class TestViewPropertyBuilding:
             model.name,
             query,
             replace=False,
-            target_columns_to_types=model.columns_to_types,
+            target_columns_to_types=_columns(model),
             view_properties=model.virtual_properties,
         )
 
@@ -1344,7 +1339,7 @@ class TestViewPropertyBuilding:
                 model.name,
                 query,
                 replace=False,
-                target_columns_to_types=model.columns_to_types,
+                target_columns_to_types=_columns(model),
                 view_properties=model.virtual_properties,
             )
 
@@ -1381,7 +1376,7 @@ class TestMVRefreshPropertyBuilding:
             query,
             replace=False,
             materialized=True,
-            target_columns_to_types=model.columns_to_types,
+            target_columns_to_types=_columns(model),
             view_properties=model.virtual_properties,
         )
         # replace=False → only CREATE statement is emitted
@@ -1466,9 +1461,7 @@ class TestMVRefreshPropertyBuilding:
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
     ):
         adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
-        model = self._build_mv_model(
-            "refresh_scheme = 'SCHEDULE EVERY (INTERVAL 5 MINUTE)'"
-        )
+        model = self._build_mv_model("refresh_scheme = 'SCHEDULE EVERY (INTERVAL 5 MINUTE)'")
         with pytest.raises(SQLMeshError, match="refresh_scheme"):
             self._create_simple_mv(adapter, model)
 
@@ -1567,7 +1560,7 @@ class TestCommentPropertyBuilding:
             assert sql == expected_sql
         else:
             # Special chars case - check for escaped quote
-            assert "It\'s a test" in sql or "It''s a test" in sql
+            assert "It's a test" in sql or "It''s a test" in sql
 
         # Common assertions for all cases
         assert "ALTER TABLE" in sql
@@ -1686,7 +1679,7 @@ class TestInvalidPropertyScenarios:
         SELECT id, dt, value FROM source_table;
         """
         model = _load_sql_model(model_sql)
-        columns = model.columns_to_types
+        columns = _columns(model)
 
         with pytest.raises(SQLMeshError, match="Multiple table key type"):
             adapter.create_table(
@@ -1721,7 +1714,7 @@ class TestInvalidPropertyScenarios:
         with pytest.raises(SQLMeshError, match="partition definition"):
             adapter.create_table(
                 model.name,
-                target_columns_to_types=model.columns_to_types,
+                target_columns_to_types=_columns(model),
                 partitioned_by=model.partitioned_by,
                 table_properties=model.physical_properties,
             )
@@ -1751,7 +1744,7 @@ class TestInvalidPropertyScenarios:
         with pytest.raises(SQLMeshError, match="Invalid property 'partition'"):
             adapter.create_table(
                 model.name,
-                target_columns_to_types=model.columns_to_types,
+                target_columns_to_types=_columns(model),
                 table_properties=model.physical_properties,
             )
 
@@ -1797,9 +1790,7 @@ class TestComprehensive:
                         ),
                         exp.EQ(
                             this=exp.Column(this="expressions"),
-                            expression=exp.Tuple(
-                                expressions=[exp.to_column("customer_id")]
-                            ),
+                            expression=exp.Tuple(expressions=[exp.to_column("customer_id")]),
                         ),
                         exp.EQ(
                             this=exp.Column(this="buckets"),

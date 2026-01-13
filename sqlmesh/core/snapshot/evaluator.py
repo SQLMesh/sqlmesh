@@ -2053,14 +2053,14 @@ def _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
     complex DELETE/MERGE statements remain supported.
     """
 
+    properties = dict(physical_properties or {})
+
     if (
         model.dialect != "starrocks"
         or not model.kind.is_incremental_by_unique_key
-        or "primary_key" in physical_properties
+        or "primary_key" in properties
     ):
-        return physical_properties
-
-    properties = dict(physical_properties or {})
+        return properties
     unique_key: t.Optional[t.List[exp.Expression]] = model.unique_key
     if unique_key:
         properties["primary_key"] = (
@@ -2092,7 +2092,8 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
         ctas_query = model.ctas_query(**render_kwargs)
         physical_properties = kwargs.get("physical_properties", model.physical_properties)
         physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-            model, physical_properties)
+            model, physical_properties
+        )
 
         logger.info("Creating table '%s'", table_name)
         if model.annotated:
@@ -2209,7 +2210,8 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
 
         physical_properties = kwargs.get("physical_properties", model.physical_properties)
         physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-            model, physical_properties)
+            model, physical_properties
+        )
         self.adapter.replace_query(
             name,
             query_or_df,
@@ -2354,7 +2356,8 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
             )
             physical_properties = kwargs.get("physical_properties", model.physical_properties)
             physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-                model, physical_properties)
+                model, physical_properties
+            )
             self.adapter.merge(
                 table_name,
                 query_or_df,
@@ -2383,7 +2386,8 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
         )
         physical_properties = kwargs.get("physical_properties", model.physical_properties)
         physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-            model, physical_properties)
+            model, physical_properties
+        )
         self.adapter.merge(
             table_name,
             query_or_df,
@@ -3175,7 +3179,8 @@ class EngineManagedStrategy(MaterializableStrategy):
             logger.info("Creating managed table: %s", table_name)
             physical_properties = kwargs.get("physical_properties", model.physical_properties)
             physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-                model, physical_properties)
+                model, physical_properties
+            )
             self.adapter.create_managed_table(
                 table_name=table_name,
                 query=model.render_query_or_raise(**render_kwargs),
