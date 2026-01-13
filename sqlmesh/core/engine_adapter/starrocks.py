@@ -1038,8 +1038,8 @@ class DistributionTupleOutputType(StructuredTupleType):
             Dict with kind/columns/buckets fields
 
         Example:
-            >>> DistributionTupleInputType.from_enum("RANDOM")
-            {"kind": "RANDOM", "columns": [], "buckets": None}
+            >>> DistributionTupleOutputType.from_enum("RANDOM")
+            {'kind': 'RANDOM', 'columns': [], 'buckets': None}
         """
         return {"kind": enum_value, "columns": [], "buckets": buckets}
 
@@ -1058,8 +1058,8 @@ class DistributionTupleOutputType(StructuredTupleType):
             Dict with kind/columns/buckets fields
 
         Example:
-            >>> func = parse_one("HASH(id, dt)")
-            >>> DistributionTupleInputType.from_func(func)
+            >> func = sqlglot.parse_one("HASH(id, dt)")
+            >> DistributionTupleOutputType.from_func(func)
             {"kind": "HASH", "columns": [exp.Column("id"), exp.Column("dt")], "buckets": None}
         """
         func_name = func.name.upper() if hasattr(func, "name") else str(func.this).upper()
@@ -1095,17 +1095,17 @@ class DistributionTupleOutputType(StructuredTupleType):
             TypeError: If value type is not supported
 
         Example:
-            >>> # From DistributionTupleInputType
-            >>> DistributionTupleInputType.to_unified_dict({"kind": "HASH", "columns": [...]})
-            {"kind": "HASH", "columns": [...], "buckets": None}
+            >>> # From DistributionTupleOutputType
+            >>> DistributionTupleOutputType.to_unified_dict({"kind": "HASH", "columns": [...]})
+            {'kind': 'HASH', 'columns': [Ellipsis]}
 
             >>> # From EnumType
-            >>> DistributionTupleInputType.to_unified_dict("RANDOM")
-            {"kind": "RANDOM", "columns": [], "buckets": None}
+            >>> DistributionTupleOutputType.to_unified_dict("RANDOM")
+            {'kind': 'RANDOM', 'columns': [], 'buckets': None}
 
-            >>> # From FuncType
-            >>> DistributionTupleInputType.to_unified_dict(parse_one("HASH(id)"))
-            {"kind": "HASH", "columns": [exp.Column("id")], "buckets": None}
+            >> # From FuncType
+            >> DistributionTupleOutputType.to_unified_dict(sqlglot.parse_one("HASH(id)"))
+            {'kind': 'HASH', 'columns': [exp.Column('id')], 'buckets': None}
         """
         if isinstance(normalized_value, dict):
             # Already in DistributionTupleInputType format
@@ -1422,7 +1422,7 @@ class PropertyValidator:
             >>> PropertyValidator.ensure_parenthesized(exp.Literal.string('id1, id2'))
             '(id1, id2)'
             >>> PropertyValidator.ensure_parenthesized(exp.Column(quoted=True, name='id1, id2'))
-            '(id1, id2)'
+            Column(quoted=True, name=id1, id2)
         """
         # logger.debug("ensure_parenthesized. value: %s, type: %s", value, type(value))
 
@@ -1526,7 +1526,7 @@ class PropertyValidator:
             SQLMeshError: If any invalid name is found
 
         Example:
-            >>> PropertyValidator.check_invalid_names(
+            >> PropertyValidator.check_invalid_names(
             ...     valid_name="partitioned_by",
             ...     invalid_names=["partition_by", "partition"],
             ...     table_properties={"partition_by": "dt"}
@@ -1579,7 +1579,7 @@ class PropertyValidator:
             SQLMeshError: If multiple properties from the group are defined
 
         Example:
-            >>> PropertyValidator.check_at_most_one(
+            >> PropertyValidator.check_at_most_one(
             ...     property_name="primary_key",
             ...     property_description="key type",
             ...     exclusive_property_names=["primary_key", "duplicate_key", "unique_key", "aggregate_key"],
