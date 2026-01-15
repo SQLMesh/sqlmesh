@@ -6,18 +6,55 @@
 
 SQLMesh supports StarRocks through its MySQL-compatible protocol, providing StarRocks-specific optimizations for table models, indexing, partitioning, and more. The adapter leverages StarRocks's strengths for analytical workloads with sensible defaults and advanced configuration support.
 
+## Prerequisites
+
+* Install SQLMesh with the StarRocks extra:
+
+```bash
+pip install "sqlmesh[starrocks]"
+```
+
+* Initialize a SQLMesh project (if you haven't already):
+
+```bash
+sqlmesh init
+```
+
+* Configure a separate state backend:
+  * StarRocks is currently **not supported** as a SQLMesh `state_connection`.
+  * Use DuckDB (recommended) or another engine for SQLMesh state.
+
 ## Connection Configuration Example
 
-```yaml
-starrocks:
-  connection:
-    type: starrocks
-    host: starrocks-fe  # Frontend (FE) node address
-    port: 9030                  # Query port (default: 9030)
-    user: starrocks_user
-    password: your_password
-    database: your_database
-    # Optional MySQL-compatible settings
+```yaml linenums="1" hl_lines="2 4-8 13-15"
+gateways:
+  starrocks:
+    connection:
+      type: starrocks
+      host: starrocks-fe  # Frontend (FE) node address
+      port: 9030          # Query port (default: 9030)
+      user: starrocks_user
+      password: your_password
+      database: your_database
+      # Optional MySQL-compatible settings
+      # charset: utf8mb4
+      # connect_timeout: 60
+    state_connection:
+      type: duckdb
+      database: ./state/sqlmesh_state.db
+
+default_gateway: starrocks
+
+model_defaults:
+  dialect: starrocks
+```
+
+### StarRocks setup note (optional)
+
+If you're running a shared-nothing cluster with a single backend, you may need to adjust the default replication number:
+
+```sql
+ADMIN SET frontend config ("default_replication_num" = "1");
 ```
 
 ## Quickstart

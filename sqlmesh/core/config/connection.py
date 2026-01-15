@@ -2388,7 +2388,7 @@ class StarRocksConnectionConfig(ConnectionConfig):
     type_: t.Literal["starrocks"] = Field(alias="type", default="starrocks")
     DIALECT: t.ClassVar[t.Literal["starrocks"]] = "starrocks"
     DISPLAY_NAME: t.ClassVar[t.Literal["StarRocks"]] = "StarRocks"
-    DISPLAY_ORDER: t.ClassVar[t.Literal[19]] = 19
+    DISPLAY_ORDER: t.ClassVar[t.Literal[18]] = 18
 
     _engine_import_validator = _get_engine_import_validator("pymysql", "starrocks")
 
