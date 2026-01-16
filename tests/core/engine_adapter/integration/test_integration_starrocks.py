@@ -1435,6 +1435,163 @@ class TestEndToEndModelParsing:
             starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
 
     # ========================================
+    # Case 6B: Expression Partitioning (table + MV)
+    # Covers: expression partitioning with/without functions, table vs MV
+    # ========================================
+
+    @pytest.mark.parametrize(
+        "partition_expr",
+        [
+            "(event_date, region)",  # plain columns
+            "date_trunc('day', event_date)",  # one function expression
+            "(from_unixtime(ts), region)",  # multiple expressions
+        ],
+    )
+    def test_e2e_partition_expression_for_table(
+        self,
+        starrocks_adapter: StarRocksEngineAdapter,
+        partition_expr: str,
+    ):
+        """Expression partitioning for regular tables (outer paren only when no functions)."""
+        db_name = "sr_e2e_part_expr_tbl_db"
+        table_name = f"{db_name}.sr_part_expr_table"
+
+        model_sql = f"""
+        MODEL (
+            name test.partition_expr_table,
+            kind FULL,
+            dialect starrocks,
+            columns (
+                id BIGINT,
+                ts BIGINT,
+                event_date DATE,
+                region VARCHAR(50)
+            ),
+            partitioned_by {partition_expr},
+        );
+        SELECT *
+        """
+
+        try:
+            starrocks_adapter.create_schema(db_name, ignore_if_exists=True)
+            params = self._parse_model_and_get_all_params(model_sql)
+            starrocks_adapter.create_table(table_name, **params)
+
+            ddl = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE TABLE {table_name}")[1]
+            logger.info(f"Case 6B DDL:\n{ddl}")
+            ddl_upper = ddl.upper()
+            assert "PARTITION BY" in ddl_upper
+
+            before, after = ddl_upper.split("PARTITION BY", 1)
+            after = after.lstrip()
+
+            # Column/function presence
+            if "DATE" in partition_expr.upper():
+                assert "EVENT_DATE" in after
+            else:
+                assert "REGION" in after
+            if "FROM_UNIXTIME" in partition_expr.upper():
+                assert "FROM_UNIXTIME" in after or \
+                    ("FROM_UNIXTIME" in before and "__GENERATED_PARTITION_COLUMN" in after)
+            if "DATE_TRUNC" in partition_expr.upper():
+                assert "DATE_TRUNC" in after
+        finally:
+            starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
+
+    @pytest.mark.parametrize(
+        "partition_clause,has_func",
+        [
+            ("(event_date, region)", False),
+            ("(date_trunc('day', event_date), region)", True),
+        ],
+    )
+    def test_e2e_partition_expression_for_mv(
+        self,
+        starrocks_adapter: StarRocksEngineAdapter,
+        partition_clause: str,
+        has_func: bool,
+    ):
+        """Expression partitioning for MVs should always keep outer parentheses."""
+        db_name = "sr_e2e_part_expr_mv_db"
+        src_table = f"{db_name}.sr_part_expr_src"
+        mv_table = f"{db_name}.sr_part_expr_mv"
+
+        try:
+            starrocks_adapter.create_schema(db_name, ignore_if_exists=True)
+
+            # Source table + data
+            starrocks_adapter.create_table(
+                src_table,
+                target_columns_to_types={
+                    "id": exp.DataType.build("BIGINT"),
+                    "ts": exp.DataType.build("BIGINT"),
+                    "event_date": exp.DataType.build("DATE"),
+                    "region": exp.DataType.build("VARCHAR(50)"),
+                },
+                primary_key=("id", "event_date", "region"),
+                table_properties={
+                    "partitioned_by": partition_clause,
+                },
+            )
+            starrocks_adapter.execute(
+                f"""
+                INSERT INTO {src_table} (id, ts, event_date, region)
+                VALUES (1, 1700000000, '2024-01-01', 'us')
+                """
+            )
+
+            model_sql = f"""
+            MODEL (
+                name test.partition_expr_mv,
+                kind VIEW (
+                    materialized true
+                ),
+                dialect starrocks,
+                columns (
+                    id BIGINT,
+                    ts BIGINT,
+                    event_date DATE,
+                    region VARCHAR(50)
+                ),
+                partitioned_by {partition_clause},
+                physical_properties (
+                    distributed_by = 'HASH(id) BUCKETS 2',
+                    refresh_moment = 'IMMEDIATE',
+                    refresh_scheme = 'ASYNC'
+                )
+            );
+            SELECT id, ts, event_date, region FROM {src_table};
+            """
+
+            model = _load_sql_model(model_sql)
+            query = model.render_query()
+            assert query is not None
+            materialized_properties = _materialized_properties_from_model(model)
+
+            starrocks_adapter.create_view(
+                mv_table,
+                query,
+                replace=True,
+                materialized=True,
+                target_columns_to_types=model.columns_to_types,
+                materialized_properties=materialized_properties,
+                view_properties=model.physical_properties,
+            )
+
+            ddl = fetchone_or_fail(
+                starrocks_adapter, f"SHOW CREATE MATERIALIZED VIEW {mv_table}"
+            )[1]
+            logger.info(f"Case 6B DDL:\n{ddl}")
+            ddl_upper = ddl.upper()
+            assert "PARTITION BY" in ddl_upper
+            after = ddl_upper.split("PARTITION BY", 1)[1].lstrip()
+            assert after.startswith("("), f"MV partition should keep parentheses, got: {after[:50]}"
+            assert "REGION" in after
+            assert ("DATE_TRUNC" in after) == has_func
+        finally:
+            starrocks_adapter.drop_schema(db_name, ignore_if_not_exists=True)
+
+    # ========================================
     # Case 7: Other Key Types (test_design.md Case 7)
     # Covers: duplicate_key, unique_key, aggregate_key
     # ========================================

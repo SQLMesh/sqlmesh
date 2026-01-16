@@ -2022,7 +2022,7 @@ def test_starrocks(make_config):
     assert config.database == "testdb"
     assert config.DIALECT == "starrocks"
     assert config.DISPLAY_NAME == "StarRocks"
-    assert config.DISPLAY_ORDER == 19
+    assert config.DISPLAY_ORDER == 18
     assert config.is_recommended_for_state_sync is False
 
     # Test with minimal configuration (using default port)

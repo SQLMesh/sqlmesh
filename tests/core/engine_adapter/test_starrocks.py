@@ -809,9 +809,11 @@ class TestPartitionPropertyBuilding:
         "partition_expr,expected_clause",
         [
             # Expression partitioning - single column
-            ("'dt'", "PARTITION BY (dt)"),
+            ("'dt'", "PARTITION BY (`dt`)"),
             # Expression partitioning - multi-column
-            ("(year, month)", "PARTITION BY (year, month)"),
+            ("(year, month)", "PARTITION BY (`year`, `month`)"),
+            # Expression partitioning - multi-column with func
+            ("(date_trunc('day', dt), region)", "PARTITION BY DATE_TRUNC('DAY', `dt`), `region`"),
             # RANGE partitioning
             ("RANGE (dt)", "PARTITION BY RANGE (`dt`) ()"),
             # LIST partitioning
@@ -852,6 +854,61 @@ class TestPartitionPropertyBuilding:
         sql = to_sql_calls(adapter)[0]
         assert expected_clause in sql
 
+    @pytest.mark.parametrize(
+        "partition_expr,expected_clause",
+        [
+            ("(year, month)", "PARTITION BY (`year`, `month`)"),
+            (
+                "(date_trunc('day', dt), region)",
+                "PARTITION BY (DATE_TRUNC('DAY', `dt`), `region`)",
+            ),
+            (
+                "(from_unixtime(dt))",
+                "PARTITION BY (FROM_UNIXTIME(`dt`))",
+            ),
+        ],
+    )
+    def test_partitioned_by_forms_for_mv(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+        partition_expr: str,
+        expected_clause: str,
+    ):
+        """MV partition_by should keep outer parentheses when rendering partition tuples."""
+        model_sql = f"""
+        MODEL (
+            name test_schema.test_mv_partition,
+            kind VIEW (
+                materialized true,
+            ),
+            dialect starrocks,
+            columns (dt DATE, region STRING, year INT, month INT),
+            physical_properties (
+                partition_by = {partition_expr}
+            )
+        );
+        SELECT dt, region, year, month FROM src;
+        """
+
+        model = _load_sql_model(model_sql)
+        materialized_properties = (
+            {"partitioned_by": model.partitioned_by} if model.partitioned_by else None
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        adapter.create_view(
+            model.name,
+            model.render_query(),
+            materialized=True,
+            replace=False,
+            target_columns_to_types=_columns(model),
+            materialized_properties=materialized_properties,
+            view_properties=model.physical_properties,
+        )
+
+        sql = to_sql_calls(adapter)[0]
+        assert expected_clause in sql
+
     def test_partition_by_alias(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
     ):
@@ -881,7 +938,7 @@ class TestPartitionPropertyBuilding:
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY (year, month)" in sql
+        assert "PARTITION BY (year, month)" in sql or "PARTITION BY (`year`, `month`)" in sql
 
     def test_partitioned_by_as_model_parameter(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
@@ -909,7 +966,7 @@ class TestPartitionPropertyBuilding:
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY (year, month)" in sql
+        assert "PARTITION BY (year, month)" in sql or "PARTITION BY (`year`, `month`)" in sql
 
     def test_partitions_value_forms(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
@@ -1354,10 +1411,10 @@ class TestMVRefreshPropertyBuilding:
         model_sql = f"""
         MODEL (
             name test_schema.test_mv_refresh_model,
-            kind VIEW,
+            kind VIEW (materialized true),
             dialect starrocks,
             columns (a INT),
-            virtual_properties (
+            physical_properties (
                 {property_sql}
             )
         );
@@ -1377,7 +1434,7 @@ class TestMVRefreshPropertyBuilding:
             replace=False,
             materialized=True,
             target_columns_to_types=_columns(model),
-            view_properties=model.virtual_properties,
+            view_properties=model.physical_properties,
         )
         # replace=False → only CREATE statement is emitted
         return to_sql_calls(adapter)[-1]
