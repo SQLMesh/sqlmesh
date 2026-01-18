@@ -1627,6 +1627,8 @@ class MSSQLConnectionConfig(ConnectionConfig):
             if not SUPPORTS_MSSQL_PYTHON_DRIVER:
                 raise ConfigError("The `mssql-python` driver requires Python 3.10 or higher.")
 
+            import mssql_python
+
             def connect_mssql_python(**kwargs: t.Any) -> t.Callable:
                 # Extract parameters for connection string
                 host = kwargs.pop("host")
@@ -1689,9 +1691,31 @@ class MSSQLConnectionConfig(ConnectionConfig):
                 # Create the connection
                 conn_str = ";".join(conn_str_parts)
 
-                import mssql_python
-
                 conn = mssql_python.connect(conn_str, autocommit=kwargs.get("autocommit", False))
+
+                # TODO: Remove this output converter as DATETIMEOFFSET
+                # should be handled natively by `mssql-python`.
+                # see "https://github.com/microsoft/mssql-python/issues/213"
+
+                def handle_datetimeoffset_mssql_python(dto_value: t.Any) -> t.Any:
+                    import struct
+                    from datetime import datetime, timedelta, timezone
+
+                    # Unpack the DATETIMEOFFSET binary format:
+                    # Format: <6hI2h = (year, month, day, hour, minute, second, nanoseconds, tz_hour_offset, tz_minute_offset)
+                    tup = struct.unpack("<6hI2h", dto_value)
+                    return datetime(
+                        tup[0],
+                        tup[1],
+                        tup[2],
+                        tup[3],
+                        tup[4],
+                        tup[5],
+                        tup[6] // 1000,
+                        timezone(timedelta(hours=tup[7], minutes=tup[8])),
+                    )
+
+                conn.add_output_converter(-155, handle_datetimeoffset_mssql_python)
 
                 return conn
 
