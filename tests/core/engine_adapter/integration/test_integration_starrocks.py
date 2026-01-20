@@ -207,7 +207,9 @@ def init_test_integration_env(starrocks_adapter: StarRocksEngineAdapter) -> None
 
     current_replication = _get_config_value("default_replication_num")
     try:
-        current_replication_int = int(current_replication) if current_replication is not None else None
+        current_replication_int = (
+            int(current_replication) if current_replication is not None else None
+        )
     except Exception:
         current_replication_int = None
 
@@ -222,9 +224,7 @@ def init_test_integration_env(starrocks_adapter: StarRocksEngineAdapter) -> None
             current_replication,
         )
     except Exception as e:  # pragma: no cover - do not break tests if lacking privilege
-        logger.warning(
-            "Failed to set default_replication_num for shared_nothing cluster: %s", e
-        )
+        logger.warning("Failed to set default_replication_num for shared_nothing cluster: %s", e)
 
 
 class TestBasicOperations:
@@ -249,10 +249,10 @@ class TestBasicOperations:
 
         # DROP DATABASE
         engine_adapter.drop_schema(db_name)
-        result: t.Optional[Row] = engine_adapter.fetchone(
+        dropped_result: t.Optional[Row] = engine_adapter.fetchone(
             f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{db_name}'"
         )
-        assert result is None, "DROP DATABASE failed"
+        assert dropped_result is None, "DROP DATABASE failed"
 
     def test_create_drop_table(self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter):
         """Test CREATE TABLE and DROP TABLE (TestContext version)."""
@@ -1491,8 +1491,9 @@ class TestEndToEndModelParsing:
             else:
                 assert "REGION" in after
             if "FROM_UNIXTIME" in partition_expr.upper():
-                assert "FROM_UNIXTIME" in after or \
-                    ("FROM_UNIXTIME" in before and "__GENERATED_PARTITION_COLUMN" in after)
+                assert "FROM_UNIXTIME" in after or (
+                    "FROM_UNIXTIME" in before and "__GENERATED_PARTITION_COLUMN" in after
+                )
             if "DATE_TRUNC" in partition_expr.upper():
                 assert "DATE_TRUNC" in after
         finally:
@@ -1578,9 +1579,9 @@ class TestEndToEndModelParsing:
                 view_properties=model.physical_properties,
             )
 
-            ddl = fetchone_or_fail(
-                starrocks_adapter, f"SHOW CREATE MATERIALIZED VIEW {mv_table}"
-            )[1]
+            ddl = fetchone_or_fail(starrocks_adapter, f"SHOW CREATE MATERIALIZED VIEW {mv_table}")[
+                1
+            ]
             logger.info(f"Case 6B DDL:\n{ddl}")
             ddl_upper = ddl.upper()
             assert "PARTITION BY" in ddl_upper
