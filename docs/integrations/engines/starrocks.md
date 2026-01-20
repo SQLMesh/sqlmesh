@@ -424,7 +424,7 @@ MODEL (
 
 ### Views
 
-StarRocks supports view `SECURITY` via `physical_properties.security`.
+StarRocks supports view `SECURITY` via **`virtual_properties`**.`security`.
 
 **Syntax:**
 
@@ -434,7 +434,7 @@ StarRocks supports view `SECURITY` via `physical_properties.security`.
 MODEL (
   name user_summary_view,
   kind VIEW,
-  physical_properties (
+  virtual_properties (
     security = INVOKER
   )
 );
@@ -451,12 +451,15 @@ GROUP BY user_id;
 
 SQLMesh uses `kind VIEW (materialized true)` to create materialized views.
 
-You can specify StarRocks MV refresh settings using the same `physical_properties` block.
+For ASYNC MVs, StarRocks requires a `REFRESH` clause, so you must specify **at least one** of `refresh_moment` or `refresh_scheme`.
+
+MV properties (including `refresh_moment` / `refresh_scheme` and other table-like properties such as partitioning, distribution, ordering, and generic properties) must be specified in **`physical_properties`**.
 
 **Refresh properties:**
 
 * `refresh_moment`: `IMMEDIATE` or `DEFERRED` (optional)
 * `refresh_scheme`: `MANUAL` or `ASYNC ...` (optional)
+  * If you specify it with the `START/EVERY`, you must specify it as a whole string, quoted by a pair of quotes.
   * Examples: `ASYNC`, `MANUAL`, `ASYNC START ("2024-01-01 00:00:00") EVERY (INTERVAL 5 MINUTE)`
   * The syntax of `ASYNC ...` clause is the same as the clause in StarRocks.
 
@@ -502,7 +505,7 @@ target_columns_to_types = {
 
 ## Limitations
 
-* **No sync MV support (currently)**: synchronous materialized views are not supported yet.
+* **No SYNC MV support**: synchronous materialized views are not supported yet.
 * **No tuple IN**: StarRocks does not support `(c1, c2) IN ((v1, v2), ...)`.
 * **No `SELECT ... FOR UPDATE`**: StarRocks is an OLAP database and does not support row locks; SQLMesh removes `FOR UPDATE` when executing SQLGlot expressions.
 * **RENAME caveat**: `ALTER TABLE db.old RENAME db.new` is not supported; the `RENAME` target cannot be qualified with a database name.
