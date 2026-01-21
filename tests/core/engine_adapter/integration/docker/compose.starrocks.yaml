@@ -3,25 +3,48 @@ services:
     image: starrocks/fe-ubuntu:3.5-latest
     container_name: starrocks-fe
     hostname: starrocks-fe
-    environment:
-      - FE_SERVERS=fe1:starrocks-fe:9030
+    command: |
+      bash /opt/starrocks/fe/bin/start_fe.sh --host_type FQDN
     ports:
-      - "9030:9030"  # MySQL protocol port for tests
-      - "8030:8030"  # HTTP port
+      - 9030:9030  # MySQL protocol port for tests
+      - 9020:9020
+      - 8030:8030  # HTTP port
     networks:
       - starrocks_net
+    healthcheck:
+      test: 'mysql -u root -h starrocks-fe -P 9030 -e "SHOW FRONTENDS\G" |grep "Alive: true"'
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   starrocks-be:
     image: starrocks/be-ubuntu:3.5-latest
     container_name: starrocks-be
     hostname: starrocks-be
     depends_on:
-      - starrocks-fe
+      starrocks-fe:
+        condition: service_healthy
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ulimit -n 65535;
+        sleep 15s
+        mysql --connect-timeout 2 -h starrocks-fe -P 9030 -u root -e "ALTER SYSTEM ADD BACKEND \"starrocks-be:9050\";"
+        bash /opt/starrocks/be/bin/start_be.sh
     environment:
-      - FE_SERVERS=starrocks-fe:9030
+      - HOST_TYPE=FQDN
+    ports:
+      - 8040:8040
     networks:
       - starrocks_net
+    healthcheck:
+      test: 'mysql -u root -h starrocks-fe -P 9030 -e "SHOW BACKENDS\G" |grep "Alive: true"'
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 networks:
   starrocks_net:
     driver: bridge
+
