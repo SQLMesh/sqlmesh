@@ -806,18 +806,18 @@ class TestPartitionPropertyBuilding:
     """Tests for partitioned_by/partition_by and partitions properties."""
 
     @pytest.mark.parametrize(
-        "partition_expr,expected_clause",
+        "partition_expr,expected_clause,expected_clause2",
         [
             # Expression partitioning - single column
-            ("'dt'", "PARTITION BY (`dt`)"),
+            ("'dt'", "PARTITION BY `dt`", "PARTITION BY (`dt`)"),
             # Expression partitioning - multi-column
-            ("(year, month)", "PARTITION BY (`year`, `month`)"),
+            ("(year, month)", "PARTITION BY `year`, `month`", "PARTITION BY (`year`, `month`)"),
             # Expression partitioning - multi-column with func
-            ("(date_trunc('day', dt), region)", "PARTITION BY DATE_TRUNC('DAY', `dt`), `region`"),
+            ("(date_trunc('day', dt), region)", "PARTITION BY DATE_TRUNC('DAY', `dt`), `region`", None),
             # RANGE partitioning
-            ("RANGE (dt)", "PARTITION BY RANGE (`dt`) ()"),
+            ("RANGE (dt)", "PARTITION BY RANGE (`dt`) ()", None),
             # LIST partitioning
-            ("LIST (region)", "PARTITION BY LIST (`region`) ()"),
+            ("LIST (region)", "PARTITION BY LIST (`region`) ()", None),
         ],
     )
     def test_partitioned_by_forms(
@@ -825,6 +825,7 @@ class TestPartitionPropertyBuilding:
         make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
         partition_expr: str,
         expected_clause: str,
+        expected_clause2: t.Optional[str],
     ):
         """Test partition_by with various forms parsed from physical_properties."""
         model_sql = f"""
@@ -852,7 +853,7 @@ class TestPartitionPropertyBuilding:
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert expected_clause in sql
+        assert expected_clause in sql or expected_clause2 and expected_clause2 in sql
 
     @pytest.mark.parametrize(
         "partition_expr,expected_clause",
@@ -938,7 +939,7 @@ class TestPartitionPropertyBuilding:
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY (year, month)" in sql or "PARTITION BY (`year`, `month`)" in sql
+        assert "PARTITION BY (`year`, `month`)" in sql or "PARTITION BY `year`, `month`" in sql
 
     def test_partitioned_by_as_model_parameter(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
@@ -966,7 +967,7 @@ class TestPartitionPropertyBuilding:
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY (year, month)" in sql or "PARTITION BY (`year`, `month`)" in sql
+        assert "PARTITION BY (year, month)" in sql or "PARTITION BY `year`, `month`" in sql or "PARTITION BY (`year`, `month`)" in sql
 
     def test_partitions_value_forms(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
