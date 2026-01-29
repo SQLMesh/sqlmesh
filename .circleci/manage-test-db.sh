@@ -25,7 +25,7 @@ function_exists() {
 # Snowflake
 snowflake_init() {
     echo "Installing Snowflake CLI"
-    pip install "snowflake-cli-labs<3.8.0"
+    pip install "snowflake-cli"
 }
 
 snowflake_up() {
@@ -40,20 +40,6 @@ snowflake_down() {
 databricks_init() {
     echo "Installing Databricks CLI"
     curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sudo sh || true
-
-    echo "Writing out Databricks CLI config file"
-    echo -e "[DEFAULT]\nhost = $DATABRICKS_SERVER_HOSTNAME\ntoken = $DATABRICKS_ACCESS_TOKEN" > ~/.databrickscfg
-
-    # this takes a path like 'sql/protocolv1/o/2934659247569/0723-005339-foobar' and extracts '0723-005339-foobar' from it
-    CLUSTER_ID=${DATABRICKS_HTTP_PATH##*/}
-
-    echo "Extracted cluster id: $CLUSTER_ID from '$DATABRICKS_HTTP_PATH'"
-
-    # Note: the cluster doesnt need to be running to create / drop catalogs, but it does need to be running to run the integration tests
-    echo "Ensuring cluster is running"
-    # the || true is to prevent the following error from causing an abort:
-    # > Error: is in unexpected state Running.
-    databricks clusters start $CLUSTER_ID || true
 }
 
 databricks_up() {

@@ -476,6 +476,18 @@ def test_deploy_to_prod_blocked_pr(github_client, make_controller):
         controller.deploy_to_prod()
 
 
+def test_deploy_to_prod_not_blocked_pr_if_config_set(github_client, make_controller):
+    mock_pull_request = github_client.get_repo().get_pull()
+    mock_pull_request.merged = False
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json",
+        github_client,
+        merge_state_status=MergeStateStatus.BLOCKED,
+        bot_config=GithubCICDBotConfig(check_if_blocked_on_deploy_to_prod=False),
+    )
+    controller.deploy_to_prod()
+
+
 def test_deploy_to_prod_dirty_pr(github_client, make_controller):
     mock_pull_request = github_client.get_repo().get_pull()
     mock_pull_request.merged = False

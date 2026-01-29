@@ -862,6 +862,39 @@ def test_trino_schema_location_mapping_syntax(tmp_path):
     assert len(conn.schema_location_mapping) == 2
 
 
+def test_trino_source_option(tmp_path):
+    config_path = tmp_path / "config_trino_source.yaml"
+    with open(config_path, "w", encoding="utf-8") as fd:
+        fd.write(
+            """
+    gateways:
+      trino:
+        connection:
+          type: trino
+          user: trino
+          host: trino
+          catalog: trino
+          source: my_sqlmesh_source
+
+    default_gateway: trino
+
+    model_defaults:
+      dialect: trino
+    """
+        )
+
+    config = load_config_from_paths(
+        Config,
+        project_paths=[config_path],
+    )
+
+    from sqlmesh.core.config.connection import TrinoConnectionConfig
+
+    conn = config.gateways["trino"].connection
+    assert isinstance(conn, TrinoConnectionConfig)
+    assert conn.source == "my_sqlmesh_source"
+
+
 def test_gcp_postgres_ip_and_scopes(tmp_path):
     config_path = tmp_path / "config_gcp_postgres.yaml"
     with open(config_path, "w", encoding="utf-8") as fd:

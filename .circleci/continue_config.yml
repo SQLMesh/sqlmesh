@@ -258,6 +258,10 @@ jobs:
             echo "export REDSHIFT_DATABASE='$TEST_DB_NAME'" >> "$BASH_ENV"
             echo "export GCP_POSTGRES_DATABASE='$TEST_DB_NAME'" >> "$BASH_ENV"
             echo "export FABRIC_DATABASE='$TEST_DB_NAME'" >> "$BASH_ENV"
+
+            # Make snowflake private key available            
+            echo $SNOWFLAKE_PRIVATE_KEY_RAW | base64 -d > /tmp/snowflake-keyfile.p8
+            echo "export SNOWFLAKE_PRIVATE_KEY_FILE='/tmp/snowflake-keyfile.p8'" >> "$BASH_ENV"
       - run:
           name: Create test database
           command: ./.circleci/manage-test-db.sh << parameters.engine >> "$TEST_DB_NAME" up
@@ -309,7 +313,7 @@ workflows:
           matrix:
             parameters:
               engine:
-                #- snowflake
+                - snowflake
                 - databricks
                 - redshift
                 - bigquery

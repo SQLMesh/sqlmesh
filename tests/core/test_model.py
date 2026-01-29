@@ -2727,6 +2727,156 @@ def test_parse(assert_exp_eq):
     )
 
 
+def test_dialect_pattern():
+    def make_test_sql(text: str) -> str:
+        return f"""
+        MODEL (
+            name test_model,
+            kind INCREMENTAL_BY_TIME_RANGE(
+                time_column ds
+            ),
+            {text}
+        );
+    
+        SELECT 1;  
+        """
+
+    def assert_match(test_sql: str, expected_value: t.Optional[str] = "duckdb"):
+        match = d.DIALECT_PATTERN.search(test_sql)
+
+        dialect_str: t.Optional[str] = None
+        if expected_value is not None:
+            assert match
+            dialect_str = match.group("dialect")
+
+        assert dialect_str == expected_value
+
+    # single-quoted dialect
+    assert_match(
+        make_test_sql(
+            """
+            dialect 'duckdb',
+            description 'there's a dialect foo in here too!'
+            """
+        )
+    )
+
+    # bare dialect
+    assert_match(
+        make_test_sql(
+            """
+            dialect duckdb,
+            description 'there's a dialect foo in here too!'
+            """
+        )
+    )
+
+    # double-quoted dialect (allowed in BQ)
+    assert_match(
+        make_test_sql(
+            """
+            dialect "duckdb",
+            description 'there's a dialect foo in here too!'
+            """
+        )
+    )
+
+    # no dialect specified, "dialect" in description
+    test_sql = make_test_sql(
+        """
+        description 'there's a dialect foo in here too!'
+        """
+    )
+
+    matches = list(d.DIALECT_PATTERN.finditer(test_sql))
+    assert not matches
+
+    # line comment between properties
+    assert_match(
+        make_test_sql(
+            """
+            tag my_tag, -- comment
+            dialect duckdb
+            """
+        )
+    )
+
+    # block comment between properties
+    assert_match(
+        make_test_sql(
+            """
+            tag my_tag, /* comment */
+            dialect duckdb
+            """
+        )
+    )
+
+    # quoted empty dialect
+    assert_match(
+        make_test_sql(
+            """
+            dialect '',
+            tag my_tag
+            """
+        ),
+        None,
+    )
+
+    # double-quoted empty dialect
+    assert_match(
+        make_test_sql(
+            """
+            dialect "",
+            tag my_tag
+            """
+        ),
+        None,
+    )
+
+    # trailing comment after dialect value
+    assert_match(
+        make_test_sql(
+            """
+            dialect duckdb -- trailing comment
+            """
+        )
+    )
+
+    # dialect value isn't terminated by ',' or ')'
+    test_sql = make_test_sql(
+        """
+        dialect duckdb -- trailing comment
+        tag my_tag
+        """
+    )
+
+    matches = list(d.DIALECT_PATTERN.finditer(test_sql))
+    assert not matches
+
+    # dialect first
+    assert_match(
+        """
+        MODEL(
+          dialect duckdb,
+          name my_name
+        );
+        """
+    )
+
+    # full parse
+    sql = """
+    MODEL (
+        name test_model,
+        description 'this text mentions dialect foo but is not a property'
+    );
+
+    SELECT 1;
+    """
+    expressions = d.parse(sql, default_dialect="duckdb")
+    model = load_sql_based_model(expressions)
+    assert model.dialect == ""
+
+
 CONST = "bar"
 
 

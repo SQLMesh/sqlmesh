@@ -128,7 +128,7 @@ gateways:
       warehouse: {{ env_var('SNOWFLAKE_WAREHOUSE') }}
       database: {{ env_var('SNOWFLAKE_DATABASE') }}
       user: {{ env_var('SNOWFLAKE_USER') }}
-      password: {{ env_var('SNOWFLAKE_PASSWORD') }}
+      private_key_path: {{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE', 'tests/fixtures/snowflake/rsa_key_no_pass.p8') }}
       check_import: false
     state_connection:
       type: duckdb
@@ -139,7 +139,10 @@ gateways:
       catalog: {{ env_var('DATABRICKS_CATALOG') }}
       server_hostname: {{ env_var('DATABRICKS_SERVER_HOSTNAME') }}
       http_path: {{ env_var('DATABRICKS_HTTP_PATH') }}
-      access_token: {{ env_var('DATABRICKS_ACCESS_TOKEN') }}
+      auth_type: {{ env_var('DATABRICKS_AUTH_TYPE', 'databricks-oauth') }}
+      oauth_client_id: {{ env_var('DATABRICKS_CLIENT_ID') }}
+      oauth_client_secret: {{ env_var('DATABRICKS_CLIENT_SECRET') }}
+      databricks_connect_use_serverless: true
       check_import: false
 
   inttest_redshift:

@@ -756,7 +756,10 @@ class TestContext:
             return username, f"CREATE ROLE {username}"
         if self.dialect == "databricks":
             # Creating an account-level group in Databricks requires making REST API calls so we are going to
-            # use a pre-created group instead. We assume the suffix on the name is the unique id
+            # use a pre-created group instead. We assume the suffix on the name is the unique id.
+            # In the Databricks UI, Workspace Settings -> Identity and Access, create the following groups:
+            #  - test_user, test_analyst, test_etl_user, test_reader, test_writer, test_admin
+            # (there do not need to be any users assigned to these groups)
             return "_".join(username.split("_")[:-1]), None
         if self.dialect == "bigquery":
             # BigQuery uses IAM service accounts that need to be pre-created

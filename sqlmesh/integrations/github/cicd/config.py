@@ -36,6 +36,7 @@ class GithubCICDBotConfig(BaseConfig):
     forward_only_branch_suffix_: t.Optional[str] = Field(
         default=None, alias="forward_only_branch_suffix"
     )
+    check_if_blocked_on_deploy_to_prod: bool = True
 
     @model_validator(mode="before")
     @classmethod

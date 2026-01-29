@@ -78,21 +78,21 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
     def _use_spark_session(self) -> bool:
         if self.can_access_spark_session(bool(self._extra_config.get("disable_spark_session"))):
             return True
-        return (
-            self.can_access_databricks_connect(
-                bool(self._extra_config.get("disable_databricks_connect"))
-            )
-            and (
-                {
-                    "databricks_connect_server_hostname",
-                    "databricks_connect_access_token",
-                }.issubset(self._extra_config)
-            )
-            and (
-                "databricks_connect_cluster_id" in self._extra_config
-                or "databricks_connect_use_serverless" in self._extra_config
-            )
-        )
+
+        if self.can_access_databricks_connect(
+            bool(self._extra_config.get("disable_databricks_connect"))
+        ):
+            if self._extra_config.get("databricks_connect_use_serverless"):
+                return True
+
+            if {
+                "databricks_connect_cluster_id",
+                "databricks_connect_server_hostname",
+                "databricks_connect_access_token",
+            }.issubset(self._extra_config):
+                return True
+
+        return False
 
     @property
     def is_spark_session_connection(self) -> bool:
@@ -108,7 +108,7 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
 
         connect_kwargs = dict(
             host=self._extra_config["databricks_connect_server_hostname"],
-            token=self._extra_config["databricks_connect_access_token"],
+            token=self._extra_config.get("databricks_connect_access_token"),
         )
         if "databricks_connect_use_serverless" in self._extra_config:
             connect_kwargs["serverless"] = True

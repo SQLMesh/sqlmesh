@@ -412,6 +412,8 @@ def test_timestamp_mapping():
         catalog="catalog",
     )
 
+    assert config._connection_factory_with_kwargs.keywords["source"] == "sqlmesh"
+
     adapter = config.create_engine_adapter()
     assert adapter.timestamp_mapping is None
 
@@ -419,11 +421,13 @@ def test_timestamp_mapping():
         user="user",
         host="host",
         catalog="catalog",
+        source="my_source",
         timestamp_mapping={
             "TIMESTAMP": "TIMESTAMP(6)",
             "TIMESTAMP(3)": "TIMESTAMP WITH TIME ZONE",
         },
     )
+    assert config._connection_factory_with_kwargs.keywords["source"] == "my_source"
     adapter = config.create_engine_adapter()
     assert adapter.timestamp_mapping is not None
     assert adapter.timestamp_mapping[exp.DataType.build("TIMESTAMP")] == exp.DataType.build(

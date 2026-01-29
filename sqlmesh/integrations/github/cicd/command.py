@@ -25,12 +25,21 @@ logger = logging.getLogger(__name__)
     envvar="GITHUB_TOKEN",
     help="The Github Token to be used. Pass in `${{ secrets.GITHUB_TOKEN }}` if you want to use the one created by Github actions",
 )
+@click.option(
+    "--full-logs",
+    is_flag=True,
+    help="Whether to print all logs in the Github Actions output or only in their relevant GA check",
+)
 @click.pass_context
-def github(ctx: click.Context, token: str) -> None:
+def github(ctx: click.Context, token: str, full_logs: bool = False) -> None:
     """Github Action CI/CD Bot. See https://sqlmesh.readthedocs.io/en/stable/integrations/github/ for details"""
     # set a larger width because if none is specified, it auto-detects 80 characters when running in GitHub Actions
     # which can result in surprise newlines when outputting dates to backfill
-    set_console(MarkdownConsole(width=1000, warning_capture_only=True, error_capture_only=True))
+    set_console(
+        MarkdownConsole(
+            width=1000, warning_capture_only=not full_logs, error_capture_only=not full_logs
+        )
+    )
     ctx.obj["github"] = GithubController(
         paths=ctx.obj["paths"],
         token=token,

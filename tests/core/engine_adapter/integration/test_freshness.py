@@ -25,6 +25,16 @@ from tests.utils.test_helpers import use_terminal_console
 EVALUATION_SPY = None
 
 
+@pytest.fixture(autouse=True)
+def _skip_snowflake(ctx: TestContext):
+    if ctx.dialect == "snowflake":
+        # these tests use callbacks that need to run db queries within a time_travel context that changes the system time to be in the future
+        # this causes invalid JWT's to be generated when the callbacks try to run a db query
+        pytest.skip(
+            "snowflake.connector generates an invalid JWT when time_travel changes the system time"
+        )
+
+
 # Mock the snapshot evaluator's evaluate function to count the number of times it is called
 @pytest.fixture(autouse=True, scope="function")
 def _install_evaluation_spy(mocker: MockerFixture):

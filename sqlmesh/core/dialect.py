@@ -803,8 +803,15 @@ def text_diff(
     return "\n".join(unified_diff(a_sql, b_sql))
 
 
+WS_OR_COMMENT = r"(?:\s|--[^\n]*\n|/\*.*?\*/)"
+HEADER = r"\b(?:model|audit)\b(?=\s*\()"
+KEY_BOUNDARY = r"(?:\(|,)"  # key is preceded by either '(' or ','
+DIALECT_VALUE = r"['\"]?(?P<dialect>[a-z][a-z0-9]*)['\"]?"
+VALUE_BOUNDARY = r"(?=,|\))"  # value is followed by comma or closing paren
+
 DIALECT_PATTERN = re.compile(
-    r"(model|audit).*?\(.*?dialect\s+'?([a-z]*)", re.IGNORECASE | re.DOTALL
+    rf"{HEADER}.*?{KEY_BOUNDARY}{WS_OR_COMMENT}*dialect{WS_OR_COMMENT}+{DIALECT_VALUE}{WS_OR_COMMENT}*{VALUE_BOUNDARY}",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -895,7 +902,8 @@ def parse(
         A list of the parsed expressions: [Model, *Statements, Query, *Statements]
     """
     match = match_dialect and DIALECT_PATTERN.search(sql[:MAX_MODEL_DEFINITION_SIZE])
-    dialect = Dialect.get_or_raise(match.group(2) if match else default_dialect)
+    dialect_str = match.group("dialect") if match else None
+    dialect = Dialect.get_or_raise(dialect_str or default_dialect)
 
     tokens = dialect.tokenize(sql)
     chunks: t.List[t.Tuple[t.List[Token], ChunkType]] = [([], ChunkType.SQL)]

@@ -193,6 +193,23 @@ If the `impersonated_service_account` argument is set, SQLMesh will:
 
 The user account must have [sufficient permissions to impersonate the service account](https://cloud.google.com/docs/authentication/use-service-account-impersonation).
 
+## Query Label
+
+BigQuery supports a `query_label` session variable which is attached to query jobs and can be used for auditing / attribution.
+
+SQLMesh supports setting it via `session_properties.query_label` on a model, as an array (or tuple) of key/value tuples.
+
+Example:
+```sql
+MODEL (
+  name my_project.my_dataset.my_model,
+  dialect 'bigquery',
+  session_properties (
+    query_label = [('team', 'data_platform'), ('env', 'prod')]
+  )
+);
+```
+
 ## Permissions Required
 With any of the above connection methods, ensure these BigQuery permissions are enabled to allow SQLMesh to work correctly.
 

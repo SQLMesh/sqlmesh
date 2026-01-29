@@ -7,7 +7,6 @@ import os
 import logging
 from pytest import FixtureRequest
 
-
 from sqlmesh import Config, EngineAdapter
 from sqlmesh.core.constants import SQLMESH_PATH
 from sqlmesh.core.config.connection import (
