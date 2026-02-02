@@ -1310,6 +1310,7 @@ class RedshiftConnectionConfig(ConnectionConfig):
         region: The AWS region where the Amazon Redshift cluster is located.
         cluster_identifier: The cluster identifier of the Amazon Redshift cluster.
         iam: If IAM authentication is enabled. Default value is False. IAM must be True when authenticating using an IdP.
+        db_user: The database user to authenticate as. Required when using IAM authentication.
         is_serverless: Redshift end-point is serverless or provisional. Default value false.
         serverless_acct_id: The account ID of the serverless. Default value None
         serverless_work_group: The name of work group for serverless end point. Default value None.
@@ -1335,6 +1336,7 @@ class RedshiftConnectionConfig(ConnectionConfig):
     region: t.Optional[str] = None
     cluster_identifier: t.Optional[str] = None
     iam: t.Optional[bool] = None
+    db_user: t.Optional[str] = None
     is_serverless: t.Optional[bool] = None
     serverless_acct_id: t.Optional[str] = None
     serverless_work_group: t.Optional[str] = None
@@ -1372,6 +1374,7 @@ class RedshiftConnectionConfig(ConnectionConfig):
             "region",
             "cluster_identifier",
             "iam",
+            "db_user",
             "is_serverless",
             "serverless_acct_id",
             "serverless_work_group",
