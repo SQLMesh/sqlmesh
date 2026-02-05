@@ -813,7 +813,11 @@ class TestPartitionPropertyBuilding:
             # Expression partitioning - multi-column
             ("(year, month)", "PARTITION BY `year`, `month`", "PARTITION BY (`year`, `month`)"),
             # Expression partitioning - multi-column with func
-            ("(date_trunc('day', dt), region)", "PARTITION BY DATE_TRUNC('DAY', `dt`), `region`", None),
+            (
+                "(date_trunc('day', dt), region)",
+                "PARTITION BY DATE_TRUNC('DAY', `dt`), `region`",
+                None,
+            ),
             # RANGE partitioning
             ("RANGE (dt)", "PARTITION BY RANGE (`dt`) ()", None),
             # LIST partitioning
@@ -967,7 +971,11 @@ class TestPartitionPropertyBuilding:
         )
 
         sql = to_sql_calls(adapter)[0]
-        assert "PARTITION BY (year, month)" in sql or "PARTITION BY `year`, `month`" in sql or "PARTITION BY (`year`, `month`)" in sql
+        assert (
+            "PARTITION BY (year, month)" in sql
+            or "PARTITION BY `year`, `month`" in sql
+            or "PARTITION BY (`year`, `month`)" in sql
+        )
 
     def test_partitions_value_forms(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]

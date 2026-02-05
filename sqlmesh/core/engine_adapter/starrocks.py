@@ -2882,7 +2882,7 @@ class StarRocksEngineAdapter(
                 create_expressions=create_expressions,
             )
         elif partition_kind is None:
-            return exp.PartitionedByProperty(this=exp.tuple_(*partitioned_by))
+            return exp.PartitionedByProperty(this=exp.Schema(expressions=partitioned_by))
 
         return None
 
@@ -2947,13 +2947,12 @@ class StarRocksEngineAdapter(
                 expressions_list.append(exp.to_column(str(col)))
         # Build buckets expression
         buckets: t.Optional[t.Any] = unified.get("buckets")
+        buckets_expr: t.Optional[exp.Expression] = None
         if buckets is not None:
             if isinstance(buckets, exp.Literal):
                 buckets_expr = buckets
             else:
                 buckets_expr = exp.Literal.number(int(buckets))
-        else:
-            buckets_expr = None
 
         result = exp.DistributedByProperty(
             kind=kind_expr,
@@ -2986,7 +2985,7 @@ class StarRocksEngineAdapter(
         # method is required by exp.RefreshTriggerProperty, but StarRocks syntax does NOT support AUTO.
         # We use a sentinel value that the StarRocks generator will not render (it only renders
         # IMMEDIATE/DEFERRED).
-        method_expr = exp.Var(this="UNSPECIFIED")
+        method_expr = None
         if refresh_moment is not None:
             refresh_moment_text = PropertyValidator.validate_and_normalize_property(
                 "refresh_moment", refresh_moment
