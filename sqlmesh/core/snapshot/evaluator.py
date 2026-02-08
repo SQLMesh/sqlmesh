@@ -2743,11 +2743,13 @@ class ViewStrategy(PromotableStrategy):
 
         logger.info("Replacing view '%s'", table_name)
         materialized_properties = None
-        if is_materialized_view:
+        if is_materialized_view and (
+            model.partitioned_by or model.partition_interval_unit or model.clustered_by
+        ):
             materialized_properties = {
                 "partitioned_by": model.partitioned_by,
-                "clustered_by": model.clustered_by,
                 "partition_interval_unit": model.partition_interval_unit,
+                "clustered_by": model.clustered_by,
             }
         self.adapter.create_view(
             table_name,

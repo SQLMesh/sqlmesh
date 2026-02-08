@@ -782,6 +782,7 @@ def test_evaluate_materialized_view_with_execution_time_macro(
         view_properties={},
         table_description=None,
         column_descriptions={},
+        materialized_properties=None,
     )
 
 
