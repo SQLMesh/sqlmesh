@@ -76,6 +76,9 @@ starrocks_ready() {
         echo "Waiting for more backends to become alive..."
         sleep 5
     done
+
+    # set default replication num to 1 (there is only one be in the docker compose file)
+    docker exec -i starrocks-fe mysql -h127.0.0.1 -P9030 -uroot -e "ADMIN SET frontend config ('default_replication_num' = '1');"
 }
 
 trino_ready() {
