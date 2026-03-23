@@ -1,3 +1,5 @@
+import os
+import time
 import typing as t
 from pathlib import Path
 
@@ -131,3 +133,22 @@ def test_optimized_query_cache_macro_def_change(tmp_path: Path, mocker: MockerFi
         new_model.render_query_or_raise().sql()
         == 'SELECT "_0"."a" AS "a" FROM (SELECT 1 AS "a") AS "_0" WHERE "_0"."a" = 2'
     )
+
+
+def test_file_cache_init_handles_stale_file(tmp_path: Path, mocker: MockerFixture) -> None:
+    cache: FileCache[_TestEntry] = FileCache(tmp_path)
+
+    stale_file = tmp_path / f"{cache._cache_version}__fake_deleted_model_9999999999"
+    stale_file.touch()
+
+    original_stat = Path.stat
+
+    def flaky_stat(self, **kwargs):
+        if self.name == stale_file.name:
+            raise FileNotFoundError(f"Simulated stale file: {self}")
+        return original_stat(self, **kwargs)
+
+    mocker.patch.object(Path, "stat", flaky_stat)
+
+    FileCache(tmp_path)
+    
