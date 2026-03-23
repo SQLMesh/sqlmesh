@@ -63,8 +63,12 @@ class FileCache(t.Generic[T]):
                 # the file.stat() call below will fail on windows if the :file name is longer than 260 chars
                 file = fix_windows_path(file)
 
-            if not file.stem.startswith(self._cache_version) or file.stat().st_atime < threshold:
-                file.unlink(missing_ok=True)
+            try:
+                stat_result = file.stat()
+                if not file.stem.startswith(self._cache_version) or stat_result.st_atime < threshold:
+                    file.unlink(missing_ok=True)
+            except FileNotFoundError:
+                continue
 
     def get_or_load(self, name: str, entry_id: str = "", *, loader: t.Callable[[], T]) -> T:
         """Returns an existing cached entry or loads and caches a new one.
