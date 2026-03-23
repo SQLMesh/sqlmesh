@@ -68,6 +68,7 @@ class FileCache(t.Generic[T]):
                 if not file.stem.startswith(self._cache_version) or stat_result.st_atime < threshold:
                     file.unlink(missing_ok=True)
             except FileNotFoundError:
+                # File was deleted between glob() and stat() — skip stale cache entries gracefully
                 continue
 
     def get_or_load(self, name: str, entry_id: str = "", *, loader: t.Callable[[], T]) -> T:
