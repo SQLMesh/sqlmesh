@@ -1422,6 +1422,35 @@ def test_databricks(make_config):
         )
 
 
+def test_databricks_shared_connection(make_config):
+    """Databricks should use a shared connection pool to prevent OAuth CSRF races.
+
+    When concurrent_tasks > 1, ThreadLocalConnectionPool creates one connection per
+    thread. For U2M OAuth, each thread triggers its own browser-based OAuth flow;
+    these race on the CSRF state parameter and cause MismatchingStateError.
+
+    Setting shared_connection = True causes ThreadLocalSharedConnectionPool to be
+    used instead: a single connection is created (behind a lock) and each thread
+    gets its own cursor, so only one OAuth flow is ever initiated.
+
+    See: https://github.com/tobymao/sqlmesh/issues/5646
+    """
+    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+
+    config = make_config(
+        type="databricks",
+        server_hostname="dbc-test.cloud.databricks.com",
+        http_path="sql/test/foo",
+        access_token="test-token",
+        concurrent_tasks=4,
+    )
+    assert isinstance(config, DatabricksConnectionConfig)
+    assert config.shared_connection is True
+
+    adapter = config.create_engine_adapter()
+    assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+
+
 def test_engine_import_validator():
     with pytest.raises(
         ConfigError,

@@ -814,6 +814,8 @@ class DatabricksConnectionConfig(ConnectionConfig):
     DISPLAY_NAME: t.ClassVar[t.Literal["Databricks"]] = "Databricks"
     DISPLAY_ORDER: t.ClassVar[t.Literal[3]] = 3
 
+    shared_connection: t.ClassVar[bool] = True
+
     _concurrent_tasks_validator = concurrent_tasks_validator
     _http_headers_validator = http_headers_validator
 
