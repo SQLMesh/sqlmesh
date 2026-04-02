@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import typing as t
+from functools import reduce
 
 from sqlglot import exp, parse_one
 
@@ -21,7 +22,7 @@ from sqlmesh.core.engine_adapter.shared import (
 )
 
 if t.TYPE_CHECKING:
-    from sqlmesh.core._typing import SchemaName, TableName
+    from sqlmesh.core._typing import QueryOrDF, SchemaName, TableName
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,85 @@ class MySQLEngineAdapter(
                 ),
             )
         )
+
+    def _replace_by_key(
+        self,
+        target_table: TableName,
+        source_table: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
+        key: t.Sequence[exp.Expr],
+        is_unique_key: bool,
+        source_columns: t.Optional[t.List[str]] = None,
+    ) -> None:
+        if len(key) <= 1:
+            return super()._replace_by_key(
+                target_table, source_table, target_columns_to_types, key, is_unique_key, source_columns
+            )
+
+        if target_columns_to_types is None:
+            target_columns_to_types = self.columns(target_table)
+
+        temp_table = self._get_temp_table(target_table)
+        column_names = list(target_columns_to_types or [])
+
+        target_alias = "_target"
+        temp_alias = "_temp"
+
+        with self.transaction():
+            self.ctas(
+                temp_table,
+                source_table,
+                target_columns_to_types=target_columns_to_types,
+                exists=False,
+                source_columns=source_columns,
+            )
+
+            try:
+                # Build a JOIN-based DELETE instead of using CONCAT_WS.
+                # CONCAT_WS prevents MySQL/MariaDB from using indexes, causing full table scans.
+                on_condition = reduce(
+                    lambda a, b: exp.And(this=a, expression=b),
+                    [
+                        self._qualify_columns(k, target_alias).eq(
+                            self._qualify_columns(k, temp_alias)
+                        )
+                        for k in key
+                    ],
+                )
+
+                target_table_aliased = exp.to_table(target_table).as_(target_alias, quoted=True)
+                temp_table_aliased = exp.to_table(temp_table).as_(temp_alias, quoted=True)
+
+                join = exp.Join(this=temp_table_aliased, kind="INNER", on=on_condition)
+                target_table_aliased.append("joins", join)
+
+                delete_stmt = exp.Delete(
+                    tables=[exp.to_table(target_alias)],
+                    this=target_table_aliased,
+                )
+                self.execute(delete_stmt)
+
+                insert_query = self._select_columns(target_columns_to_types).from_(temp_table)
+                if is_unique_key:
+                    insert_query = insert_query.distinct(*key)
+
+                insert_statement = exp.insert(
+                    insert_query,
+                    target_table,
+                    columns=column_names,
+                )
+                self.execute(insert_statement, track_rows_processed=True)
+            finally:
+                self.drop_table(temp_table)
+
+    @staticmethod
+    def _qualify_columns(expr: exp.Expr, table_alias: str) -> exp.Expr:
+        """Qualify unqualified column references in an expression with a table alias."""
+        expr = expr.copy()
+        for col in expr.find_all(exp.Column):
+            if not col.table:
+                col.set("table", exp.to_identifier(table_alias, quoted=True))
+        return expr
 
     def ping(self) -> None:
         self._connection_pool.get().ping(reconnect=False)

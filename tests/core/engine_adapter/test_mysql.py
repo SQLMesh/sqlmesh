@@ -1,5 +1,6 @@
 # type: ignore
 import typing as t
+from unittest.mock import call
 
 from pytest_mock.plugin import MockerFixture
 from sqlglot import exp, parse_one
@@ -84,3 +85,78 @@ def test_create_table_like(make_mocked_engine_adapter: t.Callable):
     adapter.cursor.execute.assert_called_once_with(
         "CREATE TABLE IF NOT EXISTS `target_table` LIKE `source_table`"
     )
+
+
+def test_replace_by_key_composite_uses_join_delete(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    """Composite key DELETE uses JOIN instead of CONCAT_WS to allow index usage."""
+    adapter = make_mocked_engine_adapter(MySQLEngineAdapter)
+    temp_table_mock = mocker.patch(
+        "sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table"
+    )
+    temp_table_mock.return_value = exp.to_table("temporary")
+
+    adapter.merge(
+        target_table="target",
+        source_table=t.cast(exp.Select, parse_one("SELECT id, ts, val FROM source")),
+        target_columns_to_types={
+            "id": exp.DataType(this=exp.DataType.Type.INT),
+            "ts": exp.DataType(this=exp.DataType.Type.TIMESTAMP),
+            "val": exp.DataType(this=exp.DataType.Type.INT),
+        },
+        unique_key=[parse_one("id"), parse_one("ts")],
+    )
+
+    sql_calls = to_sql_calls(adapter)
+
+    # The DELETE should use a JOIN instead of CONCAT_WS
+    assert any("CONCAT_WS" in s for s in sql_calls) is False, (
+        "DELETE should not use CONCAT_WS for composite keys"
+    )
+    assert any("INNER JOIN" in s for s in sql_calls) is True, (
+        "DELETE should use INNER JOIN for composite keys"
+    )
+
+    # Verify the full sequence of SQL calls
+    adapter.cursor.execute.assert_has_calls(
+        [
+            call(
+                "CREATE TABLE `temporary` AS SELECT CAST(`id` AS SIGNED) AS `id`, CAST(`ts` AS DATETIME) AS `ts`, CAST(`val` AS SIGNED) AS `val` FROM (SELECT `id`, `ts`, `val` FROM `source`) AS `_subquery`"
+            ),
+            call(
+                "DELETE `_target` FROM `target` AS `_target` INNER JOIN `temporary` AS `_temp` ON `_target`.`id` = `_temp`.`id` AND `_target`.`ts` = `_temp`.`ts`"
+            ),
+            call(
+                "INSERT INTO `target` (`id`, `ts`, `val`) SELECT `id`, `ts`, `val` FROM (SELECT `id` AS `id`, `ts` AS `ts`, `val` AS `val`, ROW_NUMBER() OVER (PARTITION BY `id`, `ts` ORDER BY `id`, `ts`) AS _row_number FROM `temporary`) AS _t WHERE _row_number = 1"
+            ),
+            call("DROP TABLE IF EXISTS `temporary`"),
+        ]
+    )
+
+
+def test_replace_by_key_single_key_uses_in(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    """Single key DELETE still uses the IN-based approach (indexes work fine for single column)."""
+    adapter = make_mocked_engine_adapter(MySQLEngineAdapter)
+    temp_table_mock = mocker.patch(
+        "sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table"
+    )
+    temp_table_mock.return_value = exp.to_table("temporary")
+
+    adapter.merge(
+        target_table="target",
+        source_table=t.cast(exp.Select, parse_one("SELECT id, val FROM source")),
+        target_columns_to_types={
+            "id": exp.DataType(this=exp.DataType.Type.INT),
+            "val": exp.DataType(this=exp.DataType.Type.INT),
+        },
+        unique_key=[parse_one("id")],
+    )
+
+    sql_calls = to_sql_calls(adapter)
+
+    # Single key should use IN-based approach, not JOIN
+    assert any("IN" in s and "DELETE" in s for s in sql_calls) is True
+    assert any("INNER JOIN" in s for s in sql_calls) is False
