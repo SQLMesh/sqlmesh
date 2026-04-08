@@ -786,7 +786,7 @@ class _SCDType2Kind(_Incremental):
             gen(self.valid_to_name),
             str(self.invalidate_hard_deletes),
             self.time_data_type.sql(self.dialect),
-            gen(self.batch_size) if self.batch_size is not None else None,
+            str(self.batch_size) if self.batch_size is not None else None,
         ]
 
     @property

@@ -2920,7 +2920,11 @@ class EngineAdapter:
             target_columns_to_types = self.columns(target_table)
 
         temp_table = self._get_temp_table(target_table)
-        key_exp = exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key) if len(key) > 1 else key[0]
+        key_exp = (
+            exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key, dialect=self.dialect)
+            if len(key) > 1
+            else key[0]
+        )
         column_names = list(target_columns_to_types or [])
 
         with self.transaction():
