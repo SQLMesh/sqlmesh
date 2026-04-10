@@ -423,7 +423,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             source_columns=source_columns,
         )
 
-        key_exp = exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key) if len(key) > 1 else key[0]
+        key_exp = (
+            exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key, dialect=self.dialect)
+            if len(key) > 1
+            else key[0]
+        )
 
         self._insert_overwrite_by_condition(
             target_table,
