@@ -62,7 +62,7 @@ class Selector(abc.ABC):
         target_env_name: str,
         fallback_env_name: t.Optional[str] = None,
         ensure_finalized_snapshots: bool = False,
-    ) -> UniqueKeyDict[str, Model]:
+    ) -> t.Tuple[UniqueKeyDict[str, Model], t.Set[str]]:
         """Given a set of selections returns models from the current state with names matching the
         selection while sourcing the remaining models from the target environment.
 
@@ -76,7 +76,7 @@ class Selector(abc.ABC):
                 the environment is not finalized.
 
         Returns:
-            A dictionary of models.
+            A tuple of (models dict, set of all matched FQNs including env models).
         """
         env_models = self._load_env_models(
             target_env_name, fallback_env_name, ensure_finalized_snapshots
@@ -148,36 +148,7 @@ class Selector(abc.ABC):
         if needs_update:
             update_model_schemas(dag, models=models, cache_dir=self._cache_dir)
 
-        return models
-
-    def expand_model_selections_with_env(
-        self,
-        model_selections: t.Iterable[str],
-        target_env_name: str,
-        fallback_env_name: t.Optional[str] = None,
-        ensure_finalized_snapshots: bool = False,
-    ) -> t.Set[str]:
-        """Expands model selections against both local models and the target environment.
-
-        This allows selections to match models that have been deleted locally but still
-        exist in the deployed environment.
-
-        Args:
-            model_selections: A set of selections.
-            target_env_name: The name of the target environment.
-            fallback_env_name: The name of the fallback environment that will be used if the target
-                environment doesn't exist.
-            ensure_finalized_snapshots: Whether to source environment snapshots from the latest finalized
-                environment state, or to use whatever snapshots are in the current environment state even if
-                the environment is not finalized.
-
-        Returns:
-            A set of matched model FQNs.
-        """
-        env_models = self._load_env_models(
-            target_env_name, fallback_env_name, ensure_finalized_snapshots
-        )
-        return self.expand_model_selections(model_selections, models={**env_models, **self._models})
+        return models, all_selected_models
 
     def _load_env_models(
         self,
