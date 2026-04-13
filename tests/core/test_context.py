@@ -2283,7 +2283,7 @@ def test_plan_select_model_deleted_model(sushi_context: Context) -> None:
 
     # Delete the model file from disk.
     model = sushi_context.get_model(model_name)
-    assert model._path.exists()
+    assert model._path is not None and model._path.exists()
     model._path.unlink()
 
     # Reload the context so it no longer knows about the deleted model.
