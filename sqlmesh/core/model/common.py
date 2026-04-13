@@ -21,7 +21,13 @@ from sqlmesh.utils.metaprogramming import (
     prepare_env,
     serialize_env,
 )
-from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator, get_dialect
+from sqlmesh.utils.pydantic import (
+    PydanticModel,
+    ValidationInfo,
+    field_validator,
+    get_dialect,
+    validation_data,
+)
 
 if t.TYPE_CHECKING:
     from sqlglot.dialects.dialect import DialectType
@@ -479,7 +485,7 @@ def parse_expression(
     if callable(v):
         return v
 
-    dialect = info.data.get("dialect") if info else ""
+    dialect = validation_data(info).get("dialect") if info else ""
 
     if isinstance(v, list):
         return [
@@ -519,7 +525,7 @@ def parse_properties(
     if v is None:
         return v
 
-    dialect = info.data.get("dialect") if info else ""
+    dialect = validation_data(info).get("dialect") if info else ""
 
     if isinstance(v, str):
         v = d.parse_one(v, dialect=dialect)
@@ -557,8 +563,9 @@ def default_catalog(cls: t.Type, v: t.Any) -> t.Optional[str]:
 
 
 def depends_on(cls: t.Type, v: t.Any, info: ValidationInfo) -> t.Optional[t.Set[str]]:
-    dialect = info.data.get("dialect")
-    default_catalog = info.data.get("default_catalog")
+    data = validation_data(info)
+    dialect = data.get("dialect")
+    default_catalog = data.get("default_catalog")
 
     if isinstance(v, exp.Paren):
         v = v.unnest()

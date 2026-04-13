@@ -19,7 +19,7 @@ from sqlmesh.core.snapshot.definition import (
     SnapshotId,
 )
 from sqlmesh.utils.date import TimeLike, now_timestamp
-from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator
+from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator, validation_data
 
 SUPPORTED_EXTENSIONS = {".py", ".sql", ".yaml", ".yml", ".csv"}
 
@@ -117,8 +117,9 @@ class File(PydanticModel):
 
     @field_validator("extension", mode="before")
     def default_extension(cls, v: str, info: ValidationInfo) -> str:
-        if "name" in info.data:
-            return pathlib.Path(info.data["name"]).suffix
+        data = validation_data(info)
+        if "name" in data:
+            return pathlib.Path(data["name"]).suffix
         return v
 
 

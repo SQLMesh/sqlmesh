@@ -41,6 +41,19 @@ def field_serializer(*args: t.Any, **kwargs: t.Any) -> t.Callable[[t.Any], t.Any
     return pydantic.field_serializer(*args, **kwargs)
 
 
+def validation_data(info_or_data: t.Any) -> t.Dict[str, t.Any]:
+    """Safely extract the validated-data dict from a ValidationInfo, dict, or None.
+
+    Pydantic 2.13+ sets ValidationInfo.data to None during model_validate_json().
+    This normalizes all inputs to a dict, returning an empty dict when data is unavailable.
+    """
+    if isinstance(info_or_data, dict):
+        return info_or_data
+    if info_or_data is not None:
+        return info_or_data.data or {}
+    return {}
+
+
 def get_dialect(values: t.Any) -> str:
     """Extracts dialect from a dict or pydantic obj, defaulting to the globally set dialect.
 
@@ -52,13 +65,7 @@ def get_dialect(values: t.Any) -> str:
 
     from sqlmesh.core.model import model
 
-    if isinstance(values, dict):
-        data = values
-    elif values is not None:
-        data = values.data
-    else:
-        data = None
-    dialect = data.get("dialect") if data is not None else None
+    dialect = validation_data(values).get("dialect")
     return model._dialect if dialect is None else dialect  # type: ignore
 
 

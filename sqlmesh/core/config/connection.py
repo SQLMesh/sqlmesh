@@ -34,6 +34,7 @@ from sqlmesh.utils.pydantic import (
     ValidationInfo,
     field_validator,
     model_validator,
+    validation_data,
     validation_error_message,
     get_concrete_types_from_typehint,
 )
@@ -1081,7 +1082,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
         v: t.Optional[str],
         info: ValidationInfo,
     ) -> t.Optional[str]:
-        if v and not info.data.get("project"):
+        if v and not validation_data(info).get("project"):
             raise ConfigError(
                 "If the `execution_project` field is specified, you must also specify the `project` field to provide a default object location."
             )
@@ -1093,7 +1094,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
         v: t.Optional[str],
         info: ValidationInfo,
     ) -> t.Optional[str]:
-        if v and not info.data.get("project"):
+        if v and not validation_data(info).get("project"):
             raise ConfigError(
                 "If the `quota_project` field is specified, you must also specify the `project` field to provide a default object location."
             )

@@ -44,6 +44,7 @@ from sqlmesh.utils.pydantic import (
     list_of_fields_validator,
     model_validator,
     get_dialect,
+    validation_data,
 )
 
 if t.TYPE_CHECKING:
@@ -135,7 +136,7 @@ class ModelMeta(_Node):
 
     @field_validator("tags", mode="before")
     def _value_or_tuple_validator(cls, v: t.Any, info: ValidationInfo) -> t.Any:
-        return ensure_list(cls._validate_value_or_tuple(v, info.data))
+        return ensure_list(cls._validate_value_or_tuple(v, validation_data(info)))
 
     @classmethod
     def _validate_value_or_tuple(
@@ -164,7 +165,7 @@ class ModelMeta(_Node):
     @field_validator("table_format", "storage_format", mode="before")
     def _format_validator(cls, v: t.Any, info: ValidationInfo) -> t.Optional[str]:
         if isinstance(v, exp.Expr) and not (isinstance(v, (exp.Literal, exp.Identifier))):
-            return v.sql(info.data.get("dialect"))
+            return v.sql(validation_data(info).get("dialect"))
         return str_or_exp_to_str(v)
 
     @field_validator("dialect", mode="before")
@@ -192,7 +193,7 @@ class ModelMeta(_Node):
         if (
             isinstance(v, list)
             and all(isinstance(i, str) for i in v)
-            and info.field_name == "partitioned_by_"
+            and (info.field_name or "") == "partitioned_by_"
         ):
             # this branch gets hit when we are deserializing from json because `partitioned_by` is stored as a List[str]
             # however, we should only invoke this if the list contains strings because this validator is also
@@ -205,7 +206,7 @@ class ModelMeta(_Node):
             )
             v = parsed.this.expressions if isinstance(parsed.this, exp.Schema) else v
 
-        expressions = list_of_fields_validator(v, info.data)
+        expressions = list_of_fields_validator(v, validation_data(info))
 
         for expression in expressions:
             num_cols = len(list(expression.find_all(exp.Column)))
@@ -228,7 +229,7 @@ class ModelMeta(_Node):
         cls, v: t.Any, info: ValidationInfo
     ) -> t.Optional[t.Dict[str, exp.DataType]]:
         columns_to_types = {}
-        dialect = info.data.get("dialect")
+        dialect = validation_data(info).get("dialect")
 
         if isinstance(v, exp.Schema):
             for column in v.expressions:
@@ -280,7 +281,8 @@ class ModelMeta(_Node):
     def _column_descriptions_validator(
         cls, vs: t.Any, info: ValidationInfo
     ) -> t.Optional[t.Dict[str, str]]:
-        dialect = info.data.get("dialect")
+        data = validation_data(info)
+        dialect = data.get("dialect")
 
         if vs is None:
             return None
@@ -302,7 +304,7 @@ class ModelMeta(_Node):
             for k, v in raw_col_descriptions.items()
         }
 
-        columns_to_types = info.data.get("columns_to_types_")
+        columns_to_types = data.get("columns_to_types_")
         if columns_to_types:
             from sqlmesh.core.console import get_console
 
@@ -310,7 +312,7 @@ class ModelMeta(_Node):
             for column_name in list(col_descriptions):
                 if column_name not in columns_to_types:
                     console.log_warning(
-                        f"In model '{info.data['name']}', a description is provided for column '{column_name}' but it is not a column in the model."
+                        f"In model '{data.get('name', '<unknown>')}', a description is provided for column '{column_name}' but it is not a column in the model."
                     )
                     del col_descriptions[column_name]
 
@@ -318,7 +320,7 @@ class ModelMeta(_Node):
 
     @field_validator("grains", "references", mode="before")
     def _refs_validator(cls, vs: t.Any, info: ValidationInfo) -> t.List[exp.Expr]:
-        dialect = info.data.get("dialect")
+        dialect = validation_data(info).get("dialect")
 
         if isinstance(vs, exp.Paren):
             vs = vs.unnest()
