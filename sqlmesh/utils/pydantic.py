@@ -52,7 +52,13 @@ def get_dialect(values: t.Any) -> str:
 
     from sqlmesh.core.model import model
 
-    dialect = (values if isinstance(values, dict) else values.data).get("dialect")
+    if isinstance(values, dict):
+        data = values
+    elif values is not None:
+        data = values.data
+    else:
+        data = None
+    dialect = data.get("dialect") if data is not None else None
     return model._dialect if dialect is None else dialect  # type: ignore
 
 
