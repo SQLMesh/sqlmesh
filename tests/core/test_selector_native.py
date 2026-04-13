@@ -844,9 +844,7 @@ def test_select_models_returns_selected_fqns(mocker: MockerFixture, make_snapsho
     assert local_model.fqn in selected_fqns
 
     # Mixed selection (active + deleted): both appear in selected_fqns.
-    _, selected_fqns = selector.select_models(
-        ["db.deleted_model", "db.local_model"], env_name
-    )
+    _, selected_fqns = selector.select_models(["db.deleted_model", "db.local_model"], env_name)
     assert selected_fqns == {deleted_model.fqn, local_model.fqn}
 
     # Wildcard should match both local and env models.
