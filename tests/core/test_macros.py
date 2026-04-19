@@ -618,6 +618,20 @@ def test_ast_correctness(macro_evaluator):
             "SELECT * FROM (VALUES ((1, 2), (2, 3), (3, 4))) AS v",
             {},
         ),
+        # Lambda parameter name matches the column identifier inside a Column expression
+        # (e.g. schema.product where 'product' is both the lambda arg and the column name).
+        # Lambda args must take precedence over the Column-context guard so that the param
+        # is substituted correctly (regression test for GitHub issue #5582).
+        (
+            "SELECT @EACH([a, b, c], product -> schema.product)",
+            "SELECT schema.a, schema.b, schema.c",
+            {},
+        ),
+        (
+            "SELECT @EACH([x, y], col -> tbl.col)",
+            "SELECT tbl.x, tbl.y",
+            {},
+        ),
     ],
 )
 def test_macro_functions(macro_evaluator: MacroEvaluator, assert_exp_eq, sql, expected, args):
