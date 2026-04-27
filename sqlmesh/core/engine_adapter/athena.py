@@ -166,6 +166,14 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         properties: t.List[exp.Expr],
         kind: str,
     ) -> None:
+        schema = to_schema(schema_name)
+        if schema.catalog and schema.catalog != self._default_catalog:
+            logger.info(
+                "Skipping creation of schema '%s' because Athena does not support creating schemas in non-default catalogs.",
+                schema.sql(dialect=self.dialect),
+            )
+            return
+
         if location := self._table_location(table_properties=None, table=exp.to_table(schema_name)):
             # don't add extra LocationProperty's if one already exists
             if not any(p for p in properties if isinstance(p, exp.LocationProperty)):
@@ -687,7 +695,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         conn = self.connection
         return conn.session.client(
             name,
-            region_name=conn.region_̀name,
+            region_name=conn.region_name,
             config=conn.config,
             **conn._client_kwargs,
         )  # type: ignore
