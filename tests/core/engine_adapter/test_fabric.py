@@ -137,8 +137,8 @@ def test_switching_between_catalogs_closes_each_time(
     close_spy = mocker.spy(adapter._connection_pool, "close")
     adapter.cursor.fetchone.return_value = (1,)
 
-    adapter.table_exists("safran.db.table")   # None→safran: 1 close
-    adapter.table_exists("planning.db.table") # safran→planning: 2nd close
+    adapter.table_exists("safran.db.table")  # None→safran: 1 close
+    adapter.table_exists("planning.db.table")  # safran→planning: 2nd close
 
     assert close_spy.call_count == 2
     assert adapter._connected_catalog == "planning"

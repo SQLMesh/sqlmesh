@@ -67,22 +67,23 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
     def _connected_catalog(self, value: t.Optional[str]) -> None:
         self._connection_pool.set_attribute("connected_catalog", value)
 
-    def _normalize_catalog(
-        self, catalog_name: t.Optional[str]
-    ) -> t.Optional[str]:
+    def _normalize_catalog(self, catalog_name: t.Optional[str]) -> t.Optional[str]:
         if not catalog_name:
             return None
 
-        default_catalog = (
-            self._default_catalog or self._extra_config.get("database")
-        )
+        default_catalog = self._default_catalog or self._extra_config.get("database")
         if default_catalog and catalog_name == default_catalog:
             return None
 
         return catalog_name
 
     def _catalog_state_label(self, catalog_name: t.Optional[str]) -> str:
-        return catalog_name or self._default_catalog or self._extra_config.get("database") or "<default>"
+        return (
+            catalog_name
+            or self._default_catalog
+            or self._extra_config.get("database")
+            or "<default>"
+        )
 
     @property
     def api_client(self) -> FabricHttpClient:
@@ -172,9 +173,7 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
 
         # No-op: the logical catalog state already matches.
         if self.get_current_catalog() == target_catalog:
-            logger.debug(
-                "Already using requested Fabric catalog state, no action needed"
-            )
+            logger.debug("Already using requested Fabric catalog state, no action needed")
             return
 
         # Decide whether the open connection needs to be replaced.
@@ -194,9 +193,7 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         #    restore-to-neutral left the connection on the right catalog, we
         #    skip the close entirely.
         connected_catalog = self._normalize_catalog(self._connected_catalog)
-        needs_reconnect = (
-            target_catalog is not None and connected_catalog != target_catalog
-        )
+        needs_reconnect = target_catalog is not None and connected_catalog != target_catalog
 
         if needs_reconnect:
             logger.info(
