@@ -58,6 +58,23 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
     def _target_catalog(self, value: t.Optional[str]) -> None:
         self._connection_pool.set_attribute("target_catalog", value)
 
+    def _normalize_catalog(
+        self, catalog_name: t.Optional[str]
+    ) -> t.Optional[str]:
+        if not catalog_name:
+            return None
+
+        default_catalog = (
+            self._default_catalog or self._extra_config.get("database")
+        )
+        if default_catalog and catalog_name == default_catalog:
+            return None
+
+        return catalog_name
+
+    def _catalog_state_label(self, catalog_name: t.Optional[str]) -> str:
+        return catalog_name or "<default>"
+
     @property
     def api_client(self) -> FabricHttpClient:
         # the requests Session is not guaranteed to be threadsafe
@@ -115,10 +132,10 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
             self.close()
 
     def get_current_catalog(self) -> t.Optional[str]:
-        """Return the adapter-managed catalog for Fabric's stateless sessions."""
-        return self._target_catalog or self._extra_config.get("database")
+        """Return the explicit Fabric catalog target for the current thread."""
+        return self._normalize_catalog(self._target_catalog)
 
-    def set_current_catalog(self, catalog_name: str) -> None:
+    def set_current_catalog(self, catalog_name: t.Optional[str]) -> None:
         """
         Set the current catalog for Microsoft Fabric connections.
 
@@ -127,7 +144,8 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         recreate them with the new catalog in the connection configuration.
 
         Args:
-            catalog_name: The name of the catalog (warehouse) to switch to
+            catalog_name: The name of the catalog (warehouse) to switch to.
+                The configured default catalog is treated as the neutral state.
 
         Note:
             Fabric doesn't support catalog switching via USE statements because each
@@ -138,13 +156,18 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
             https://learn.microsoft.com/en-us/fabric/data-warehouse/sql-query-editor#limitations
         """
         current_catalog = self.get_current_catalog()
+        target_catalog = self._normalize_catalog(catalog_name)
 
         # If already using the requested catalog, do nothing
-        if current_catalog and current_catalog == catalog_name:
-            logger.debug(f"Already using catalog '{catalog_name}', no action needed")
+        if current_catalog == target_catalog:
+            logger.debug("Already using the requested Fabric catalog state, no action needed")
             return
 
-        logger.info(f"Switching from catalog '{current_catalog}' to '{catalog_name}'")
+        logger.info(
+            "Switching from catalog '%s' to '%s'",
+            self._catalog_state_label(current_catalog),
+            self._catalog_state_label(target_catalog),
+        )
 
         # commit the transaction before closing the connection to help prevent errors like:
         # > Snapshot isolation transaction failed in database because the object accessed by the statement has been modified by a
@@ -155,14 +178,14 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         # note: we call close() on the connection pool instead of self.close() because self.close() calls close_all()
         # on the connection pool but we just want to close the connection for this thread
         self._connection_pool.close()
-        self._target_catalog = catalog_name  # new connections will use this catalog
+        self._target_catalog = target_catalog
 
         catalog_after_switch = self.get_current_catalog()
 
-        if catalog_after_switch != catalog_name:
+        if catalog_after_switch != target_catalog:
             # We need to raise an error if the catalog switch failed to prevent the operation that needed the catalog switch from being run against the wrong catalog
             raise SQLMeshError(
-                f"Unable to switch catalog to {catalog_name}, catalog ended up as {catalog_after_switch}"
+                f"Unable to switch catalog to {target_catalog}, catalog ended up as {catalog_after_switch}"
             )
 
     def alter_table(

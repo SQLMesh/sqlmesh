@@ -19,7 +19,7 @@ def adapter(make_mocked_engine_adapter: t.Callable) -> FabricEngineAdapter:
     return make_mocked_engine_adapter(FabricEngineAdapter)
 
 
-def test_get_current_catalog_uses_target_catalog_or_configured_database(
+def test_get_current_catalog_uses_only_explicit_target_catalog(
     make_mocked_engine_adapter: t.Callable,
 ):
     adapter = make_mocked_engine_adapter(
@@ -27,7 +27,7 @@ def test_get_current_catalog_uses_target_catalog_or_configured_database(
         database="default_catalog",
     )
 
-    assert adapter.get_current_catalog() == "default_catalog"
+    assert adapter.get_current_catalog() is None
 
     adapter._target_catalog = "switched_catalog"
 
@@ -36,7 +36,7 @@ def test_get_current_catalog_uses_target_catalog_or_configured_database(
     adapter._connection_pool.close()
 
     assert adapter._connection_pool.get_attribute("target_catalog") is None
-    assert adapter.get_current_catalog() == "default_catalog"
+    assert adapter.get_current_catalog() is None
     adapter.cursor.execute.assert_not_called()
 
 
@@ -61,6 +61,46 @@ def test_set_current_catalog_does_not_query_database(
 
     assert adapter.get_current_catalog() == "new_catalog"
     adapter.cursor.execute.assert_not_called()
+
+
+def test_set_current_catalog_to_default_clears_explicit_target(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+
+    adapter.set_current_catalog("planning")
+    adapter.set_current_catalog("core")
+
+    assert adapter.get_current_catalog() is None
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_catalog_scoped_call_restores_to_neutral_state(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    set_current_catalog_spy = mocker.patch.object(
+        adapter,
+        "set_current_catalog",
+        wraps=adapter.set_current_catalog,
+    )
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("planning.db.table")
+
+    assert [
+        call.args[0] for call in set_current_catalog_spy.call_args_list
+    ] == ["planning", None]
+    assert adapter.get_current_catalog() is None
 
 
 def test_columns(adapter: FabricEngineAdapter):
