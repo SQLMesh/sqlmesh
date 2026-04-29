@@ -58,6 +58,15 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
     def _target_catalog(self, value: t.Optional[str]) -> None:
         self._connection_pool.set_attribute("target_catalog", value)
 
+    @property
+    def _connected_catalog(self) -> t.Optional[str]:
+        """Catalog the currently-open thread-local connection is actually using."""
+        return self._connection_pool.get_attribute("connected_catalog")
+
+    @_connected_catalog.setter
+    def _connected_catalog(self, value: t.Optional[str]) -> None:
+        self._connection_pool.set_attribute("connected_catalog", value)
+
     def _normalize_catalog(
         self, catalog_name: t.Optional[str]
     ) -> t.Optional[str]:
@@ -118,17 +127,21 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
     def _drop_catalog(self, catalog_name: exp.Identifier) -> None:
         """Drop a catalog (warehouse) in Microsoft Fabric via REST API."""
         warehouse_name = catalog_name.sql(dialect=self.dialect, identify=False)
-        current_catalog = self.get_current_catalog()
 
         logger.info(f"Deleting Fabric warehouse: {warehouse_name}")
         self.api_client.delete_warehouse(warehouse_name)
 
-        if warehouse_name == current_catalog:
-            # Somewhere around 2025-09-08, Fabric started validating the "Database=" connection argument and throwing 'Authentication failed' if the database doesnt exist
-            # In addition, set_current_catalog() is implemented using a threadlocal variable "target_catalog"
-            # So, when we drop a warehouse, and there are still threads with "target_catalog" set to reference it, any operations on those threads
-            # that use an either use an existing connection pointing to this warehouse or trigger a new connection
-            # will fail with an 'Authentication Failed' error unless we close all connections here, which also clears all the threadlocal data
+        # Close all connections if any thread may be using the dropped warehouse.
+        # We must check both the logical target and the physical connection catalog
+        # (falling back to the configured default when either is neutral) because
+        # Fabric validates the DATABASE= connection argument and raises
+        # 'Authentication Failed' when it points at a non-existent warehouse.
+        default_db = self._extra_config.get("database")
+        in_use = {
+            self.get_current_catalog() or default_db,
+            self._normalize_catalog(self._connected_catalog) or default_db,
+        }
+        if warehouse_name in in_use:
             self.close()
 
     def get_current_catalog(self) -> t.Optional[str]:
@@ -155,38 +168,57 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         See:
             https://learn.microsoft.com/en-us/fabric/data-warehouse/sql-query-editor#limitations
         """
-        current_catalog = self.get_current_catalog()
         target_catalog = self._normalize_catalog(catalog_name)
 
-        # If already using the requested catalog, do nothing
-        if current_catalog == target_catalog:
-            logger.debug("Already using the requested Fabric catalog state, no action needed")
+        # No-op: the logical catalog state already matches.
+        if self.get_current_catalog() == target_catalog:
+            logger.debug(
+                "Already using requested Fabric catalog state, no action needed"
+            )
             return
 
-        logger.info(
-            "Switching from catalog '%s' to '%s'",
-            self._catalog_state_label(current_catalog),
-            self._catalog_state_label(target_catalog),
+        # Decide whether the open connection needs to be replaced.
+        #
+        # The set_catalog decorator restores the previous catalog (often None)
+        # after every catalog-scoped call.  For Fabric, a connection close +
+        # reopen is expensive because each new connection goes through ODBC and
+        # the Fabric gateway.  We therefore apply lazy connection management:
+        #
+        #  * When restoring to neutral (target=None): just update _target_catalog.
+        #    The existing connection stays alive and will be reused or replaced
+        #    on the next real switch, avoiding a pointless bounce through the
+        #    default catalog.
+        #
+        #  * When switching to a non-neutral catalog: only close/reopen if the
+        #    open connection is already on a different catalog.  If a previous
+        #    restore-to-neutral left the connection on the right catalog, we
+        #    skip the close entirely.
+        connected_catalog = self._normalize_catalog(self._connected_catalog)
+        needs_reconnect = (
+            target_catalog is not None and connected_catalog != target_catalog
         )
 
-        # commit the transaction before closing the connection to help prevent errors like:
-        # > Snapshot isolation transaction failed in database because the object accessed by the statement has been modified by a
-        # > DDL statement in another concurrent transaction since the start of this transaction
-        # on subsequent queries in the new connection
-        self._connection_pool.commit()
-
-        # note: we call close() on the connection pool instead of self.close() because self.close() calls close_all()
-        # on the connection pool but we just want to close the connection for this thread
-        self._connection_pool.close()
-        self._target_catalog = target_catalog
-
-        catalog_after_switch = self.get_current_catalog()
-
-        if catalog_after_switch != target_catalog:
-            # We need to raise an error if the catalog switch failed to prevent the operation that needed the catalog switch from being run against the wrong catalog
-            raise SQLMeshError(
-                f"Unable to switch catalog to {target_catalog}, catalog ended up as {catalog_after_switch}"
+        if needs_reconnect:
+            logger.info(
+                "Switching connection from catalog '%s' to '%s'",
+                self._catalog_state_label(connected_catalog),
+                self._catalog_state_label(target_catalog),
             )
+            # Commit before closing to avoid snapshot-isolation errors on
+            # subsequent queries in the new connection.
+            self._connection_pool.commit()
+            # note: close() on the pool (not self.close()) to only affect this
+            # thread's connection rather than all threads.
+            self._connection_pool.close()
+            self._connected_catalog = target_catalog
+        else:
+            logger.debug(
+                "Updating catalog target to '%s' (connection remains on '%s')",
+                self._catalog_state_label(target_catalog),
+                self._catalog_state_label(connected_catalog),
+            )
+
+        self._target_catalog = target_catalog
 
     def alter_table(
         self, alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]]

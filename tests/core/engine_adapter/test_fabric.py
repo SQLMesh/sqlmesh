@@ -79,28 +79,69 @@ def test_set_current_catalog_to_default_clears_explicit_target(
     adapter.cursor.execute.assert_not_called()
 
 
-def test_catalog_scoped_call_restores_to_neutral_state(
+def test_catalog_scoped_call_restores_to_neutral_without_close(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,
 ):
+    """Decorator's restore-to-neutral must not close the existing connection."""
     adapter = make_mocked_engine_adapter(
         FabricEngineAdapter,
         default_catalog="core",
         database="core",
     )
-    set_current_catalog_spy = mocker.patch.object(
-        adapter,
-        "set_current_catalog",
-        wraps=adapter.set_current_catalog,
-    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
     adapter.cursor.fetchone.return_value = (1,)
 
     adapter.table_exists("planning.db.table")
 
-    assert [
-        call.args[0] for call in set_current_catalog_spy.call_args_list
-    ] == ["planning", None]
+    # Decorator calls set_current_catalog("planning") then set_current_catalog(None).
+    # Only the first call (None→planning) should trigger a connection close.
+    assert close_spy.call_count == 1
+    assert adapter._connected_catalog == "planning"
     assert adapter.get_current_catalog() is None
+
+
+def test_repeated_same_catalog_reuses_connection(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    """Two consecutive operations on the same catalog share one connection."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("planning.db.table")
+    adapter.table_exists("planning.db.table")
+
+    # Only the very first switch (None→planning) should close.
+    # The restore to neutral keeps the connection alive and the second
+    # planning operation reuses it without another close.
+    assert close_spy.call_count == 1
+    assert adapter._connected_catalog == "planning"
+
+
+def test_switching_between_catalogs_closes_each_time(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    """Switching to a different catalog always triggers a connection close."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("safran.db.table")   # None→safran: 1 close
+    adapter.table_exists("planning.db.table") # safran→planning: 2nd close
+
+    assert close_spy.call_count == 2
+    assert adapter._connected_catalog == "planning"
 
 
 def test_columns(adapter: FabricEngineAdapter):
