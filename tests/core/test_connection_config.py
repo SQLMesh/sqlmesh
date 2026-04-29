@@ -14,6 +14,7 @@ from sqlmesh.core.config.connection import (
     DatabricksConnectionConfig,
     DuckDBAttachOptions,
     FabricConnectionConfig,
+    FelderaConnectionConfig,
     DuckDBConnectionConfig,
     GCPPostgresConnectionConfig,
     MotherDuckConnectionConfig,
@@ -1953,6 +1954,25 @@ def test_fabric_pyodbc_connection_string_generation():
 
         # Check autocommit parameter, should default to True for Fabric
         assert call_args[1]["autocommit"] is True
+
+
+def test_feldera_connection_config(make_config):
+    config = make_config(type="feldera", pipeline_name="pipeline", check_import=False)
+
+    assert isinstance(config, FelderaConnectionConfig)
+    assert config.DIALECT == "felderadialect"
+
+    with patch("sqlmesh.engines.feldera.db_api.connect") as mock_connect:
+        config._connection_factory_with_kwargs()
+
+    mock_connect.assert_called_once_with(
+        host="http://localhost:8080",
+        api_key=None,
+        pipeline_name="pipeline",
+        workers=4,
+        compilation_profile="dev",
+        timeout=300,
+    )
 
 
 def test_schema_differ_overrides(make_config) -> None:
