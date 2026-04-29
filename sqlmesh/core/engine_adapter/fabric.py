@@ -114,6 +114,10 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
             # will fail with an 'Authentication Failed' error unless we close all connections here, which also clears all the threadlocal data
             self.close()
 
+    def get_current_catalog(self) -> t.Optional[str]:
+        """Return the adapter-managed catalog for Fabric's stateless sessions."""
+        return self._target_catalog or self._extra_config.get("database")
+
     def set_current_catalog(self, catalog_name: str) -> None:
         """
         Set the current catalog for Microsoft Fabric connections.

@@ -19,6 +19,50 @@ def adapter(make_mocked_engine_adapter: t.Callable) -> FabricEngineAdapter:
     return make_mocked_engine_adapter(FabricEngineAdapter)
 
 
+def test_get_current_catalog_uses_target_catalog_or_configured_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        database="default_catalog",
+    )
+
+    assert adapter.get_current_catalog() == "default_catalog"
+
+    adapter._target_catalog = "switched_catalog"
+
+    assert adapter.get_current_catalog() == "switched_catalog"
+
+    adapter._connection_pool.close()
+
+    assert adapter._connection_pool.get_attribute("target_catalog") is None
+    assert adapter.get_current_catalog() == "default_catalog"
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_get_current_catalog_returns_none_without_target_or_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(FabricEngineAdapter)
+
+    assert adapter.get_current_catalog() is None
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_set_current_catalog_does_not_query_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        database="default_catalog",
+    )
+
+    adapter.set_current_catalog("new_catalog")
+
+    assert adapter.get_current_catalog() == "new_catalog"
+    adapter.cursor.execute.assert_not_called()
+
+
 def test_columns(adapter: FabricEngineAdapter):
     adapter.cursor.fetchall.return_value = [
         ("decimal_ps", "decimal", None, 5, 4),
