@@ -82,7 +82,7 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         return catalog_name
 
     def _catalog_state_label(self, catalog_name: t.Optional[str]) -> str:
-        return catalog_name or "<default>"
+        return catalog_name or self._default_catalog or self._extra_config.get("database") or "<default>"
 
     @property
     def api_client(self) -> FabricHttpClient:
