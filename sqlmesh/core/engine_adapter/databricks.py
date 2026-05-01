@@ -411,3 +411,27 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         return super()._build_column_defs(
             target_columns_to_types, column_descriptions, is_view, materialized
         )
+
+    def columns(
+        self, table_name: TableName, include_pseudo_columns: bool = False
+    ) -> t.Dict[str, exp.DataType]:
+        table = exp.to_table(table_name)
+        query = (
+            exp.select("columns.column_name", "columns.full_data_type")
+            .from_("system.information_schema.columns")
+            .where(
+                exp.and_(
+                    exp.column("table_catalog").eq(table.catalog),
+                    exp.column("table_schema").eq(table.db),
+                    exp.column("table_name").eq(table.name),
+                )
+            )
+            .order_by("ordinal_position ASC")
+        )
+
+        result = self.cursor.fetchall(query)
+
+        return {
+            row.column_name: exp.DataType.build(row.full_data_type, dialect=self.dialect)
+            for row in result
+        }
