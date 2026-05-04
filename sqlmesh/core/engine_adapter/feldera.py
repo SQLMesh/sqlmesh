@@ -3,7 +3,7 @@ from __future__ import annotations
 import typing as t
 
 from sqlglot import exp
-from sqlglot.dialects import generator
+from sqlglot.generator import Generator
 from sqlglot.dialects.dialect import Dialect
 
 from sqlmesh.core.dialect import to_schema
@@ -23,11 +23,17 @@ if t.TYPE_CHECKING:
 
 
 class FelderaDialect(Dialect):
-    class Generator(generator.Generator):
+    class Generator(Generator):
         TYPE_MAPPING = {
-            **generator.Generator.TYPE_MAPPING,
+            **Generator.TYPE_MAPPING,
             exp.DataType.Type.FLOAT: "REAL",
             exp.DataType.Type.INT: "INTEGER",
+        }
+        TRANSFORMS = {
+            **Generator.TRANSFORMS,
+            exp.DateStrToDate: lambda self, expression: (
+                f"CAST({self.sql(expression, 'this')} AS DATE)"
+            ),
         }
 
 
@@ -93,34 +99,54 @@ class FelderaEngineAdapter(EngineAdapter):
         except Exception:
             return []
 
-        objects: t.List[DataObject] = []
+        objects_by_name: t.Dict[str, DataObject] = {}
         for table in pipeline.tables():
             name = table.name.lower()
             if lower_object_names and name not in lower_object_names:
                 continue
-            objects.append(
-                DataObject(
-                    catalog=None,
-                    schema=pipeline_name,
-                    name=name,
-                    type=DataObjectType.TABLE,
-                )
+            objects_by_name[name] = DataObject(
+                catalog=None,
+                schema=pipeline_name,
+                name=name,
+                type=DataObjectType.TABLE,
             )
 
         for view in pipeline.views():
             name = view.name.lower()
             if lower_object_names and name not in lower_object_names:
                 continue
-            objects.append(
-                DataObject(
-                    catalog=None,
-                    schema=pipeline_name,
-                    name=name,
-                    type=DataObjectType.MATERIALIZED_VIEW,
-                )
+            objects_by_name[name] = DataObject(
+                catalog=None,
+                schema=pipeline_name,
+                name=name,
+                type=DataObjectType.MATERIALIZED_VIEW,
             )
 
-        return objects
+        pending_drops = connection._state.pending_drops()
+        for object_name in pending_drops:
+            objects_by_name.pop(object_name, None)
+
+        for object_name in connection._state.pending_tables():
+            if lower_object_names and object_name not in lower_object_names:
+                continue
+            objects_by_name[object_name] = DataObject(
+                catalog=None,
+                schema=pipeline_name,
+                name=object_name,
+                type=DataObjectType.TABLE,
+            )
+
+        for object_name in connection._state.pending_views():
+            if lower_object_names and object_name not in lower_object_names:
+                continue
+            objects_by_name[object_name] = DataObject(
+                catalog=None,
+                schema=pipeline_name,
+                name=object_name,
+                type=DataObjectType.MATERIALIZED_VIEW,
+            )
+
+        return list(objects_by_name.values())
 
     def columns(
         self, table_name: TableName, include_pseudo_columns: bool = False
@@ -148,6 +174,91 @@ class FelderaEngineAdapter(EngineAdapter):
         )
 
     def get_current_catalog(self) -> t.Optional[str]:
+        return None
+
+    def _replace_materialized_view(
+        self,
+        table_name: TableName,
+        query_or_df: t.Any,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        target_table = exp.to_table(table_name)
+        target_data_object = self.get_data_object(target_table)
+
+        if target_data_object is not None:
+            self.drop_data_object(target_data_object, ignore_if_not_exists=True)
+
+        self.create_view(
+            target_table,
+            query_or_df,
+            target_columns_to_types=target_columns_to_types,
+            replace=False,
+            materialized=True,
+            table_description=table_description,
+            column_descriptions=column_descriptions,
+            source_columns=source_columns,
+            **kwargs,
+        )
+
+    def replace_query(
+        self,
+        table_name: TableName,
+        query_or_df: t.Any,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        supports_replace_table_override: t.Optional[bool] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        self._replace_materialized_view(
+            table_name,
+            query_or_df,
+            target_columns_to_types=target_columns_to_types,
+            table_description=table_description,
+            column_descriptions=column_descriptions,
+            source_columns=source_columns,
+            **kwargs,
+        )
+
+    def insert_overwrite_by_time_partition(
+        self,
+        table_name: TableName,
+        query_or_df: t.Any,
+        start: t.Any,
+        end: t.Any,
+        time_formatter: t.Any,
+        time_column: t.Any,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        self._replace_materialized_view(
+            table_name,
+            query_or_df,
+            target_columns_to_types=target_columns_to_types,
+            source_columns=source_columns,
+            **kwargs,
+        )
+
+    def drop_table(self, table_name: TableName, exists: bool = True, **kwargs: t.Any) -> None:
+        target_data_object = self.get_data_object(exp.to_table(table_name))
+        if target_data_object and target_data_object.type.is_view:
+            self.drop_view(table_name, exists=exists, **kwargs)
+            return
+        super().drop_table(table_name, exists=exists, **kwargs)
+
+    def create_schema(
+        self,
+        schema_name: SchemaName,
+        ignore_if_exists: bool = True,
+        warn_on_error: bool = True,
+        properties: t.Optional[t.List[exp.Expr]] = None,
+    ) -> None:
         return None
 
     def ping(self) -> None:
