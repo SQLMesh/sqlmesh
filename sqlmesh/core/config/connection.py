@@ -238,6 +238,7 @@ class DuckDBAttachOptions(BaseConfig):
 
     # DuckLake specific options
     data_path: t.Optional[str] = None
+    override_data_path: t.Optional[bool] = False
     encrypted: bool = False
     data_inlining_row_limit: t.Optional[int] = None
     metadata_schema: t.Optional[str] = None
@@ -258,6 +259,8 @@ class DuckDBAttachOptions(BaseConfig):
                 path = f"ducklake:{path}"
             if self.data_path is not None:
                 options.append(f"DATA_PATH '{self.data_path}'")
+                if self.override_data_path:
+                    options.append("OVERRIDE_DATA_PATH true")
             if self.encrypted:
                 options.append("ENCRYPTED")
             if self.data_inlining_row_limit is not None:
