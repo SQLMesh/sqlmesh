@@ -11,6 +11,8 @@ from sqlglot.errors import ParseError
 
 logger = logging.getLogger(__name__)
 
+QUERY_MIRROR_PREFIX = "__sqlmesh_query__"
+
 if t.TYPE_CHECKING:
     import pandas as pd
 
@@ -61,10 +63,46 @@ class PipelineStateManager:
 
     def register_ddl(self, sql: str) -> None:
         with self._lock:
-            upper = sql.strip().upper()
             object_key = _extract_name(sql)
+            expression = None
+
+            try:
+                expression = parse_one(_strip_leading_comments(sql))
+            except (ParseError, ValueError):
+                pass
+
             self._hydrated_object_keys.discard(object_key)
+
+            if isinstance(expression, exp.Create):
+                kind = str(expression.args.get("kind") or "").upper()
+                if "TABLE" in kind:
+                    sql = _rewrite_table_ctas_sql(sql)
+                    self._dropped_objects.discard(object_key)
+                    self._views.pop(object_key, None)
+                    self._tables[object_key] = sql
+                    self._dirty = True
+                elif "VIEW" in kind:
+                    self._dropped_objects.discard(object_key)
+                    self._tables.pop(object_key, None)
+                    self._views[object_key] = sql
+                    self._dirty = True
+                return
+
+            if isinstance(expression, exp.Drop):
+                kind = str(expression.args.get("kind") or "").upper()
+                if "TABLE" in kind:
+                    self._tables.pop(object_key, None)
+                    self._dropped_objects.add(object_key)
+                    self._dirty = True
+                elif "VIEW" in kind:
+                    self._views.pop(object_key, None)
+                    self._dropped_objects.add(object_key)
+                    self._dirty = True
+                return
+
+            upper = sql.strip().upper()
             if "CREATE TABLE" in upper or "CREATE MATERIALIZED TABLE" in upper:
+                sql = _rewrite_table_ctas_sql(sql)
                 self._dropped_objects.discard(object_key)
                 self._views.pop(object_key, None)
                 self._tables[object_key] = sql
@@ -95,6 +133,10 @@ class PipelineStateManager:
         with self._lock:
             return set(self._views)
 
+    def is_materialized_view(self, object_name: str) -> bool:
+        with self._lock:
+            return _is_materialized_view_sql(self._views.get(object_name.lower(), ""))
+
     def pending_drops(self) -> t.Set[str]:
         with self._lock:
             return set(self._dropped_objects)
@@ -103,11 +145,30 @@ class PipelineStateManager:
         with self._lock:
             return self._pipeline
 
+    def queryable_relation_names(self) -> t.Set[str]:
+        with self._lock:
+            return {
+                *self._tables,
+                *(
+                    name
+                    for name, sql in self._views.items()
+                    if not _is_materialized_view_sql(sql)
+                ),
+            }
+
     def assemble_program(self) -> str:
         with self._lock:
             statements = [
-                *(ddl.rstrip(";") + ";" for ddl in self._tables.values()),
-                *(ddl.rstrip(";") + ";" for ddl in self._views.values()),
+                *(
+                    statement
+                    for ddl in self._tables.values()
+                    for statement in _ddl_statements_with_query_mirror(ddl)
+                ),
+                *(
+                    statement
+                    for ddl in self._views.values()
+                    for statement in _ddl_statements_with_query_mirror(ddl)
+                ),
             ]
             return "\n\n".join(statements)
 
@@ -213,14 +274,22 @@ class PipelineStateManager:
                 continue
 
             sql = expression.sql()
-            object_key = _extract_name(sql)
 
             if isinstance(expression, exp.Create):
+                target = expression.this
+                if isinstance(target, exp.Schema):
+                    target = target.this
+
+                if isinstance(target, exp.Table) and _is_query_mirror_name(target.name):
+                    continue
+
+                object_key = _extract_name(sql)
                 kind = str(expression.args.get("kind") or "").upper()
                 if "VIEW" in kind:
                     self._tables.pop(object_key, None)
                     self._views[object_key] = sql
                 elif "TABLE" in kind:
+                    sql = _rewrite_table_ctas_sql(sql)
                     self._views.pop(object_key, None)
                     self._tables[object_key] = sql
                 self._hydrated_object_keys.add(object_key)
@@ -300,6 +369,203 @@ def _normalize_ddl(sql: str) -> str:
         sql,
         flags=re.IGNORECASE,
     )
+
+
+def _is_query_mirror_name(name: str) -> bool:
+    return name.lower().startswith(QUERY_MIRROR_PREFIX)
+
+
+def _query_mirror_name(name: str) -> str:
+    return f"{QUERY_MIRROR_PREFIX}{name}"
+
+
+def _query_mirror_table(table: exp.Table) -> exp.Table:
+    mirror = table.copy()
+    mirror.set("this", exp.to_identifier(_query_mirror_name(table.name), quoted=True))
+    return mirror
+
+
+def _ddl_statements_with_query_mirror(sql: str) -> t.List[str]:
+    try:
+        expressions = [expression for expression in parse(sql) if expression is not None]
+    except (ParseError, ValueError):
+        expressions = []
+
+    if not expressions:
+        statement = sql.rstrip(";") + ";"
+        mirror_sql = _query_mirror_sql(sql)
+        return [statement, *([mirror_sql.rstrip(";") + ";"] if mirror_sql else [])]
+
+    statements = []
+    for expression in expressions:
+        statement = expression.sql().rstrip(";") + ";"
+        statements.append(statement)
+        mirror_sql = _query_mirror_sql(statement)
+        if mirror_sql:
+            statements.append(mirror_sql.rstrip(";") + ";")
+
+    return statements
+
+
+def _query_mirror_sql(sql: str) -> t.Optional[str]:
+    stripped = _strip_leading_comments(sql)
+
+    try:
+        expression = parse_one(stripped)
+    except (ParseError, ValueError):
+        return None
+
+    if not isinstance(expression, exp.Create):
+        return None
+
+    target = expression.this
+    if isinstance(target, exp.Schema):
+        target = target.this
+
+    if not isinstance(target, exp.Table) or _is_query_mirror_name(target.name):
+        return None
+
+    kind = str(expression.args.get("kind") or "").upper()
+    if "TABLE" not in kind and "VIEW" not in kind:
+        return None
+    if "VIEW" in kind and _is_materialized_view_sql(sql):
+        return None
+
+    return exp.Create(
+        this=_query_mirror_table(target),
+        kind="MATERIALIZED VIEW",
+        expression=exp.select("*").from_(target.copy()),
+    ).sql()
+
+
+def _rewrite_query_for_query_mirrors(sql: str, relation_names: t.Set[str]) -> str:
+    if not relation_names:
+        return sql
+
+    stripped = _strip_leading_comments(sql)
+
+    try:
+        expression = parse_one(stripped)
+    except (ParseError, ValueError):
+        return sql
+
+    cte_names = {
+        cte.alias_or_name.lower()
+        for cte in expression.find_all(exp.CTE)
+        if cte.alias_or_name
+    }
+
+    def transform(node: exp.Expression) -> exp.Expression:
+        if (
+            isinstance(node, exp.Table)
+            and not _is_query_mirror_name(node.name)
+            and node.name.lower() in relation_names
+            and node.name.lower() not in cte_names
+        ):
+            return _query_mirror_table(node)
+        return node
+
+    return expression.transform(transform, copy=True).sql()
+
+
+def _execution_error(rows: t.List[t.Mapping[str, t.Any]]) -> t.Optional[str]:
+    for row in rows:
+        for value in row.values():
+            if isinstance(value, str) and value.startswith("Execution error:"):
+                return value
+
+    return None
+
+
+def _is_materialized_view_sql(sql: str) -> bool:
+    stripped = _strip_leading_comments(sql)
+    upper = stripped.upper()
+
+    if "CREATE MATERIALIZED VIEW" in upper:
+        return True
+    if "CREATE VIEW" in upper:
+        return False
+
+    try:
+        expression = parse_one(stripped)
+    except (ParseError, ValueError):
+        expression = None
+
+    if isinstance(expression, exp.Create):
+        kind = str(expression.args.get("kind") or "").upper()
+        return "MATERIALIZED" in kind and "VIEW" in kind
+
+    return False
+
+
+def _rewrite_table_ctas_sql(sql: str) -> str:
+    stripped = _strip_leading_comments(sql)
+
+    try:
+        expression = parse_one(stripped)
+    except (ParseError, ValueError):
+        return sql
+
+    if not isinstance(expression, exp.Create):
+        return sql
+
+    kind = str(expression.args.get("kind") or "").upper()
+    query = expression.expression
+    target = expression.this
+
+    if "TABLE" not in kind or query is None or not isinstance(target, exp.Table):
+        return sql
+
+    columns_to_types = _select_columns_to_types(query)
+    if not columns_to_types:
+        return sql
+
+    schema = exp.Schema(
+        this=target.copy(),
+        expressions=[
+            exp.ColumnDef(this=exp.to_identifier(column, quoted=True), kind=data_type.copy())
+            for column, data_type in columns_to_types.items()
+        ],
+    )
+    create_exp = exp.Create(
+        this=schema,
+        kind=expression.args.get("kind") or "TABLE",
+        replace=bool(expression.args.get("replace")),
+        exists=bool(expression.args.get("exists")),
+        properties=expression.args.get("properties"),
+    )
+    insert_exp = exp.insert(query.copy(), target.copy(), columns=list(columns_to_types))
+    return f"{create_exp.sql()};\n{insert_exp.sql()}"
+
+
+def _select_columns_to_types(query: exp.Expression) -> t.Optional[t.Dict[str, exp.DataType]]:
+    if not isinstance(query, exp.Query):
+        return None
+
+    columns_to_types: t.Dict[str, exp.DataType] = {}
+    unknown = exp.DataType.build("unknown")
+
+    for select in query.selects:
+        output_name = select.output_name
+        data_type = _projection_type(select) or (select.type or unknown).copy()
+
+        if not output_name or output_name in columns_to_types or data_type == unknown:
+            return None
+
+        columns_to_types[output_name] = data_type
+
+    return columns_to_types or None
+
+
+def _projection_type(select: exp.Expression) -> t.Optional[exp.DataType]:
+    expression = select
+    if isinstance(select, exp.Alias):
+        expression = select.this
+
+    if isinstance(expression, exp.Cast) and isinstance(expression.args.get("to"), exp.DataType):
+        return expression.args["to"].copy()
+
+    return None
 
 
 def _strip_leading_comments(sql: str) -> str:
@@ -393,7 +659,12 @@ class FelderaCursor:
             self._columns = []
             return
 
-        rows = list(self._get_pipeline().query(sql))
+        query_sql = _rewrite_query_for_query_mirrors(
+            sql, self._state.queryable_relation_names()
+        )
+        rows = list(self._get_pipeline().query(query_sql))
+        if error := _execution_error(rows):
+            raise RuntimeError(error)
         self._rows = rows
         self._columns = list(rows[0].keys()) if rows else []
         self.rowcount = len(rows)
@@ -403,11 +674,11 @@ class FelderaCursor:
         ]
 
     def _get_pipeline(self) -> t.Any:
-        from feldera.pipeline import Pipeline
-
         pipeline = self._state.current_pipeline()
         if pipeline is not None:
             return pipeline
+
+        from feldera.pipeline import Pipeline
 
         return Pipeline.get(self._pipeline_name, self._client)
 

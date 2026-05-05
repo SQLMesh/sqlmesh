@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import typing as t
 
 from sqlglot import exp
-from sqlglot.generator import Generator
 from sqlglot.dialects.dialect import Dialect
+from sqlglot.generator import Generator
 
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.base import EngineAdapter
@@ -14,12 +15,30 @@ from sqlmesh.core.engine_adapter.shared import (
     DataObject,
     DataObjectType,
 )
+from sqlmesh.engines.feldera.db_api import QUERY_MIRROR_PREFIX
 from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
     import pandas as pd
 
     from sqlmesh.core._typing import SchemaName, TableName
+    from sqlmesh.core.engine_adapter.shared import SourceQuery
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_query_mirror_name(name: str) -> bool:
+    return name.lower().startswith(QUERY_MIRROR_PREFIX)
+
+
+def _view_type(state: t.Any, object_name: str) -> DataObjectType:
+    is_materialized_view = getattr(state, "is_materialized_view", None)
+
+    if callable(is_materialized_view) and is_materialized_view(object_name):
+        return DataObjectType.MATERIALIZED_VIEW
+
+    return DataObjectType.VIEW
 
 
 class FelderaDialect(Dialect):
@@ -113,13 +132,15 @@ class FelderaEngineAdapter(EngineAdapter):
 
         for view in pipeline.views():
             name = view.name.lower()
+            if _is_query_mirror_name(name):
+                continue
             if lower_object_names and name not in lower_object_names:
                 continue
             objects_by_name[name] = DataObject(
                 catalog=None,
                 schema=pipeline_name,
                 name=name,
-                type=DataObjectType.MATERIALIZED_VIEW,
+                type=_view_type(connection._state, name),
             )
 
         pending_drops = connection._state.pending_drops()
@@ -143,7 +164,7 @@ class FelderaEngineAdapter(EngineAdapter):
                 catalog=None,
                 schema=pipeline_name,
                 name=object_name,
-                type=DataObjectType.MATERIALIZED_VIEW,
+                type=_view_type(connection._state, object_name),
             )
 
         return list(objects_by_name.values())
@@ -176,80 +197,103 @@ class FelderaEngineAdapter(EngineAdapter):
     def get_current_catalog(self) -> t.Optional[str]:
         return None
 
-    def _replace_materialized_view(
+    def create_view(
         self,
-        table_name: TableName,
+        view_name: TableName,
         query_or_df: t.Any,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        replace: bool = True,
+        materialized: bool = False,
+        materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         source_columns: t.Optional[t.List[str]] = None,
-        **kwargs: t.Any,
+        **create_kwargs: t.Any,
     ) -> None:
-        target_table = exp.to_table(table_name)
-        target_data_object = self.get_data_object(target_table)
+        if replace:
+            target_data_object = self.get_data_object(exp.to_table(view_name))
+            if target_data_object is not None:
+                self.drop_data_object(target_data_object, ignore_if_not_exists=True)
 
-        if target_data_object is not None:
-            self.drop_data_object(target_data_object, ignore_if_not_exists=True)
-
-        self.create_view(
-            target_table,
+        super().create_view(
+            view_name,
             query_or_df,
             target_columns_to_types=target_columns_to_types,
             replace=False,
-            materialized=True,
+            materialized=materialized,
+            materialized_properties=materialized_properties,
             table_description=table_description,
             column_descriptions=column_descriptions,
+            view_properties=view_properties,
             source_columns=source_columns,
-            **kwargs,
+            **create_kwargs,
         )
 
-    def replace_query(
+    def _create_table_from_source_queries(
         self,
         table_name: TableName,
-        query_or_df: t.Any,
+        source_queries: t.List[SourceQuery],
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        exists: bool = True,
+        replace: bool = False,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
-        source_columns: t.Optional[t.List[str]] = None,
-        supports_replace_table_override: t.Optional[bool] = None,
+        table_kind: t.Optional[str] = None,
+        track_rows_processed: bool = True,
         **kwargs: t.Any,
     ) -> None:
-        self._replace_materialized_view(
-            table_name,
-            query_or_df,
-            target_columns_to_types=target_columns_to_types,
-            table_description=table_description,
-            column_descriptions=column_descriptions,
-            source_columns=source_columns,
-            **kwargs,
-        )
+        if replace:
+            return super()._create_table_from_source_queries(
+                table_name,
+                source_queries,
+                target_columns_to_types=target_columns_to_types,
+                exists=exists,
+                replace=replace,
+                table_description=table_description,
+                column_descriptions=column_descriptions,
+                table_kind=table_kind,
+                track_rows_processed=track_rows_processed,
+                **kwargs,
+            )
 
-    def insert_overwrite_by_time_partition(
-        self,
-        table_name: TableName,
-        query_or_df: t.Any,
-        start: t.Any,
-        end: t.Any,
-        time_formatter: t.Any,
-        time_column: t.Any,
-        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
-        source_columns: t.Optional[t.List[str]] = None,
-        **kwargs: t.Any,
-    ) -> None:
-        self._replace_materialized_view(
-            table_name,
-            query_or_df,
-            target_columns_to_types=target_columns_to_types,
-            source_columns=source_columns,
-            **kwargs,
-        )
+        if not target_columns_to_types:
+            raise SQLMeshError(
+                "Feldera requires known column types when creating a table from a query."
+            )
+
+        with self.transaction(condition=len(source_queries) > 1):
+            self._create_table_from_columns(
+                table_name,
+                target_columns_to_types,
+                exists=exists,
+                table_description=table_description,
+                column_descriptions=column_descriptions,
+                **kwargs,
+            )
+            for source_query in source_queries:
+                with source_query as query:
+                    self._insert_append_query(
+                        table_name,
+                        query,
+                        target_columns_to_types,
+                        track_rows_processed=track_rows_processed,
+                    )
 
     def drop_table(self, table_name: TableName, exists: bool = True, **kwargs: t.Any) -> None:
         target_data_object = self.get_data_object(exp.to_table(table_name))
-        if target_data_object and target_data_object.type.is_view:
-            self.drop_view(table_name, exists=exists, **kwargs)
-            return
+        if target_data_object:
+            if target_data_object.type.is_materialized_view:
+                self.drop_view(
+                    table_name,
+                    ignore_if_not_exists=exists,
+                    materialized=True,
+                    **kwargs,
+                )
+                return
+            if target_data_object.type.is_view:
+                self.drop_view(table_name, ignore_if_not_exists=exists, **kwargs)
+                return
         super().drop_table(table_name, exists=exists, **kwargs)
 
     def create_schema(
