@@ -531,6 +531,10 @@ def test_drop_data_object_materialized_view_calls_correct_drop(mocker: MockFixtu
 def test_columns(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
 
+    # Override/mock get_current_catalog to return default
+    current_catalog_mock = mocker.patch.object(
+        adapter, "get_current_catalog", return_value="test_catalog"
+    )
     # create long struct columns datatype
     long_struct_cols = [f"a_{i}:int" for i in range(50)]
     adapter.cursor.fetchall.return_value = [
@@ -573,3 +577,10 @@ def test_columns(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
             f"struct<{','.join(long_struct_cols)}>", dialect=adapter.dialect
         ),
     }
+
+    adapter.cursor.fetchall.assert_called_once_with(
+        parse_one(
+            """SELECT columns.column_name, columns.full_data_type FROM system.information_schema.columns WHERE table_name = 'test_table' AND table_schema = 'test_db' AND table_catalog = 'test_catalog' ORDER BY ordinal_position ASC""",
+            dialect="databricks",
+        )
+    )

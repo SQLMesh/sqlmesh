@@ -416,14 +416,16 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         self, table_name: TableName, include_pseudo_columns: bool = False
     ) -> t.Dict[str, exp.DataType]:
         table = exp.to_table(table_name)
+
+        column_catalog = table.catalog or self.get_current_catalog()
         query = (
             exp.select("columns.column_name", "columns.full_data_type")
             .from_("system.information_schema.columns")
             .where(
                 exp.and_(
-                    exp.column("table_catalog").eq(table.catalog),
-                    exp.column("table_schema").eq(table.db),
                     exp.column("table_name").eq(table.name),
+                    exp.column("table_schema").eq(table.db),
+                    exp.column("table_catalog").eq(column_catalog),
                 )
             )
             .order_by("ordinal_position ASC")
