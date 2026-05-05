@@ -431,7 +431,4 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
 
         result = self.cursor.fetchall(query)
 
-        return {
-            row.column_name: exp.DataType.build(row.full_data_type, dialect=self.dialect)
-            for row in result
-        }
+        return {row[0]: exp.DataType.build(row[1], dialect=self.dialect) for row in result}
