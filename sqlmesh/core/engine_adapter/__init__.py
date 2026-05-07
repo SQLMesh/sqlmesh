@@ -38,7 +38,6 @@ DIALECT_TO_ENGINE_ADAPTER = {
     "athena": AthenaEngineAdapter,
     "risingwave": RisingwaveEngineAdapter,
     "fabric": FabricEngineAdapter,
-    "felderadialect": FelderaEngineAdapter,
     "feldera": FelderaEngineAdapter,
 }
 

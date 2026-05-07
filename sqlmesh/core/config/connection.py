@@ -2353,7 +2353,7 @@ class FelderaConnectionConfig(ConnectionConfig):
     timeout: int = 300
 
     type_: t.Literal["feldera"] = Field(alias="type", default="feldera")
-    DIALECT: t.ClassVar[t.Literal["felderadialect"]] = "felderadialect"
+    DIALECT: t.ClassVar[t.Literal["feldera"]] = "feldera"
     DISPLAY_NAME: t.ClassVar[t.Literal["Feldera"]] = "Feldera"
     DISPLAY_ORDER: t.ClassVar[t.Literal[18]] = 18
 

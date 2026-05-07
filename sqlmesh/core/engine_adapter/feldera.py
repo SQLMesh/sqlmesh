@@ -41,7 +41,7 @@ def _view_type(state: t.Any, object_name: str) -> DataObjectType:
     return DataObjectType.VIEW
 
 
-class FelderaDialect(Dialect):
+class _SQLMeshFeldera(Dialect):
     class Generator(Generator):
         TYPE_MAPPING = {
             **Generator.TYPE_MAPPING,
@@ -54,6 +54,10 @@ class FelderaDialect(Dialect):
                 f"CAST({self.sql(expression, 'this')} AS DATE)"
             ),
         }
+
+
+if Dialect.get("feldera") is None:
+    Dialect.classes["feldera"] = _SQLMeshFeldera
 
 
 _FELDERA_TO_EXP_TYPE: t.Dict[str, exp.DataType.Type] = {
@@ -83,7 +87,7 @@ def _feldera_type_to_exp(dtype_str: str) -> exp.DataType:
 
 
 class FelderaEngineAdapter(EngineAdapter):
-    DIALECT = "felderadialect"
+    DIALECT = "feldera"
     SUPPORTS_TRANSACTIONS = False
     SUPPORTS_INDEXES = False
     SUPPORTS_MATERIALIZED_VIEWS = True

@@ -1960,14 +1960,13 @@ def test_feldera_connection_config(make_config):
     config = make_config(type="feldera", pipeline_name="pipeline", check_import=False)
 
     assert isinstance(config, FelderaConnectionConfig)
-    assert config.DIALECT == "felderadialect"
+    assert config.DIALECT == "feldera"
 
     with patch("sqlmesh.engines.feldera.db_api.connect") as mock_connect:
         config._connection_factory_with_kwargs()
 
     mock_connect.assert_called_once_with(
         host="http://localhost:8080",
-        api_key=None,
         pipeline_name="pipeline",
         workers=4,
         compilation_profile="dev",

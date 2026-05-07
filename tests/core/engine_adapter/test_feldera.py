@@ -120,7 +120,11 @@ def test_get_data_objects_uses_requested_pipeline_name(
         ("requested_pipeline", "source", DataObjectType.TABLE),
         ("requested_pipeline", "sink", DataObjectType.VIEW),
     ]
-    assert adapter.dialect == "felderadialect"
+    assert adapter.dialect == "feldera"
+
+
+def test_builtin_dialect_registers_feldera_name() -> None:
+    assert parse_one("SELECT 1", dialect="feldera").sql(dialect="feldera") == "SELECT 1"
 
 
 def test_get_data_objects_marks_materialized_views_from_state(
