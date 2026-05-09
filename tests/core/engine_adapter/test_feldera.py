@@ -127,6 +127,13 @@ def test_builtin_dialect_registers_feldera_name() -> None:
     assert parse_one("SELECT 1", dialect="feldera").sql(dialect="feldera") == "SELECT 1"
 
 
+def test_builtin_dialect_preserves_current_timestamp_keyword() -> None:
+    assert (
+        parse_one("SELECT CURRENT_TIMESTAMP AS ts", dialect="feldera").sql(dialect="feldera")
+        == "SELECT CURRENT_TIMESTAMP AS ts"
+    )
+
+
 def test_get_data_objects_marks_materialized_views_from_state(
     adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch
 ):
@@ -158,6 +165,28 @@ def test_replace_query_creates_table(
     )
 
     assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "db"."full_model" ("a" INTEGER)',
+        'INSERT INTO "db"."full_model" ("a") SELECT "a" FROM "tbl"',
+    ]
+
+
+def test_replace_query_recreates_existing_table(
+    adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        adapter,
+        "get_data_object",
+        lambda table: DataObject(schema="db", name="full_model", type=DataObjectType.TABLE),
+    )
+
+    adapter.replace_query(
+        "db.full_model",
+        parse_one("SELECT a FROM tbl"),
+        {"a": exp.DataType.build("INT")},
+    )
+
+    assert to_sql_calls(adapter) == [
+        'DROP TABLE IF EXISTS "db"."full_model"',
         'CREATE TABLE IF NOT EXISTS "db"."full_model" ("a" INTEGER)',
         'INSERT INTO "db"."full_model" ("a") SELECT "a" FROM "tbl"',
     ]

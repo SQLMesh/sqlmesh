@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import typing as t
@@ -12,6 +13,7 @@ from sqlglot.errors import ParseError
 logger = logging.getLogger(__name__)
 
 QUERY_MIRROR_PREFIX = "__sqlmesh_query__"
+FELDERA_DIALECT = "feldera"
 
 if t.TYPE_CHECKING:
     import pandas as pd
@@ -31,7 +33,7 @@ def _classify(sql: str) -> SqlIntent:
         return SqlIntent.NO_OP
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         expression = None
 
@@ -46,6 +48,36 @@ def _classify(sql: str) -> SqlIntent:
     if upper.startswith("INSERT"):
         return SqlIntent.DATA_INGRESS
     return SqlIntent.ADHOC_QUERY
+
+
+def _is_virtual_layer_ddl(sql: str) -> bool:
+    stripped = _strip_leading_comments(sql)
+
+    try:
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
+    except (ParseError, ValueError):
+        return False
+
+    if not isinstance(expression, (exp.Create, exp.Drop)):
+        return False
+
+    target = expression.this
+    if isinstance(target, exp.Schema):
+        target = target.this
+
+    if not isinstance(target, exp.Table) or not target.db:
+        return False
+
+    target_db = target.db.lower()
+    if target_db.startswith("sqlmesh__"):
+        return False
+
+    referenced_snapshot_tables = [
+        table
+        for table in expression.find_all(exp.Table)
+        if table is not target and table.db and table.db.lower().startswith("sqlmesh__")
+    ]
+    return bool(referenced_snapshot_tables)
 
 
 class PipelineStateManager:
@@ -67,7 +99,7 @@ class PipelineStateManager:
             expression = None
 
             try:
-                expression = parse_one(_strip_leading_comments(sql))
+                expression = parse_one(_strip_leading_comments(sql), dialect=FELDERA_DIALECT)
             except (ParseError, ValueError):
                 pass
 
@@ -210,43 +242,31 @@ class PipelineStateManager:
             if isinstance(profile, str):
                 profile = CompilationProfile(profile)
 
-            try:
-                pipeline = self._compile_program(
-                    client,
-                    pipeline_name,
-                    sql,
-                    profile,
-                    runtime_config,
-                    timeout,
-                    Pipeline,
-                    PipelineBuilder,
-                    PipelineStatus,
-                    InnerPipeline,
-                    FelderaAPIError,
-                )
-            except RuntimeError as ex:
-                if "not found" not in str(ex).lower() or not self._hydrated_object_keys:
-                    raise
+            while True:
+                try:
+                    pipeline = self._compile_program(
+                        client,
+                        pipeline_name,
+                        sql,
+                        profile,
+                        runtime_config,
+                        timeout,
+                        Pipeline,
+                        PipelineBuilder,
+                        PipelineStatus,
+                        InnerPipeline,
+                        FelderaAPIError,
+                    )
+                    break
+                except RuntimeError as ex:
+                    if not self._evict_hydrated_objects(str(ex)):
+                        raise
 
-                for object_key in list(self._hydrated_object_keys):
-                    self._tables.pop(object_key, None)
-                    self._views.pop(object_key, None)
-                self._hydrated_object_keys.clear()
-
-                sql = self.assemble_program()
-                pipeline = self._compile_program(
-                    client,
-                    pipeline_name,
-                    sql,
-                    profile,
-                    runtime_config,
-                    timeout,
-                    Pipeline,
-                    PipelineBuilder,
-                    PipelineStatus,
-                    InnerPipeline,
-                    FelderaAPIError,
-                )
+                    sql = self.assemble_program()
+                    if not sql.strip():
+                        self._dirty = False
+                        self._dropped_objects.clear()
+                        return self._pipeline
 
             pipeline.start()
             pipeline.wait_for_status(PipelineStatus.RUNNING, timeout=timeout)
@@ -269,11 +289,11 @@ class PipelineStateManager:
         except Exception:
             return
 
-        for expression in parse(program_code):
+        for expression in parse(program_code, dialect=FELDERA_DIALECT):
             if expression is None:
                 continue
 
-            sql = expression.sql()
+            sql = expression.sql(dialect=FELDERA_DIALECT)
 
             if isinstance(expression, exp.Create):
                 target = expression.this
@@ -293,6 +313,29 @@ class PipelineStateManager:
                     self._views.pop(object_key, None)
                     self._tables[object_key] = sql
                 self._hydrated_object_keys.add(object_key)
+
+    def _evict_hydrated_objects(self, error_message: str) -> bool:
+        if not self._hydrated_object_keys:
+            return False
+
+        normalized_error = error_message.lower()
+        object_keys = [
+            object_key
+            for object_key in self._hydrated_object_keys
+            if object_key in normalized_error
+        ]
+
+        if not object_keys:
+            if "not found" not in normalized_error:
+                return False
+            object_keys = list(self._hydrated_object_keys)
+
+        for object_key in object_keys:
+            self._tables.pop(object_key, None)
+            self._views.pop(object_key, None)
+            self._hydrated_object_keys.discard(object_key)
+
+        return True
 
     def _compile_program(
         self,
@@ -314,13 +357,16 @@ class PipelineStateManager:
             existing_pipeline = None
 
         if existing_pipeline is None:
-            return PipelineBuilder(
-                client,
-                name=pipeline_name,
-                sql=sql,
-                compilation_profile=profile,
-                runtime_config=runtime_config,
-            ).create_or_replace(wait=True)
+            try:
+                return PipelineBuilder(
+                    client,
+                    name=pipeline_name,
+                    sql=sql,
+                    compilation_profile=profile,
+                    runtime_config=runtime_config,
+                ).create_or_replace(wait=True)
+            except RuntimeError as ex:
+                raise self._format_compile_error(client, pipeline_name, ex) from ex
 
         existing_pipeline.stop(force=True)
         existing_pipeline.wait_for_status(PipelineStatus.STOPPED, timeout=timeout)
@@ -338,17 +384,65 @@ class PipelineStateManager:
             },
             runtime_config=runtime_config.to_dict(),
         )
-        inner_pipeline = client.create_or_update_pipeline(inner_pipeline, wait=True)
+        try:
+            inner_pipeline = client.create_or_update_pipeline(inner_pipeline, wait=True)
+        except RuntimeError as ex:
+            raise self._format_compile_error(client, pipeline_name, ex) from ex
         pipeline = Pipeline(client)
         pipeline._inner = inner_pipeline
         return pipeline
+
+    def _format_compile_error(self, client: t.Any, pipeline_name: str, error: Exception) -> RuntimeError:
+        error_message = str(error)
+
+        try:
+            from feldera.enums import PipelineFieldSelector
+        except Exception:
+            PipelineFieldSelector = None
+
+        try:
+            field_selector = PipelineFieldSelector.ALL if PipelineFieldSelector else None
+            pipeline = client.get_pipeline(pipeline_name, field_selector)
+        except Exception:
+            return RuntimeError(error_message)
+
+        program_error = getattr(pipeline, "program_error", None) or {}
+        sql_compilation = program_error.get("sql_compilation") or {}
+        sql_messages = sql_compilation.get("messages") or []
+
+        if sql_messages:
+            details = self._sql_compilation_error_message(pipeline_name, sql_messages)
+            if details != error_message:
+                return RuntimeError(details)
+
+        rust_error = program_error.get("rust_compilation")
+        system_error = program_error.get("system_error")
+        if rust_error or system_error:
+            message = f"The program failed to compile: {getattr(pipeline, 'program_status', 'unknown')}\n"
+            if rust_error is not None:
+                message += f"Rust Error: {rust_error}\n"
+            if system_error is not None:
+                message += f"System Error: {system_error}"
+            return RuntimeError(message.rstrip())
+
+        return RuntimeError(error_message)
+
+    @staticmethod
+    def _sql_compilation_error_message(
+        pipeline_name: str, sql_errors: t.Sequence[t.Mapping[str, t.Any]]
+    ) -> str:
+        err_msg = f"Pipeline {pipeline_name} failed to compile:\n"
+        for sql_error in sql_errors:
+            err_msg += f"{sql_error['error_type']}\n{sql_error['message']}\n"
+            err_msg += f"Code snippet:\n{sql_error['snippet']}"
+        return err_msg
 
 
 def _extract_name(sql: str) -> str:
     stripped = _strip_leading_comments(sql)
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         return stripped[:80].lower()
 
@@ -387,7 +481,9 @@ def _query_mirror_table(table: exp.Table) -> exp.Table:
 
 def _ddl_statements_with_query_mirror(sql: str) -> t.List[str]:
     try:
-        expressions = [expression for expression in parse(sql) if expression is not None]
+        expressions = [
+            expression for expression in parse(sql, dialect=FELDERA_DIALECT) if expression is not None
+        ]
     except (ParseError, ValueError):
         expressions = []
 
@@ -398,7 +494,7 @@ def _ddl_statements_with_query_mirror(sql: str) -> t.List[str]:
 
     statements = []
     for expression in expressions:
-        statement = expression.sql().rstrip(";") + ";"
+        statement = expression.sql(dialect=FELDERA_DIALECT).rstrip(";") + ";"
         statements.append(statement)
         mirror_sql = _query_mirror_sql(statement)
         if mirror_sql:
@@ -411,7 +507,7 @@ def _query_mirror_sql(sql: str) -> t.Optional[str]:
     stripped = _strip_leading_comments(sql)
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         return None
 
@@ -424,6 +520,8 @@ def _query_mirror_sql(sql: str) -> t.Optional[str]:
 
     if not isinstance(target, exp.Table) or _is_query_mirror_name(target.name):
         return None
+    if target.db and target.db.lower().startswith("sqlmesh__"):
+        return None
 
     kind = str(expression.args.get("kind") or "").upper()
     if "TABLE" not in kind and "VIEW" not in kind:
@@ -431,11 +529,13 @@ def _query_mirror_sql(sql: str) -> t.Optional[str]:
     if "VIEW" in kind and _is_materialized_view_sql(sql):
         return None
 
-    return exp.Create(
+    mirror_sql = exp.Create(
         this=_query_mirror_table(target),
         kind="MATERIALIZED VIEW",
         expression=exp.select("*").from_(target.copy()),
-    ).sql()
+    ).sql(dialect=FELDERA_DIALECT)
+
+    return _strip_table_qualifiers(mirror_sql)
 
 
 def _rewrite_query_for_query_mirrors(sql: str, relation_names: t.Set[str]) -> str:
@@ -445,7 +545,7 @@ def _rewrite_query_for_query_mirrors(sql: str, relation_names: t.Set[str]) -> st
     stripped = _strip_leading_comments(sql)
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         return sql
 
@@ -465,7 +565,7 @@ def _rewrite_query_for_query_mirrors(sql: str, relation_names: t.Set[str]) -> st
             return _query_mirror_table(node)
         return node
 
-    return expression.transform(transform, copy=True).sql()
+    return expression.transform(transform, copy=True).sql(dialect=FELDERA_DIALECT)
 
 
 def _execution_error(rows: t.List[t.Mapping[str, t.Any]]) -> t.Optional[str]:
@@ -487,7 +587,7 @@ def _is_materialized_view_sql(sql: str) -> bool:
         return False
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         expression = None
 
@@ -502,7 +602,7 @@ def _rewrite_table_ctas_sql(sql: str) -> str:
     stripped = _strip_leading_comments(sql)
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         return sql
 
@@ -535,7 +635,10 @@ def _rewrite_table_ctas_sql(sql: str) -> str:
         properties=expression.args.get("properties"),
     )
     insert_exp = exp.insert(query.copy(), target.copy(), columns=list(columns_to_types))
-    return f"{create_exp.sql()};\n{insert_exp.sql()}"
+    return (
+        f"{create_exp.sql(dialect=FELDERA_DIALECT)};\n"
+        f"{insert_exp.sql(dialect=FELDERA_DIALECT)}"
+    )
 
 
 def _select_columns_to_types(query: exp.Expression) -> t.Optional[t.Dict[str, exp.DataType]]:
@@ -582,12 +685,200 @@ def _strip_table_qualifiers(sql: str) -> str:
     stripped = _strip_leading_comments(sql)
 
     try:
-        expression = parse_one(stripped)
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
     except (ParseError, ValueError):
         return stripped
 
     expression = expression.transform(_unqualify_table)
-    return expression.sql()
+    return expression.sql(dialect=FELDERA_DIALECT)
+
+
+def _normalize_pipeline_ddl(sql: str) -> str:
+    stripped = _strip_leading_comments(sql)
+
+    try:
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
+    except (ParseError, ValueError):
+        return stripped
+
+    def transform(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Table) and node.db and node.db.lower().startswith("sqlmesh__"):
+            node = node.copy()
+            node.set("db", None)
+        return node
+
+    return expression.transform(transform, copy=True).sql(dialect=FELDERA_DIALECT)
+
+
+def _insert_to_input_json_payload(
+    sql: str,
+) -> t.Optional[t.Tuple[str, t.List[t.Dict[str, t.Any]]]]:
+    stripped = _strip_leading_comments(sql)
+
+    try:
+        expression = parse_one(stripped, dialect=FELDERA_DIALECT)
+    except (ParseError, ValueError):
+        return None
+
+    if not isinstance(expression, exp.Insert):
+        return None
+
+    target = expression.this
+    if isinstance(target, exp.Schema):
+        table = target.this
+        target_columns = [column.name for column in target.expressions]
+    elif isinstance(target, exp.Table):
+        table = target
+        target_columns = []
+    else:
+        return None
+
+    if not isinstance(table, exp.Table):
+        return None
+
+    query = expression.expression
+    if not isinstance(query, exp.Query):
+        return None
+
+    values = _query_values_source(query)
+    if values is None:
+        return None
+
+    alias = values.args.get("alias")
+    if alias is None:
+        return None
+
+    source_columns = [column.name for column in alias.columns]
+    if not source_columns:
+        return None
+
+    if not target_columns:
+        target_columns = [select.output_name for select in query.selects]
+
+    if len(target_columns) != len(query.selects):
+        return None
+
+    rows = []
+    for row in values.expressions:
+        if not isinstance(row, exp.Tuple):
+            return None
+
+        source_row = {
+            column: _literal_value(value)
+            for column, value in zip(source_columns, row.expressions)
+        }
+        payload_row: t.Dict[str, t.Any] = {}
+        for target_column, select in zip(target_columns, query.selects):
+            if not target_column:
+                return None
+
+            evaluated = _evaluate_insert_value_expression(select, source_row)
+            if evaluated is _UNSUPPORTED_INGEST_EXPRESSION:
+                return None
+            payload_row[target_column] = evaluated
+        rows.append(payload_row)
+
+    return table.name, rows
+
+
+def _query_values_source(query: exp.Query) -> t.Optional[exp.Values]:
+    from_expression = query.args.get("from_")
+    if from_expression is None:
+        return None
+
+    source = from_expression.this
+    if isinstance(source, exp.Values):
+        return source
+    if isinstance(source, exp.Subquery) and isinstance(source.this, exp.Query):
+        return _query_values_source(source.this)
+    return None
+
+
+_UNSUPPORTED_INGEST_EXPRESSION = object()
+
+
+def _evaluate_insert_value_expression(
+    expression: exp.Expression, source_row: t.Mapping[str, t.Any]
+) -> t.Any:
+    if isinstance(expression, exp.Alias):
+        return _evaluate_insert_value_expression(expression.this, source_row)
+
+    if isinstance(expression, exp.Cast):
+        value = _evaluate_insert_value_expression(expression.this, source_row)
+        if value is _UNSUPPORTED_INGEST_EXPRESSION:
+            return value
+        to_type = expression.args.get("to")
+        if isinstance(to_type, exp.DataType):
+            return _coerce_input_json_value(value, to_type)
+        return value
+
+    if isinstance(expression, exp.Column):
+        return source_row.get(expression.name)
+
+    if isinstance(expression, (exp.Literal, exp.Boolean, exp.Null)):
+        return _literal_value(expression)
+
+    if isinstance(expression, exp.Paren):
+        return _evaluate_insert_value_expression(expression.this, source_row)
+
+    if isinstance(expression, exp.Neg):
+        value = _evaluate_insert_value_expression(expression.this, source_row)
+        if isinstance(value, (int, float)):
+            return -value
+        return _UNSUPPORTED_INGEST_EXPRESSION
+
+    return _UNSUPPORTED_INGEST_EXPRESSION
+
+
+def _literal_value(expression: exp.Expression) -> t.Any:
+    if isinstance(expression, (exp.Literal, exp.Boolean, exp.Null)):
+        return expression.to_py()
+    return _UNSUPPORTED_INGEST_EXPRESSION
+
+
+def _coerce_input_json_value(value: t.Any, data_type: exp.DataType) -> t.Any:
+    if value is None:
+        return None
+
+    dtype = data_type.this
+    if dtype in {
+        exp.DataType.Type.TINYINT,
+        exp.DataType.Type.SMALLINT,
+        exp.DataType.Type.INT,
+        exp.DataType.Type.BIGINT,
+    }:
+        return int(value)
+
+    if dtype in {
+        exp.DataType.Type.FLOAT,
+        exp.DataType.Type.DOUBLE,
+        exp.DataType.Type.DECIMAL,
+    }:
+        return float(value)
+
+    if dtype == exp.DataType.Type.BOOLEAN:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "t", "1"}:
+                return True
+            if normalized in {"false", "f", "0"}:
+                return False
+        return bool(value)
+
+    if dtype in {
+        exp.DataType.Type.CHAR,
+        exp.DataType.Type.NCHAR,
+        exp.DataType.Type.TEXT,
+        exp.DataType.Type.VARCHAR,
+        exp.DataType.Type.NVARCHAR,
+        exp.DataType.Type.DATE,
+        exp.DataType.Type.TIME,
+        exp.DataType.Type.TIMESTAMP,
+        exp.DataType.Type.TIMESTAMPTZ,
+    }:
+        return str(value)
+
+    return value
 
 
 def _unqualify_table(node: exp.Expression) -> exp.Expression:
@@ -627,10 +918,14 @@ class FelderaCursor:
                 "Feldera DB-API does not support query parameters"
             )
 
-        sql = _strip_table_qualifiers(sql)
-        sql = _normalize_ddl(sql)
-
-        intent = _classify(sql)
+        original_sql = sql
+        normalized_sql = _normalize_ddl(sql)
+        intent = _classify(normalized_sql)
+        sql = (
+            _normalize_pipeline_ddl(normalized_sql)
+            if intent == SqlIntent.PIPELINE_DDL
+            else _strip_table_qualifiers(normalized_sql)
+        )
         logger.debug("Feldera execute (intent=%s): %.200s", intent.value, sql)
 
         if intent == SqlIntent.NO_OP:
@@ -639,6 +934,10 @@ class FelderaCursor:
             return
 
         if intent == SqlIntent.PIPELINE_DDL:
+            if _is_virtual_layer_ddl(original_sql):
+                self._rows = []
+                self._columns = []
+                return
             self._state.register_ddl(sql)
             self._rows = []
             self._columns = []
@@ -654,7 +953,13 @@ class FelderaCursor:
             )
 
         if intent == SqlIntent.DATA_INGRESS:
-            self._get_pipeline().execute(sql)
+            pipeline = self._get_pipeline()
+            payload = _insert_to_input_json_payload(sql)
+            if payload is not None:
+                table_name, rows = payload
+                pipeline.input_json(table_name, rows)
+            else:
+                pipeline.execute(sql)
             self._rows = []
             self._columns = []
             return
@@ -746,13 +1051,21 @@ class FelderaConnection:
 
     def close(self) -> None:
         if self._state.has_pending_changes():
-            self._state.deploy(
-                self._client,
-                self._pipeline_name,
-                self._workers,
-                self._compilation_profile,
-                self._timeout,
-            )
+            try:
+                self._state.deploy(
+                    self._client,
+                    self._pipeline_name,
+                    self._workers,
+                    self._compilation_profile,
+                    self._timeout,
+                )
+            except Exception as ex:
+                logger.error(
+                    "Feldera pending DDL failed during connection close for pipeline %s:\n%s",
+                    self._pipeline_name,
+                    ex,
+                )
+                raise
         return None
 
 

@@ -50,6 +50,11 @@ class _SQLMeshFeldera(Dialect):
         }
         TRANSFORMS = {
             **Generator.TRANSFORMS,
+            exp.CurrentTimestamp: lambda self, expression: (
+                self.func("CURRENT_TIMESTAMP", expression.this)
+                if expression.this
+                else "CURRENT_TIMESTAMP"
+            ),
             exp.DateStrToDate: lambda self, expression: (
                 f"CAST({self.sql(expression, 'this')} AS DATE)"
             ),
@@ -283,6 +288,37 @@ class FelderaEngineAdapter(EngineAdapter):
                         target_columns_to_types,
                         track_rows_processed=track_rows_processed,
                     )
+
+    def _insert_overwrite_by_condition(
+        self,
+        table_name: TableName,
+        source_queries: t.List[SourceQuery],
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        where: t.Optional[exp.Condition] = None,
+        insert_overwrite_strategy_override: t.Optional[t.Any] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        # Whole-table replacement is cheaper in Feldera as DROP+CREATE than DELETE+INSERT.
+        if where is None and source_queries:
+            self.drop_table(table_name)
+            self._create_table_from_source_queries(
+                table_name,
+                source_queries,
+                target_columns_to_types=target_columns_to_types,
+                exists=True,
+                replace=False,
+                **kwargs,
+            )
+            return
+
+        super()._insert_overwrite_by_condition(
+            table_name,
+            source_queries,
+            target_columns_to_types=target_columns_to_types,
+            where=where,
+            insert_overwrite_strategy_override=insert_overwrite_strategy_override,
+            **kwargs,
+        )
 
     def drop_table(self, table_name: TableName, exists: bool = True, **kwargs: t.Any) -> None:
         target_data_object = self.get_data_object(exp.to_table(table_name))
