@@ -15,13 +15,13 @@ def test_classify_treats_comment_prefixed_create_schema_as_pipeline_ddl() -> Non
 
 def test_is_virtual_layer_ddl_identifies_environment_alias_view() -> None:
     assert db_api._is_virtual_layer_ddl(
-        'CREATE VIEW "polymarket__dev"."live_trades" AS '
-        'SELECT * FROM "sqlmesh__polymarket"."polymarket__live_trades__1782741465__dev"'
+        'CREATE VIEW "analytics__dev"."source_events" AS '
+        'SELECT * FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev"'
     )
 
     assert not db_api._is_virtual_layer_ddl(
-        'CREATE MATERIALIZED VIEW "sqlmesh__polymarket"."polymarket__rolling_vwap__1225616675__dev" AS '
-        'SELECT * FROM "sqlmesh__polymarket"."polymarket__live_trades__1782741465__dev"'
+        'CREATE MATERIALIZED VIEW "sqlmesh__analytics"."analytics__aggregate_view__1225616675__dev" AS '
+        'SELECT * FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev"'
     )
 
 
@@ -37,17 +37,28 @@ def test_strip_table_qualifiers_preserves_current_timestamp_keyword() -> None:
     )
 
 
-def test_normalize_pipeline_ddl_strips_only_sqlmesh_internal_qualifiers() -> None:
+def test_normalize_pipeline_ddl_canonicalizes_snapshot_names_to_logical_names() -> None:
     sql = (
-        'CREATE MATERIALIZED VIEW "sqlmesh__polymarket"."polymarket__rolling_vwap__1225616675__dev" AS '
-        'SELECT "live_trades"."market_id" AS "market_id" '
-        'FROM "polymarket"."live_trades" AS "live_trades"'
+        'CREATE MATERIALIZED VIEW "sqlmesh__analytics"."analytics__aggregate_view__1225616675__dev" AS '
+        'SELECT "source_events"."entity_id" AS "entity_id" '
+        'FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev" AS "source_events"'
     )
 
     assert db_api._normalize_pipeline_ddl(sql) == (
-        'CREATE MATERIALIZED VIEW "polymarket__rolling_vwap__1225616675__dev" AS '
-        'SELECT "live_trades"."market_id" AS "market_id" '
-        'FROM "polymarket"."live_trades" AS "live_trades"'
+        'CREATE MATERIALIZED VIEW "aggregate_view" AS '
+        'SELECT "source_events"."entity_id" AS "entity_id" '
+        'FROM "source_events" AS "source_events"'
+    )
+
+
+def test_normalize_pipeline_ddl_strips_schema_from_logical_tables() -> None:
+    sql = (
+        'CREATE TABLE "analytics"."sample_seed" '
+        '("entity_id" VARCHAR, "description" VARCHAR)'
+    )
+
+    assert db_api._normalize_pipeline_ddl(sql) == (
+        'CREATE TABLE "sample_seed" ("entity_id" VARCHAR, "description" VARCHAR)'
     )
 
 
@@ -111,14 +122,14 @@ def test_cursor_ignores_virtual_layer_view_ddl() -> None:
     )
 
     cursor.execute(
-        'CREATE VIEW "polymarket__dev"."live_trades" AS '
-        'SELECT * FROM "sqlmesh__polymarket"."polymarket__live_trades__1782741465__dev"'
+        'CREATE VIEW "analytics__dev"."source_events" AS '
+        'SELECT * FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev"'
     )
 
     assert state_manager.registered_sql == []
 
 
-def test_cursor_preserves_schema_qualified_references_in_pipeline_ddl() -> None:
+def test_cursor_registers_logical_model_names_in_pipeline_ddl() -> None:
     class FakeStateManager:
         def __init__(self) -> None:
             self.registered_sql = []
@@ -137,15 +148,15 @@ def test_cursor_preserves_schema_qualified_references_in_pipeline_ddl() -> None:
     )
 
     cursor.execute(
-        'CREATE MATERIALIZED VIEW "sqlmesh__polymarket"."polymarket__trade_price_observations__1956259901__dev" AS '
-        'SELECT "live_trades"."market_id" AS "market_id" '
-        'FROM "polymarket"."live_trades" AS "live_trades"'
+        'CREATE MATERIALIZED VIEW "sqlmesh__analytics"."analytics__aggregated_observations__1956259901__dev" AS '
+        'SELECT "source_events"."entity_id" AS "entity_id" '
+        'FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev" AS "source_events"'
     )
 
     assert state_manager.registered_sql == [
-        'CREATE MATERIALIZED VIEW "polymarket__trade_price_observations__1956259901__dev" AS '
-        'SELECT "live_trades"."market_id" AS "market_id" '
-        'FROM "polymarket"."live_trades" AS "live_trades"'
+        'CREATE MATERIALIZED VIEW "aggregated_observations" AS '
+        'SELECT "source_events"."entity_id" AS "entity_id" '
+        'FROM "source_events" AS "source_events"'
     ]
 
 
@@ -211,27 +222,27 @@ def test_state_manager_rewrites_table_ctas() -> None:
 def test_evict_hydrated_objects_removes_stale_object_from_compile_error() -> None:
     manager = db_api.PipelineStateManager()
     manager._views = {
-        'polymarket__rolling_vwap__781619724__dev': (
-            'CREATE MATERIALIZED VIEW "polymarket__rolling_vwap__781619724__dev" AS '
+        'analytics__aggregate_view__781619724__dev': (
+            'CREATE MATERIALIZED VIEW "analytics__aggregate_view__781619724__dev" AS '
             'SELECT CURRENT_TIMESTAMP AS ts'
         ),
-        'polymarket__rolling_vwap__1225616675__dev': (
-            'CREATE MATERIALIZED VIEW "polymarket__rolling_vwap__1225616675__dev" AS '
+        'analytics__aggregate_view__1225616675__dev': (
+            'CREATE MATERIALIZED VIEW "analytics__aggregate_view__1225616675__dev" AS '
             'SELECT NOW() AS ts'
         ),
     }
     manager._hydrated_object_keys = {
-        'polymarket__rolling_vwap__781619724__dev',
-        'polymarket__rolling_vwap__1225616675__dev',
+        'analytics__aggregate_view__781619724__dev',
+        'analytics__aggregate_view__1225616675__dev',
     }
 
     removed = manager._evict_hydrated_objects(
-        'Compilation error in CREATE MATERIALIZED VIEW "polymarket__rolling_vwap__781619724__dev"'
+        'Compilation error in CREATE MATERIALIZED VIEW "analytics__aggregate_view__781619724__dev"'
     )
 
     assert removed is True
-    assert 'polymarket__rolling_vwap__781619724__dev' not in manager.pending_views()
-    assert 'polymarket__rolling_vwap__1225616675__dev' in manager.pending_views()
+    assert 'analytics__aggregate_view__781619724__dev' not in manager.pending_views()
+    assert 'analytics__aggregate_view__1225616675__dev' in manager.pending_views()
 
 
 def test_format_compile_error_preserves_sql_compilation_details() -> None:
@@ -246,8 +257,8 @@ def test_format_compile_error_preserves_sql_compilation_details() -> None:
                         "messages": [
                             {
                                 "error_type": "Compilation error",
-                                "message": "Object 'polymarket__live_trades__1782741465__dev' not found",
-                                "snippet": '1|CREATE MATERIALIZED VIEW "polymarket__rolling_vwap__1225616675__dev" AS SELECT ...',
+                                "message": "Object 'analytics__source_events__1782741465__dev' not found",
+                                "snippet": '1|CREATE MATERIALIZED VIEW "analytics__aggregate_view__1225616675__dev" AS SELECT ...',
                             }
                         ]
                     }
@@ -256,15 +267,15 @@ def test_format_compile_error_preserves_sql_compilation_details() -> None:
 
     error = manager._format_compile_error(
         FakeClient(),
-        "polymarket",
+        "test_pipeline",
         RuntimeError("The program failed to compile: SqlError"),
     )
 
     assert str(error) == (
-        "Pipeline polymarket failed to compile:\n"
+        "Pipeline test_pipeline failed to compile:\n"
         "Compilation error\n"
-        "Object 'polymarket__live_trades__1782741465__dev' not found\n"
-        'Code snippet:\n1|CREATE MATERIALIZED VIEW "polymarket__rolling_vwap__1225616675__dev" AS SELECT ...'
+        "Object 'analytics__source_events__1782741465__dev' not found\n"
+        'Code snippet:\n1|CREATE MATERIALIZED VIEW "analytics__aggregate_view__1225616675__dev" AS SELECT ...'
     )
 
 
@@ -275,7 +286,7 @@ def test_connection_close_logs_pending_compile_error(caplog: pytest.LogCaptureFi
 
         def deploy(self, *args: object, **kwargs: object) -> object:
             raise RuntimeError(
-                "Pipeline polymarket failed to compile:\n"
+                "Pipeline test_pipeline failed to compile:\n"
                 "Compilation error\n"
                 "TIMESTAMP_TRUNC problem"
             )
@@ -283,7 +294,7 @@ def test_connection_close_logs_pending_compile_error(caplog: pytest.LogCaptureFi
     connection = db_api.FelderaConnection(
         client=object(),
         host="http://localhost:8080",
-        pipeline_name="polymarket",
+        pipeline_name="test_pipeline",
     )
     connection._state = FakeStateManager()
 
@@ -291,7 +302,7 @@ def test_connection_close_logs_pending_compile_error(caplog: pytest.LogCaptureFi
         with pytest.raises(RuntimeError, match="TIMESTAMP_TRUNC problem"):
             connection.close()
 
-    assert "Feldera pending DDL failed during connection close for pipeline polymarket" in caplog.text
+    assert "Feldera pending DDL failed during connection close for pipeline test_pipeline" in caplog.text
     assert "TIMESTAMP_TRUNC problem" in caplog.text
 
 
@@ -315,27 +326,44 @@ def test_state_manager_query_mirror_strips_schema_qualifiers() -> None:
     manager = db_api.PipelineStateManager()
 
     manager.register_ddl(
-        'CREATE TABLE "polymarket"."markets_sample_seed" AS '
+        'CREATE TABLE "analytics"."sample_seed" AS '
         'SELECT CAST("id" AS INTEGER) AS "id" FROM (VALUES (1)) AS "t"("id")'
     )
 
     program = manager.assemble_program()
 
-    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__markets_sample_seed" AS SELECT * FROM "markets_sample_seed";' in program
-    assert 'SELECT * FROM "polymarket"."markets_sample_seed"' not in program
+    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__sample_seed" AS SELECT * FROM "sample_seed";' in program
+    assert 'SELECT * FROM "analytics"."sample_seed"' not in program
 
 
 def test_state_manager_skips_query_mirrors_for_sqlmesh_internal_objects() -> None:
     manager = db_api.PipelineStateManager()
 
     manager.register_ddl(
-        'CREATE TABLE "sqlmesh__polymarket"."polymarket__l1_orderbook__441175831__dev" '
-        '("market_id" VARCHAR, "best_bid" DOUBLE)'
+        'CREATE TABLE "sqlmesh__analytics"."analytics__source_snapshot__441175831__dev" '
+        '("entity_id" VARCHAR, "metric_value" DOUBLE)'
     )
 
     program = manager.assemble_program()
 
-    assert '__sqlmesh_query__polymarket__l1_orderbook__441175831__dev' not in program
+    assert '__sqlmesh_query__analytics__source_snapshot__441175831__dev' not in program
+
+
+def test_state_manager_canonicalizes_snapshot_tables_to_logical_names() -> None:
+    manager = db_api.PipelineStateManager()
+
+    manager.register_ddl(
+        db_api._normalize_pipeline_ddl(
+            'CREATE TABLE "sqlmesh__analytics"."analytics__records__849752499__dev" '
+            '("entity_id" VARCHAR, "description" VARCHAR)'
+        )
+    )
+
+    program = manager.assemble_program()
+
+    assert 'CREATE TABLE "records" ("entity_id" VARCHAR, "description" VARCHAR);' in program
+    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__records" AS SELECT * FROM "records";' in program
+    assert 'analytics__records__849752499__dev' not in program
 
 
 def test_hydrate_existing_program_skips_query_mirrors(monkeypatch) -> None:
@@ -401,31 +429,77 @@ def test_cursor_rewrites_queries_to_query_mirrors() -> None:
     assert cursor.fetchone() == (1,)
 
 
+def test_cursor_rewrites_snapshot_queries_to_logical_query_mirrors() -> None:
+    captured_queries = []
+
+    class FakeStateManager:
+        def has_pending_changes(self) -> bool:
+            return False
+
+        def queryable_relation_names(self) -> set[str]:
+            return {"source_events"}
+
+        def current_pipeline(self) -> object:
+            return types.SimpleNamespace(
+                query=lambda sql: captured_queries.append(sql) or [{"count": 1}]
+            )
+
+    cursor = db_api.FelderaCursor(
+        client=object(),
+        pipeline_name="test_pipeline",
+        state_manager=FakeStateManager(),
+    )
+
+    cursor.execute('SELECT COUNT(*) FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev"')
+
+    assert parse_one(captured_queries[0]).sql() == parse_one(
+        'SELECT COUNT(*) FROM "__sqlmesh_query__source_events"'
+    ).sql()
+    assert cursor.fetchone() == (1,)
+
+
 def test_insert_to_input_json_payload_rewrites_seed_values() -> None:
     payload = db_api._insert_to_input_json_payload(
-        'INSERT INTO "seed_model" ("market_id", "volume_24h", "end_date") '
-        'SELECT CAST("market_id" AS TEXT) AS "market_id", '
-        'CAST("volume_24h" AS DOUBLE) AS "volume_24h", '
-        'CAST("end_date" AS TIMESTAMP) AS "end_date" '
+        'INSERT INTO "seed_model" ("entity_id", "score", "event_ts") '
+        'SELECT CAST("entity_id" AS TEXT) AS "entity_id", '
+        'CAST("score" AS DOUBLE) AS "score", '
+        'CAST("event_ts" AS TIMESTAMP) AS "event_ts" '
         'FROM (VALUES '
         "('123', '4.5', '2026-05-09 01:00:00'), "
         "('456', '7.0', NULL)"
-        ') AS "t"("market_id", "volume_24h", "end_date")'
+        ') AS "t"("entity_id", "score", "event_ts")'
     )
 
     assert payload == (
         "seed_model",
         [
             {
-                "market_id": "123",
-                "volume_24h": 4.5,
-                "end_date": "2026-05-09 01:00:00",
+                "entity_id": "123",
+                "score": 4.5,
+                "event_ts": "2026-05-09 01:00:00",
             },
             {
-                "market_id": "456",
-                "volume_24h": 7.0,
-                "end_date": None,
+                "entity_id": "456",
+                "score": 7.0,
+                "event_ts": None,
             },
+        ],
+    )
+
+
+def test_insert_to_input_json_payload_canonicalizes_snapshot_target() -> None:
+    payload = db_api._insert_to_input_json_payload(
+        'INSERT INTO "sqlmesh__analytics"."analytics__sample_seed__2883946936__dev" ("entity_id") '
+        'SELECT CAST("entity_id" AS TEXT) AS "entity_id" '
+        'FROM (VALUES (\'123\')) AS "t"("entity_id")'
+    )
+
+    assert payload == (
+        "sample_seed",
+        [
+            {
+                "entity_id": "123",
+            }
         ],
     )
 

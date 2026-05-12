@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import logging
 import threading
 import typing as t
@@ -689,8 +688,48 @@ def _strip_table_qualifiers(sql: str) -> str:
     except (ParseError, ValueError):
         return stripped
 
-    expression = expression.transform(_unqualify_table)
+    def transform(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Table):
+            node = _canonicalize_snapshot_table(node)
+            node = _unqualify_table(node)
+        return node
+
+    expression = expression.transform(transform, copy=True)
     return expression.sql(dialect=FELDERA_DIALECT)
+
+
+def _snapshot_name_parts(name: str) -> t.Optional[t.Tuple[str, str]]:
+    parts = name.split("__")
+    if len(parts) < 3:
+        return None
+
+    if parts[-1].isdigit():
+        schema_name = parts[0]
+        model_name = "__".join(parts[1:-1])
+        return (schema_name, model_name) if model_name else None
+
+    if len(parts) >= 4 and parts[-2].isdigit():
+        schema_name = parts[0]
+        model_name = "__".join(parts[1:-2])
+        return (schema_name, model_name) if model_name else None
+
+    return None
+
+
+def _canonicalize_snapshot_table(node: exp.Table) -> exp.Table:
+    if _is_query_mirror_name(node.name):
+        return node
+
+    snapshot_parts = _snapshot_name_parts(node.name)
+    if snapshot_parts is None:
+        return node
+
+    _, model_name = snapshot_parts
+    canonicalized = node.copy()
+    canonicalized.set("this", exp.to_identifier(model_name, quoted=True))
+    canonicalized.set("db", None)
+    canonicalized.set("catalog", None)
+    return canonicalized
 
 
 def _normalize_pipeline_ddl(sql: str) -> str:
@@ -702,9 +741,9 @@ def _normalize_pipeline_ddl(sql: str) -> str:
         return stripped
 
     def transform(node: exp.Expression) -> exp.Expression:
-        if isinstance(node, exp.Table) and node.db and node.db.lower().startswith("sqlmesh__"):
-            node = node.copy()
-            node.set("db", None)
+        if isinstance(node, exp.Table):
+            node = _canonicalize_snapshot_table(node)
+            node = _unqualify_table(node)
         return node
 
     return expression.transform(transform, copy=True).sql(dialect=FELDERA_DIALECT)
@@ -735,6 +774,8 @@ def _insert_to_input_json_payload(
 
     if not isinstance(table, exp.Table):
         return None
+
+    table = _canonicalize_snapshot_table(table)
 
     query = expression.expression
     if not isinstance(query, exp.Query):
