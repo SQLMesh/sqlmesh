@@ -214,11 +214,6 @@ class PipelineStateManager:
         from feldera.rest.pipeline import Pipeline as InnerPipeline
         from feldera.runtime_config import RuntimeConfig
 
-        try:
-            from feldera.pipeline import PipelineStatus
-        except ImportError:
-            from feldera.rest.pipeline import PipelineStatus
-
         with self._lock:
             self._hydrate_existing_program(client, pipeline_name)
             if not self._dirty:
@@ -248,7 +243,6 @@ class PipelineStateManager:
                         timeout,
                         Pipeline,
                         PipelineBuilder,
-                        PipelineStatus,
                         InnerPipeline,
                         FelderaAPIError,
                     )
@@ -263,8 +257,7 @@ class PipelineStateManager:
                         self._dropped_objects.clear()
                         return self._pipeline
 
-            pipeline.start()
-            pipeline.wait_for_status(PipelineStatus.RUNNING, timeout=timeout)
+            pipeline.start(timeout_s=timeout)
             self._pipeline = pipeline
             self._dirty = False
             self._dropped_objects.clear()
@@ -342,7 +335,6 @@ class PipelineStateManager:
         timeout: int,
         Pipeline: t.Any,
         PipelineBuilder: t.Any,
-        PipelineStatus: t.Any,
         InnerPipeline: t.Any,
         FelderaAPIError: t.Any,
     ) -> t.Any:
@@ -363,8 +355,7 @@ class PipelineStateManager:
             except RuntimeError as ex:
                 raise self._format_compile_error(client, pipeline_name, ex) from ex
 
-        existing_pipeline.stop(force=True)
-        existing_pipeline.wait_for_status(PipelineStatus.STOPPED, timeout=timeout)
+        existing_pipeline.stop(force=True, timeout_s=timeout)
         existing_pipeline.dismiss_error()
 
         inner_pipeline = InnerPipeline(
@@ -391,15 +382,10 @@ class PipelineStateManager:
         self, client: t.Any, pipeline_name: str, error: Exception
     ) -> RuntimeError:
         error_message = str(error)
+        from feldera.enums import PipelineFieldSelector
 
         try:
-            from feldera.enums import PipelineFieldSelector
-        except Exception:
-            PipelineFieldSelector = None
-
-        try:
-            field_selector = PipelineFieldSelector.ALL if PipelineFieldSelector else None
-            pipeline = client.get_pipeline(pipeline_name, field_selector)
+            pipeline = client.get_pipeline(pipeline_name, PipelineFieldSelector.ALL)
         except Exception:
             return RuntimeError(error_message)
 
