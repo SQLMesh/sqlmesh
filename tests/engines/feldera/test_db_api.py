@@ -1,3 +1,4 @@
+import sys
 import types
 import typing as t
 
@@ -5,6 +6,13 @@ import pytest
 from sqlglot import parse_one
 
 from sqlmesh.engines.feldera import db_api
+
+
+@pytest.fixture(autouse=True)
+def reset_feldera_shared_states() -> t.Iterator[None]:
+    db_api.FelderaConnection.reset_shared_states()
+    yield
+    db_api.FelderaConnection.reset_shared_states()
 
 
 def test_classify_treats_comment_prefixed_create_schema_as_pipeline_ddl() -> None:
@@ -97,6 +105,44 @@ def test_cursor_defers_pipeline_deploy_until_non_ddl_statement() -> None:
     assert cursor.fetchall() == [(1,)]
 
 
+def test_cursor_clears_description_after_non_query_execute() -> None:
+    class FakePipeline:
+        def query(self, sql: str) -> list[dict[str, int]]:
+            return [{"a": 1}]
+
+        def input_json(self, table_name: str, rows: object) -> None:
+            return None
+
+        def execute(self, sql: str) -> None:
+            return None
+
+    class FakeStateManager:
+        def __init__(self) -> None:
+            self.pipeline = FakePipeline()
+
+        def has_pending_changes(self) -> bool:
+            return False
+
+        def current_pipeline(self) -> object:
+            return self.pipeline
+
+        def queryable_relation_names(self) -> set[str]:
+            return set()
+
+    cursor = db_api.FelderaCursor(
+        client=object(),
+        pipeline_name="test_pipeline",
+        state_manager=t.cast(t.Any, FakeStateManager()),
+    )
+
+    cursor.execute("SELECT 1 AS a")
+    assert cursor.description == [("a", None, None, None, None, None, None)]
+
+    cursor.execute('INSERT INTO "seed_model" SELECT 1 AS "a" FROM (VALUES (1)) AS "t"("a")')
+
+    assert cursor.description is None
+
+
 def test_cursor_ignores_virtual_layer_view_ddl() -> None:
     class FakeStateManager:
         def __init__(self) -> None:
@@ -182,8 +228,8 @@ def test_hydrate_existing_program_skips_empty_parse_results(monkeypatch) -> None
     feldera_module = types.ModuleType("feldera")
     setattr(feldera_module, "pipeline", pipeline_module)
 
-    monkeypatch.setitem(__import__("sys").modules, "feldera", feldera_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.pipeline", pipeline_module)
+    monkeypatch.setitem(sys.modules, "feldera", feldera_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
 
     manager._hydrate_existing_program(object(), "test_pipeline")
 
@@ -277,6 +323,44 @@ def test_format_compile_error_preserves_sql_compilation_details() -> None:
     )
 
 
+def test_format_compile_error_preserves_rust_and_system_error_details() -> None:
+    manager = db_api.PipelineStateManager()
+
+    class FakeClient:
+        def get_pipeline(self, pipeline_name: str, field_selector: object) -> object:
+            return types.SimpleNamespace(
+                program_status="RustError",
+                program_error={
+                    "rust_compilation": "rust failed",
+                    "system_error": "system failed",
+                },
+            )
+
+    error = manager._format_compile_error(
+        FakeClient(),
+        "test_pipeline",
+        RuntimeError("The program failed to compile: RustError"),
+    )
+
+    assert str(error) == (
+        "The program failed to compile: RustError\n"
+        "Rust Error: rust failed\n"
+        "System Error: system failed"
+    )
+
+
+def test_format_compile_error_returns_original_message_without_program_error() -> None:
+    manager = db_api.PipelineStateManager()
+
+    class FakeClient:
+        def get_pipeline(self, pipeline_name: str, field_selector: object) -> object:
+            return types.SimpleNamespace(program_status="Unknown", program_error=None)
+
+    error = manager._format_compile_error(FakeClient(), "test_pipeline", RuntimeError("boom"))
+
+    assert str(error) == "boom"
+
+
 def test_format_compile_error_requests_all_pipeline_fields(monkeypatch) -> None:
     manager = db_api.PipelineStateManager()
     requested_field_selector: list[object] = []
@@ -284,7 +368,7 @@ def test_format_compile_error_requests_all_pipeline_fields(monkeypatch) -> None:
 
     enums_module = types.ModuleType("feldera.enums")
     setattr(enums_module, "PipelineFieldSelector", types.SimpleNamespace(ALL=selector_all))
-    monkeypatch.setitem(__import__("sys").modules, "feldera.enums", enums_module)
+    monkeypatch.setitem(sys.modules, "feldera.enums", enums_module)
 
     class FakeClient:
         def get_pipeline(self, pipeline_name: str, field_selector: object) -> object:
@@ -296,7 +380,7 @@ def test_format_compile_error_requests_all_pipeline_fields(monkeypatch) -> None:
     assert requested_field_selector == [selector_all]
 
 
-def test_deploy_imports_compilation_profile_from_feldera_enums(monkeypatch) -> None:
+def test_deploy_succeeds_with_mocked_feldera_modules(monkeypatch) -> None:
     manager = db_api.PipelineStateManager()
 
     class CompilationProfile(str):
@@ -348,16 +432,14 @@ def test_deploy_imports_compilation_profile_from_feldera_enums(monkeypatch) -> N
     setattr(feldera_module, "runtime_config", runtime_config_module)
     setattr(feldera_module, "rest", rest_module)
 
-    monkeypatch.setitem(__import__("sys").modules, "feldera", feldera_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.enums", enums_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.pipeline", pipeline_module)
-    monkeypatch.setitem(
-        __import__("sys").modules, "feldera.pipeline_builder", pipeline_builder_module
-    )
-    monkeypatch.setitem(__import__("sys").modules, "feldera.runtime_config", runtime_config_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.rest", rest_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.rest.errors", rest_errors_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.rest.pipeline", rest_pipeline_module)
+    monkeypatch.setitem(sys.modules, "feldera", feldera_module)
+    monkeypatch.setitem(sys.modules, "feldera.enums", enums_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline_builder", pipeline_builder_module)
+    monkeypatch.setitem(sys.modules, "feldera.runtime_config", runtime_config_module)
+    monkeypatch.setitem(sys.modules, "feldera.rest", rest_module)
+    monkeypatch.setitem(sys.modules, "feldera.rest.errors", rest_errors_module)
+    monkeypatch.setitem(sys.modules, "feldera.rest.pipeline", rest_pipeline_module)
 
     manager.deploy(object(), "test_pipeline")
 
@@ -398,6 +480,10 @@ def test_compile_program_does_not_wait_after_stop() -> None:
         def to_dict(self) -> dict[str, object]:
             return {}
 
+    class PipelineBuilder:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("PipelineBuilder should not be constructed when the pipeline exists")
+
     client = types.SimpleNamespace(create_or_update_pipeline=lambda pipeline, wait=True: pipeline)
 
     manager._compile_program(
@@ -408,7 +494,7 @@ def test_compile_program_does_not_wait_after_stop() -> None:
         RuntimeConfig(),
         300,
         Pipeline,
-        object,
+        PipelineBuilder,
         InnerPipeline,
         RuntimeError,
     )
@@ -463,14 +549,12 @@ def test_deploy_does_not_wait_after_start(monkeypatch) -> None:
     setattr(rest_errors_module, "FelderaAPIError", RuntimeError)
     setattr(rest_pipeline_module, "Pipeline", type("InnerPipeline", (), {}))
 
-    monkeypatch.setitem(__import__("sys").modules, "feldera.enums", enums_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.pipeline", pipeline_module)
-    monkeypatch.setitem(
-        __import__("sys").modules, "feldera.pipeline_builder", pipeline_builder_module
-    )
-    monkeypatch.setitem(__import__("sys").modules, "feldera.runtime_config", runtime_config_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.rest.errors", rest_errors_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.rest.pipeline", rest_pipeline_module)
+    monkeypatch.setitem(sys.modules, "feldera.enums", enums_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline_builder", pipeline_builder_module)
+    monkeypatch.setitem(sys.modules, "feldera.runtime_config", runtime_config_module)
+    monkeypatch.setitem(sys.modules, "feldera.rest.errors", rest_errors_module)
+    monkeypatch.setitem(sys.modules, "feldera.rest.pipeline", rest_pipeline_module)
 
     monkeypatch.setattr(manager, "_hydrate_existing_program", lambda client, pipeline_name: None)
     monkeypatch.setattr(manager, "assemble_program", lambda: "CREATE TABLE x (id INT)")
@@ -510,6 +594,37 @@ def test_connection_close_logs_pending_compile_error(caplog: pytest.LogCaptureFi
         in caplog.text
     )
     assert "TIMESTAMP_TRUNC problem" in caplog.text
+
+
+def test_hydrate_existing_program_returns_silently_when_pipeline_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = db_api.PipelineStateManager()
+
+    pipeline_module = types.ModuleType("feldera.pipeline")
+    setattr(
+        pipeline_module,
+        "Pipeline",
+        type(
+            "Pipeline",
+            (),
+            {
+                "get": staticmethod(
+                    lambda pipeline_name, client: (_ for _ in ()).throw(RuntimeError("missing"))
+                )
+            },
+        ),
+    )
+    feldera_module = types.ModuleType("feldera")
+    setattr(feldera_module, "pipeline", pipeline_module)
+
+    monkeypatch.setitem(sys.modules, "feldera", feldera_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
+
+    manager._hydrate_existing_program(object(), "test_pipeline")
+
+    assert manager.pending_tables() == set()
+    assert manager.pending_views() == set()
 
 
 def test_state_manager_adds_query_mirrors_for_non_materialized_relations() -> None:
@@ -612,8 +727,8 @@ def test_hydrate_existing_program_skips_query_mirrors(monkeypatch) -> None:
     feldera_module = types.ModuleType("feldera")
     setattr(feldera_module, "pipeline", pipeline_module)
 
-    monkeypatch.setitem(__import__("sys").modules, "feldera", feldera_module)
-    monkeypatch.setitem(__import__("sys").modules, "feldera.pipeline", pipeline_module)
+    monkeypatch.setitem(sys.modules, "feldera", feldera_module)
+    monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
 
     manager._hydrate_existing_program(object(), "test_pipeline")
 
@@ -800,3 +915,24 @@ def test_cursor_raises_execution_error_from_query_rows() -> None:
 
     with pytest.raises(RuntimeError, match="Execution error: test failure"):
         cursor.execute("SELECT COUNT(*) FROM full_model")
+
+
+def test_connect_preserves_integer_timeout(monkeypatch) -> None:
+    captured_kwargs: dict[str, object] = {}
+
+    class FelderaClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+
+    feldera_client_module = types.ModuleType("feldera.rest.feldera_client")
+    setattr(feldera_client_module, "FelderaClient", FelderaClient)
+    monkeypatch.setitem(sys.modules, "feldera.rest.feldera_client", feldera_client_module)
+
+    db_api.connect(
+        host="http://localhost:8080",
+        pipeline_name="test_pipeline",
+        timeout=123,
+    )
+
+    assert captured_kwargs["timeout"] == 123
+    assert isinstance(captured_kwargs["timeout"], int)

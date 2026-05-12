@@ -9,6 +9,8 @@ import re
 from sqlglot import exp, parse, parse_one
 from sqlglot.errors import ParseError
 
+import sqlmesh.engines.feldera.dialect
+
 logger = logging.getLogger(__name__)
 
 QUERY_MIRROR_PREFIX = "__sqlmesh_query__"
@@ -943,6 +945,9 @@ class FelderaCursor:
         if parameters is not None:
             raise NotImplementedError("Feldera DB-API does not support query parameters")
 
+        self.description = None
+        self.rowcount = -1
+
         original_sql = sql
         normalized_sql = _normalize_ddl(sql)
         intent = _classify(normalized_sql)
@@ -1055,6 +1060,11 @@ class FelderaConnection:
         with self._state_lock:
             self._state: t.Any = self._shared_states.setdefault(state_key, PipelineStateManager())
 
+    @classmethod
+    def reset_shared_states(cls) -> None:
+        with cls._state_lock:
+            cls._shared_states.clear()
+
     def cursor(self) -> FelderaCursor:
         return FelderaCursor(
             self._client,
@@ -1101,7 +1111,7 @@ def connect(
 ) -> FelderaConnection:
     from feldera.rest.feldera_client import FelderaClient
 
-    client = FelderaClient(url=host, api_key=api_key, timeout=float(timeout))
+    client = FelderaClient(url=host, api_key=api_key, timeout=timeout)
     return FelderaConnection(
         client,
         host,

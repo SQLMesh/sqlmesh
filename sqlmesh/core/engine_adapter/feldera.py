@@ -4,8 +4,6 @@ import logging
 import typing as t
 
 from sqlglot import exp
-from sqlglot.dialects.dialect import Dialect
-from sqlglot.generator import Generator as SQLGlotGenerator
 
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.base import EngineAdapter
@@ -14,6 +12,7 @@ from sqlmesh.core.engine_adapter.shared import (
     CommentCreationView,
     DataObject,
     DataObjectType,
+    set_catalog,
 )
 from sqlmesh.engines.feldera.db_api import QUERY_MIRROR_PREFIX
 from sqlmesh.utils.errors import SQLMeshError
@@ -39,30 +38,6 @@ def _view_type(state: t.Any, object_name: str) -> DataObjectType:
         return DataObjectType.MATERIALIZED_VIEW
 
     return DataObjectType.VIEW
-
-
-class _SQLMeshFeldera(Dialect):
-    class Generator(SQLGlotGenerator):
-        TYPE_MAPPING = {
-            **SQLGlotGenerator.TYPE_MAPPING,
-            exp.DataType.Type.FLOAT: "REAL",
-            exp.DataType.Type.INT: "INTEGER",
-        }
-        TRANSFORMS = {
-            **SQLGlotGenerator.TRANSFORMS,
-            exp.CurrentTimestamp: lambda self, expression: (
-                self.func("CURRENT_TIMESTAMP", expression.this)
-                if expression.this
-                else "CURRENT_TIMESTAMP"
-            ),
-            exp.DateStrToDate: lambda self, expression: (
-                f"CAST({self.sql(expression, 'this')} AS DATE)"
-            ),
-        }
-
-
-if Dialect.get("feldera") is None:
-    Dialect.classes["feldera"] = _SQLMeshFeldera
 
 
 _FELDERA_TO_EXP_TYPE: t.Dict[str, t.Any] = {
@@ -91,6 +66,7 @@ def _feldera_type_to_exp(dtype_str: str) -> exp.DataType:
     return exp.DataType(this=kind)
 
 
+@set_catalog()
 class FelderaEngineAdapter(EngineAdapter):
     DIALECT = "feldera"
     SUPPORTS_TRANSACTIONS = False

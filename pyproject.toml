@@ -255,6 +255,7 @@ markers = [
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
     "duckdb: test for DuckDB",
+    "feldera: test for Feldera",
     "fabric: test for Fabric",
     "motherduck: test for MotherDuck",
     "mssql: test for MSSQL",

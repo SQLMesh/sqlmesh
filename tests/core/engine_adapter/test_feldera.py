@@ -5,15 +5,17 @@ import types
 import typing as t
 
 import pytest
+from sqlglot import Dialect
 from sqlglot import parse_one
 from sqlglot import exp
 
 from sqlmesh.core.engine_adapter import FelderaEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
-from sqlmesh.utils.errors import SQLMeshError
+from sqlmesh.engines.feldera.dialect import register_feldera_dialect
+from sqlmesh.utils.errors import SQLMeshError, UnsupportedCatalogOperationError
 from tests.core.engine_adapter import to_sql_calls
 
-pytestmark = [pytest.mark.engine]
+pytestmark = [pytest.mark.engine, pytest.mark.feldera]
 
 
 @pytest.fixture
@@ -115,25 +117,42 @@ def test_get_data_objects_uses_requested_pipeline_name(
     monkeypatch.setitem(sys.modules, "feldera", feldera_module)
     monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
 
-    data_objects = adapter._get_data_objects("catalog.requested_pipeline")
+    data_objects = adapter._get_data_objects("requested_pipeline")
 
     assert requested_pipeline_names == ["requested_pipeline"]
     assert [(obj.schema_name, obj.name, obj.type) for obj in data_objects] == [
         ("requested_pipeline", "source", DataObjectType.TABLE),
         ("requested_pipeline", "sink", DataObjectType.VIEW),
     ]
+
+
+def test_adapter_dialect_is_feldera(adapter: FelderaEngineAdapter) -> None:
     assert adapter.dialect == "feldera"
 
 
-def test_builtin_dialect_registers_feldera_name() -> None:
+def test_feldera_dialect_is_registered() -> None:
     assert parse_one("SELECT 1", dialect="feldera").sql(dialect="feldera") == "SELECT 1"
 
 
-def test_builtin_dialect_preserves_current_timestamp_keyword() -> None:
+def test_feldera_dialect_preserves_current_timestamp_keyword() -> None:
     assert (
         parse_one("SELECT CURRENT_TIMESTAMP AS ts", dialect="feldera").sql(dialect="feldera")
         == "SELECT CURRENT_TIMESTAMP AS ts"
     )
+
+
+def test_register_feldera_dialect_registers_custom_type_mapping() -> None:
+    original = Dialect.classes.pop("feldera", None)
+
+    try:
+        register_feldera_dialect()
+        assert exp.DataType.build("FLOAT").sql(dialect="feldera") == "REAL"
+    finally:
+        Dialect.classes.pop("feldera", None)
+        if original is not None:
+            Dialect.classes["feldera"] = original
+        else:
+            register_feldera_dialect()
 
 
 def test_get_data_objects_marks_materialized_views_from_state(
@@ -149,7 +168,7 @@ def test_get_data_objects_marks_materialized_views_from_state(
     )
     _install_feldera_pipeline(monkeypatch, pipeline)
 
-    data_objects = adapter._get_data_objects("catalog.requested_pipeline")
+    data_objects = adapter._get_data_objects("requested_pipeline")
 
     assert [(obj.schema_name, obj.name, obj.type) for obj in data_objects] == [
         ("requested_pipeline", "sink", DataObjectType.MATERIALIZED_VIEW),
@@ -194,7 +213,7 @@ def test_replace_query_recreates_existing_table(
     ]
 
 
-def test_insert_overwrite_by_time_partition_uses_table_operations(
+def test_insert_overwrite_by_time_partition_uses_delete_insert(
     adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(adapter, "_get_data_objects", lambda schema_name, object_names=None: [])
@@ -218,6 +237,54 @@ def test_insert_overwrite_by_time_partition_uses_table_operations(
     ]
 
 
+def test_insert_overwrite_without_condition_drops_and_recreates_table(
+    adapter: FelderaEngineAdapter,
+) -> None:
+    recorded_calls: list[tuple[str, tuple[t.Any, ...], dict[str, t.Any]]] = []
+    source_queries = [t.cast(t.Any, object())]
+    target_columns_to_types = {"a": exp.DataType.build("INT")}
+
+    def record_drop_table(*args: t.Any, **kwargs: t.Any) -> None:
+        recorded_calls.append(("drop_table", args, kwargs))
+
+    def record_create_table(*args: t.Any, **kwargs: t.Any) -> None:
+        recorded_calls.append(("create_table", args, kwargs))
+
+    adapter.drop_table = record_drop_table  # type: ignore[method-assign]
+    adapter._create_table_from_source_queries = record_create_table  # type: ignore[method-assign]
+
+    adapter._insert_overwrite_by_condition(
+        "db.full_model",
+        source_queries,
+        target_columns_to_types=target_columns_to_types,
+        where=None,
+    )
+
+    assert recorded_calls == [
+        ("drop_table", ("db.full_model",), {}),
+        (
+            "create_table",
+            ("db.full_model", source_queries),
+            {
+                "target_columns_to_types": target_columns_to_types,
+                "exists": True,
+                "replace": False,
+            },
+        ),
+    ]
+
+
+def test_create_table_from_source_queries_requires_known_column_types(
+    adapter: FelderaEngineAdapter,
+) -> None:
+    with pytest.raises(SQLMeshError, match="requires known column types"):
+        adapter._create_table_from_source_queries("db.full_model", [], target_columns_to_types=None)
+
+
+def test_create_schema_is_no_op(adapter: FelderaEngineAdapter) -> None:
+    assert adapter.create_schema("db") is None
+
+
 def test_create_view_creates_view(adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(adapter, "_get_data_objects", lambda schema_name, object_names=None: [])
     adapter.create_view(
@@ -230,6 +297,14 @@ def test_create_view_creates_view(adapter: FelderaEngineAdapter, monkeypatch: py
     assert to_sql_calls(adapter) == [
         'CREATE VIEW "db"."view_model" AS SELECT "a" FROM "tbl"',
     ]
+
+
+def test_create_view_rejects_catalog_qualified_names(adapter: FelderaEngineAdapter) -> None:
+    with pytest.raises(UnsupportedCatalogOperationError, match="does not support catalogs"):
+        adapter.create_view(
+            "catalog.db.view_model",
+            parse_one("SELECT a FROM tbl"),
+        )
 
 
 def test_replace_view_drops_then_creates_view(

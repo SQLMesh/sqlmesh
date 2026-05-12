@@ -56,6 +56,7 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Do not support row-level operations
     "spark",
     "trino",
+    "feldera",
     # Nullable types are problematic
     "clickhouse",
 }
@@ -2343,7 +2344,16 @@ class RisingwaveConnectionConfig(ConnectionConfig):
 
 
 class FelderaConnectionConfig(ConnectionConfig):
-    """Feldera connection configuration."""
+    """Feldera connection configuration.
+
+    Args:
+        host: The Feldera API base URL.
+        api_key: The optional Feldera API key.
+        pipeline_name: The name of the backing Feldera pipeline.
+        compilation_profile: The Feldera compilation profile to use during deploys.
+        workers: The number of workers in the Feldera runtime config.
+        timeout: The timeout, in seconds, for Feldera API operations.
+    """
 
     host: str = "http://localhost:8080"
     api_key: t.Optional[str] = None
@@ -2385,9 +2395,6 @@ class FelderaConnectionConfig(ConnectionConfig):
         from sqlmesh.engines.feldera.db_api import connect
 
         return connect
-
-    def get_catalog(self) -> t.Optional[str]:
-        return None
 
 
 _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {

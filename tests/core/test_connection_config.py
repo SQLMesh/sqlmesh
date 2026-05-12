@@ -1961,6 +1961,7 @@ def test_feldera_connection_config(make_config):
 
     assert isinstance(config, FelderaConnectionConfig)
     assert config.DIALECT == "feldera"
+    assert config.is_forbidden_for_state_sync
 
     with patch("sqlmesh.engines.feldera.db_api.connect") as mock_connect:
         config._connection_factory_with_kwargs()
