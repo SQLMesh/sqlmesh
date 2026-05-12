@@ -5,7 +5,7 @@ import typing as t
 
 from sqlglot import exp
 from sqlglot.dialects.dialect import Dialect
-from sqlglot.generator import Generator
+from sqlglot.generator import Generator as SQLGlotGenerator
 
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.base import EngineAdapter
@@ -42,14 +42,14 @@ def _view_type(state: t.Any, object_name: str) -> DataObjectType:
 
 
 class _SQLMeshFeldera(Dialect):
-    class Generator(Generator):
+    class Generator(SQLGlotGenerator):
         TYPE_MAPPING = {
-            **Generator.TYPE_MAPPING,
+            **SQLGlotGenerator.TYPE_MAPPING,
             exp.DataType.Type.FLOAT: "REAL",
             exp.DataType.Type.INT: "INTEGER",
         }
         TRANSFORMS = {
-            **Generator.TRANSFORMS,
+            **SQLGlotGenerator.TRANSFORMS,
             exp.CurrentTimestamp: lambda self, expression: (
                 self.func("CURRENT_TIMESTAMP", expression.this)
                 if expression.this
@@ -65,7 +65,7 @@ if Dialect.get("feldera") is None:
     Dialect.classes["feldera"] = _SQLMeshFeldera
 
 
-_FELDERA_TO_EXP_TYPE: t.Dict[str, exp.DataType.Type] = {
+_FELDERA_TO_EXP_TYPE: t.Dict[str, t.Any] = {
     "BOOLEAN": exp.DataType.Type.BOOLEAN,
     "TINYINT": exp.DataType.Type.TINYINT,
     "SMALLINT": exp.DataType.Type.SMALLINT,
@@ -102,7 +102,7 @@ class FelderaEngineAdapter(EngineAdapter):
 
     def _fetch_native_df(
         self,
-        query: t.Union[exp.Expression, str],
+        query: t.Union[exp.Expr, str],
         quote_identifiers: bool = False,
     ) -> pd.DataFrame:
         with self.transaction():
@@ -118,9 +118,7 @@ class FelderaEngineAdapter(EngineAdapter):
 
         connection = self.connection
         pipeline_name = to_schema(schema_name).db
-        lower_object_names = (
-            {name.lower() for name in object_names} if object_names else None
-        )
+        lower_object_names = {name.lower() for name in object_names} if object_names else None
 
         try:
             pipeline = Pipeline.get(pipeline_name, connection._client)
@@ -199,8 +197,7 @@ class FelderaEngineAdapter(EngineAdapter):
                 }
 
         raise SQLMeshError(
-            "Table/view "
-            f"'{target}' not found in pipeline '{connection._pipeline_name}'"
+            f"Table/view '{target}' not found in pipeline '{connection._pipeline_name}'"
         )
 
     def get_current_catalog(self) -> t.Optional[str]:

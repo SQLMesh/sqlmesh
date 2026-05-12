@@ -2341,7 +2341,7 @@ class RisingwaveConnectionConfig(ConnectionConfig):
 
         return init
 
-    
+
 class FelderaConnectionConfig(ConnectionConfig):
     """Feldera connection configuration."""
 
@@ -2388,6 +2388,7 @@ class FelderaConnectionConfig(ConnectionConfig):
 
     def get_catalog(self) -> t.Optional[str]:
         return None
+
 
 _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {
     ConnectionConfig,  # type: ignore[type-abstract]

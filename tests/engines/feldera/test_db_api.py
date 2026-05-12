@@ -1,4 +1,5 @@
 import types
+import typing as t
 
 import pytest
 from sqlglot import parse_one
@@ -7,10 +8,7 @@ from sqlmesh.engines.feldera import db_api
 
 
 def test_classify_treats_comment_prefixed_create_schema_as_pipeline_ddl() -> None:
-    assert (
-        db_api._classify("/* sqlmesh */ CREATE SCHEMA foo")
-        == db_api.SqlIntent.PIPELINE_DDL
-    )
+    assert db_api._classify("/* sqlmesh */ CREATE SCHEMA foo") == db_api.SqlIntent.PIPELINE_DDL
 
 
 def test_is_virtual_layer_ddl_identifies_environment_alias_view() -> None:
@@ -32,8 +30,7 @@ def test_strip_table_qualifiers_preserves_current_timestamp_keyword() -> None:
     )
 
     assert db_api._strip_table_qualifiers(sql) == (
-        'CREATE MATERIALIZED VIEW "view_model" AS '
-        'SELECT CURRENT_TIMESTAMP AS ts FROM "source"'
+        'CREATE MATERIALIZED VIEW "view_model" AS SELECT CURRENT_TIMESTAMP AS ts FROM "source"'
     )
 
 
@@ -52,10 +49,7 @@ def test_normalize_pipeline_ddl_canonicalizes_snapshot_names_to_logical_names() 
 
 
 def test_normalize_pipeline_ddl_strips_schema_from_logical_tables() -> None:
-    sql = (
-        'CREATE TABLE "analytics"."sample_seed" '
-        '("entity_id" VARCHAR, "description" VARCHAR)'
-    )
+    sql = 'CREATE TABLE "analytics"."sample_seed" ("entity_id" VARCHAR, "description" VARCHAR)'
 
     assert db_api._normalize_pipeline_ddl(sql) == (
         'CREATE TABLE "sample_seed" ("entity_id" VARCHAR, "description" VARCHAR)'
@@ -86,7 +80,7 @@ def test_cursor_defers_pipeline_deploy_until_non_ddl_statement() -> None:
         def queryable_relation_names(self) -> set[str]:
             return set()
 
-    state_manager = FakeStateManager()
+    state_manager = t.cast(t.Any, FakeStateManager())
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
@@ -106,7 +100,7 @@ def test_cursor_defers_pipeline_deploy_until_non_ddl_statement() -> None:
 def test_cursor_ignores_virtual_layer_view_ddl() -> None:
     class FakeStateManager:
         def __init__(self) -> None:
-            self.registered_sql = []
+            self.registered_sql: list[str] = []
 
         def register_ddl(self, sql: str) -> None:
             self.registered_sql.append(sql)
@@ -114,7 +108,7 @@ def test_cursor_ignores_virtual_layer_view_ddl() -> None:
         def has_pending_changes(self) -> bool:
             return False
 
-    state_manager = FakeStateManager()
+    state_manager = t.cast(t.Any, FakeStateManager())
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
@@ -132,7 +126,7 @@ def test_cursor_ignores_virtual_layer_view_ddl() -> None:
 def test_cursor_registers_logical_model_names_in_pipeline_ddl() -> None:
     class FakeStateManager:
         def __init__(self) -> None:
-            self.registered_sql = []
+            self.registered_sql: list[str] = []
 
         def register_ddl(self, sql: str) -> None:
             self.registered_sql.append(sql)
@@ -140,7 +134,7 @@ def test_cursor_registers_logical_model_names_in_pipeline_ddl() -> None:
         def has_pending_changes(self) -> bool:
             return False
 
-    state_manager = FakeStateManager()
+    state_manager = t.cast(t.Any, FakeStateManager())
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
@@ -170,19 +164,23 @@ def test_hydrate_existing_program_skips_empty_parse_results(monkeypatch) -> None
     )
 
     pipeline_module = types.ModuleType("feldera.pipeline")
-    pipeline_module.Pipeline = type(
+    setattr(
+        pipeline_module,
         "Pipeline",
-        (),
-        {
-            "get": staticmethod(
-                lambda pipeline_name, client: types.SimpleNamespace(
-                    _inner=types.SimpleNamespace(program_code="ignored")
+        type(
+            "Pipeline",
+            (),
+            {
+                "get": staticmethod(
+                    lambda pipeline_name, client: types.SimpleNamespace(
+                        _inner=types.SimpleNamespace(program_code="ignored")
+                    )
                 )
-            )
-        },
+            },
+        ),
     )
     feldera_module = types.ModuleType("feldera")
-    feldera_module.pipeline = pipeline_module
+    setattr(feldera_module, "pipeline", pipeline_module)
 
     monkeypatch.setitem(__import__("sys").modules, "feldera", feldera_module)
     monkeypatch.setitem(__import__("sys").modules, "feldera.pipeline", pipeline_module)
@@ -212,9 +210,9 @@ def test_state_manager_rewrites_table_ctas() -> None:
 
     assert manager.assemble_program() == (
         'CREATE TABLE "seed_model" ("id" INTEGER);\n'
-        '\n'
+        "\n"
         'CREATE MATERIALIZED VIEW "__sqlmesh_query__seed_model" AS SELECT * FROM "seed_model";\n'
-        '\n'
+        "\n"
         'INSERT INTO "seed_model" (id) SELECT CAST("id" AS INTEGER) AS "id" FROM (VALUES (1)) AS "t"("id");'
     )
 
@@ -222,18 +220,18 @@ def test_state_manager_rewrites_table_ctas() -> None:
 def test_evict_hydrated_objects_removes_stale_object_from_compile_error() -> None:
     manager = db_api.PipelineStateManager()
     manager._views = {
-        'analytics__aggregate_view__781619724__dev': (
+        "analytics__aggregate_view__781619724__dev": (
             'CREATE MATERIALIZED VIEW "analytics__aggregate_view__781619724__dev" AS '
-            'SELECT CURRENT_TIMESTAMP AS ts'
+            "SELECT CURRENT_TIMESTAMP AS ts"
         ),
-        'analytics__aggregate_view__1225616675__dev': (
+        "analytics__aggregate_view__1225616675__dev": (
             'CREATE MATERIALIZED VIEW "analytics__aggregate_view__1225616675__dev" AS '
-            'SELECT NOW() AS ts'
+            "SELECT NOW() AS ts"
         ),
     }
     manager._hydrated_object_keys = {
-        'analytics__aggregate_view__781619724__dev',
-        'analytics__aggregate_view__1225616675__dev',
+        "analytics__aggregate_view__781619724__dev",
+        "analytics__aggregate_view__1225616675__dev",
     }
 
     removed = manager._evict_hydrated_objects(
@@ -241,8 +239,8 @@ def test_evict_hydrated_objects_removes_stale_object_from_compile_error() -> Non
     )
 
     assert removed is True
-    assert 'analytics__aggregate_view__781619724__dev' not in manager.pending_views()
-    assert 'analytics__aggregate_view__1225616675__dev' in manager.pending_views()
+    assert "analytics__aggregate_view__781619724__dev" not in manager.pending_views()
+    assert "analytics__aggregate_view__1225616675__dev" in manager.pending_views()
 
 
 def test_format_compile_error_preserves_sql_compilation_details() -> None:
@@ -296,13 +294,16 @@ def test_connection_close_logs_pending_compile_error(caplog: pytest.LogCaptureFi
         host="http://localhost:8080",
         pipeline_name="test_pipeline",
     )
-    connection._state = FakeStateManager()
+    connection._state = t.cast(t.Any, FakeStateManager())
 
     with caplog.at_level("ERROR", logger="sqlmesh.engines.feldera.db_api"):
         with pytest.raises(RuntimeError, match="TIMESTAMP_TRUNC problem"):
             connection.close()
 
-    assert "Feldera pending DDL failed during connection close for pipeline test_pipeline" in caplog.text
+    assert (
+        "Feldera pending DDL failed during connection close for pipeline test_pipeline"
+        in caplog.text
+    )
     assert "TIMESTAMP_TRUNC problem" in caplog.text
 
 
@@ -317,8 +318,14 @@ def test_state_manager_adds_query_mirrors_for_non_materialized_relations() -> No
 
     program = manager.assemble_program()
 
-    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__full_model" AS SELECT * FROM "full_model";' in program
-    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__view_model" AS SELECT * FROM "view_model";' in program
+    assert (
+        'CREATE MATERIALIZED VIEW "__sqlmesh_query__full_model" AS SELECT * FROM "full_model";'
+        in program
+    )
+    assert (
+        'CREATE MATERIALIZED VIEW "__sqlmesh_query__view_model" AS SELECT * FROM "view_model";'
+        in program
+    )
     assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__materialized_view_model"' not in program
 
 
@@ -332,7 +339,10 @@ def test_state_manager_query_mirror_strips_schema_qualifiers() -> None:
 
     program = manager.assemble_program()
 
-    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__sample_seed" AS SELECT * FROM "sample_seed";' in program
+    assert (
+        'CREATE MATERIALIZED VIEW "__sqlmesh_query__sample_seed" AS SELECT * FROM "sample_seed";'
+        in program
+    )
     assert 'SELECT * FROM "analytics"."sample_seed"' not in program
 
 
@@ -346,7 +356,7 @@ def test_state_manager_skips_query_mirrors_for_sqlmesh_internal_objects() -> Non
 
     program = manager.assemble_program()
 
-    assert '__sqlmesh_query__analytics__source_snapshot__441175831__dev' not in program
+    assert "__sqlmesh_query__analytics__source_snapshot__441175831__dev" not in program
 
 
 def test_state_manager_canonicalizes_snapshot_tables_to_logical_names() -> None:
@@ -362,34 +372,40 @@ def test_state_manager_canonicalizes_snapshot_tables_to_logical_names() -> None:
     program = manager.assemble_program()
 
     assert 'CREATE TABLE "records" ("entity_id" VARCHAR, "description" VARCHAR);' in program
-    assert 'CREATE MATERIALIZED VIEW "__sqlmesh_query__records" AS SELECT * FROM "records";' in program
-    assert 'analytics__records__849752499__dev' not in program
+    assert (
+        'CREATE MATERIALIZED VIEW "__sqlmesh_query__records" AS SELECT * FROM "records";' in program
+    )
+    assert "analytics__records__849752499__dev" not in program
 
 
 def test_hydrate_existing_program_skips_query_mirrors(monkeypatch) -> None:
     manager = db_api.PipelineStateManager()
 
     pipeline_module = types.ModuleType("feldera.pipeline")
-    pipeline_module.Pipeline = type(
+    setattr(
+        pipeline_module,
         "Pipeline",
-        (),
-        {
-            "get": staticmethod(
-                lambda pipeline_name, client: types.SimpleNamespace(
-                    _inner=types.SimpleNamespace(
-                        program_code=(
-                            'CREATE TABLE "full_model" ("id" INT);\n'
-                            'CREATE MATERIALIZED VIEW "__sqlmesh_query__full_model" AS SELECT * FROM "full_model";\n'
-                            'CREATE VIEW "view_model" AS SELECT "id" FROM "full_model";\n'
-                            'CREATE MATERIALIZED VIEW "__sqlmesh_query__view_model" AS SELECT * FROM "view_model";'
+        type(
+            "Pipeline",
+            (),
+            {
+                "get": staticmethod(
+                    lambda pipeline_name, client: types.SimpleNamespace(
+                        _inner=types.SimpleNamespace(
+                            program_code=(
+                                'CREATE TABLE "full_model" ("id" INT);\n'
+                                'CREATE MATERIALIZED VIEW "__sqlmesh_query__full_model" AS SELECT * FROM "full_model";\n'
+                                'CREATE VIEW "view_model" AS SELECT "id" FROM "full_model";\n'
+                                'CREATE MATERIALIZED VIEW "__sqlmesh_query__view_model" AS SELECT * FROM "view_model";'
+                            )
                         )
                     )
                 )
-            )
-        },
+            },
+        ),
     )
     feldera_module = types.ModuleType("feldera")
-    feldera_module.pipeline = pipeline_module
+    setattr(feldera_module, "pipeline", pipeline_module)
 
     monkeypatch.setitem(__import__("sys").modules, "feldera", feldera_module)
     monkeypatch.setitem(__import__("sys").modules, "feldera.pipeline", pipeline_module)
@@ -401,7 +417,7 @@ def test_hydrate_existing_program_skips_query_mirrors(monkeypatch) -> None:
 
 
 def test_cursor_rewrites_queries_to_query_mirrors() -> None:
-    captured_queries = []
+    captured_queries: list[str] = []
 
     class FakeStateManager:
         def has_pending_changes(self) -> bool:
@@ -411,26 +427,29 @@ def test_cursor_rewrites_queries_to_query_mirrors() -> None:
             return {"full_model", "view_model"}
 
         def current_pipeline(self) -> object:
-            return types.SimpleNamespace(
-                query=lambda sql: captured_queries.append(sql) or [{"count": 1}]
-            )
+            def query(sql: str) -> list[dict[str, int]]:
+                captured_queries.append(sql)
+                return [{"count": 1}]
+
+            return types.SimpleNamespace(query=query)
 
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
-        state_manager=FakeStateManager(),
+        state_manager=t.cast(t.Any, FakeStateManager()),
     )
 
     cursor.execute('SELECT COUNT(*) FROM "full_model"')
 
-    assert parse_one(captured_queries[0]).sql() == parse_one(
-        'SELECT COUNT(*) FROM "__sqlmesh_query__full_model"'
-    ).sql()
+    assert (
+        parse_one(captured_queries[0]).sql()
+        == parse_one('SELECT COUNT(*) FROM "__sqlmesh_query__full_model"').sql()
+    )
     assert cursor.fetchone() == (1,)
 
 
 def test_cursor_rewrites_snapshot_queries_to_logical_query_mirrors() -> None:
-    captured_queries = []
+    captured_queries: list[str] = []
 
     class FakeStateManager:
         def has_pending_changes(self) -> bool:
@@ -440,21 +459,26 @@ def test_cursor_rewrites_snapshot_queries_to_logical_query_mirrors() -> None:
             return {"source_events"}
 
         def current_pipeline(self) -> object:
-            return types.SimpleNamespace(
-                query=lambda sql: captured_queries.append(sql) or [{"count": 1}]
-            )
+            def query(sql: str) -> list[dict[str, int]]:
+                captured_queries.append(sql)
+                return [{"count": 1}]
+
+            return types.SimpleNamespace(query=query)
 
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
-        state_manager=FakeStateManager(),
+        state_manager=t.cast(t.Any, FakeStateManager()),
     )
 
-    cursor.execute('SELECT COUNT(*) FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev"')
+    cursor.execute(
+        'SELECT COUNT(*) FROM "sqlmesh__analytics"."analytics__source_events__1782741465__dev"'
+    )
 
-    assert parse_one(captured_queries[0]).sql() == parse_one(
-        'SELECT COUNT(*) FROM "__sqlmesh_query__source_events"'
-    ).sql()
+    assert (
+        parse_one(captured_queries[0]).sql()
+        == parse_one('SELECT COUNT(*) FROM "__sqlmesh_query__source_events"').sql()
+    )
     assert cursor.fetchone() == (1,)
 
 
@@ -464,7 +488,7 @@ def test_insert_to_input_json_payload_rewrites_seed_values() -> None:
         'SELECT CAST("entity_id" AS TEXT) AS "entity_id", '
         'CAST("score" AS DOUBLE) AS "score", '
         'CAST("event_ts" AS TIMESTAMP) AS "event_ts" '
-        'FROM (VALUES '
+        "FROM (VALUES "
         "('123', '4.5', '2026-05-09 01:00:00'), "
         "('456', '7.0', NULL)"
         ') AS "t"("entity_id", "score", "event_ts")'
@@ -528,7 +552,7 @@ def test_cursor_uses_input_json_for_seed_inserts() -> None:
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
-        state_manager=FakeStateManager(),
+        state_manager=t.cast(t.Any, FakeStateManager()),
     )
 
     cursor.execute(
@@ -566,7 +590,7 @@ def test_cursor_raises_execution_error_from_query_rows() -> None:
     cursor = db_api.FelderaCursor(
         client=object(),
         pipeline_name="test_pipeline",
-        state_manager=FakeStateManager(),
+        state_manager=t.cast(t.Any, FakeStateManager()),
     )
 
     with pytest.raises(RuntimeError, match="Execution error: test failure"):

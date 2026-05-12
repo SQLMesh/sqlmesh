@@ -43,7 +43,9 @@ def _install_feldera_pipeline(monkeypatch: pytest.MonkeyPatch, pipeline: t.Any) 
     monkeypatch.setitem(sys.modules, "feldera.pipeline", pipeline_module)
 
 
-def test_columns_uses_pipeline_metadata(adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch):
+def test_columns_uses_pipeline_metadata(
+    adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch
+):
     connection = adapter._connection_pool.get()
     connection._client = object()
     connection._pipeline_name = "configured_pipeline"
@@ -216,9 +218,7 @@ def test_insert_overwrite_by_time_partition_uses_table_operations(
     ]
 
 
-def test_create_view_creates_view(
-    adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch
-):
+def test_create_view_creates_view(adapter: FelderaEngineAdapter, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(adapter, "_get_data_objects", lambda schema_name, object_names=None: [])
     adapter.create_view(
         "db.view_model",

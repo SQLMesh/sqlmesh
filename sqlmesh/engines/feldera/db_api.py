@@ -180,11 +180,7 @@ class PipelineStateManager:
         with self._lock:
             return {
                 *self._tables,
-                *(
-                    name
-                    for name, sql in self._views.items()
-                    if not _is_materialized_view_sql(sql)
-                ),
+                *(name for name, sql in self._views.items() if not _is_materialized_view_sql(sql)),
             }
 
     def assemble_program(self) -> str:
@@ -391,7 +387,9 @@ class PipelineStateManager:
         pipeline._inner = inner_pipeline
         return pipeline
 
-    def _format_compile_error(self, client: t.Any, pipeline_name: str, error: Exception) -> RuntimeError:
+    def _format_compile_error(
+        self, client: t.Any, pipeline_name: str, error: Exception
+    ) -> RuntimeError:
         error_message = str(error)
 
         try:
@@ -417,7 +415,9 @@ class PipelineStateManager:
         rust_error = program_error.get("rust_compilation")
         system_error = program_error.get("system_error")
         if rust_error or system_error:
-            message = f"The program failed to compile: {getattr(pipeline, 'program_status', 'unknown')}\n"
+            message = (
+                f"The program failed to compile: {getattr(pipeline, 'program_status', 'unknown')}\n"
+            )
             if rust_error is not None:
                 message += f"Rust Error: {rust_error}\n"
             if system_error is not None:
@@ -481,7 +481,9 @@ def _query_mirror_table(table: exp.Table) -> exp.Table:
 def _ddl_statements_with_query_mirror(sql: str) -> t.List[str]:
     try:
         expressions = [
-            expression for expression in parse(sql, dialect=FELDERA_DIALECT) if expression is not None
+            expression
+            for expression in parse(sql, dialect=FELDERA_DIALECT)
+            if expression is not None
         ]
     except (ParseError, ValueError):
         expressions = []
@@ -549,9 +551,7 @@ def _rewrite_query_for_query_mirrors(sql: str, relation_names: t.Set[str]) -> st
         return sql
 
     cte_names = {
-        cte.alias_or_name.lower()
-        for cte in expression.find_all(exp.CTE)
-        if cte.alias_or_name
+        cte.alias_or_name.lower() for cte in expression.find_all(exp.CTE) if cte.alias_or_name
     }
 
     def transform(node: exp.Expression) -> exp.Expression:
@@ -567,7 +567,7 @@ def _rewrite_query_for_query_mirrors(sql: str, relation_names: t.Set[str]) -> st
     return expression.transform(transform, copy=True).sql(dialect=FELDERA_DIALECT)
 
 
-def _execution_error(rows: t.List[t.Mapping[str, t.Any]]) -> t.Optional[str]:
+def _execution_error(rows: t.Sequence[t.Mapping[str, t.Any]]) -> t.Optional[str]:
     for row in rows:
         for value in row.values():
             if isinstance(value, str) and value.startswith("Execution error:"):
@@ -634,10 +634,7 @@ def _rewrite_table_ctas_sql(sql: str) -> str:
         properties=expression.args.get("properties"),
     )
     insert_exp = exp.insert(query.copy(), target.copy(), columns=list(columns_to_types))
-    return (
-        f"{create_exp.sql(dialect=FELDERA_DIALECT)};\n"
-        f"{insert_exp.sql(dialect=FELDERA_DIALECT)}"
-    )
+    return f"{create_exp.sql(dialect=FELDERA_DIALECT)};\n{insert_exp.sql(dialect=FELDERA_DIALECT)}"
 
 
 def _select_columns_to_types(query: exp.Expression) -> t.Optional[t.Dict[str, exp.DataType]]:
@@ -649,7 +646,9 @@ def _select_columns_to_types(query: exp.Expression) -> t.Optional[t.Dict[str, ex
 
     for select in query.selects:
         output_name = select.output_name
-        data_type = _projection_type(select) or (select.type or unknown).copy()
+        data_type = (
+            _projection_type(t.cast(exp.Expression, select)) or (select.type or unknown).copy()
+        )
 
         if not output_name or output_name in columns_to_types or data_type == unknown:
             return None
@@ -805,15 +804,16 @@ def _insert_to_input_json_payload(
             return None
 
         source_row = {
-            column: _literal_value(value)
-            for column, value in zip(source_columns, row.expressions)
+            column: _literal_value(value) for column, value in zip(source_columns, row.expressions)
         }
         payload_row: t.Dict[str, t.Any] = {}
         for target_column, select in zip(target_columns, query.selects):
             if not target_column:
                 return None
 
-            evaluated = _evaluate_insert_value_expression(select, source_row)
+            evaluated: t.Any = _evaluate_insert_value_expression(
+                t.cast(exp.Expression, select), source_row
+            )
             if evaluated is _UNSUPPORTED_INGEST_EXPRESSION:
                 return None
             payload_row[target_column] = evaluated
@@ -937,7 +937,7 @@ class FelderaCursor:
         self,
         client: t.Any,
         pipeline_name: str,
-        state_manager: PipelineStateManager,
+        state_manager: t.Any,
         workers: int = 4,
         compilation_profile: str = "dev",
         timeout: int = 300,
@@ -955,9 +955,7 @@ class FelderaCursor:
 
     def execute(self, sql: str, parameters: t.Optional[t.Any] = None) -> None:
         if parameters is not None:
-            raise NotImplementedError(
-                "Feldera DB-API does not support query parameters"
-            )
+            raise NotImplementedError("Feldera DB-API does not support query parameters")
 
         original_sql = sql
         normalized_sql = _normalize_ddl(sql)
@@ -1005,9 +1003,7 @@ class FelderaCursor:
             self._columns = []
             return
 
-        query_sql = _rewrite_query_for_query_mirrors(
-            sql, self._state.queryable_relation_names()
-        )
+        query_sql = _rewrite_query_for_query_mirrors(sql, self._state.queryable_relation_names())
         rows = list(self._get_pipeline().query(query_sql))
         if error := _execution_error(rows):
             raise RuntimeError(error)
@@ -1015,8 +1011,7 @@ class FelderaCursor:
         self._columns = list(rows[0].keys()) if rows else []
         self.rowcount = len(rows)
         self.description = [
-            (column, None, None, None, None, None, None)
-            for column in self._columns
+            (column, None, None, None, None, None, None) for column in self._columns
         ]
 
     def _get_pipeline(self) -> t.Any:
@@ -1072,7 +1067,7 @@ class FelderaConnection:
         self._timeout = timeout
         state_key = (host, pipeline_name)
         with self._state_lock:
-            self._state = self._shared_states.setdefault(state_key, PipelineStateManager())
+            self._state: t.Any = self._shared_states.setdefault(state_key, PipelineStateManager())
 
     def cursor(self) -> FelderaCursor:
         return FelderaCursor(
