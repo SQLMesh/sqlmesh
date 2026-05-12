@@ -482,7 +482,9 @@ def test_compile_program_does_not_wait_after_stop() -> None:
 
     class PipelineBuilder:
         def __init__(self, *args: object, **kwargs: object) -> None:
-            raise AssertionError("PipelineBuilder should not be constructed when the pipeline exists")
+            raise AssertionError(
+                "PipelineBuilder should not be constructed when the pipeline exists"
+            )
 
     client = types.SimpleNamespace(create_or_update_pipeline=lambda pipeline, wait=True: pipeline)
 

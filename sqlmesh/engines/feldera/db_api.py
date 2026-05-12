@@ -9,7 +9,6 @@ import re
 from sqlglot import exp, parse, parse_one
 from sqlglot.errors import ParseError
 
-import sqlmesh.engines.feldera.dialect
 
 logger = logging.getLogger(__name__)
 
