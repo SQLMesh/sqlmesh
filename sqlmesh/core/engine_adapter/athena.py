@@ -19,7 +19,6 @@ from sqlmesh.core.engine_adapter.shared import (
     SourceQuery,
     InsertOverwriteStrategy,
 )
-
 if t.TYPE_CHECKING:
     from sqlmesh.core._typing import SchemaName, TableName
     from sqlmesh.core.engine_adapter._typing import QueryOrDF
@@ -104,8 +103,13 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         """
         schema_name = to_schema(schema_name)
         schema = schema_name.db
-        
-        info_schema_tables = exp.table_("tables", db="information_schema", catalog=schema_name.catalog, alias="t")
+        catalog = schema_name.catalog
+
+        # In Athena, information_schema queries spanning catalogs often fail with CATALOG_NOT_FOUND.
+        # We need to temporarily set the default catalog to the target catalog to execute this query successfully
+        # or use system views depending on exact driver support. By omitting the catalog from the table explicitly
+        # and setting it via connection, we ensure it maps to the correct AWS/S3 integration natively.
+        info_schema_tables = exp.table_("tables", db="information_schema", alias="t")
         
         query = (
             exp.select(
@@ -126,7 +130,25 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         if object_names:
             query = query.where(exp.column("table_name", table="t").isin(*object_names))
 
-        df = self.fetchdf(query)
+        current_catalog = self.get_current_catalog()
+        
+        if catalog and catalog != self._default_catalog:
+            if current_catalog != catalog:
+                self.set_current_catalog(catalog)
+        
+        try:
+            df = self.fetchdf(query)
+            
+            # For queries that don't return the catalog in the result (some drivers/engines), 
+            # fill it in if it's missing or empty and we explicitly queried for a specific catalog
+            if catalog and df is not None and not df.empty and "catalog" in df.columns:
+                df["catalog"] = df["catalog"].fillna(catalog)
+                # Replace empty strings with the catalog as well
+                df["catalog"] = df["catalog"].replace("", catalog)
+                
+        finally:
+            if catalog and catalog != self._default_catalog and current_catalog is not None and current_catalog != catalog:
+                self.set_current_catalog(current_catalog)
 
         return [
             DataObject(
@@ -164,7 +186,11 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         table = exp.to_table(table_name)
         # note: the data_type column contains the full parameterized type, eg 'varchar(10)'
         
-        info_schema_columns = exp.table_("columns", db="information_schema", catalog=table.catalog)
+        catalog = table.catalog
+
+        # Fetching column info across catalogs often fails in Athena (CATALOG_NOT_FOUND)
+        # So we strip the catalog and set the current catalog dynamically
+        info_schema_columns = exp.table_("columns", db="information_schema")
         
         query = (
             exp.select("column_name", "data_type")
@@ -172,6 +198,12 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
             .where(exp.column("table_schema").eq(table.db), exp.column("table_name").eq(table.name))
             .order_by("ordinal_position")
         )
+        
+        current_catalog = self.get_current_catalog()
+        
+        if catalog and catalog != self._default_catalog:
+            if current_catalog != catalog:
+                self.set_current_catalog(catalog)
         
         try:
             result = self.fetchdf(query, quote_identifiers=True)
@@ -185,13 +217,8 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
             # and rely on the set_current_catalog mechanism (applied at the EngineAdapter method level)
             # to set the catalog in the execution context.
             describe_table = table.copy()
-            catalog = describe_table.catalog
-            current_catalog = self.get_current_catalog()
-            
             if catalog and catalog != self._default_catalog:
                 describe_table.set("catalog", None)
-                if catalog != current_catalog:
-                    self.set_current_catalog(catalog)
             
             try:
                 self.execute(exp.Describe(this=describe_table, kind="TABLE"))
@@ -209,9 +236,10 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
                     if column_name and column_name.strip() and column_type and column_type.strip()
                 }
             finally:
-                if catalog and catalog != self._default_catalog and current_catalog != catalog:
-                    if current_catalog is not None:
-                        self.set_current_catalog(current_catalog)
+                pass # context reset is handled in outer finally block
+        finally:
+            if catalog and catalog != self._default_catalog and current_catalog is not None and current_catalog != catalog:
+                self.set_current_catalog(current_catalog)
 
     def _drop_object(
         self,
@@ -263,7 +291,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
             if not any(p for p in properties if isinstance(p, exp.LocationProperty)):
                 properties.append(location)
 
-        if schema.catalog and schema.catalog != self._default_catalog:
+        if schema.catalog:
             target_schema = schema.copy()
             catalog = target_schema.catalog
             target_schema.set("catalog", None)
@@ -430,7 +458,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         # But we also need to strip it from the generated CREATE TABLE statement.
         # Note: We must strip the catalog from the table in the schema if table_name_or_schema is a schema.
         target_table = create_table.this if isinstance(create_table, exp.Schema) else create_table
-        if not expression and target_table.catalog and target_table.catalog != self._default_catalog:
+        if not expression and target_table.catalog:
             target_table.set("catalog", None)
 
         return exp.Create(
@@ -515,7 +543,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
                     exp.PartitionedByProperty(this=exp.Schema(expressions=schema_expressions))
                 )
             else:
-                if is_s3_table:
+                if is_s3_table and expression:
                     array_exprs = []
                     for e in schema_expressions:
                         e_copy = e.copy()
@@ -640,28 +668,28 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         # Note: SHOW TBLPROPERTIES gets parsed by SQLGlot as an exp.Command anyway so we just use a string here
         # This also means we need to use dialect="hive" instead of dialect="athena" so that the identifiers get the correct quoting (backticks)
         target_table = table.copy()
-        if target_table.catalog and target_table.catalog != self._default_catalog:
-            catalog = target_table.catalog
+        catalog = target_table.catalog
+        
+        current_catalog = self.get_current_catalog()
+        if catalog and catalog != self._default_catalog:
             target_table.set("catalog", None)
-            
-            current_catalog = self.get_current_catalog()
             if current_catalog != catalog:
                 self.set_current_catalog(catalog)
-            
-            try:
-                for row in self.fetchall(f"SHOW TBLPROPERTIES {target_table.sql(dialect='hive', identify=True)}"):
-                    row_lower = row[0].lower()
-                    if "external" in row_lower and "true" in row_lower:
-                        return "hive"
-            finally:
-                if current_catalog is not None and current_catalog != catalog:
-                    self.set_current_catalog(current_catalog)
-        else:
+        
+        try:
             for row in self.fetchall(f"SHOW TBLPROPERTIES {target_table.sql(dialect='hive', identify=True)}"):
                 # This query returns a single column with values like 'EXTERNAL\tTRUE'
                 row_lower = row[0].lower()
                 if "external" in row_lower and "true" in row_lower:
                     return "hive"
+        except Exception:
+            # If SHOW TBLPROPERTIES fails (e.g. S3 Tables might not support it), assume iceberg
+            # S3 tables are always iceberg anyway
+            pass
+        finally:
+            if catalog and catalog != self._default_catalog and current_catalog is not None and current_catalog != catalog:
+                self.set_current_catalog(current_catalog)
+        
         return "iceberg"
 
     def _is_hive_partitioned_table(self, table: exp.Table) -> bool:
