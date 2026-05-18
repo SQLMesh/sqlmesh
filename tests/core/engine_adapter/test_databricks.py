@@ -526,3 +526,23 @@ def test_drop_data_object_materialized_view_calls_correct_drop(mocker: MockFixtu
     drop_view_mock.assert_called_once_with(
         mv_data_object.to_table(), ignore_if_not_exists=True, materialized=True
     )
+
+
+def test_create_column_comments_batched(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    mocker.patch.object(adapter, "get_current_catalog", return_value="test_catalog")
+    mocker.patch.object(adapter, "_get_current_schema", return_value="test_schema")
+
+    adapter._create_column_comments(
+        "test_table",
+        {"a": "description for a", "b": "description for b"},
+    )
+
+    sql_calls = to_sql_calls(adapter)
+    assert len(sql_calls) == 1
+    assert sql_calls == [
+        "ALTER TABLE test_catalog.test_schema.`test_table` ALTER COLUMN `a` COMMENT 'description for a', COLUMN `b` COMMENT 'description for b'",
+    ]

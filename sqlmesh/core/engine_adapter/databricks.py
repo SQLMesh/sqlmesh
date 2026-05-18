@@ -411,3 +411,34 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         return super()._build_column_defs(
             target_columns_to_types, column_descriptions, is_view, materialized
         )
+
+    def _create_column_comments(
+        self,
+        table_name: TableName,
+        column_comments: t.Dict[str, str],
+        table_kind: str = "TABLE",
+        materialized_view: bool = False,
+    ) -> None:
+        if not column_comments:
+            return
+
+        table = self._ensure_fqn(table_name)
+        table_sql = table.sql(dialect=self.dialect, identify=True)
+
+        clauses = []
+        for col, comment in column_comments.items():
+            col_sql = exp.column(col).sql(dialect=self.dialect, identify=True)
+            comment_sql = exp.Literal.string(self._truncate_column_comment(comment)).sql(
+                dialect=self.dialect
+            )
+            clauses.append(f"COLUMN {col_sql} COMMENT {comment_sql}")
+
+        sql = f"ALTER TABLE {table_sql} ALTER {', '.join(clauses)}"
+
+        try:
+            self.execute(sql)
+        except Exception:
+            logger.warning(
+                f"Column comments for table '{table.alias_or_name}' not registered - this may be due to limited permissions",
+                exc_info=True,
+            )
