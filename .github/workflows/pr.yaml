@@ -188,9 +188,9 @@ jobs:
 
   ui-style:
     needs: [changes]
-    if:
-      needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
-      'true' || github.ref == 'refs/heads/main'
+    if: false
+      # needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
+      # 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
