@@ -21,6 +21,7 @@ from sqlmesh.core.config import (
 )
 from sqlmesh.core.console import get_console
 from sqlmesh.core.context import Context
+from sqlmesh.utils import yaml
 from sqlmesh.utils.date import now
 from tests.conftest import DuckDBMetadata
 from tests.utils.test_helpers import use_terminal_console
@@ -559,3 +560,58 @@ def test_engine_adapters_multi_repo_all_gateways_gathered(copy_to_temp_path):
     gathered_gateways = context.engine_adapters.keys()
     expected_gateways = {"local", "memory", "extra"}
     assert gathered_gateways == expected_gateways
+
+
+@use_terminal_console
+def test_multi_repo_create_external_models(copy_to_temp_path):
+    """create_external_models should not classify cross-repo models as external (sqlmesh#5326).
+
+    silver.c and silver.e (repo_2) depend on bronze.a (repo_1). When running
+    create_external_models with both repos loaded, bronze.a must NOT be treated
+    as an external model because it is an internal model defined in repo_1.
+
+    The observable symptom of the bug is a warning: "Unable to get schema for
+    'bronze.a'" — because SQLMesh tries to query the schema of what it wrongly
+    thinks is an external table.  A correct implementation never attempts this
+    lookup and therefore emits no such warning.
+    """
+    paths = copy_to_temp_path("examples/multi")
+    repo_1_path = f"{paths[0]}/repo_1"
+    repo_2_path = f"{paths[0]}/repo_2"
+
+    context = Context(paths=[repo_1_path, repo_2_path], gateway="memory")
+    context._new_state_sync().reset(default_catalog=context.default_catalog)
+
+    with patch.object(context.console, "log_warning") as mock_warning:
+        context.create_external_models()
+
+    warning_messages = [str(call) for call in mock_warning.call_args_list]
+    schema_lookup_warnings = [
+        msg
+        for msg in warning_messages
+        if "bronze" in msg and "a" in msg and "schema" in msg.lower()
+    ]
+    assert not schema_lookup_warnings, (
+        "bronze.a should not be looked up as an external model, but got warnings: "
+        + str(schema_lookup_warnings)
+    )
+
+    # repo_2's external_models.yaml must not contain bronze.a
+    repo_2_external = Path(repo_2_path) / c.EXTERNAL_MODELS_YAML
+    if repo_2_external.exists():
+        contents = yaml.load(repo_2_external)
+        external_names = [e["name"] for e in contents]
+        assert not any("bronze" in name and "a" in name for name in external_names), (
+            f"bronze.a should not be in repo_2's external models, but found: {external_names}"
+        )
+
+    # repo_1 has no external dependencies at all
+    repo_1_external = Path(repo_1_path) / c.EXTERNAL_MODELS_YAML
+    if repo_1_external.exists():
+        contents = yaml.load(repo_1_external)
+        assert len(contents) == 0, f"repo_1 should have no external models, got: {contents}"
+
+    # Plan should still resolve all 5 models as internal after create_external_models
+    context.load()
+    plan = context.plan_builder().build()
+    assert len(plan.new_snapshots) == 5

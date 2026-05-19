@@ -2495,6 +2495,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 gateway=external_models_gateway,
                 max_workers=self.concurrent_tasks,
                 strict=strict,
+                all_models=self._models,
             )
 
     @python_api_analytics
