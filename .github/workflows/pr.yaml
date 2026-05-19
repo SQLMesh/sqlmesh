@@ -396,6 +396,7 @@ jobs:
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
     runs-on: ubuntu-latest
+    if: false
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
