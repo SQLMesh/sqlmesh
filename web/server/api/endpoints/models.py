@@ -29,7 +29,7 @@ def get_models(context: Context = Depends(get_loaded_context)) -> t.List[models.
 
 
 @router.get(
-    "/{name:str}",
+    "/{name:path}",
     response_model=models.Model,
     response_model_exclude_unset=True,
     response_model_exclude_none=True,

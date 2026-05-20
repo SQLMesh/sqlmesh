@@ -24,8 +24,8 @@ export class ModelSQLMeshModel<
 
   name: string
   fqn: string
-  path: string
-  full_path: string
+  path: string = ''
+  full_path: string = ''
   dialect: string
   type: ModelType
   columns: Column[]
@@ -50,8 +50,8 @@ export class ModelSQLMeshModel<
     this.name = encodeURI(this.initial.name)
     this.fqn = encodeURI(this.initial.fqn)
     this.default_catalog = this.initial.default_catalog
-    this.path = this.initial.path
-    this.full_path = this.initial.full_path
+    this.path = this.initial.path ?? ''
+    this.full_path = this.initial.full_path ?? ''
     this.dialect = this.initial.dialect
     this.description = this.initial.description
     this.sql = this.initial.sql
