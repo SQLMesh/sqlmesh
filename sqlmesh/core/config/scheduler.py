@@ -131,7 +131,10 @@ class BuiltInSchedulerConfig(_EngineAdapterStateSyncSchedulerConfig, BaseConfig)
         from sqlmesh.core.config.ownership import OwnershipConfig
 
         ownership_config = getattr(context.config, "ownership", None)
-        if isinstance(ownership_config, OwnershipConfig) and not ownership_config.environment_owner_mapping:
+        if (
+            isinstance(ownership_config, OwnershipConfig)
+            and not ownership_config.environment_owner_mapping
+        ):
             ownership_config = None
         return BuiltInPlanEvaluator(
             state_sync=context.state_sync,
