@@ -1,0 +1,148 @@
+# Plan: local-only `format` and `lint`
+
+## Goal
+
+Make `sqlmesh format` and `sqlmesh lint` runnable with no state-sync credentials and no reachable database, by adding a `load_state: bool = True` parameter to `GenericContext` that gates the remote-snapshot merge block in `Context.load()`, and a `LOCAL_ONLY_COMMANDS = ("format", "lint")` tuple in `cli/main.py` that flips it to `False` for those two commands. Everything else stays as it is.
+
+## Overall validation
+
+The PR is done when all of these are true:
+
+- A `Context` constructed against a project whose state connection points at an unreachable host completes both `context.format()` and `context.lint_models()` without raising when `load_state=False` is passed.
+- `sqlmesh format` and `sqlmesh lint` invoked through the CLI runner against a project whose `config.yaml` declares an unreachable state connection complete with `exit_code == 0`. `EngineAdapterStateSync.get_versions` is never called during the run (verified by `mocker.patch` with `assert_not_called()`).
+- A guard-rail CLI test confirms `sqlmesh plan` against the same project *does* call `EngineAdapterStateSync.get_versions` — the new tuple didn't accidentally cover commands it shouldn't.
+- `make py-style` is clean. Ruff, mypy, and the migration-sequence check all pass.
+- `make fast-test` is green (covers the new Context-level tests).
+- The targeted CLI test passes when run directly (`pytest tests/cli/test_cli.py::test_format_runs_without_state -v` and the same for lint). `make slow-test` is green overall.
+- Every commit on the branch carries a `Signed-off-by:` trailer per the DCO bot. `git log --format='%(trailers:key=Signed-off-by)' main..HEAD` shows one for each commit.
+
+## Key discoveries & assumptions
+
+**Facts** (each verified during exploration):
+
+- The state-merge block in `Context.load()` is two consecutive `if any(self._projects):` guards at `sqlmesh/core/context.py:677-699`. The first loads environment statements from prod (lines 677-683); the second populates the local `uncached` set and merges remote snapshots into `self._models` / `self._standalone_audits` (lines 685-699). Both touch state via `self.state_reader.get_environment(c.PROD)`.
+- `GenericContext.__init__` lives at `sqlmesh/core/context.py:376` with the existing `load: bool = True` parameter at line 385. `self.load()` is called at the very end of `__init__` if `load` is true (line 473).
+- The CLI top-level group `cli(...)` lives at `sqlmesh/cli/main.py:94`. The `SKIP_CONTEXT_COMMANDS` and `SKIP_LOAD_COMMANDS` tuples are at `cli/main.py:31` and `cli/main.py:43`. The Context construction call is at `cli/main.py:132-137`.
+- Existing format tests live at `tests/core/test_format.py` (no module-level mark — runs under `fast`). They construct a `Context` directly with `Config()` and `tmp_path` (e.g. `test_format_files` at line 14).
+- Existing linter tests live at `tests/core/linter/test_builtin.py` (also no module-level mark — fast). They use the `copy_to_temp_path` fixture from `tests/conftest.py:565` against `examples/sushi`.
+- CLI runner tests live at `tests/cli/test_cli.py`. The module is marked `pytestmark = pytest.mark.slow` at line 23. The runner fixture is at line 31, returning `CliRunner(env={"COLUMNS": "80"})`. `create_example_project` helper is at line 36.
+- The `Linter` is built per-project in `Context.load()` at `context.py:670-674` before the state-merge block. Linters don't depend on the state-merge having run.
+- `format` and `lint` Click handlers are at `sqlmesh/cli/main.py:343-380` and `sqlmesh/cli/main.py:1168-1185` respectively. Neither needs argument changes.
+
+**Assumptions** (flagged for the implementer to confirm during work):
+
+- A Postgres connection config pointing at an unreachable host (e.g. `localhost:1`) is sufficient to make state access fail loudly without requiring `psycopg2` to actually attempt a real connection — the failure should happen at `get_versions` cursor-fetch time, not at config validation time. If config validation rejects the host, fall back to patching `EngineAdapterStateSync.get_versions` to raise.
+- No existing test currently exercises the "format/lint succeed despite broken state" path. Verified by `rg 'format.*state\|lint.*state' tests/` returning no relevant matches, but the implementer should confirm before adding the regression.
+
+## Existing patterns & conventions to follow
+
+**Code patterns:**
+
+- **CLI command-class tuples.** `SKIP_LOAD_COMMANDS` and `SKIP_CONTEXT_COMMANDS` at `sqlmesh/cli/main.py:31,43` are plain module-level string tuples; the `cli(...)` group reads them inside `if ctx.invoked_subcommand in ...` checks. The new `LOCAL_ONLY_COMMANDS` follows the same shape and is checked in the same block (`cli/main.py:120-123`).
+- **Boolean construction parameters.** `GenericContext.__init__` (`context.py:376-389`) uses plain `bool` parameters with `True`/`False` defaults — e.g. `load: bool = True`. Add `load_state: bool = True` in the same style, with a matching docstring entry in the class docstring at `context.py:362-373`.
+- **Private instance storage.** Constructor flags are stored as private attributes prefixed with `_` (e.g. `self._loaded`, `self._loaders`, `self._models`). Store the new flag as `self._load_state`.
+- **Guard composition.** Add to an existing `if`-guard with `and` rather than wrapping the block in a new outer `if`. Matches the style at `context.py:677` and keeps the diff minimal.
+
+**Test patterns:**
+
+- **Fast Context-level tests** construct a `Context` from a `tmp_path` plus a `Config(...)` literal (`tests/core/test_format.py:14-42`). No fixtures beyond `tmp_path` and `mocker` are needed. Tests are top-level `def test_*` functions, not classes.
+- **Linter tests** use the `copy_to_temp_path` fixture (`tests/conftest.py:565`) and patch the project's `config.py` text to enable rules (`tests/core/linter/test_builtin.py:7-46`). The same fixture can be reused for the local-only lint test by writing a config with an unreachable state connection.
+- **CLI tests** use the session-scoped `runner` fixture and the `create_example_project` helper (`tests/cli/test_cli.py:31-60`). The module-level `pytestmark = pytest.mark.slow` (line 23) inherits to every test added there.
+- **Mocker assertions.** `tests/cli/test_cli.py` already uses `MagicMock` patterns. For "method never called", `mocker.patch(...)` followed by `mock.assert_not_called()` is the idiomatic shape in this repo (`rg "assert_not_called" tests/` shows ~20 hits).
+
+**Contribution conventions:**
+
+- **DCO sign-off.** Every commit needs `Signed-off-by:` — produced by `git commit -s`. The bot blocks merge otherwise. The docs commit on this branch already carries one.
+- **Commit messages.** Recent commits use lowercase semantic prefixes (`fix:`, `chore:`, `docs:`) with imperative subject lines — see `git log --oneline -20` for the pattern. Combined with the global AGENTS.md format: subject ≤50 chars, body wrapped at 72 explaining why, trailers `Coding-Agent: pi` / `Model: <slug>` / `Signed-off-by: ...`.
+- **Pre-commit style.** `make py-style` runs ruff (check + format, line length 100), mypy, and the migration-sequence check. Run before each commit. If only Python changed, `make py-style` is faster than `make style` (which also runs prettier/eslint).
+- **Test selection.** `make fast-test` runs the fast suite plus isolated groups. CLI tests in `tests/cli/test_cli.py` are slow-marked at the module level and require `make slow-test` for the full suite, but the targeted CLI test can be invoked directly via `pytest tests/cli/test_cli.py::<name>` during development.
+- **No new files unless necessary.** Per `03_contributing.md`, new Python files need the `# SPDX-License-Identifier: Apache-2.0` header. This plan adds no new source files — only modifies existing ones — so no header work needed.
+
+## Out of scope
+
+- **`dag` and any other CLI command.** Even though the `load_state` mechanism would make some of `dag` local-only, its `--select-model` path constructs a `Selector` that evaluates `self.state_reader` at construction time (`context.py:2947`). Fixing that requires touching `Selector` and every other `_new_selector` call site — separate change, not in this PR.
+- **Refactoring `Context.load()` structure.** No extraction of the state-merge block into a private method, no rearrangement of the load sequence. The change is `and self._load_state` added to two existing guards.
+- **Suppressing analytics or any other implicit network activity.** Anonymized analytics still fire on `format` and `lint` invocations after this change. That's governed by the existing `disable_anonymized_analytics` config knob and is orthogonal.
+- **Tests for "command X still hits state."** No new test asserts that `plan`/`diff`/`run`/etc. continue to touch state. The default `load_state=True` preserves their behavior; the existing test suite already covers them.
+- **Documentation updates.** The user-facing behavior change is "CI now works without state credentials." Discoverable from the PR description and release notes. No `docs/` page change in this PR.
+- **Backporting or version-gating.** This is a forward-only change on `main`. No release-branch backport, no `@deprecated` shim, no feature flag.
+
+## Tasks
+
+Two tasks, two commits, one PR.
+
+---
+
+### Task 1: Add `load_state` to Context and gate the state-merge block
+
+**Purpose:** Introduce the mechanism that lets a caller construct a `Context` that loads models but never touches the state backend.
+
+**Files:**
+- Modify: `sqlmesh/core/context.py`
+- Modify: `tests/core/test_format.py`
+- Modify: `tests/core/linter/test_builtin.py`
+
+**Test cases** (red first, then implementation):
+
+`tests/core/test_format.py` (fast):
+- *`test_format_without_state_load`*: Construct a `Context` with `paths=tmp_path`, a `Config` whose state connection points at `localhost:1` (Postgres), and `load_state=False`. Place one `.sql` model file under `models/` containing SQL that is already in canonical formatted form (so `--check` succeeds for content reasons — the test is about state access, not about formatting decisions). Call `context.format(check=True)` and assert it returns `True` without raising. Assert the file's contents on disk are unchanged.
+
+`tests/core/linter/test_builtin.py` (fast):
+- *`test_lint_without_state_load`*: Using `copy_to_temp_path("examples/sushi")`, rewrite the sushi `config.py` to enable the linter (existing pattern at `test_builtin.py:21-40`) AND set a Postgres state connection at `localhost:1`. Construct `Context(paths=[sushi_path], load_state=False)`. Call `context.lint_models(raise_on_error=False)` and assert it returns a list (i.e., the linter ran end-to-end) without raising.
+
+**Implementation outline:**
+
+In `sqlmesh/core/context.py`:
+- Extend the `GenericContext` class docstring args block at lines 356-368 with a one-line entry for the new parameter: a brief description noting it gates the remote-state merge inside `load()` and is only meaningful when `load=True`.
+- Add `load_state: bool = True` to `GenericContext.__init__` after the existing `load: bool = True` at line 385.
+- Store as `self._load_state` on the instance during `__init__`, alongside the other private attributes (`self._loaded`, `self._loaders`, etc., around lines 396-415).
+- In `Context.load()`, tighten the two `if any(self._projects):` guards at lines 677 and 685 by ANDing `self._load_state` into each predicate. No other changes to `load()` body. `update_schemas`, `Linter.from_rules`, and the `analytics.collector.on_project_loaded` call are unaffected.
+
+**Verification:**
+- Automated: `pytest tests/core/test_format.py::test_format_without_state_load tests/core/linter/test_builtin.py::test_lint_without_state_load -v` — new tests pass.
+- Automated: `pytest tests/core/test_format.py tests/core/linter/ -v` — existing tests in these files still pass.
+- Automated: `make py-style` — ruff, mypy, migration-sequence all clean.
+- Manual: read the diff of `context.py` and confirm the only non-test changes are: one docstring line, one constructor parameter, one attribute assignment, two `and` insertions.
+
+**Commit:** `git commit -s` with subject `feat: add load_state flag to Context` (37 chars). Trailers: `Coding-Agent: pi`, `Model: <slug>`, `Signed-off-by: ...`.
+
+---
+
+### Task 2: Wire `LOCAL_ONLY_COMMANDS` in the CLI
+
+**Purpose:** Make `sqlmesh format` and `sqlmesh lint` construct their `Context` with `load_state=False`, completing the user-facing behavior.
+
+**Files:**
+- Modify: `sqlmesh/cli/main.py`
+- Modify: `tests/cli/test_cli.py`
+
+**Test cases** (red first, then implementation):
+
+`tests/cli/test_cli.py` (slow, via module-level `pytestmark`):
+
+All three tests share a setup (factor into a local helper or repeat inline):
+1. `create_example_project(tmp_path, template=ProjectTemplate.EMPTY)` to scaffold a real project.
+2. Overwrite the generated `config.yaml` so the `gateways.local` block includes a `state_connection` of type `postgres` pointing at `host: localhost, port: 1`. The DuckDB warehouse connection stays as it is. This makes the project *configuration* declare an unreachable state, exercising the full config-loading path — not just the runtime patch.
+3. Place one already-formatted `.sql` model under `models/` so `format --check` has no formatting reason to fail.
+4. `mocker.patch("sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions", side_effect=RuntimeError("state should not be accessed"))` belt-and-suspenders: if the unreachable host somehow gets bypassed, the patch still catches it.
+
+- *`test_format_runs_without_state`*: Run setup. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "format", "--check"])`. Assert `result.exit_code == 0`. Assert the patched `get_versions` mock has `assert_not_called()`.
+- *`test_lint_runs_without_state`*: Run setup. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "lint"])`. Assert `result.exit_code == 0` and the patched mock was not called.
+- *`test_plan_still_loads_state`* (required guard-rail): Run setup, but patch `get_versions` to return a stub `Versions` object rather than raise, so `plan` can proceed past the version check. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")` to cancel at the prompt. Assert the patched method *was* called at least once. Confirms `LOCAL_ONLY_COMMANDS` didn't accidentally include `plan`.
+
+**Implementation outline:**
+
+In `sqlmesh/cli/main.py`:
+- Add a new module-level constant `LOCAL_ONLY_COMMANDS = ("format", "lint")` immediately after `SKIP_CONTEXT_COMMANDS` (line 43), matching the surrounding tuple style.
+- Inside `cli(...)` (lines 117-123), mirror the existing `load = True; if ... in SKIP_LOAD_COMMANDS: load = False` pattern to introduce a `load_state` local that defaults to `True` and flips to `False` when `ctx.invoked_subcommand in LOCAL_ONLY_COMMANDS`.
+- Pass `load_state=load_state` as an additional keyword argument in the `Context(...)` call at lines 132-137.
+
+**Verification:**
+- Automated: `pytest tests/cli/test_cli.py::test_format_runs_without_state tests/cli/test_cli.py::test_lint_runs_without_state tests/cli/test_cli.py::test_plan_still_loads_state -v` — all three new tests pass.
+- Automated: `pytest tests/cli/test_cli.py::test_format_leading_comma_default -v` — existing format CLI test still green.
+- Automated: `make py-style` — clean.
+- Automated: `make fast-test` — full fast suite green. Confirms Task 1 didn't regress and Task 2 didn't disturb fast tests.
+- Manual: from inside the repo, run `sqlmesh --paths examples/sushi format --check` and `sqlmesh --paths examples/sushi lint` against a real sushi project. They should succeed. (Sushi uses DuckDB so this won't *prove* offline behavior, but it sanity-checks the wiring.)
+- Manual: read the diff of `cli/main.py` and confirm the only changes are: one new tuple, one new variable, one `if`-check, one `load_state=` kwarg in the `Context(...)` call.
+
+**Commit:** `git commit -s` with subject `cli: run format and lint without state` (38 chars). Trailers: `Coding-Agent: pi`, `Model: <slug>`, `Signed-off-by: ...`.
