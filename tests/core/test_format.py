@@ -147,7 +147,6 @@ def test_ignore_formating_files(tmp_path: pathlib.Path):
 
 
 def test_format_without_state_load(tmp_path: pathlib.Path, mocker: MockerFixture):
-    """`format` with `load_state=False` runs end-to-end without touching state sync."""
     mock = mocker.patch(
         "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
         side_effect=RuntimeError("state should not be accessed"),

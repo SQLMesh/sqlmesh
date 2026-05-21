@@ -2240,7 +2240,6 @@ FROM table1""")
 
 
 def _setup_local_only_project(tmp_path, mocker):
-    """Scaffold a project with a non-empty `project` name and patch state to raise."""
     create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
     config_path = tmp_path / "config.yaml"
     existing = config_path.read_text(encoding="utf-8")
@@ -2272,22 +2271,7 @@ def test_lint_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
 
 
 def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
-    """Guard-rail: confirm `plan` is not in LOCAL_ONLY_COMMANDS.
-
-    Asserts two complementary things, because either alone has a blind spot:
-      1. The CLI explicitly passes `load_state=True` to `Context(...)` for `plan`.
-         Checking `"load_state" in call.kwargs` (not just the value) catches a
-         regression where someone deletes the `load_state=load_state` line in
-         cli/main.py entirely — the kwarg would be absent and silently default
-         to True without this check.
-      2. State sync was actually accessed. Catches a regression where someone
-         adds `"plan"` to LOCAL_ONLY_COMMANDS — `load_state` would be False and
-         the patched method would never be called.
-
-    The `plan` invocation is expected to fail because state access is patched
-    to raise. We don't assert on exit_code; mocker.spy records the constructor
-    call before the wrapped __init__ runs, so kwargs are recorded regardless.
-    """
+    """Guard that `plan` explicitly passes `load_state=True` and still reaches state sync."""
     mock = _setup_local_only_project(tmp_path, mocker)
     init_spy = mocker.spy(Context, "__init__")
 
@@ -2307,18 +2291,7 @@ def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
 def test_format_does_not_open_state_connection(
     runner: CliRunner, tmp_path: Path, mocker, monkeypatch
 ):
-    """Realistic CI scenario: a config.yaml declaring a remote Postgres state
-    connection with credentials sourced from unset env vars. Format must still
-    succeed without opening the state connection.
-
-    Distinct from test_format_runs_without_state: that one proves the gate by
-    patching get_versions on a default-DuckDB project. This one proves the
-    end-to-end CI use case where the config declares a real remote backend and
-    no secrets are provisioned. Jinja `env_var('FOO')` with `FOO` unset
-    renders the string `"None"` into the YAML; Pydantic accepts that for
-    Postgres's `user`/`password` (both typed `str`), so config validation
-    passes with placeholder values. The gate then prevents any connection.
-    """
+    """Format must not open a configured remote Postgres state connection when CI secrets are unset."""
     pytest.importorskip("psycopg2")
 
     for var in ("PG_HOST", "PG_USER", "PG_PASSWORD", "PG_DATABASE"):

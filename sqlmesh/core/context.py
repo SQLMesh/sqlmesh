@@ -363,7 +363,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             connection as it appears in configuration will be used.
         concurrent_tasks: The maximum number of tasks that can use the connection concurrently.
         load: Whether or not to automatically load all models and macros (default True).
-        load_state: Whether to merge remote state into the local project during load (default True). Consulted by load(); has no effect when load() is not called.
+        load_state: Whether to merge remote state into the local project during load (default True).
         console: The rich instance used for printing out CLI command results.
         users: A list of users to make known to SQLMesh.
     """

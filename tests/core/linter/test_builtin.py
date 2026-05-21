@@ -235,15 +235,13 @@ def test_no_missing_unit_tests(tmp_path, copy_to_temp_path):
 
 
 def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
-    """`lint_models` with `load_state=False` runs built-in rules without touching state sync."""
     sushi_paths = copy_to_temp_path("examples/sushi")
     sushi_path = sushi_paths[0]
 
     with open(sushi_path / "config.py", "r") as f:
         read_file = f.read()
 
-    # Set a non-empty project name so `any(self._projects)` is truthy and the
-    # state-merge guard in `Context.load()` actually exercises `self._load_state`.
+    # Set a project name so state-merge code reaches the `self._load_state` guard.
     project_anchor = "config = Config(\n    gateways="
     assert project_anchor in read_file, (
         "sushi config.py shape drifted; update project_anchor in test"
@@ -253,8 +251,7 @@ def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
         'config = Config(\n    project="sushi",\n    gateways=',
     )
 
-    # Enable the linter with one built-in rule so `lint_models` actually executes
-    # a rule under `load_state=False`, not just the empty-rule-set path.
+    # Enable one built-in rule so `lint_models` doesn't take the empty-rule-set path.
     before = """    linter=LinterConfig(
         enabled=False,
         rules=[

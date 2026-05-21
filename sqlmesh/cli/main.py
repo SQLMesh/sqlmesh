@@ -116,8 +116,7 @@ def cli(
     configure_console(ignore_warnings=ignore_warnings)
 
     load = True
-    # Computed outside the single-path block: local-only behaviour must apply
-    # regardless of how many --paths were provided, unlike SKIP_LOAD_COMMANDS.
+    # Outside the single-path block: applies regardless of --paths count.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
 
     if len(paths) == 1:
