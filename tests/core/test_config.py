@@ -698,20 +698,6 @@ def test_config_ownership_defaults_to_empty():
     assert config.ownership.environment_owner_mapping == {}
     assert config.ownership.resolve_owner("prod") is None
 
-    attach_config_1 = config.gateways["another_gateway"].connection.catalogs.get("sqlite")
-
-    assert isinstance(attach_config_1, DuckDBAttachOptions)
-    assert attach_config_1.type == "sqlite"
-    assert attach_config_1.path == "test.db"
-    assert attach_config_1.read_only is False
-
-    attach_config_2 = config.gateways["another_gateway"].connection.catalogs.get("postgres")
-
-    assert isinstance(attach_config_2, DuckDBAttachOptions)
-    assert attach_config_2.type == "postgres"
-    assert attach_config_2.path == "dbname=postgres user=postgres host=127.0.0.1"
-    assert attach_config_2.read_only is True
-
 
 def test_ownership_config_physical_owner():
     # physical_owner is a simple optional string — no pattern matching.

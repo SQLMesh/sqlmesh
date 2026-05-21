@@ -1095,9 +1095,7 @@ def test_table_format(adapter: SparkEngineAdapter, mocker: MockerFixture):
 def test_alter_schema_owner(make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(SparkEngineAdapter)
     adapter.alter_schema_owner("catalog.my_schema", "svc_prod_spn")
-    assert to_sql_calls(adapter) == [
-        "ALTER SCHEMA `catalog`.`my_schema` OWNER TO `svc_prod_spn`"
-    ]
+    assert to_sql_calls(adapter) == ["ALTER SCHEMA `catalog`.`my_schema` OWNER TO `svc_prod_spn`"]
 
 
 def test_alter_schema_owner_three_part_name(make_mocked_engine_adapter: t.Callable):

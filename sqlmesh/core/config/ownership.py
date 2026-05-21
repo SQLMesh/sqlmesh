@@ -11,9 +11,7 @@ from sqlmesh.core.config.common import compile_regex_mapping
 if t.TYPE_CHECKING:
     OwnershipMapping = t.Dict[re.Pattern, str]
 else:
-    OwnershipMapping = t.Annotated[
-        t.Dict[re.Pattern, str], BeforeValidator(compile_regex_mapping)
-    ]
+    OwnershipMapping = t.Annotated[t.Dict[re.Pattern, str], BeforeValidator(compile_regex_mapping)]
 
 
 class OwnershipConfig(BaseConfig):

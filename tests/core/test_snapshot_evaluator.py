@@ -495,9 +495,7 @@ def test_promote_owner_applied_per_view(mocker: MockerFixture, adapter_mock, mak
         snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
         snapshots.append(snapshot)
 
-    evaluator.promote(
-        snapshots, EnvironmentNamingInfo(name="test_env"), owner="svc_prod_spn"
-    )
+    evaluator.promote(snapshots, EnvironmentNamingInfo(name="test_env"), owner="svc_prod_spn")
 
     assert adapter_mock.alter_view_owner.call_count == 3
     called_owners = {c.args[1] for c in adapter_mock.alter_view_owner.call_args_list}
@@ -546,9 +544,7 @@ def test_create_without_physical_owner_skips_alter(
     adapter_mock.alter_table_owner.assert_not_called()
 
 
-def test_create_view_kind_skips_physical_owner(
-    mocker: MockerFixture, adapter_mock, make_snapshot
-):
+def test_create_view_kind_skips_physical_owner(mocker: MockerFixture, adapter_mock, make_snapshot):
     """ViewKind snapshots skip alter_table_owner even when physical_owner is set."""
     adapter_mock.get_data_objects.return_value = []
     evaluator = SnapshotEvaluator(adapter_mock)
