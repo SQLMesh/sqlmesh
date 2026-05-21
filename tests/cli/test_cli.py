@@ -2304,7 +2304,7 @@ def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
     assert mock.called, "state-sync was never accessed during `plan`"
 
 
-def test_format_runs_without_state_credentials(
+def test_format_does_not_open_state_connection(
     runner: CliRunner, tmp_path: Path, mocker, monkeypatch
 ):
     """Realistic CI scenario: a config.yaml declaring a remote Postgres state
@@ -2312,8 +2312,12 @@ def test_format_runs_without_state_credentials(
     succeed without opening the state connection.
 
     Distinct from test_format_runs_without_state: that one proves the gate by
-    patching get_versions. This one proves the end-to-end CI use case where
-    no secrets are provisioned and YAML env_var() resolves to None.
+    patching get_versions on a default-DuckDB project. This one proves the
+    end-to-end CI use case where the config declares a real remote backend and
+    no secrets are provisioned. Jinja `env_var('FOO')` with `FOO` unset
+    renders the string `"None"` into the YAML; Pydantic accepts that for
+    Postgres's `user`/`password` (both typed `str`), so config validation
+    passes with placeholder values. The gate then prevents any connection.
     """
     pytest.importorskip("psycopg2")
 
