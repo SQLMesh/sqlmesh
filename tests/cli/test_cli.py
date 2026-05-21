@@ -2237,3 +2237,50 @@ FROM table1""")
         assert result.exit_code == 0
     finally:
         del os.environ["SQLMESH__FORMAT__LEADING_COMMA"]
+
+
+def _setup_local_only_project(tmp_path, mocker):
+    """Scaffold a project with a non-empty `project` name and patch state to raise."""
+    create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
+    config_path = tmp_path / "config.yaml"
+    existing = config_path.read_text(encoding="utf-8")
+    config_path.write_text("project: cli_test\n\n" + existing, encoding="utf-8")
+
+    (tmp_path / "models" / "example.sql").write_text(
+        "MODEL(name local.example, dialect 'duckdb'); SELECT 1 AS col\n",
+        encoding="utf-8",
+    )
+
+    return mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+
+def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_lint_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "lint"])
+    assert result.exit_code == 0, f"Lint failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard-rail: confirm `plan` is not in LOCAL_ONLY_COMMANDS by checking
+    the Context constructor received load_state=True for it."""
+    _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")
+
+    assert init_spy.called, "Context was never constructed"
+    load_state_values = [call.kwargs.get("load_state", True) for call in init_spy.call_args_list]
+    assert all(load_state_values), (
+        f"Context was constructed with load_state=False for `plan`: {load_state_values}"
+    )

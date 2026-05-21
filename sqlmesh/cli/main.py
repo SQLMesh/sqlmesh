@@ -41,6 +41,7 @@ SKIP_LOAD_COMMANDS = (
     "table_name",
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
+LOCAL_ONLY_COMMANDS = ("format", "lint")
 
 
 def _sqlmesh_version() -> str:
@@ -115,6 +116,7 @@ def cli(
     configure_console(ignore_warnings=ignore_warnings)
 
     load = True
+    load_state = True
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -123,6 +125,8 @@ def cli(
             return
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
+        if ctx.invoked_subcommand in LOCAL_ONLY_COMMANDS:
+            load_state = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
     log_limit = list(configs.values())[0].log_limit
@@ -135,6 +139,7 @@ def cli(
             config=configs,
             gateway=gateway,
             load=load,
+            load_state=load_state,
         )
     except Exception:
         if debug:

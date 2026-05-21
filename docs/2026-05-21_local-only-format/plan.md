@@ -121,15 +121,15 @@ In `sqlmesh/core/context.py`:
 
 `tests/cli/test_cli.py` (slow, via module-level `pytestmark`):
 
-All three tests share a setup (factor into a local helper or repeat inline):
+All three tests share a setup factored into `_setup_local_only_project(tmp_path, mocker)`:
 1. `create_example_project(tmp_path, template=ProjectTemplate.EMPTY)` to scaffold a real project.
-2. Overwrite the generated `config.yaml` so the `gateways.local` block includes a `state_connection` of type `postgres` pointing at `host: localhost, port: 1`. The DuckDB warehouse connection stays as it is. This makes the project *configuration* declare an unreachable state, exercising the full config-loading path — not just the runtime patch.
-3. Place one already-formatted `.sql` model under `models/` so `format --check` has no formatting reason to fail.
-4. `mocker.patch("sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions", side_effect=RuntimeError("state should not be accessed"))` belt-and-suspenders: if the unreachable host somehow gets bypassed, the patch still catches it.
+2. Prepend `project: cli_test\n\n` to the generated `config.yaml` so `Config.project` is non-empty and `any(self._projects)` is truthy. Without this, the existing outer guard short-circuits regardless of `self._load_state` and the tests are vacuous.
+3. Write one `.sql` model under `models/` so the CLI doesn't short-circuit with "no models found".
+4. `mocker.patch("sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions", side_effect=RuntimeError("state should not be accessed"))`. (No `state_connection: postgres` block in `config.yaml` — same `psycopg2` problem as Task 1; YAML validation through Pydantic fires the import validator. The patch is the only mechanism.)
 
-- *`test_format_runs_without_state`*: Run setup. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "format", "--check"])`. Assert `result.exit_code == 0`. Assert the patched `get_versions` mock has `assert_not_called()`.
-- *`test_lint_runs_without_state`*: Run setup. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "lint"])`. Assert `result.exit_code == 0` and the patched mock was not called.
-- *`test_plan_still_loads_state`* (required guard-rail): Run setup, but patch `get_versions` to return a stub `Versions` object rather than raise, so `plan` can proceed past the version check. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")` to cancel at the prompt. Assert the patched method *was* called at least once. Confirms `LOCAL_ONLY_COMMANDS` didn't accidentally include `plan`.
+- *`test_format_runs_without_state`*: Run setup. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "format"])` (no `--check` — lets format write in place, exit_code 0 whenever the call returned). Assert `result.exit_code == 0` and `mock.assert_not_called()`.
+- *`test_lint_runs_without_state`*: Run setup. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "lint"])`. Assert `result.exit_code == 0` and `mock.assert_not_called()`.
+- *`test_plan_still_loads_state`* (required guard-rail): Run setup. *Additionally* spy on `Context.__init__` via `mocker.spy(Context, "__init__")`. Invoke `runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")`. Assert that the spy was called and that every call's `load_state` kwarg was `True` (defaults to `True` when omitted). This is stronger than asserting `mock.called` on `get_versions` — a regression where someone added `"plan"` to `LOCAL_ONLY_COMMANDS` would still hit state later via `context.plan(...)`, so `get_versions.called` alone wouldn't catch it. The spy proves the Context constructor itself was called with `load_state=True` for `plan`. Verified by temporarily appending `"plan"` to `LOCAL_ONLY_COMMANDS`; the spy-based assertion fails.
 
 **Implementation outline:**
 
