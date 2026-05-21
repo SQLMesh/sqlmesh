@@ -125,6 +125,7 @@ def delete_expired_snapshots(
     *,
     current_ts: int,
     ignore_ttl: bool = False,
+    force_delete: bool = False,
     batch_size: t.Optional[int] = None,
     console: t.Optional[Console] = None,
 ) -> t.List[str]:
@@ -138,6 +139,7 @@ def delete_expired_snapshots(
         snapshot_evaluator: SnapshotEvaluator instance to clean up tables associated with snapshots.
         current_ts: Timestamp used to evaluate expiration.
         ignore_ttl: If True, include snapshots regardless of TTL (only checks if unreferenced).
+        force_delete: If True, delete snapshot state records even when physical table cleanup fails.
         batch_size: Maximum number of snapshots to fetch per batch.
         console: Optional console for reporting progress.
 
@@ -162,23 +164,32 @@ def delete_expired_snapshots(
             len(batch.expired_snapshot_ids),
             end_info,
         )
+        cleanup_succeeded = True
         try:
             snapshot_evaluator.cleanup(
                 target_snapshots=batch.cleanup_tasks,
                 on_complete=console.update_cleanup_progress if console else None,
             )
-            state_sync.delete_expired_snapshots(
-                batch_range=ExpiredBatchRange(
-                    start=RowBoundary.lowest_boundary(),
-                    end=batch.batch_range.end,
-                ),
-                ignore_ttl=ignore_ttl,
-            )
-            logger.info("Cleaned up expired snapshots batch")
-            num_expired_snapshots += len(batch.expired_snapshot_ids)
-        except Exception as e:
-            message = f"Failed to clean up an expired snapshots batch: {e}"
+        except Exception as failed_drops:
+            message = f"Failed to clean up: {failed_drops}"
             logger.warning(message)
             failures.append(message)
+            cleanup_succeeded = False
+
+        if cleanup_succeeded or force_delete:
+            try:
+                state_sync.delete_expired_snapshots(
+                    batch_range=ExpiredBatchRange(
+                        start=RowBoundary.lowest_boundary(),
+                        end=batch.batch_range.end,
+                    ),
+                    ignore_ttl=ignore_ttl,
+                )
+                logger.info("Cleaned up expired snapshots batch")
+                num_expired_snapshots += len(batch.expired_snapshot_ids)
+            except Exception as e:
+                message = f"Failed to delete expired snapshot state records: {e}"
+                logger.warning(message)
+                failures.append(message)
     logger.info("Cleaned up %s expired snapshots", num_expired_snapshots)
     return failures

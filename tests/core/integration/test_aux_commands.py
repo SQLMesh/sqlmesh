@@ -224,6 +224,79 @@ def test_janitor_warn_on_delete_failure_downgrades_aggregated_error(
     assert "Janitor completed with failures" in warn_spy.call_args[0][0]
 
 
+def test_janitor_force_delete_removes_environment_state_despite_drop_failure(
+    mocker: MockerFixture, tmp_path: Path
+):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "model1.sql").write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+    )
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+    ctx.invalidate_environment("dev")
+
+    mocker.patch(
+        "sqlmesh.core.context.cleanup_expired_views",
+        return_value=["view drop error"],
+    )
+    mocker.patch(
+        "sqlmesh.core.janitor.iter_expired_snapshot_batches",
+        return_value=iter([]),
+    )
+
+    # without force_delete the environment is retained for retry
+    with pytest.raises(SQLMeshError):
+        ctx._run_janitor(ignore_ttl=True, force_delete=False)
+    assert ctx.state_sync.get_environment("dev") is not None
+
+    # with force_delete the environment state is purged even though drops failed
+    with pytest.raises(SQLMeshError):
+        ctx._run_janitor(ignore_ttl=True, force_delete=True)
+    assert ctx.state_sync.get_environment("dev") is None
+
+
+def test_janitor_force_delete_removes_snapshot_state_despite_cleanup_failure(
+    mocker: MockerFixture, tmp_path: Path
+):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    model1_path = models_dir / "model1.sql"
+    model1_path.write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+
+    # using warn_on_delete_failure so the janitor completes and we can inspect the state after
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            janitor=JanitorConfig(warn_on_delete_failure=True),
+        ),
+    )
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+    model1_snapshot = ctx.get_snapshot("test.model1")
+
+    # simulating a zombie snapshot
+    model1_path.unlink()
+    ctx.load()
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+    ctx.invalidate_environment("dev")
+
+    mocker.patch(
+        "sqlmesh.core.snapshot.evaluator.SnapshotEvaluator.cleanup",
+        side_effect=Exception("table cleanup error"),
+    )
+
+    # without force_delete the snapshot state is retained for retry
+    ctx._run_janitor(ignore_ttl=True, force_delete=False)
+    assert ctx.state_sync.get_snapshots([model1_snapshot.snapshot_id])  # type: ignore
+
+    # with force_delete the snapshot state record is purged even though cleanup failed
+    ctx._run_janitor(ignore_ttl=True, force_delete=True)
+    assert not ctx.state_sync.get_snapshots([model1_snapshot.snapshot_id])  # type: ignore
+
+
 @use_terminal_console
 def test_destroy(copy_to_temp_path):
     # Testing project with two gateways to verify cleanup is performed across engines
