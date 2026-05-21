@@ -175,6 +175,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             self.console.log_success(skip_message)
             return
 
+        physical_owner = self.ownership_config.physical_owner if self.ownership_config else None
         completion_status = None
         progress_stopped = False
         try:
@@ -188,6 +189,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
                     x, plan.environment, self.default_catalog
                 ),
                 on_complete=self.console.update_creation_progress,
+                owner=physical_owner,
             )
             if completion_status.is_nothing_to_do:
                 self.console.log_success(skip_message)
@@ -212,9 +214,10 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def visit_physical_layer_schema_creation_stage(
         self, stage: stages.PhysicalLayerSchemaCreationStage, plan: EvaluatablePlan
     ) -> None:
+        physical_owner = self.ownership_config.physical_owner if self.ownership_config else None
         try:
             self.snapshot_evaluator.create_physical_schemas(
-                stage.snapshots, stage.deployability_index
+                stage.snapshots, stage.deployability_index, owner=physical_owner
             )
         except Exception as ex:
             raise PlanError("Plan application failed.") from ex

@@ -1432,6 +1432,13 @@ class EngineAdapter:
         (e.g. Spark/Databricks Unity Catalog: ALTER VIEW ... OWNER TO ...).
         """
 
+    def alter_table_owner(self, table_name: TableName, owner: str) -> None:
+        """Set the owner of a table.
+
+        No-op by default. Override in dialect-specific adapters that support ownership control
+        (e.g. Spark/Databricks Unity Catalog: ALTER TABLE ... OWNER TO ...).
+        """
+
     def drop_schema(
         self,
         schema_name: SchemaName,

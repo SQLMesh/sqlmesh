@@ -368,6 +368,7 @@ class SnapshotEvaluator:
         on_complete: t.Optional[t.Callable[[SnapshotInfoLike], None]] = None,
         allow_destructive_snapshots: t.Optional[t.Set[str]] = None,
         allow_additive_snapshots: t.Optional[t.Set[str]] = None,
+        owner: t.Optional[str] = None,
     ) -> CompletionStatus:
         """Creates a physical snapshot schema and table for the given collection of snapshots.
 
@@ -379,6 +380,7 @@ class SnapshotEvaluator:
             on_complete: A callback to call on each successfully created snapshot.
             allow_destructive_snapshots: Set of snapshots that are allowed to have destructive schema changes.
             allow_additive_snapshots: Set of snapshots that are allowed to have additive schema changes.
+            owner: Optional principal to set as table owner after creation.
 
         Returns:
             CompletionStatus: The status of the creation operation (success, failure, nothing to do).
@@ -398,17 +400,22 @@ class SnapshotEvaluator:
             on_complete=on_complete,
             allow_destructive_snapshots=allow_destructive_snapshots or set(),
             allow_additive_snapshots=allow_additive_snapshots or set(),
+            owner=owner,
         )
         return CompletionStatus.SUCCESS
 
     def create_physical_schemas(
-        self, snapshots: t.Iterable[Snapshot], deployability_index: DeployabilityIndex
+        self,
+        snapshots: t.Iterable[Snapshot],
+        deployability_index: DeployabilityIndex,
+        owner: t.Optional[str] = None,
     ) -> None:
         """Creates the physical schemas for the given snapshots.
 
         Args:
             snapshots: Snapshots to create physical schemas for.
             deployability_index: Determines snapshots that are deployable in the context of this creation.
+            owner: Optional principal to set as schema owner after creation.
         """
         tables_by_gateway: t.Dict[t.Optional[str], t.List[str]] = defaultdict(list)
         for snapshot in snapshots:
@@ -420,7 +427,7 @@ class SnapshotEvaluator:
         gateway_table_pairs = [
             (gateway, table) for gateway, tables in tables_by_gateway.items() for table in tables
         ]
-        self._create_schemas(gateway_table_pairs=gateway_table_pairs)
+        self._create_schemas(gateway_table_pairs=gateway_table_pairs, owner=owner)
 
     def get_snapshots_to_create(
         self, target_snapshots: t.Iterable[Snapshot], deployability_index: DeployabilityIndex
@@ -453,6 +460,7 @@ class SnapshotEvaluator:
         on_complete: t.Optional[t.Callable[[SnapshotInfoLike], None]],
         allow_destructive_snapshots: t.Set[str],
         allow_additive_snapshots: t.Set[str],
+        owner: t.Optional[str] = None,
     ) -> None:
         """Internal method to create tables in parallel."""
         with self.concurrent_context():
@@ -465,6 +473,7 @@ class SnapshotEvaluator:
                     allow_destructive_snapshots=allow_destructive_snapshots,
                     allow_additive_snapshots=allow_additive_snapshots,
                     on_complete=on_complete,
+                    owner=owner,
                 ),
                 self.ddl_concurrent_tasks,
                 raise_on_error=False,
@@ -870,6 +879,7 @@ class SnapshotEvaluator:
         allow_destructive_snapshots: t.Set[str],
         allow_additive_snapshots: t.Set[str],
         on_complete: t.Optional[t.Callable[[SnapshotInfoLike], None]] = None,
+        owner: t.Optional[str] = None,
     ) -> None:
         """Creates a physical table for the given snapshot.
 
@@ -880,6 +890,7 @@ class SnapshotEvaluator:
             on_complete: A callback to call on each successfully created database object.
             allow_destructive_snapshots: Snapshots for which destructive schema changes are allowed.
             allow_additive_snapshots: Snapshots for which additive schema changes are allowed.
+            owner: Optional principal to set as table owner after creation.
         """
         if not snapshot.is_model:
             return
@@ -907,6 +918,9 @@ class SnapshotEvaluator:
                 **create_render_kwargs
             )
 
+            is_table_deployable = deployability_index.is_deployable(snapshot)
+            table_name = snapshot.table_name(is_deployable=is_table_deployable)
+
             if self._can_clone(snapshot, deployability_index):
                 self._clone_snapshot_in_dev(
                     snapshot=snapshot,
@@ -919,16 +933,18 @@ class SnapshotEvaluator:
                     run_pre_post_statements=True,
                 )
             else:
-                is_table_deployable = deployability_index.is_deployable(snapshot)
                 self._execute_create(
                     snapshot=snapshot,
-                    table_name=snapshot.table_name(is_deployable=is_table_deployable),
+                    table_name=table_name,
                     is_table_deployable=is_table_deployable,
                     deployability_index=deployability_index,
                     create_render_kwargs=create_render_kwargs,
                     rendered_physical_properties=rendered_physical_properties,
                     dry_run=True,
                 )
+
+        if owner and not isinstance(snapshot.model.kind, ViewKind):
+            adapter.alter_table_owner(table_name, owner)
 
         evaluation_strategy.run_post_statements(
             snapshot=snapshot, render_kwargs={**create_render_kwargs, "inside_transaction": False}

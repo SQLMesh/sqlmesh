@@ -1125,6 +1125,23 @@ def test_alter_view_owner_special_chars_in_principal(make_mocked_engine_adapter:
     ]
 
 
+def test_alter_table_owner(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_table_owner("catalog.sqlmesh__sushi.orders__abc123", "svc_prod_spn")
+    assert to_sql_calls(adapter) == [
+        "ALTER TABLE `catalog`.`sqlmesh__sushi`.`orders__abc123` OWNER TO `svc_prod_spn`"
+    ]
+
+
+def test_alter_table_owner_special_chars_in_principal(make_mocked_engine_adapter: t.Callable):
+    # Databricks Unity Catalog principals can contain colons and @ signs.
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_table_owner("catalog.sqlmesh__sushi.orders__abc123", "group:data@company.com")
+    assert to_sql_calls(adapter) == [
+        "ALTER TABLE `catalog`.`sqlmesh__sushi`.`orders__abc123` OWNER TO `group:data@company.com`"
+    ]
+
+
 def test_alter_schema_owner_base_noop(make_mocked_engine_adapter: t.Callable):
     # The base EngineAdapter.alter_schema_owner is a no-op: adapters that don't
     # support ownership control silently skip it without emitting any SQL.
@@ -1133,6 +1150,7 @@ def test_alter_schema_owner_base_noop(make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
     adapter.alter_schema_owner("my_schema", "some_owner")
     adapter.alter_view_owner("my_schema.my_view", "some_owner")
+    adapter.alter_table_owner("my_schema.my_table", "some_owner")
     # No ALTER SQL should have been emitted
     alter_calls = [s for s in to_sql_calls(adapter) if "OWNER" in s.upper()]
     assert alter_calls == []

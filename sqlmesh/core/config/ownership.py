@@ -30,9 +30,11 @@ class OwnershipConfig(BaseConfig):
           environment_owner_mapping:
             "^prod$": "svc_prod_spn"
             ".*": "group:shared-developers"
+          physical_owner: "group:shared-developers"
     """
 
     environment_owner_mapping: OwnershipMapping = {}
+    physical_owner: t.Optional[str] = None
 
     def resolve_owner(self, environment_name: str) -> t.Optional[str]:
         """Return the configured owner for the given environment name, or None."""

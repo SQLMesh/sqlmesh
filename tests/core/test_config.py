@@ -713,6 +713,28 @@ def test_config_ownership_defaults_to_empty():
     assert attach_config_2.read_only is True
 
 
+def test_ownership_config_physical_owner():
+    # physical_owner is a simple optional string — no pattern matching.
+    config = OwnershipConfig(physical_owner="group:data-platform")
+    assert config.physical_owner == "group:data-platform"
+
+
+def test_ownership_config_physical_owner_default_none():
+    assert OwnershipConfig().physical_owner is None
+
+
+def test_ownership_config_physical_owner_deserialization():
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership={
+            "environment_owner_mapping": {"^prod$": "svc_prod"},
+            "physical_owner": "group:data-platform",
+        },
+    )
+    assert config.ownership.physical_owner == "group:data-platform"
+    assert config.ownership.resolve_owner("prod") == "svc_prod"
+
+
 def test_load_model_defaults_audits(tmp_path):
     config_path = tmp_path / "config_model_defaults_audits.yaml"
     with open(config_path, "w", encoding="utf-8") as fd:

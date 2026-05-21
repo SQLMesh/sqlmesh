@@ -567,6 +567,13 @@ class SparkEngineAdapter(
         owner_sql = exp.to_identifier(owner, quoted=True).sql(dialect=self.dialect)
         self.execute(f"ALTER VIEW {view_sql} OWNER TO {owner_sql}")
 
+    def alter_table_owner(self, table_name: TableName, owner: str) -> None:
+        table_sql = exp.to_table(table_name, dialect=self.dialect).sql(
+            dialect=self.dialect, identify=True
+        )
+        owner_sql = exp.to_identifier(owner, quoted=True).sql(dialect=self.dialect)
+        self.execute(f"ALTER TABLE {table_sql} OWNER TO {owner_sql}")
+
     @classmethod
     def _wap_branch_name(cls, wap_id: str) -> str:
         return f"{cls.WAP_PREFIX}{wap_id}"
