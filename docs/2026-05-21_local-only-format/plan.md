@@ -95,7 +95,7 @@ Two tasks, two commits, one PR.
 
 In `sqlmesh/core/context.py`:
 - Extend the `GenericContext` class docstring args block at lines 356-368 with a one-line entry for the new parameter: a brief description noting it gates the remote-state merge inside `load()` and is only meaningful when `load=True`.
-- Add `load_state: bool = True` to `GenericContext.__init__` after the existing `load: bool = True` at line 385.
+- Add `load_state: bool = True` to `GenericContext.__init__` at the *end* of the parameter list (after `selector`). Placing it last avoids shifting any existing positional arguments for callers outside this repo who may pass `users`, `config_loader_kwargs`, or `selector` positionally.
 - Store as `self._load_state` on the instance during `__init__`, alongside the other private attributes (`self._loaded`, `self._loaders`, etc., around lines 396-415).
 - In `Context.load()`, tighten the two `if any(self._projects):` guards at lines 677 and 685 by ANDing `self._load_state` into each predicate. No other changes to `load()` body. `update_schemas`, `Linter.from_rules`, and the `analytics.collector.on_project_loaded` call are unaffected.
 
@@ -135,7 +135,7 @@ All three tests share a setup factored into `_setup_local_only_project(tmp_path,
 
 In `sqlmesh/cli/main.py`:
 - Add a new module-level constant `LOCAL_ONLY_COMMANDS = ("format", "lint")` immediately after `SKIP_CONTEXT_COMMANDS` (line 43), matching the surrounding tuple style.
-- Inside `cli(...)` (lines 117-123), mirror the existing `load = True; if ... in SKIP_LOAD_COMMANDS: load = False` pattern to introduce a `load_state` local that defaults to `True` and flips to `False` when `ctx.invoked_subcommand in LOCAL_ONLY_COMMANDS`.
+- Inside `cli(...)` (around line 117), compute `load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS` *outside* the `if len(paths) == 1:` block. Unlike `SKIP_LOAD_COMMANDS` (whose `load = False` toggle is inside the single-path conditional), `load_state` must apply regardless of how many `--paths` were provided — multi-project monorepo invocations of `format`/`lint` need to be local-only too.
 - Pass `load_state=load_state` as an additional keyword argument in the `Context(...)` call at lines 132-137.
 
 **Verification:**

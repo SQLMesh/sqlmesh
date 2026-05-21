@@ -235,7 +235,7 @@ def test_no_missing_unit_tests(tmp_path, copy_to_temp_path):
 
 
 def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
-    """`lint_models` with `load_state=False` runs end-to-end without touching state sync."""
+    """`lint_models` with `load_state=False` runs built-in rules without touching state sync."""
     sushi_paths = copy_to_temp_path("examples/sushi")
     sushi_path = sushi_paths[0]
 
@@ -249,6 +249,23 @@ def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
         'config = Config(\n    project="sushi",\n    gateways=',
     )
     assert 'project="sushi"' in read_file
+
+    # Enable the linter with one built-in rule so `lint_models` actually executes
+    # a rule under `load_state=False`, not just the empty-rule-set path.
+    before = """    linter=LinterConfig(
+        enabled=False,
+        rules=[
+            "ambiguousorinvalidcolumn",
+            "invalidselectstarexpansion",
+            "noselectstar",
+            "nomissingaudits",
+            "nomissingowner",
+            "nomissingexternalmodels",
+        ],
+    ),"""
+    after = 'linter=LinterConfig(enabled=True, rules=["nomissingexternalmodels"]),'
+    read_file = read_file.replace(before, after)
+    assert after in read_file
 
     with open(sushi_path / "config.py", "w") as f:
         f.writelines(read_file)

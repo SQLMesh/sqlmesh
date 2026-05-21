@@ -116,7 +116,7 @@ def cli(
     configure_console(ignore_warnings=ignore_warnings)
 
     load = True
-    load_state = True
+    load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -125,8 +125,6 @@ def cli(
             return
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
-        if ctx.invoked_subcommand in LOCAL_ONLY_COMMANDS:
-            load_state = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
     log_limit = list(configs.values())[0].log_limit

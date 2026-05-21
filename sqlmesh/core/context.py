@@ -384,10 +384,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         concurrent_tasks: t.Optional[int] = None,
         loader: t.Optional[t.Type[Loader]] = None,
         load: bool = True,
-        load_state: bool = True,
         users: t.Optional[t.List[User]] = None,
         config_loader_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
         selector: t.Optional[t.Type[Selector]] = None,
+        load_state: bool = True,
     ):
         self.configs = (
             config
