@@ -2272,24 +2272,36 @@ def test_lint_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
 
 
 def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
-    """Guard-rail: confirm `plan` is not in LOCAL_ONLY_COMMANDS by checking
-    the Context constructor received load_state=True for it.
+    """Guard-rail: confirm `plan` is not in LOCAL_ONLY_COMMANDS.
+
+    Asserts two complementary things, because either alone has a blind spot:
+      1. The CLI explicitly passes `load_state=True` to `Context(...)` for `plan`.
+         Checking `"load_state" in call.kwargs` (not just the value) catches a
+         regression where someone deletes the `load_state=load_state` line in
+         cli/main.py entirely — the kwarg would be absent and silently default
+         to True without this check.
+      2. State sync was actually accessed. Catches a regression where someone
+         adds `"plan"` to LOCAL_ONLY_COMMANDS — `load_state` would be False and
+         the patched method would never be called.
 
     The `plan` invocation is expected to fail because state access is patched
     to raise. We don't assert on exit_code; mocker.spy records the constructor
-    call before the wrapped __init__ runs, so the kwargs assertion holds
-    regardless of whether the call ultimately raised.
+    call before the wrapped __init__ runs, so kwargs are recorded regardless.
     """
-    _setup_local_only_project(tmp_path, mocker)
+    mock = _setup_local_only_project(tmp_path, mocker)
     init_spy = mocker.spy(Context, "__init__")
 
     runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")
 
     assert init_spy.called, "Context was never constructed"
-    load_state_values = [call.kwargs.get("load_state", True) for call in init_spy.call_args_list]
-    assert all(load_state_values), (
-        f"Context was constructed with load_state=False for `plan`: {load_state_values}"
-    )
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `plan`"
+        )
+    assert mock.called, "state-sync was never accessed during `plan`"
 
 
 def test_format_runs_without_state_credentials(
