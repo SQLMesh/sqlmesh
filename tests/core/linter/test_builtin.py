@@ -244,11 +244,14 @@ def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
 
     # Set a non-empty project name so `any(self._projects)` is truthy and the
     # state-merge guard in `Context.load()` actually exercises `self._load_state`.
+    project_anchor = "config = Config(\n    gateways="
+    assert project_anchor in read_file, (
+        "sushi config.py shape drifted; update project_anchor in test"
+    )
     read_file = read_file.replace(
-        "config = Config(\n    gateways=",
+        project_anchor,
         'config = Config(\n    project="sushi",\n    gateways=',
     )
-    assert 'project="sushi"' in read_file
 
     # Enable the linter with one built-in rule so `lint_models` actually executes
     # a rule under `load_state=False`, not just the empty-rule-set path.
@@ -264,11 +267,13 @@ def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
         ],
     ),"""
     after = 'linter=LinterConfig(enabled=True, rules=["nomissingexternalmodels"]),'
+    assert before in read_file, (
+        "sushi config.py LinterConfig block shape drifted; update `before` in test"
+    )
     read_file = read_file.replace(before, after)
-    assert after in read_file
 
     with open(sushi_path / "config.py", "w") as f:
-        f.writelines(read_file)
+        f.write(read_file)
 
     mock = mocker.patch(
         "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",

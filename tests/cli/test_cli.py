@@ -2273,7 +2273,13 @@ def test_lint_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
 
 def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
     """Guard-rail: confirm `plan` is not in LOCAL_ONLY_COMMANDS by checking
-    the Context constructor received load_state=True for it."""
+    the Context constructor received load_state=True for it.
+
+    The `plan` invocation is expected to fail because state access is patched
+    to raise. We don't assert on exit_code; mocker.spy records the constructor
+    call before the wrapped __init__ runs, so the kwargs assertion holds
+    regardless of whether the call ultimately raised.
+    """
     _setup_local_only_project(tmp_path, mocker)
     init_spy = mocker.spy(Context, "__init__")
 
@@ -2284,3 +2290,58 @@ def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
     assert all(load_state_values), (
         f"Context was constructed with load_state=False for `plan`: {load_state_values}"
     )
+
+
+def test_format_runs_without_state_credentials(
+    runner: CliRunner, tmp_path: Path, mocker, monkeypatch
+):
+    """Realistic CI scenario: a config.yaml declaring a remote Postgres state
+    connection with credentials sourced from unset env vars. Format must still
+    succeed without opening the state connection.
+
+    Distinct from test_format_runs_without_state: that one proves the gate by
+    patching get_versions. This one proves the end-to-end CI use case where
+    no secrets are provisioned and YAML env_var() resolves to None.
+    """
+    pytest.importorskip("psycopg2")
+
+    for var in ("PG_HOST", "PG_USER", "PG_PASSWORD", "PG_DATABASE"):
+        monkeypatch.delenv(var, raising=False)
+
+    create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
+    (tmp_path / "config.yaml").write_text(
+        """project: cli_test
+
+gateways:
+  prod:
+    state_connection:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'postgres.internal.example.com') }}"
+      port: 5432
+      user: "{{ env_var('PG_USER') }}"
+      password: "{{ env_var('PG_PASSWORD') }}"
+      database: "{{ env_var('PG_DATABASE', 'sqlmesh_state') }}"
+    connection:
+      type: duckdb
+      database: "warehouse.db"
+
+default_gateway: prod
+
+model_defaults:
+  dialect: duckdb
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "example.sql").write_text(
+        "MODEL(name local.example, dialect 'duckdb'); SELECT 1 AS col\n",
+        encoding="utf-8",
+    )
+
+    mock = mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
