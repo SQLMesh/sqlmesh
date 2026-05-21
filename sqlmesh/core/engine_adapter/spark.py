@@ -553,6 +553,20 @@ class SparkEngineAdapter(
 
         return f"ALTER TABLE {table_sql} ALTER COLUMN {column_sql} COMMENT {comment_sql}"
 
+    def alter_schema_owner(self, schema_name: SchemaName, owner: str) -> None:
+        schema_sql = exp.to_table(schema_name, dialect=self.dialect).sql(
+            dialect=self.dialect, identify=True
+        )
+        owner_sql = exp.to_identifier(owner, quoted=True).sql(dialect=self.dialect)
+        self.execute(f"ALTER SCHEMA {schema_sql} OWNER TO {owner_sql}")
+
+    def alter_view_owner(self, view_name: TableName, owner: str) -> None:
+        view_sql = exp.to_table(view_name, dialect=self.dialect).sql(
+            dialect=self.dialect, identify=True
+        )
+        owner_sql = exp.to_identifier(owner, quoted=True).sql(dialect=self.dialect)
+        self.execute(f"ALTER VIEW {view_sql} OWNER TO {owner_sql}")
+
     @classmethod
     def _wap_branch_name(cls, wap_id: str) -> str:
         return f"{cls.WAP_PREFIX}{wap_id}"

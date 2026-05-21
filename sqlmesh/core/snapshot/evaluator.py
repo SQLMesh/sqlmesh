@@ -275,6 +275,7 @@ class SnapshotEvaluator:
         snapshots: t.Optional[t.Dict[SnapshotId, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
         on_complete: t.Optional[t.Callable[[SnapshotInfoLike], None]] = None,
+        owner: t.Optional[str] = None,
     ) -> None:
         """Promotes the given collection of snapshots in the target environment by replacing a corresponding
         view with a physical table associated with the given snapshot.
@@ -306,7 +307,7 @@ class SnapshotEvaluator:
         gateway_table_pairs = [
             (gateway, table) for gateway, tables in tables_by_gateway.items() for table in tables
         ]
-        self._create_schemas(gateway_table_pairs=gateway_table_pairs)
+        self._create_schemas(gateway_table_pairs=gateway_table_pairs, owner=owner)
 
         # Fetch the view data objects for the promoted snapshots to get them cached
         self._get_virtual_data_objects(target_snapshots, environment_naming_info)
@@ -325,6 +326,7 @@ class SnapshotEvaluator:
                     environment_naming_info=environment_naming_info,
                     deployability_index=deployability_index,  # type: ignore
                     on_complete=on_complete,
+                    owner=owner,
                 ),
                 self.ddl_concurrent_tasks,
             )
@@ -1257,6 +1259,7 @@ class SnapshotEvaluator:
         execution_time: t.Optional[TimeLike] = None,
         snapshots: t.Optional[t.Dict[SnapshotId, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
+        owner: t.Optional[str] = None,
     ) -> None:
         if not snapshot.is_model:
             return
@@ -1297,6 +1300,9 @@ class SnapshotEvaluator:
             snapshot_by_name = {s.name: s for s in (snapshots or {}).values()}
             render_kwargs["snapshots"] = snapshot_by_name
             adapter.execute(snapshot.model.render_on_virtual_update(**render_kwargs))
+
+        if owner:
+            adapter.alter_view_owner(view_name, owner)
 
         if on_complete is not None:
             on_complete(snapshot)
@@ -1449,6 +1455,7 @@ class SnapshotEvaluator:
     def _create_schemas(
         self,
         gateway_table_pairs: t.Iterable[t.Tuple[t.Optional[str], t.Union[exp.Table, str]]],
+        owner: t.Optional[str] = None,
     ) -> None:
         table_exprs = [(gateway, exp.to_table(t)) for gateway, t in gateway_table_pairs]
         unique_schemas = {
@@ -1464,6 +1471,8 @@ class SnapshotEvaluator:
             logger.info("Creating schema '%s'", schema)
             adapter = self.get_adapter(gateway)
             adapter.create_schema(schema)
+            if owner:
+                adapter.alter_schema_owner(schema, owner)
 
         with self.concurrent_context():
             concurrent_apply_to_values(

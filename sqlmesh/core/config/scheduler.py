@@ -128,12 +128,18 @@ class BuiltInSchedulerConfig(_EngineAdapterStateSyncSchedulerConfig, BaseConfig)
     type_: t.Literal["builtin"] = Field(alias="type", default="builtin")
 
     def create_plan_evaluator(self, context: GenericContext) -> PlanEvaluator:
+        from sqlmesh.core.config.ownership import OwnershipConfig
+
+        ownership_config = getattr(context.config, "ownership", None)
+        if isinstance(ownership_config, OwnershipConfig) and not ownership_config.environment_owner_mapping:
+            ownership_config = None
         return BuiltInPlanEvaluator(
             state_sync=context.state_sync,
             snapshot_evaluator=context.snapshot_evaluator,
             create_scheduler=context.create_scheduler,
             default_catalog=context.default_catalog,
             console=context.console,
+            ownership_config=ownership_config,
         )
 
     def get_default_catalog_per_gateway(self, context: GenericContext) -> t.Dict[str, str]:

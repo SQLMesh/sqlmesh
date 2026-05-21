@@ -32,6 +32,7 @@ from sqlmesh.core.config.loader import (
     load_configs as load_configs,
 )
 from sqlmesh.core.config.migration import MigrationConfig as MigrationConfig
+from sqlmesh.core.config.ownership import OwnershipConfig as OwnershipConfig
 from sqlmesh.core.config.model import ModelDefaultsConfig as ModelDefaultsConfig
 from sqlmesh.core.config.naming import NameInferenceConfig as NameInferenceConfig
 from sqlmesh.core.config.linter import LinterConfig as LinterConfig

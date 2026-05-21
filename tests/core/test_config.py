@@ -14,6 +14,7 @@ from sqlmesh.core.config import (
     DuckDBConnectionConfig,
     GatewayConfig,
     ModelDefaultsConfig,
+    OwnershipConfig,
     BigQueryConnectionConfig,
     MotherDuckConnectionConfig,
     BuiltInSchedulerConfig,
@@ -605,6 +606,97 @@ model_defaults:
     )
 
     assert config.gateways["another_gateway"].connection.catalogs.get("memory") == ":memory:"
+
+
+# ---------------------------------------------------------------------------
+# OwnershipConfig tests
+# ---------------------------------------------------------------------------
+
+
+def test_ownership_config_resolve_owner():
+    config = OwnershipConfig(
+        environment_owner_mapping={
+            "^prod$": "svc_prod_spn",
+            ".*": "group:shared-developers",
+        }
+    )
+    assert config.resolve_owner("prod") == "svc_prod_spn"
+    assert config.resolve_owner("dev_alice") == "group:shared-developers"
+    assert config.resolve_owner("staging") == "group:shared-developers"
+    # "production" does not match ^prod$ so falls through to .*
+    assert config.resolve_owner("production") == "group:shared-developers"
+
+
+def test_ownership_config_empty_returns_none():
+    assert OwnershipConfig().resolve_owner("prod") is None
+    assert OwnershipConfig().resolve_owner("dev_env") is None
+
+
+def test_ownership_config_first_match_wins():
+    # The catch-all .* comes before a more specific pattern — it always wins.
+    # This documents the ordering contract: users must put specific patterns first.
+    config = OwnershipConfig(
+        environment_owner_mapping={
+            ".*": "catch_all_owner",
+            "^prod$": "prod_owner",
+        }
+    )
+    assert config.resolve_owner("prod") == "catch_all_owner"
+
+
+def test_ownership_config_case_sensitive():
+    # Patterns are compiled without re.IGNORECASE, so matching is case-sensitive.
+    config = OwnershipConfig(environment_owner_mapping={"^prod$": "svc_prod"})
+    assert config.resolve_owner("prod") == "svc_prod"
+    assert config.resolve_owner("PROD") is None
+    assert config.resolve_owner("Prod") is None
+
+
+def test_ownership_config_no_match_returns_none():
+    config = OwnershipConfig(environment_owner_mapping={"^prod$": "svc_prod"})
+    assert config.resolve_owner("staging") is None
+    assert config.resolve_owner("dev_bob") is None
+
+
+def test_ownership_config_deserialization_from_dict():
+    # Simulates YAML/dict-based config loading (as produced by load_config_from_yaml).
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership={
+            "environment_owner_mapping": {
+                "^prod$": "svc_prod_spn",
+                ".*": "group:shared-developers",
+            }
+        },
+    )
+    assert config.ownership.resolve_owner("prod") == "svc_prod_spn"
+    assert config.ownership.resolve_owner("dev") == "group:shared-developers"
+
+
+def test_ownership_config_nested_update():
+    # Config.ownership uses UpdateStrategy.NESTED_UPDATE.
+    # When two Configs are merged, the second one's environment_owner_mapping
+    # replaces the first's (REPLACE semantics within OwnershipConfig since
+    # environment_owner_mapping has no explicit strategy).
+    c1 = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership=OwnershipConfig(environment_owner_mapping={"^prod$": "spn_prod"}),
+    )
+    c2 = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership=OwnershipConfig(environment_owner_mapping={".*": "grp_devs"}),
+    )
+    merged = c1.update_with(c2)
+    # c2's mapping fully replaces c1's — the ^prod$ pattern is gone
+    assert merged.ownership.resolve_owner("prod") == "grp_devs"
+    assert merged.ownership.resolve_owner("dev_alice") == "grp_devs"
+
+
+def test_config_ownership_defaults_to_empty():
+    # Configs without an explicit ownership block have a no-op OwnershipConfig.
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    assert config.ownership.environment_owner_mapping == {}
+    assert config.ownership.resolve_owner("prod") is None
 
     attach_config_1 = config.gateways["another_gateway"].connection.catalogs.get("sqlite")
 

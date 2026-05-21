@@ -436,6 +436,74 @@ def test_promote_forward_only(mocker: MockerFixture, adapter_mock, make_snapshot
     )
 
 
+def test_promote_with_owner(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """When owner is supplied, alter_schema_owner and alter_view_owner are called."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="a"),
+        storage_format="parquet",
+        query=parse_one("SELECT a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.promote(
+        [snapshot], EnvironmentNamingInfo(name="test_env"), owner="group:shared-developers"
+    )
+
+    adapter_mock.alter_schema_owner.assert_called_once_with(
+        to_schema("test_schema__test_env"), "group:shared-developers"
+    )
+    adapter_mock.alter_view_owner.assert_called_once_with(
+        "test_schema__test_env.test_model", "group:shared-developers"
+    )
+
+
+def test_promote_without_owner_skips_alter(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """When no owner is configured (the default), ownership DDL is never issued."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="a"),
+        storage_format="parquet",
+        query=parse_one("SELECT a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.promote([snapshot], EnvironmentNamingInfo(name="test_env"))
+
+    adapter_mock.alter_schema_owner.assert_not_called()
+    adapter_mock.alter_view_owner.assert_not_called()
+
+
+def test_promote_owner_applied_per_view(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """alter_view_owner is called once per promoted snapshot."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    snapshots = []
+    for name in ("model_a", "model_b", "model_c"):
+        model = SqlModel(
+            name=f"test_schema.{name}",
+            kind=ViewKind(),
+            query=parse_one("SELECT 1"),
+        )
+        snapshot = make_snapshot(model)
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots.append(snapshot)
+
+    evaluator.promote(
+        snapshots, EnvironmentNamingInfo(name="test_env"), owner="svc_prod_spn"
+    )
+
+    assert adapter_mock.alter_view_owner.call_count == 3
+    called_owners = {c.args[1] for c in adapter_mock.alter_view_owner.call_args_list}
+    assert called_owners == {"svc_prod_spn"}
+
+
 def test_cleanup(mocker: MockerFixture, adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock)
 

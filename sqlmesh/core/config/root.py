@@ -30,6 +30,7 @@ from sqlmesh.core.config.connection import (
 from sqlmesh.core.config.format import FormatConfig
 from sqlmesh.core.config.gateway import GatewayConfig
 from sqlmesh.core.config.janitor import JanitorConfig
+from sqlmesh.core.config.ownership import OwnershipConfig
 from sqlmesh.core.config.migration import MigrationConfig
 from sqlmesh.core.config.model import ModelDefaultsConfig
 from sqlmesh.core.config.naming import NameInferenceConfig as NameInferenceConfig
@@ -118,6 +119,7 @@ class Config(BaseConfig):
         gateway_managed_virtual_layer: Whether the models' views in the virtual layer are created by the model-specific gateway rather than the default gateway.
         infer_python_dependencies: Whether to statically analyze Python code to automatically infer Python package requirements.
         environment_catalog_mapping: A mapping from regular expressions to catalog names. The catalog name is used to determine the target catalog for a given environment.
+        ownership: Ownership rules applied at schema/view creation time. Maps environment name patterns to owner principals so objects are correctly owned even after a partial run.
         default_target_environment: The name of the environment that will be the default target for the `sqlmesh plan` and `sqlmesh run` commands.
         log_limit: The default number of logs to keep.
         format: The formatting options for SQL code.
@@ -175,6 +177,7 @@ class Config(BaseConfig):
     janitor: JanitorConfig = JanitorConfig()
     cache_dir: t.Optional[str] = None
     dbt: t.Optional[DbtConfig] = None
+    ownership: OwnershipConfig = Field(default_factory=OwnershipConfig)
 
     _FIELD_UPDATE_STRATEGY: t.ClassVar[t.Dict[str, UpdateStrategy]] = {
         "gateways": UpdateStrategy.NESTED_UPDATE,
@@ -194,6 +197,7 @@ class Config(BaseConfig):
         "after_all": UpdateStrategy.EXTEND,
         "linter": UpdateStrategy.NESTED_UPDATE,
         "dbt": UpdateStrategy.NESTED_UPDATE,
+        "ownership": UpdateStrategy.NESTED_UPDATE,
     }
 
     _connection_config_validator = connection_config_validator

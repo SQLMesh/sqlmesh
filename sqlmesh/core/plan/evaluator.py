@@ -40,6 +40,7 @@ from sqlmesh.core.state_sync import StateSync
 from sqlmesh.core.plan.common import identify_restatement_intervals_across_snapshot_versions
 from sqlmesh.utils import CorrelationId
 from sqlmesh.utils.concurrency import NodeExecutionFailedError
+from sqlmesh.core.config.ownership import OwnershipConfig
 from sqlmesh.utils.errors import PlanError, ConflictingPlanError, SQLMeshError
 from sqlmesh.utils.date import now, to_timestamp
 
@@ -74,12 +75,14 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         create_scheduler: t.Callable[[t.Iterable[Snapshot], SnapshotEvaluator], Scheduler],
         default_catalog: t.Optional[str],
         console: t.Optional[Console] = None,
+        ownership_config: t.Optional[OwnershipConfig] = None,
     ):
         self.state_sync = state_sync
         self.snapshot_evaluator = snapshot_evaluator
         self.create_scheduler = create_scheduler
         self.default_catalog = default_catalog
         self.console = console or get_console()
+        self.ownership_config = ownership_config
         self._circuit_breaker: t.Optional[t.Callable[[], bool]] = None
 
     def evaluate(
@@ -434,6 +437,9 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         deployability_index: t.Optional[DeployabilityIndex] = None,
         on_complete: t.Optional[t.Callable[[SnapshotInfoLike], None]] = None,
     ) -> None:
+        owner: t.Optional[str] = None
+        if self.ownership_config:
+            owner = self.ownership_config.resolve_owner(environment_naming_info.name)
         self.snapshot_evaluator.promote(
             target_snapshots,
             start=plan.start,
@@ -449,6 +455,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             environment_naming_info=environment_naming_info,
             deployability_index=deployability_index,
             on_complete=on_complete,
+            owner=owner,
         )
 
     def _demote_snapshots(
