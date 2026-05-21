@@ -22,7 +22,6 @@ from sqlmesh.core.state_sync import (
 )
 from sqlmesh.core.janitor import cleanup_expired_views, delete_expired_snapshots
 from sqlmesh.utils.date import now_timestamp
-from sqlmesh.utils.errors import SQLMeshError
 
 pytestmark = pytest.mark.slow
 
@@ -101,7 +100,7 @@ def test_cleanup_expired_views(mocker: MockerFixture, make_snapshot: t.Callable)
 @pytest.mark.parametrize(
     "suffix_target", [EnvironmentSuffixTarget.SCHEMA, EnvironmentSuffixTarget.TABLE]
 )
-def test_cleanup_expired_environment_schema_warn_on_delete_failure(
+def test_cleanup_expired_views_collects_failures(
     mocker: MockerFixture, make_snapshot: t.Callable, suffix_target: EnvironmentSuffixTarget
 ):
     adapter = mocker.MagicMock()
@@ -124,15 +123,65 @@ def test_cleanup_expired_environment_schema_warn_on_delete_failure(
         catalog_name_override="catalog_override",
     )
 
-    with pytest.raises(SQLMeshError, match="Failed to drop the expired environment .*"):
-        cleanup_expired_views(adapter, {}, [schema_environment], warn_on_delete_failure=False)
-
-    cleanup_expired_views(adapter, {}, [schema_environment], warn_on_delete_failure=True)
+    # Janitor is now best-effort: failures are returned, not raised.
+    failures = cleanup_expired_views(adapter, {}, [schema_environment])
+    assert len(failures) == 1
+    assert "Failed to drop the expired environment" in failures[0]
 
     if suffix_target == EnvironmentSuffixTarget.SCHEMA:
         assert adapter.drop_schema.called
     else:
         assert adapter.drop_view.called
+
+
+def test_cleanup_expired_views_continues_past_failures(
+    mocker: MockerFixture, make_snapshot: t.Callable
+):
+    adapter = mocker.MagicMock()
+    adapter.dialect = None
+
+    snapshot_failing = make_snapshot(
+        SqlModel(name="catalog.schema.failing", query=parse_one("select 1"))
+    )
+    snapshot_failing.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_succeeding = make_snapshot(
+        SqlModel(name="catalog.schema.succeeding", query=parse_one("select 1"))
+    )
+    snapshot_succeeding.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    failing_env = Environment(
+        name="failing_env",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot_failing.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="p",
+        previous_plan_id="p",
+    )
+    succeeding_env = Environment(
+        name="succeeding_env",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot_succeeding.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="p",
+        previous_plan_id="p",
+    )
+
+    def drop_view_side_effect(view, ignore_if_not_exists=True):
+        if "failing" in str(view):
+            raise Exception("boom")
+
+    adapter.drop_view.side_effect = drop_view_side_effect
+
+    failures = cleanup_expired_views(adapter, {}, [failing_env, succeeding_env])
+
+    # Both drops were attempted
+    assert adapter.drop_view.call_count == 2
+
+    # Only the failing one is reported
+    assert len(failures) == 1
+    assert "failing" in failures[0]
 
 
 def test_delete_expired_snapshots_common_function_batching(
