@@ -144,3 +144,21 @@ def test_ignore_formating_files(tmp_path: pathlib.Path):
         model3.read_text(encoding="utf-8")
         == "MODEL (\n  name this.model3,\n  dialect 'duckdb',\n  formatting TRUE\n);\n\nSELECT\n  1 AS col"
     )
+
+
+def test_format_without_state_load(tmp_path: pathlib.Path, mocker: MockerFixture):
+    """`format` with `load_state=False` runs end-to-end without touching state sync."""
+    mock = mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models/example.sql"),
+        "MODEL(name local.example, dialect 'duckdb'); SELECT 1 AS col",
+    )
+
+    context = Context(paths=tmp_path, config=Config(project="local_only"), load_state=False)
+    context.format(check=True)
+    mock.assert_not_called()

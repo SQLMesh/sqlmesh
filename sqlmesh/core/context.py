@@ -363,6 +363,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             connection as it appears in configuration will be used.
         concurrent_tasks: The maximum number of tasks that can use the connection concurrently.
         load: Whether or not to automatically load all models and macros (default True).
+        load_state: Whether to merge remote state into the local project during load (default True). Only meaningful when load=True.
         console: The rich instance used for printing out CLI command results.
         users: A list of users to make known to SQLMesh.
     """
@@ -383,6 +384,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         concurrent_tasks: t.Optional[int] = None,
         loader: t.Optional[t.Type[Loader]] = None,
         load: bool = True,
+        load_state: bool = True,
         users: t.Optional[t.List[User]] = None,
         config_loader_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
         selector: t.Optional[t.Type[Selector]] = None,
@@ -413,6 +415,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        self._load_state: bool = load_state
         self._selector_cls = selector or NativeSelector
 
         self.path, self.config = t.cast(t.Tuple[Path, C], next(iter(self.configs.items())))
@@ -674,7 +677,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
 
         # Load environment statements from state for projects not in current load
-        if any(self._projects):
+        if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
             if prod:
                 existing_statements = self.state_reader.get_environment_statements(c.PROD)
@@ -684,7 +687,7 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         uncached = set()
 
-        if any(self._projects):
+        if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:

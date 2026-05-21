@@ -232,3 +232,32 @@ def test_no_missing_unit_tests(tmp_path, copy_to_temp_path):
         assert len(model_violations) == 0, (
             f"Model {model_name} should not have a violation since it has a test"
         )
+
+
+def test_lint_without_state_load(tmp_path, copy_to_temp_path, mocker) -> None:
+    """`lint_models` with `load_state=False` runs end-to-end without touching state sync."""
+    sushi_paths = copy_to_temp_path("examples/sushi")
+    sushi_path = sushi_paths[0]
+
+    with open(sushi_path / "config.py", "r") as f:
+        read_file = f.read()
+
+    # Set a non-empty project name so `any(self._projects)` is truthy and the
+    # state-merge guard in `Context.load()` actually exercises `self._load_state`.
+    read_file = read_file.replace(
+        "config = Config(\n    gateways=",
+        'config = Config(\n    project="sushi",\n    gateways=',
+    )
+    assert 'project="sushi"' in read_file
+
+    with open(sushi_path / "config.py", "w") as f:
+        f.writelines(read_file)
+
+    mock = mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+    context = Context(paths=[sushi_path], load_state=False)
+    context.lint_models(raise_on_error=False)
+    mock.assert_not_called()

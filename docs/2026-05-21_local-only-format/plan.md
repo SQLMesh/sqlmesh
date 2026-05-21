@@ -29,10 +29,11 @@ The PR is done when all of these are true:
 - The `Linter` is built per-project in `Context.load()` at `context.py:670-674` before the state-merge block. Linters don't depend on the state-merge having run.
 - `format` and `lint` Click handlers are at `sqlmesh/cli/main.py:343-380` and `sqlmesh/cli/main.py:1168-1185` respectively. Neither needs argument changes.
 
-**Assumptions** (flagged for the implementer to confirm during work):
+**Decisions resolved during implementation:**
 
-- A Postgres connection config pointing at an unreachable host (e.g. `localhost:1`) is sufficient to make state access fail loudly without requiring `psycopg2` to actually attempt a real connection — the failure should happen at `get_versions` cursor-fetch time, not at config validation time. If config validation rejects the host, fall back to patching `EngineAdapterStateSync.get_versions` to raise.
-- No existing test currently exercises the "format/lint succeed despite broken state" path. Verified by `rg 'format.*state\|lint.*state' tests/` returning no relevant matches, but the implementer should confirm before adding the regression.
+- The plan originally suggested configuring an unreachable Postgres state connection. This doesn't work in the dev environment because `psycopg2` is not installed; `PostgresConnectionConfig` runs `_get_engine_import_validator("psycopg2", ...)` at config-validation time (`sqlmesh/core/config/connection.py:1424`) and raises before our code path is reached. Implementation uses the plan's documented fallback: patch `sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions` with `side_effect=RuntimeError(...)` and assert it is never called.
+- The state-merge blocks are guarded by `if any(self._projects):`, where `self._projects = {config.project for config in self.configs.values()}`. `Config.project` defaults to `""` (`sqlmesh/core/config/root.py:142`), and `any({""})` is `False` — so a `Config()` literal short-circuits the guard before the new `self._load_state` term is evaluated, making the test vacuous. The Context-level tests therefore set a non-empty `project` (`Config(project="local_only")` in the format test; an inline rewrite of sushi's `config.py` to add `project="sushi"` in the linter test) to ensure the guard is actually exercised.
+- No existing test exercised the "format/lint succeed despite broken state" path (verified by `rg 'format.*state\|lint.*state' tests/`).
 
 ## Existing patterns & conventions to follow
 
@@ -85,10 +86,10 @@ Two tasks, two commits, one PR.
 **Test cases** (red first, then implementation):
 
 `tests/core/test_format.py` (fast):
-- *`test_format_without_state_load`*: Construct a `Context` with `paths=tmp_path`, a `Config` whose state connection points at `localhost:1` (Postgres), and `load_state=False`. Place one `.sql` model file under `models/` containing SQL that is already in canonical formatted form (so `--check` succeeds for content reasons — the test is about state access, not about formatting decisions). Call `context.format(check=True)` and assert it returns `True` without raising. Assert the file's contents on disk are unchanged.
+- *`test_format_without_state_load`*: Patch `EngineAdapterStateSync.get_versions` to raise `RuntimeError`. Place one `.sql` model under `models/`. Construct `Context(paths=tmp_path, config=Config(project="local_only"), load_state=False)` (non-empty `project` so `any(self._projects)` is truthy and the gate is exercised). Call `context.format(check=True)`. Assert the patched mock has `assert_not_called()`. Verified non-vacuous by flipping to `load_state=True` and confirming the test fails with the patched `RuntimeError`.
 
 `tests/core/linter/test_builtin.py` (fast):
-- *`test_lint_without_state_load`*: Using `copy_to_temp_path("examples/sushi")`, rewrite the sushi `config.py` to enable the linter (existing pattern at `test_builtin.py:21-40`) AND set a Postgres state connection at `localhost:1`. Construct `Context(paths=[sushi_path], load_state=False)`. Call `context.lint_models(raise_on_error=False)` and assert it returns a list (i.e., the linter ran end-to-end) without raising.
+- *`test_lint_without_state_load`*: Using `copy_to_temp_path("examples/sushi")`, rewrite the sushi `config.py` to add `project="sushi"` to the `Config(...)` call (so `any(self._projects)` is truthy). Patch `EngineAdapterStateSync.get_versions` to raise. Construct `Context(paths=[sushi_path], load_state=False)`. Call `context.lint_models(raise_on_error=False)`. Assert the patched mock has `assert_not_called()`. Verified non-vacuous the same way as the format test.
 
 **Implementation outline:**
 
