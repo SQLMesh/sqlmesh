@@ -15,6 +15,7 @@ import sqlglot
 from sqlglot import Generator, exp, parse_one
 from sqlglot.executor.env import ENV
 from sqlglot.executor.python import Python
+from sqlglot.generators.python import PythonGenerator
 from sqlglot.helper import csv, ensure_collection
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.schema import MappingSchema
@@ -140,9 +141,9 @@ class CaseInsensitiveMapping(t.Dict[str, t.Any]):
 
 
 class MacroDialect(Python):
-    class Generator(Python.Generator):
+    class Generator(PythonGenerator):
         TRANSFORMS = {
-            **Python.Generator.TRANSFORMS,  # type: ignore
+            **PythonGenerator.TRANSFORMS,
             exp.Column: lambda self, e: f"exp.to_column('{self.sql(e, 'this')}')",
             exp.Lambda: lambda self, e: f"lambda {self.expressions(e)}: {self.sql(e, 'this')}",
             MacroFunc: _macro_func_sql,

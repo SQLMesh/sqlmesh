@@ -481,10 +481,14 @@ def _parse_types(
     check_func: bool = False,
     schema: bool = False,
     allow_identifiers: bool = True,
+    with_collation: bool = False,
 ) -> t.Optional[exp.Expr]:
     start = self._curr
     parsed_type = self.__parse_types(  # type: ignore
-        check_func=check_func, schema=schema, allow_identifiers=allow_identifiers
+        check_func=check_func,
+        schema=schema,
+        allow_identifiers=allow_identifiers,
+        with_collation=with_collation,
     )
 
     if schema and parsed_type:
