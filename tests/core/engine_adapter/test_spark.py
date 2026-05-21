@@ -1154,6 +1154,24 @@ def test_alter_schema_owner_base_noop(make_mocked_engine_adapter: t.Callable):
     assert alter_calls == []
 
 
+def test_current_user(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.cursor.fetchone.return_value = ("spn-abc-123",)
+    result = adapter.current_user()
+    assert result == "spn-abc-123"
+    sql_calls = to_sql_calls(adapter)
+    assert any("CURRENT_USER" in s.upper() for s in sql_calls)
+
+
+def test_current_user_base_noop(make_mocked_engine_adapter: t.Callable):
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+
+    adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    adapter.cursor.fetchone.return_value = ("duckdb-user",)
+    result = adapter.current_user()
+    assert result == "duckdb-user"
+
+
 def test_get_data_object_wap_branch(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SparkEngineAdapter, patch_get_data_objects=False)
     mocker.patch.object(adapter, "_get_data_objects", return_value=[])

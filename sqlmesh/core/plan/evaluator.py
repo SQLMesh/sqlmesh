@@ -175,7 +175,11 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             self.console.log_success(skip_message)
             return
 
-        physical_owner = self.ownership_config.physical_owner if self.ownership_config else None
+        physical_owner = (
+            self.ownership_config.resolve_physical_owner(self.snapshot_evaluator.adapter)
+            if self.ownership_config
+            else None
+        )
         completion_status = None
         progress_stopped = False
         try:
@@ -214,7 +218,11 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def visit_physical_layer_schema_creation_stage(
         self, stage: stages.PhysicalLayerSchemaCreationStage, plan: EvaluatablePlan
     ) -> None:
-        physical_owner = self.ownership_config.physical_owner if self.ownership_config else None
+        physical_owner = (
+            self.ownership_config.resolve_physical_owner(self.snapshot_evaluator.adapter)
+            if self.ownership_config
+            else None
+        )
         try:
             self.snapshot_evaluator.create_physical_schemas(
                 stage.snapshots, stage.deployability_index, owner=physical_owner
@@ -442,7 +450,9 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     ) -> None:
         owner: t.Optional[str] = None
         if self.ownership_config:
-            owner = self.ownership_config.resolve_owner(environment_naming_info.name)
+            owner = self.ownership_config.resolve_owner(
+                environment_naming_info.name, self.snapshot_evaluator.adapter
+            )
         self.snapshot_evaluator.promote(
             target_snapshots,
             start=plan.start,

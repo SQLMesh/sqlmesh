@@ -1418,6 +1418,17 @@ class EngineAdapter:
                 raise
             logger.warning("Failed to create %s '%s': %s", kind.lower(), schema_name, e)
 
+    def current_user(self) -> str:
+        """Return the identity of the currently-connected principal.
+
+        Uses SQL ``CURRENT_USER()`` which is supported by Spark/Databricks and
+        DuckDB.  Override in adapters where a different mechanism is required.
+        """
+        row = self.fetchone("SELECT CURRENT_USER()")
+        if not row:
+            raise SQLMeshError("Could not determine current user: CURRENT_USER() returned no rows")
+        return row[0]
+
     def alter_schema_owner(self, schema_name: SchemaName, owner: str) -> None:
         """Set the owner of a schema.
 
