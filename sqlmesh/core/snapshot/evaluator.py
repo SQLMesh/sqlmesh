@@ -547,7 +547,7 @@ class SnapshotEvaluator:
             t.snapshot.snapshot_id: t.dev_table_only for t in filtered_targets
         }
         with self.concurrent_context():
-            concurrent_apply_to_snapshots(
+            errors, _ = concurrent_apply_to_snapshots(
                 [t.snapshot for t in filtered_targets],
                 lambda s: self._cleanup_snapshot(
                     s,
@@ -557,7 +557,11 @@ class SnapshotEvaluator:
                 ),
                 self.ddl_concurrent_tasks,
                 reverse_order=True,
+                raise_on_error=False,
             )
+        if errors:
+            errored_snapshots = "\n".join(f"  {e.node.name}: {e.__cause__}" for e in errors)
+            raise SQLMeshError(f"\n{errored_snapshots}")
 
     def audit(
         self,

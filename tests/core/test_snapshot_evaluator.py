@@ -570,12 +570,12 @@ def test_cleanup_fails(adapter_mock, make_snapshot):
     snapshot.version = "test_version"
 
     evaluator.promote([snapshot], EnvironmentNamingInfo(name="test_env"))
-    with pytest.raises(NodeExecutionFailedError) as exc_info:
+    with pytest.raises(SQLMeshError) as exc_info:
         evaluator.cleanup(
             [SnapshotTableCleanupTask(snapshot=snapshot.table_info, dev_table_only=True)]
         )
 
-    assert str(exc_info.value.__cause__) == "test_error"
+    assert "test_error" in str(exc_info.value)
 
 
 def test_cleanup_skip_missing_table(adapter_mock, make_snapshot):
