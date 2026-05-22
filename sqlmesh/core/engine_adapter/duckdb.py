@@ -218,3 +218,23 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
     @property
     def _is_motherduck(self) -> bool:
         return self._extra_config.get("is_motherduck", False)
+
+    def drop_table(
+        self,
+        table_name: t.Any,
+        exists: bool = True,
+        **kwargs: t.Any,
+    ) -> None:
+        """
+        DuckDB will raise an error if you try to DROP TABLE on a view.
+        Fallback to DROP VIEW if the execution of DROP TABLE fails.
+        """
+        from duckdb import Error
+
+        # Safety: Remove 'exists' from kwargs so we don't pass it twice
+        kwargs.pop("exists", None)
+
+        try:
+            super().drop_table(table_name, exists=exists, **kwargs)
+        except Error:
+            self.drop_view(table_name, **kwargs)
