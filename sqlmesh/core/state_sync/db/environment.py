@@ -167,31 +167,46 @@ class EnvironmentState:
             where=environment_filter,
         )
 
-    def get_expired_environments(self, current_ts: int) -> t.List[EnvironmentSummary]:
+    def get_expired_environments(
+        self, current_ts: int, name: t.Optional[str] = None
+    ) -> t.List[EnvironmentSummary]:
         """Returns the expired environments.
 
         Expired environments are environments that have exceeded their time-to-live value.
+
+        Args:
+            current_ts: The current timestamp in milliseconds used to determine expiration.
+            name: If provided, only the environment with this name is considered.
+
         Returns:
             The list of environment summaries to remove.
         """
-        return self._fetch_environment_summaries(
-            where=self._create_expiration_filter_expr(current_ts)
-        )
+        where: exp.Expr = self._create_expiration_filter_expr(current_ts)
+        if name is not None:
+            where = exp.and_(t.cast(exp.Condition, where), exp.column("name").eq(name))
+        return self._fetch_environment_summaries(where=where)
 
     def delete_expired_environments(
-        self, current_ts: t.Optional[int] = None
+        self, current_ts: t.Optional[int] = None, name: t.Optional[str] = None
     ) -> t.List[EnvironmentSummary]:
         """Deletes expired environments.
+
+        Args:
+            current_ts: The current timestamp in milliseconds. Defaults to now.
+            name: If provided, only the environment with this name is deleted.
 
         Returns:
             A list of deleted environments.
         """
         current_ts = current_ts or now_timestamp()
-        expired_environments = self.get_expired_environments(current_ts=current_ts)
+        expired_environments = self.get_expired_environments(current_ts=current_ts, name=name)
 
+        where: exp.Expr = self._create_expiration_filter_expr(current_ts)
+        if name is not None:
+            where = exp.and_(t.cast(exp.Condition, where), exp.column("name").eq(name))
         self.engine_adapter.delete_from(
             self.environments_table,
-            where=self._create_expiration_filter_expr(current_ts),
+            where=where,
         )
 
         # Delete the expired environments' corresponding environment statements
