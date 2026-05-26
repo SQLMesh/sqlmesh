@@ -631,16 +631,22 @@ def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
     is_flag=True,
     help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire",
 )
+@click.option(
+    "--force-delete",
+    is_flag=True,
+    help="Delete expired environment and snapshot state records even when the physical table or view drops fail. "
+    "Any objects that could not be dropped become orphaned and must be removed manually.",
+)
 @click.pass_context
 @error_handler
 @cli_analytics
-def janitor(ctx: click.Context, ignore_ttl: bool, **kwargs: t.Any) -> None:
+def janitor(ctx: click.Context, ignore_ttl: bool, force_delete: bool, **kwargs: t.Any) -> None:
     """
     Run the janitor process on-demand.
 
     The janitor cleans up old environments and expired snapshots.
     """
-    ctx.obj.run_janitor(ignore_ttl, **kwargs)
+    ctx.obj.run_janitor(ignore_ttl, force_delete=force_delete, **kwargs)
 
 
 @cli.command("destroy")

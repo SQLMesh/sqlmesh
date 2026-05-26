@@ -774,7 +774,8 @@ def format_model_expressions(
     if rewrite_casts:
 
         def cast_to_colon(node: exp.Expr) -> exp.Expr:
-            if isinstance(node, exp.Cast) and not any(
+            # Directly check type instead of isinstance to avoid rewriting subclasses of CAST, e.g. JSONCast
+            if type(node) is exp.Cast and not any(
                 # Only convert CAST into :: if it doesn't have additional args set, otherwise this
                 # conversion could alter the semantics (eg. changing SAFE_CAST in BigQuery to CAST)
                 arg
