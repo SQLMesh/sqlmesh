@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import typing as t
 
+from pydantic import Field
 from pydantic.functional_validators import BeforeValidator
 
 from sqlmesh.core.config.base import BaseConfig
@@ -48,9 +49,9 @@ class OwnershipConfig(BaseConfig):
     """
 
     environment_owner_mapping: OwnershipMapping = {}
-    environment_owner_resolver: t.Optional[EnvironmentOwnerResolver] = None
+    environment_owner_resolver: t.Optional[EnvironmentOwnerResolver] = Field(default=None, exclude=True)
     physical_owner: t.Optional[str] = None
-    physical_owner_resolver: t.Optional[PhysicalOwnerResolver] = None
+    physical_owner_resolver: t.Optional[PhysicalOwnerResolver] = Field(default=None, exclude=True)
 
     @property
     def is_active(self) -> bool:
