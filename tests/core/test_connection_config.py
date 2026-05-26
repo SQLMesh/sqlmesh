@@ -810,6 +810,7 @@ def test_duckdb_attach_ducklake_catalog(make_config):
                 type="ducklake",
                 path="catalog.ducklake",
                 data_path="/tmp/ducklake_data",
+                override_data_path=False,
                 encrypted=True,
                 data_inlining_row_limit=10,
             ),
