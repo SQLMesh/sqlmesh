@@ -578,7 +578,7 @@ def test_columns(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
         ),
     }
 
-    adapter.cursor.fetchall.assert_called_once_with(
+    adapter.cursor.execute.assert_called_once_with(
         parse_one(
             """SELECT columns.column_name, columns.full_data_type FROM system.information_schema.columns WHERE table_name = 'test_table' AND table_schema = 'test_db' AND table_catalog = 'test_catalog' ORDER BY ordinal_position ASC""",
             dialect="databricks",
