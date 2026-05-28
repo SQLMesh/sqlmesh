@@ -272,6 +272,26 @@ export default function LineageFlowProvider({
     [nodesConnections],
   )
 
+  // Reverse adjacency index: parent -> children. Built once per `lineage`
+  // change so per-model `directNeighbors` lookups stay O(parents + children)
+  // instead of scanning the whole graph on every mainNode switch.
+  const childrenByParent = useMemo(() => {
+    const map = new Map<ModelEncodedFQN, ModelEncodedFQN[]>()
+    for (const [child, info] of Object.entries(lineage) as Array<
+      [ModelEncodedFQN, Lineage]
+    >) {
+      for (const parent of info?.models ?? []) {
+        const existing = map.get(parent)
+        if (existing) {
+          existing.push(child)
+        } else {
+          map.set(parent, [child])
+        }
+      }
+    }
+    return map
+  }, [lineage])
+
   const directNeighbors = useMemo(() => {
     const set = new Set<ModelEncodedFQN>()
     if (isNil(mainNode)) return set
@@ -279,15 +299,11 @@ export default function LineageFlowProvider({
     for (const parent of lineage[mainNode]?.models ?? []) {
       set.add(parent)
     }
-    for (const [child, info] of Object.entries(lineage) as Array<
-      [ModelEncodedFQN, Lineage]
-    >) {
-      if (info?.models?.includes(mainNode)) {
-        set.add(child)
-      }
+    for (const child of childrenByParent.get(mainNode) ?? []) {
+      set.add(child)
     }
     return set
-  }, [mainNode, lineage])
+  }, [mainNode, lineage, childrenByParent])
 
   const selectedEdges = useMemo(
     () =>

@@ -408,8 +408,8 @@ function ModelColumnLineage(): JSX.Element {
           <SettingsControl
             showColumns={withColumns}
             onWithColumnsChange={setWithColumns}
-            onlyDirect={withOnlyDirect}
-            onOnlyDirectChange={setWithOnlyDirect}
+            withOnlyDirect={withOnlyDirect}
+            onWithOnlyDirectChange={setWithOnlyDirect}
           />
         </Controls>
         <Background

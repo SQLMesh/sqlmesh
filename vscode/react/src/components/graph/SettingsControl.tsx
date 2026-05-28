@@ -6,21 +6,22 @@ import clsx from 'clsx'
 interface SettingsControlProps {
   showColumns: boolean
   onWithColumnsChange: (value: boolean) => void
-  onlyDirect: boolean
-  onOnlyDirectChange: (value: boolean) => void
+  withOnlyDirect: boolean
+  onWithOnlyDirectChange: (value: boolean) => void
 }
+
+const itemClass = clsx(
+  'group flex w-full items-center px-2 py-1 text-sm',
+  'text-[var(--vscode-button-foreground)]',
+  'hover:bg-[var(--vscode-button-background)] bg-[var(--vscode-button-hoverBackground)]',
+)
 
 export function SettingsControl({
   showColumns,
   onWithColumnsChange,
-  onlyDirect,
-  onOnlyDirectChange,
+  withOnlyDirect,
+  onWithOnlyDirectChange,
 }: SettingsControlProps): JSX.Element {
-  const itemClass = clsx(
-    'group flex w-full items-center px-2 py-1 text-sm',
-    'text-[var(--vscode-button-foreground)]',
-    'hover:bg-[var(--vscode-button-background)] bg-[var(--vscode-button-hoverBackground)]',
-  )
   return (
     <Menu
       as="div"
@@ -52,10 +53,10 @@ export function SettingsControl({
         <MenuItem
           as="button"
           className={itemClass}
-          onClick={() => onOnlyDirectChange(!onlyDirect)}
+          onClick={() => onWithOnlyDirectChange(!withOnlyDirect)}
         >
           <span className="flex-1 text-left">Only Direct Neighbors</span>
-          {onlyDirect && (
+          {withOnlyDirect && (
             <CheckIcon
               className="h-4 w-4 text-primary-500"
               aria-hidden="true"
