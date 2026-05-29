@@ -1,7 +1,7 @@
 # ruff: noqa: F811
 import json
-import typing as t
 import re
+import typing as t
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch, PropertyMock
@@ -1535,6 +1535,33 @@ def test_seed_model_custom_types(tmp_path):
 
     assert df["empty_date"].dtype == "object"
     assert df["empty_date"].iloc[0] is None
+
+
+def test_seed_model_batched_render_returns_independent_dataframes(tmp_path):
+    model_csv_path = (tmp_path / "model.csv").absolute()
+
+    with open(model_csv_path, "w", encoding="utf-8") as fd:
+        fd.write(
+            """key,value
+1,one
+2,two
+"""
+        )
+
+    model = create_seed_model(
+        "test_db.test_model",
+        SeedKind(path=str(model_csv_path), batch_size=1),
+        columns={
+            "key": "int",
+            "value": "text",
+        },
+    )
+
+    batches = list(model.render_seed())
+    batches[0].iloc[0, 1] = "changed"
+
+    assert [df["value"].tolist() for df in batches] == [["changed"], ["two"]]
+    assert model.seed.reader()._get_df()["value"].tolist() == ["one", "two"]
 
 
 def test_seed_with_special_characters_in_column(tmp_path, assert_exp_eq):
