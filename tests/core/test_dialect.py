@@ -210,6 +210,29 @@ SELECT
     x = format_model_expressions(
         parse(
             """
+            MODEL(name a.b, kind FULL, dialect clickhouse);
+            SELECT data.:String AS foo, CAST(1 AS INT) AS bar
+            """
+        ),
+        dialect="clickhouse",
+    )
+    # JSONCast (e.g. `.:` syntax in ClickHouse) must not be written to `::`
+    assert (
+        x
+        == """MODEL (
+  name a.b,
+  kind FULL,
+  dialect clickhouse
+);
+
+SELECT
+  data.:String AS foo,
+  1::Int32 AS bar"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
             MODEL(name foo);
             SELECT CAST(1 AS INT) AS bla
             """
