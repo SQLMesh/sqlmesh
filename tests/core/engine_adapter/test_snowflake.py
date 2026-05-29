@@ -479,7 +479,7 @@ def test_df_to_source_queries_reset_non_default_index(
     write_pandas = mocker.patch("snowflake.connector.pandas_tools.write_pandas", return_value=None)
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
 
-    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).iloc[1:]
+    df = pd.DataFrame({"a": [2, 3], "b": [5, 6]}, index=[1, 2])
     adapter.replace_query(
         "other_db.test_table", df, {"a": exp.DataType.build("INT"), "b": exp.DataType.build("INT")}
     )

@@ -67,7 +67,7 @@ def test_read_returns_independent_batches():
     seed_reader = seed.reader()
 
     batches = list(seed_reader.read(batch_size=1))
-    batches[0].loc[batches[0].index[0], "value"] = "changed"
+    batches[0].at[0, "value"] = "changed"
 
     assert [df["value"].tolist() for df in batches] == [["changed"], ["two"]]
     assert next(seed_reader.read())["value"].tolist() == ["one", "two"]
