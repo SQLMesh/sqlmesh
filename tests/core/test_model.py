@@ -1,7 +1,7 @@
 # ruff: noqa: F811
 import json
-import re
 import typing as t
+import re
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch, PropertyMock
