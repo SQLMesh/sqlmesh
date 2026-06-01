@@ -784,6 +784,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         Returns:
             True if the run was successful, False otherwise.
         """
+        self._load_materializations()
+
         environment = environment or self.config.default_target_environment
         environment = Environment.sanitize_name(environment)
         if not skip_janitor and environment.lower() == c.PROD:
@@ -796,7 +798,6 @@ class GenericContext(BaseContext, t.Generic[C]):
             engine_type=self.snapshot_evaluator.adapter.dialect,
             state_sync_type=self.state_sync.state_type(),
         )
-        self._load_materializations()
 
         env_check_attempts_num = max(
             1,
@@ -888,6 +889,7 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     @python_api_analytics
     def run_janitor(self, ignore_ttl: bool, force_delete: bool = False) -> bool:
+        self._load_materializations()
         success = False
 
         if self.console.start_cleanup(ignore_ttl):
@@ -2883,6 +2885,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         for environment in self.state_reader.get_environments():
             self.state_sync.invalidate_environment(name=environment.name, protect_prod=False)
             self.console.log_success(f"Environment '{environment.name}' invalidated.")
+
+        self._load_materializations()
 
         # Run janitor to clean up all objects
         self._run_janitor(ignore_ttl=True)
