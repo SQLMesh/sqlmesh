@@ -469,6 +469,26 @@ def test_df_to_source_queries_use_schema(
     assert 'USE SCHEMA "other_catalog"."other_db"' in to_sql_calls(adapter)
 
 
+def test_df_to_source_queries_reset_non_default_index(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.snowflake.SnowflakeEngineAdapter.table_exists",
+        return_value=False,
+    )
+    write_pandas = mocker.patch("snowflake.connector.pandas_tools.write_pandas", return_value=None)
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    df = pd.DataFrame({"a": [2, 3], "b": [5, 6]}, index=[1, 2])
+    adapter.replace_query(
+        "other_db.test_table", df, {"a": exp.DataType.build("INT"), "b": exp.DataType.build("INT")}
+    )
+
+    uploaded_df = write_pandas.call_args.args[1]
+    assert uploaded_df.index.equals(pd.RangeIndex(start=0, stop=2, step=1))
+    assert uploaded_df.to_dict("list") == {"a": [2, 3], "b": [5, 6]}
+
+
 def test_create_managed_table(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
 

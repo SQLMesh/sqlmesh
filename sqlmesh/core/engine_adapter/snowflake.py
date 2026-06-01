@@ -407,7 +407,7 @@ class SnowflakeEngineAdapter(
             elif isinstance(df, pd.DataFrame):
                 from snowflake.connector.pandas_tools import write_pandas
 
-                ordered_df = df[list(source_columns_to_types)]
+                ordered_df = df[list(source_columns_to_types)].reset_index(drop=True)
 
                 # Workaround for https://github.com/snowflakedb/snowflake-connector-python/issues/1034
                 # The above issue has already been fixed upstream, but we keep the following
