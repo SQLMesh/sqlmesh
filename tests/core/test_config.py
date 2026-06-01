@@ -964,6 +964,63 @@ def test_gateway_model_defaults(tmp_path):
     assert ctx.config.model_defaults == expected
 
 
+def test_model_defaults_cron_tz(tmp_path):
+    """Test that cron_tz can be set in model_defaults."""
+    import zoneinfo
+
+    config_path = tmp_path / "config_model_defaults_cron_tz.yaml"
+    with open(config_path, "w", encoding="utf-8") as fd:
+        fd.write(
+            """
+model_defaults:
+    dialect: duckdb
+    cron: '@daily'
+    cron_tz: 'America/Los_Angeles'
+        """
+        )
+
+    config = load_config_from_paths(
+        Config,
+        project_paths=[config_path],
+    )
+
+    assert config.model_defaults.cron == "@daily"
+    assert config.model_defaults.cron_tz == zoneinfo.ZoneInfo("America/Los_Angeles")
+    assert config.model_defaults.cron_tz.key == "America/Los_Angeles"
+
+
+def test_gateway_model_defaults_cron_tz(tmp_path):
+    """Test that cron_tz can be set in gateway-specific model_defaults."""
+    import zoneinfo
+
+    global_defaults = ModelDefaultsConfig(
+        dialect="snowflake", owner="foo", cron="@daily", cron_tz="UTC"
+    )
+    gateway_defaults = ModelDefaultsConfig(dialect="duckdb", cron_tz="America/New_York")
+
+    config = Config(
+        gateways={
+            "duckdb": GatewayConfig(
+                connection=DuckDBConnectionConfig(database="db.db"),
+                model_defaults=gateway_defaults,
+            )
+        },
+        model_defaults=global_defaults,
+        default_gateway="duckdb",
+    )
+
+    ctx = Context(paths=tmp_path, config=config, gateway="duckdb")
+
+    expected = ModelDefaultsConfig(
+        dialect="duckdb", owner="foo", cron="@daily", cron_tz="America/New_York"
+    )
+
+    assert ctx.config.model_defaults == expected
+    # Also verify the cron_tz is a ZoneInfo object
+    assert isinstance(ctx.config.model_defaults.cron_tz, zoneinfo.ZoneInfo)
+    assert ctx.config.model_defaults.cron_tz.key == "America/New_York"
+
+
 def test_redshift_merge_flag(tmp_path, mocker: MockerFixture):
     config_path = tmp_path / "config_redshift_merge.yaml"
     with open(config_path, "w", encoding="utf-8") as fd:

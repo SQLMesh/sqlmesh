@@ -716,8 +716,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         return query
 
     def _build_settings_property(
-        self, key: str, value: exp.Expr | str | int | float
+        self, settings: t.Mapping[str, exp.Expr | str | int | float]
     ) -> exp.SettingsProperty:
+        # ClickHouse requires every key=value pair to live under a single
+        # SETTINGS clause (`SETTINGS a = 1, b = 2`). Emitting one
+        # SettingsProperty per pair produces repeated SETTINGS keywords and a
+        # syntax error at execution time.
         return exp.SettingsProperty(
             expressions=[
                 exp.EQ(
@@ -726,6 +730,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                     if isinstance(value, exp.Expr)
                     else exp.Literal(this=value, is_string=isinstance(value, str)),
                 )
+                for key, value in settings.items()
             ]
         )
 
@@ -827,9 +832,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             properties.append(exp.EmptyProperty())
 
         if table_properties_copy:
-            properties.extend(
-                [self._build_settings_property(k, v) for k, v in table_properties_copy.items()]
-            )
+            properties.append(self._build_settings_property(table_properties_copy))
 
         if table_description:
             properties.append(
@@ -858,9 +861,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             properties.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
 
         if view_properties_copy:
-            properties.extend(
-                [self._build_settings_property(k, v) for k, v in view_properties_copy.items()]
-            )
+            properties.append(self._build_settings_property(view_properties_copy))
 
         if table_description:
             properties.append(

@@ -308,7 +308,6 @@ class ModelTest(unittest.TestCase):
                 expected,
                 actual,
                 check_dtype=False,
-                check_datetimelike_compat=True,
                 check_like=True,  # Ignore column order
             )
         except AssertionError as e:
