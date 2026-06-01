@@ -1171,6 +1171,38 @@ def test_janitor_environment_not_expired_warning(sushi_context, mocker: MockerFi
 
 
 @pytest.mark.slow
+def test_invalidate_environment_sync_calls_cleanup_with_name(
+    sushi_context, mocker: MockerFixture
+) -> None:
+    """invalidate_environment(..., sync=True) must pass name= to _cleanup_environments so only the
+    target environment is deleted, not all expired environments."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_expired_environments.return_value = []
+
+    sushi_context.invalidate_environment("dev", sync=True)
+
+    state_sync_mock.invalidate_environment.assert_called_once_with("dev")
+    state_sync_mock.delete_expired_environments.assert_called_once()
+    _, kwargs = state_sync_mock.delete_expired_environments.call_args
+    assert kwargs.get("name") == "dev"
+
+
+@pytest.mark.slow
+def test_invalidate_environment_no_sync_skips_cleanup(sushi_context, mocker: MockerFixture) -> None:
+    """invalidate_environment(..., sync=False) should not trigger _cleanup_environments at all."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+
+    sushi_context.invalidate_environment("dev", sync=False)
+
+    state_sync_mock.invalidate_environment.assert_called_once_with("dev")
+    state_sync_mock.delete_expired_environments.assert_not_called()
+
+
+@pytest.mark.slow
 def test_plan_default_end(sushi_context_pre_scheduling: Context):
     prod_plan_builder = sushi_context_pre_scheduling.plan_builder("prod")
     # Simulate that the prod is 3 days behind.
