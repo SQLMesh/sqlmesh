@@ -40,6 +40,7 @@ import sys
 import time
 import traceback
 import typing as t
+import zoneinfo
 from functools import cached_property
 from io import StringIO
 from itertools import chain
@@ -129,6 +130,8 @@ from sqlmesh.utils.date import (
     now,
     to_datetime,
     make_exclusive,
+    parse_time_zone,
+    is_relative,
 )
 from sqlmesh.utils.errors import (
     CircuitBreakerError,
@@ -765,6 +768,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         select_models: t.Optional[t.Collection[str]] = None,
         exit_on_env_update: t.Optional[int] = None,
         no_auto_upstream: bool = False,
+        time_zone: t.Optional[str] = None,
     ) -> CompletionStatus:
         """Run the entire dag through the scheduler.
 
@@ -797,6 +801,16 @@ class GenericContext(BaseContext, t.Generic[C]):
             state_sync_type=self.state_sync.state_type(),
         )
         self._load_materializations()
+
+        relative_base = to_datetime(
+            execution_time or now(), relative_tz=self._relative_tz(time_zone)
+        )
+        start = self._resolve_interval_bound(
+            start, relative_base=relative_base, time_zone=time_zone
+        )
+        end = self._resolve_interval_bound(end, relative_base=relative_base, time_zone=time_zone)
+        if execution_time and isinstance(execution_time, str):
+            execution_time = relative_base
 
         env_check_attempts_num = max(
             1,
@@ -1095,6 +1109,44 @@ class GenericContext(BaseContext, t.Generic[C]):
     def default_catalog(self) -> t.Optional[str]:
         return self.default_catalog_per_gateway.get(self.selected_gateway)
 
+    def _effective_time_zone(self, time_zone: t.Optional[str] = None) -> t.Optional[str]:
+        if time_zone is not None:
+            return time_zone or None
+        return self.config.time_zone
+
+    def _relative_tz(self, time_zone: t.Optional[str] = None) -> t.Optional[zoneinfo.ZoneInfo]:
+        return parse_time_zone(self._effective_time_zone(time_zone))
+
+    def _localize_ds_flags(
+        self,
+        start: t.Optional[TimeLike],
+        end: t.Optional[TimeLike],
+        time_zone: t.Optional[str] = None,
+    ) -> t.Tuple[t.Optional[zoneinfo.ZoneInfo], bool, bool]:
+        relative_tz = self._relative_tz(time_zone)
+        localize_start_ds = bool(
+            relative_tz and start is not None and isinstance(start, str) and is_relative(start)
+        )
+        localize_end_ds = bool(
+            relative_tz and end is not None and isinstance(end, str) and is_relative(end)
+        )
+        return relative_tz, localize_start_ds, localize_end_ds
+
+    def _resolve_interval_bound(
+        self,
+        value: t.Optional[TimeLike],
+        *,
+        relative_base: datetime,
+        time_zone: t.Optional[str] = None,
+    ) -> t.Optional[TimeLike]:
+        if value is None or not isinstance(value, str) or not is_relative(value):
+            return value
+        return to_datetime(
+            value,
+            relative_base=relative_base,
+            relative_tz=self._relative_tz(time_zone),
+        )
+
     @python_api_analytics
     def render(
         self,
@@ -1104,6 +1156,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         end: t.Optional[TimeLike] = None,
         execution_time: t.Optional[TimeLike] = None,
         expand: t.Union[bool, t.Iterable[str]] = False,
+        time_zone: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> exp.Expr:
         """Renders a model's query, expanding macros with provided kwargs, and optionally expanding referenced models.
@@ -1116,11 +1169,22 @@ class GenericContext(BaseContext, t.Generic[C]):
             expand: Whether or not to use expand materialized models, defaults to False.
                 If True, all referenced models are expanded as raw queries.
                 If a list, only referenced models are expanded as raw queries.
+            time_zone: IANA timezone for interpreting relative start, end, and execution-time values.
 
         Returns:
             The rendered expression.
         """
+        relative_tz, localize_start_ds, localize_end_ds = self._localize_ds_flags(
+            start, end, time_zone
+        )
         execution_time = execution_time or now()
+        relative_base = to_datetime(execution_time, relative_tz=relative_tz)
+        start = self._resolve_interval_bound(
+            start, relative_base=relative_base, time_zone=time_zone
+        )
+        end = self._resolve_interval_bound(end, relative_base=relative_base, time_zone=time_zone)
+        if isinstance(execution_time, str):
+            execution_time = relative_base
 
         model = self.get_model(model_or_snapshot, raise_if_missing=True)
 
@@ -1145,6 +1209,9 @@ class GenericContext(BaseContext, t.Generic[C]):
                     start=start,
                     end=end,
                     execution_time=execution_time,
+                    relative_tz=relative_tz,
+                    localize_start_ds=localize_start_ds,
+                    localize_end_ds=localize_end_ds,
                     **kwargs,
                 )
             )
@@ -1161,6 +1228,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             expand=expand,
             deployability_index=deployability_index,
             engine_adapter=self._get_engine_adapter(model.gateway),
+            relative_tz=relative_tz,
+            localize_start_ds=localize_start_ds,
+            localize_end_ds=localize_end_ds,
             **kwargs,
         )
 
@@ -1170,8 +1240,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         model_or_snapshot: ModelOrSnapshot,
         start: TimeLike,
         end: TimeLike,
-        execution_time: TimeLike,
+        execution_time: t.Optional[TimeLike] = None,
         limit: t.Optional[int] = None,
+        time_zone: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> DF:
         """Evaluate a model or snapshot (running its query against a DB/Engine).
@@ -1182,9 +1253,30 @@ class GenericContext(BaseContext, t.Generic[C]):
             model_or_snapshot: The model, model name, or snapshot to render.
             start: The start of the interval to evaluate.
             end: The end of the interval to evaluate.
-            execution_time: The date/time time reference to use for execution time.
+            execution_time: The date/time time reference to use for execution time. Defaults to now.
             limit: A limit applied to the model.
+            time_zone: IANA timezone for interpreting relative start, end, and execution-time values.
         """
+        relative_tz, localize_start_ds, localize_end_ds = self._localize_ds_flags(
+            start, end, time_zone
+        )
+        resolved_execution_time: TimeLike = execution_time or now()
+        relative_base = to_datetime(resolved_execution_time, relative_tz=relative_tz)
+        if (
+            resolved_start := self._resolve_interval_bound(
+                start, relative_base=relative_base, time_zone=time_zone
+            )
+        ) is not None:
+            start = resolved_start
+        if (
+            resolved_end := self._resolve_interval_bound(
+                end, relative_base=relative_base, time_zone=time_zone
+            )
+        ) is not None:
+            end = resolved_end
+        if isinstance(execution_time, str):
+            resolved_execution_time = relative_base
+
         snapshots = self.snapshots
         fqn = self._node_or_snapshot_to_fqn(model_or_snapshot)
         if fqn not in snapshots:
@@ -1205,10 +1297,13 @@ class GenericContext(BaseContext, t.Generic[C]):
             snapshot,
             start=start,
             end=end,
-            execution_time=execution_time,
+            execution_time=resolved_execution_time,
             snapshots=self.snapshots,
             limit=limit or c.DEFAULT_MAX_LIMIT,
             expand=expand,
+            relative_tz=relative_tz,
+            localize_start_ds=localize_start_ds,
+            localize_end_ds=localize_end_ds,
         )
 
         if df is None:
@@ -1343,6 +1438,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         explain: t.Optional[bool] = None,
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
+        time_zone: t.Optional[str] = None,
     ) -> Plan:
         """Interactively creates a plan.
 
@@ -1423,6 +1519,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain=explain,
             ignore_cron=ignore_cron,
             min_intervals=min_intervals,
+            time_zone=time_zone,
         )
 
         plan = plan_builder.build()
@@ -1476,6 +1573,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
         always_include_local_changes: t.Optional[bool] = None,
+        time_zone: t.Optional[str] = None,
     ) -> PlanBuilder:
         """Creates a plan builder.
 
@@ -1701,6 +1799,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             backfill_models,
             snapshots,
             max_interval_end_per_model,
+            time_zone=time_zone,
         )
 
         if not self.config.virtual_environment_mode.is_full:
@@ -1757,6 +1856,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             },
             explain=explain or False,
             ignore_cron=ignore_cron or False,
+            relative_tz=self._relative_tz(time_zone),
+            time_zone=self._effective_time_zone(time_zone),
         )
 
     def apply(
@@ -2286,6 +2387,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         *,
         models: t.Optional[t.Iterator[str]] = None,
         execution_time: t.Optional[TimeLike] = None,
+        time_zone: t.Optional[str] = None,
     ) -> bool:
         """Audit models.
 
@@ -2298,6 +2400,24 @@ class GenericContext(BaseContext, t.Generic[C]):
         Returns:
             False if any of the audits failed, True otherwise.
         """
+        relative_tz, localize_start_ds, localize_end_ds = self._localize_ds_flags(
+            start, end, time_zone
+        )
+        relative_base = to_datetime(execution_time or now(), relative_tz=relative_tz)
+        if (
+            resolved_start := self._resolve_interval_bound(
+                start, relative_base=relative_base, time_zone=time_zone
+            )
+        ) is not None:
+            start = resolved_start
+        if (
+            resolved_end := self._resolve_interval_bound(
+                end, relative_base=relative_base, time_zone=time_zone
+            )
+        ) is not None:
+            end = resolved_end
+        if execution_time and isinstance(execution_time, str):
+            execution_time = relative_base
 
         snapshots = (
             [self.get_snapshot(model, raise_if_missing=True) for model in models]
@@ -2317,6 +2437,9 @@ class GenericContext(BaseContext, t.Generic[C]):
                 end=end,
                 execution_time=execution_time,
                 snapshots=self.snapshots,
+                relative_tz=relative_tz,
+                localize_start_ds=localize_start_ds,
+                localize_end_ds=localize_end_ds,
             ):
                 audit_id = f"{audit_result.audit.name}"
                 if audit_result.model:
@@ -2378,6 +2501,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         select_models: t.Collection[str],
         start: t.Optional[TimeLike] = None,
         end: t.Optional[TimeLike] = None,
+        time_zone: t.Optional[str] = None,
     ) -> t.Dict[Snapshot, SnapshotIntervals]:
         """Check intervals for a given environment.
 
@@ -2393,12 +2517,18 @@ class GenericContext(BaseContext, t.Generic[C]):
         if not env:
             raise SQLMeshError(f"Environment '{environment}' was not found.")
 
+        relative_base = to_datetime(now(), relative_tz=self._relative_tz(time_zone))
+        start = self._resolve_interval_bound(
+            start, relative_base=relative_base, time_zone=time_zone
+        )
+        end = self._resolve_interval_bound(end, relative_base=relative_base, time_zone=time_zone)
+
         snapshots = {k.name: v for k, v in self.state_sync.get_snapshots(env.snapshots).items()}
 
         missing = {
             k.name: v
             for k, v in missing_intervals(
-                snapshots.values(), start=start, end=end, execution_time=end
+                snapshots.values(), start=start, end=end, execution_time=end or relative_base
             ).items()
         }
 
@@ -3126,6 +3256,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         backfill_model_fqns: t.Optional[t.Set[str]],
         snapshots_by_model_fqn: t.Dict[str, Snapshot],
         end_override_per_model: t.Optional[t.Dict[str, datetime]],
+        time_zone: t.Optional[str] = None,
     ) -> t.Dict[str, datetime]:
         if not min_intervals or not backfill_model_fqns or not plan_start:
             # If there are no models to backfill, there are no intervals to consider for backfill, so we dont need to consider a minimum number
@@ -3135,11 +3266,16 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         start_overrides: t.Dict[str, datetime] = {}
         end_override_per_model = end_override_per_model or {}
+        relative_tz = self._relative_tz(time_zone)
 
-        plan_execution_time_dt = to_datetime(plan_execution_time)
-        plan_start_dt = to_datetime(plan_start, relative_base=plan_execution_time_dt)
+        plan_execution_time_dt = to_datetime(plan_execution_time, relative_tz=relative_tz)
+        plan_start_dt = to_datetime(
+            plan_start, relative_base=plan_execution_time_dt, relative_tz=relative_tz
+        )
         plan_end_dt = to_datetime(
-            plan_end or plan_execution_time_dt, relative_base=plan_execution_time_dt
+            plan_end or plan_execution_time_dt,
+            relative_base=plan_execution_time_dt,
+            relative_tz=relative_tz,
         )
 
         # we need to take the DAG into account so that parent models can be expanded to cover at least as much as their children

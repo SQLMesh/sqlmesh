@@ -1720,12 +1720,16 @@ test_foo:
 
 @pytest.mark.pyspark
 def test_pyspark_python_model(tmp_path: Path) -> None:
+    from sqlmesh.utils.java import spark_java_options
+
     spark_connection_config = SparkConnectionConfig(
         config={
             "spark.master": "local",
             "spark.driver.memory": "512m",
             "spark.sql.warehouse.dir": f"{tmp_path}/data_dir",
-            "spark.driver.extraJavaOptions": f"-Dderby.system.home={tmp_path}/derby_dir",
+            "spark.driver.extraJavaOptions": spark_java_options(
+                f"-Dderby.system.home={tmp_path}/derby_dir"
+            ),
         },
     )
     config = Config(

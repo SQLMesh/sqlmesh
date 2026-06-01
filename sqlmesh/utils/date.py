@@ -4,6 +4,7 @@ import re
 import time
 import typing as t
 import warnings
+import zoneinfo
 
 from datetime import date, datetime, timedelta, timezone, tzinfo
 
@@ -13,6 +14,7 @@ from dateparser.freshness_date_parser import freshness_date_parser
 from sqlglot import exp
 
 from sqlmesh.utils import ttl_cache
+from sqlmesh.utils.errors import ConfigError
 
 if t.TYPE_CHECKING:
     import pandas as pd
@@ -44,6 +46,34 @@ TEMPORAL_TZ_TYPES = {
     exp.DataType.Type.TIMESTAMPTZ,
     exp.DataType.Type.TIMESTAMPLTZ,
 }
+
+
+def parse_time_zone(tz: t.Optional[str]) -> t.Optional[zoneinfo.ZoneInfo]:
+    """Parse an IANA timezone name. None means UTC/default behavior."""
+    if not tz or tz == "UTC":
+        return None
+
+    try:
+        return zoneinfo.ZoneInfo(tz)
+    except Exception as e:
+        available_timezones = zoneinfo.available_timezones()
+
+        if available_timezones:
+            raise ConfigError(f"{e}. {tz} must be a valid IANA timezone.")
+        raise ConfigError(
+            f"{e}. IANA time zone data is not available on your system. "
+            "`pip install tzdata` to leverage time zones."
+        )
+
+
+def _floor_to_local_midnight(dt: datetime, local_tz: tzinfo) -> datetime:
+    local_dt = dt.astimezone(local_tz)
+    return local_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _timezone_name(tzinfo_: tzinfo) -> str:
+    key = getattr(tzinfo_, "key", None)
+    return key if key else "UTC"
 
 
 def now(minute_floor: bool = True) -> datetime:
@@ -121,6 +151,7 @@ def to_timestamp(
     value: TimeLike,
     relative_base: t.Optional[datetime] = None,
     check_categorical_relative_expression: bool = True,
+    relative_tz: t.Optional[tzinfo] = None,
 ) -> int:
     """
     Converts a value into an epoch millis timestamp.
@@ -129,6 +160,7 @@ def to_timestamp(
         value: A variety of date formats. If value is a string, it must be in iso format.
         relative_base: The datetime to reference for time expressions that are using relative terms
         check_categorical_relative_expression: If True, takes into account the relative expressions that are categorical.
+        relative_tz: Timezone for interpreting relative/categorical date strings.
 
     Returns:
         Epoch millis timestamp.
@@ -138,6 +170,7 @@ def to_timestamp(
             value,
             relative_base=relative_base,
             check_categorical_relative_expression=check_categorical_relative_expression,
+            relative_tz=relative_tz,
         ).timestamp()
         * 1000
     )
@@ -149,6 +182,7 @@ def to_datetime(
     relative_base: t.Optional[datetime] = None,
     check_categorical_relative_expression: bool = True,
     tz: t.Optional[tzinfo] = None,
+    relative_tz: t.Optional[tzinfo] = None,
 ) -> datetime:
     """Converts a value into a UTC datetime object.
 
@@ -157,6 +191,8 @@ def to_datetime(
         relative_base: The datetime to reference for time expressions that are using relative terms.
         check_categorical_relative_expression: If True, takes into account the relative expressions that are categorical.
         tz: Timezone to convert datetime to, defaults to utc
+        relative_tz: Timezone for interpreting relative/categorical date strings. Parsed values are
+            converted to UTC before the output timezone is applied.
 
     Raises:
         ValueError if value cannot be converted to a datetime.
@@ -169,7 +205,13 @@ def to_datetime(
     elif isinstance(value, date):
         dt = datetime(value.year, value.month, value.day)
     elif isinstance(value, exp.Expr):
-        return to_datetime(value.name)
+        return to_datetime(
+            value.name,
+            relative_base=relative_base,
+            check_categorical_relative_expression=check_categorical_relative_expression,
+            tz=tz,
+            relative_tz=relative_tz,
+        )
     else:
         try:
             epoch = float(value)
@@ -179,17 +221,37 @@ def to_datetime(
         if epoch is None:
             relative_base = relative_base or now()
             expression = str(value)
-            if check_categorical_relative_expression and is_categorical_relative_expression(
+            parse_timezone = "UTC"
+            parse_relative_base: datetime = relative_base
+            use_relative_tz = bool(
+                relative_tz
+                and check_categorical_relative_expression
+                and is_categorical_relative_expression(expression)
+            )
+
+            if use_relative_tz:
+                assert relative_tz is not None
+                parse_timezone = _timezone_name(relative_tz)
+                parse_relative_base = _floor_to_local_midnight(relative_base, relative_tz)
+            elif check_categorical_relative_expression and is_categorical_relative_expression(
                 expression
             ):
-                relative_base = relative_base.replace(hour=0, minute=0, second=0, microsecond=0)
+                parse_relative_base = relative_base.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
 
             # note: we hardcode TIMEZONE: UTC to work around this bug: https://github.com/scrapinghub/dateparser/issues/896
             # where dateparser just silently fails if it cant interpret the contents of /etc/localtime
-            # this works because SQLMesh only deals with UTC, there is no concept of user local time
             dt = dateparser.parse(
-                expression, settings={"RELATIVE_BASE": relative_base, "TIMEZONE": "UTC"}
+                expression,
+                settings={"RELATIVE_BASE": parse_relative_base, "TIMEZONE": parse_timezone},
             )
+
+            if use_relative_tz and dt is not None:
+                assert relative_tz is not None
+                if not dt.tzinfo:
+                    dt = dt.replace(tzinfo=relative_tz)
+                dt = dt.astimezone(UTC)
         else:
             try:
                 dt = datetime.strptime(str(value), DATE_INT_FMT)
@@ -225,6 +287,9 @@ def date_dict(
     execution_time: TimeLike,
     start: t.Optional[TimeLike],
     end: t.Optional[TimeLike],
+    relative_tz: t.Optional[tzinfo] = None,
+    localize_start_ds: t.Optional[bool] = None,
+    localize_end_ds: t.Optional[bool] = None,
 ) -> t.Dict[str, TimeLike]:
     """Creates a kwarg dictionary of datetime variables for use in SQL Contexts.
 
@@ -234,38 +299,94 @@ def date_dict(
         execution_time: Execution time.
         start: Start time.
         end: End time.
+        relative_tz: Timezone for interpreting relative/categorical date strings.
+        localize_start_ds: Whether @start_ds/@start_date use the local calendar date in
+            `relative_tz`. Defaults to True when `start` is a categorical relative string.
+        localize_end_ds: Whether @end_ds/@end_date use the local calendar date in
+            `relative_tz`. Defaults to True when `end` is a categorical relative string.
 
     Returns:
         A dictionary with various keys pointing to datetime formats.
     """
+    if localize_start_ds is None:
+        localize_start_ds = bool(
+            relative_tz
+            and start is not None
+            and isinstance(start, str)
+            and is_categorical_relative_expression(start)
+        )
+    if localize_end_ds is None:
+        localize_end_ds = bool(
+            relative_tz
+            and end is not None
+            and isinstance(end, str)
+            and is_categorical_relative_expression(end)
+        )
+
     kwargs: t.Dict[str, t.Union[str, datetime, date, float, int]] = {}
 
-    execution_dt = to_datetime(execution_time)
-    prefixes = [
+    execution_dt = to_datetime(execution_time, relative_tz=relative_tz)
+    prefixes: t.List[t.Tuple[str, TimeLike]] = [
         ("latest", execution_dt),  # TODO: Preserved for backward compatibility. Remove in 1.0.0.
         ("execution", execution_dt),
     ]
 
     if start is not None:
-        prefixes.append(("start", to_datetime(start)))
+        prefixes.append(
+            (
+                "start",
+                to_datetime(
+                    start,
+                    relative_base=execution_dt,
+                    relative_tz=relative_tz,
+                ),
+            )
+        )
     if end is not None:
-        prefixes.append(("end", to_datetime(end)))
+        prefixes.append(
+            (
+                "end",
+                to_datetime(
+                    end,
+                    relative_base=execution_dt,
+                    relative_tz=relative_tz,
+                ),
+            )
+        )
 
     for prefix, time_like in prefixes:
-        dt = to_datetime(time_like)
+        dt = (
+            to_datetime(time_like, relative_tz=relative_tz)
+            if isinstance(time_like, str)
+            else to_datetime(time_like)
+        )
         dtntz = dt.replace(tzinfo=None)
 
-        millis = to_timestamp(time_like)
+        millis = (
+            to_timestamp(time_like, relative_tz=relative_tz)
+            if isinstance(time_like, str)
+            else to_timestamp(time_like)
+        )
 
         kwargs[f"{prefix}_dt"] = dt
         kwargs[f"{prefix}_dtntz"] = dtntz
-        kwargs[f"{prefix}_date"] = to_date(dt)
-        kwargs[f"{prefix}_ds"] = to_ds(time_like)
+        localize_ds = (prefix == "start" and localize_start_ds) or (
+            prefix == "end" and localize_end_ds
+        )
+        if localize_ds and relative_tz:
+            local_dt = dt.astimezone(relative_tz)
+            local_date = local_dt.date()
+            kwargs[f"{prefix}_date"] = local_date
+            kwargs[f"{prefix}_ds"] = local_date.strftime("%Y-%m-%d")
+            kwargs[f"{prefix}_hour"] = local_dt.hour
+        else:
+            kwargs[f"{prefix}_date"] = to_date(dt)
+            kwargs[f"{prefix}_ds"] = to_ds(time_like)
+            kwargs[f"{prefix}_hour"] = dt.hour
         kwargs[f"{prefix}_ts"] = to_ts(dt)
         kwargs[f"{prefix}_tstz"] = to_tstz(dt)
         kwargs[f"{prefix}_epoch"] = millis / 1000
         kwargs[f"{prefix}_millis"] = millis
-        kwargs[f"{prefix}_hour"] = dt.hour
 
     return kwargs
 
@@ -298,7 +419,10 @@ def is_date(obj: TimeLike) -> bool:
 
 
 def make_inclusive(
-    start: TimeLike, end: TimeLike, dialect: t.Optional[DialectType] = ""
+    start: TimeLike,
+    end: TimeLike,
+    dialect: t.Optional[DialectType] = "",
+    relative_tz: t.Optional[tzinfo] = None,
 ) -> DatetimeRange:
     """Adjust start and end times to to become inclusive datetimes.
 
@@ -324,20 +448,27 @@ def make_inclusive(
     Returns:
         A tuple of inclusive datetime objects.
     """
-    return (to_datetime(start), make_inclusive_end(end, dialect=dialect))
+    return (
+        to_datetime(start, relative_tz=relative_tz),
+        make_inclusive_end(end, dialect=dialect, relative_tz=relative_tz),
+    )
 
 
-def make_inclusive_end(end: TimeLike, dialect: t.Optional[DialectType] = "") -> datetime:
+def make_inclusive_end(
+    end: TimeLike,
+    dialect: t.Optional[DialectType] = "",
+    relative_tz: t.Optional[tzinfo] = None,
+) -> datetime:
     import pandas as pd
 
-    exclusive_end = make_exclusive(end)
+    exclusive_end = make_exclusive(end, relative_tz=relative_tz)
     if dialect == "tsql":
         return to_utc_timestamp(exclusive_end) - pd.Timedelta(1, unit="ns")
     return exclusive_end - timedelta(microseconds=1)
 
 
-def make_exclusive(time: TimeLike) -> datetime:
-    dt = to_datetime(time)
+def make_exclusive(time: TimeLike, relative_tz: t.Optional[tzinfo] = None) -> datetime:
+    dt = to_datetime(time, relative_tz=relative_tz)
     if is_date(time):
         dt = dt + timedelta(days=1)
     return dt

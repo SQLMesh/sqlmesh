@@ -1405,17 +1405,17 @@ class SnapshotEvaluator:
 
         adapter = self.get_adapter(snapshot.model_gateway)
 
-        kwargs = {
-            "start": start,
-            "end": end,
-            "execution_time": execution_time,
-            "snapshots": snapshots,
-            "deployability_index": deployability_index,
-            "engine_adapter": adapter,
-            "runtime_stage": RuntimeStage.AUDITING,
+        kwargs = dict(
+            start=start,
+            end=end,
+            execution_time=execution_time,
+            snapshots=snapshots,
+            deployability_index=deployability_index,
+            engine_adapter=adapter,
+            runtime_stage=RuntimeStage.AUDITING,
             **audit_args,
             **kwargs,
-        }
+        )
 
         if snapshot.is_model:
             query = snapshot.model.render_audit_query(audit, **kwargs)

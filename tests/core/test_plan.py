@@ -39,6 +39,7 @@ from sqlmesh.core.snapshot import (
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
     now,
+    parse_time_zone,
     to_date,
     to_datetime,
     to_timestamp,
@@ -3377,6 +3378,46 @@ def test_plan_dates_relative_to_execution_time(
         assert to_datetime(plan.start) == to_datetime(output_start)
         assert to_datetime(plan.end) == to_datetime(output_end)
         assert to_datetime(plan.execution_time) == to_datetime(output_execution_time)
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_plan_relative_dates_with_time_zone(make_snapshot: t.Callable) -> None:
+    snapshot_a = make_snapshot(
+        SqlModel(name="a", query=parse_one("select 1, ds"), dialect="duckdb")
+    )
+
+    context_diff = ContextDiff(
+        environment="test_environment",
+        is_new_environment=True,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added={snapshot_a.snapshot_id},
+        removed_snapshots={},
+        modified_snapshots={},
+        snapshots={},
+        new_snapshots={snapshot_a.snapshot_id: snapshot_a},
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+
+    la_tz = parse_time_zone("America/Los_Angeles")
+    plan = PlanBuilder(
+        context_diff,
+        start="1 week ago",
+        execution_time="2023-01-20 12:30:30",
+        is_dev=True,
+        relative_tz=la_tz,
+        time_zone="America/Los_Angeles",
+    ).build()
+
+    assert to_datetime(plan.start) == to_datetime("2023-01-13 08:00:00")
+    assert plan.time_zone == "America/Los_Angeles"
 
 
 def test_plan_builder_additive_change_error_blocks_plan(make_snapshot):

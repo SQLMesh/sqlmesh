@@ -352,6 +352,41 @@ def test_plan_dev_start_date(runner, tmp_path):
     assert "sqlmesh_example__dev.incremental_model: [2023-01-01" in result.output
 
 
+def test_plan_accepts_time_zone_option(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--help"],
+    )
+    assert result.exit_code == 0
+    assert "--time-zone" in result.output
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_plan_rejects_invalid_time_zone(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "dev",
+            "--start",
+            "1 week ago",
+            "--time-zone",
+            "Not/A_Timezone",
+            "--skip-tests",
+            "--no-prompts",
+        ],
+    )
+    assert result.exit_code != 0
+
+
 def test_plan_dev_end_date(runner, tmp_path):
     create_example_project(tmp_path)
 
