@@ -260,6 +260,30 @@ INTERVAL_SECONDS = {
 }
 
 
+def _cron_tz_validator(cls: t.Type, v: t.Any) -> t.Optional[zoneinfo.ZoneInfo]:
+    if not v or v == "UTC":
+        return None
+
+    v = str_or_exp_to_str(v)
+
+    try:
+        return zoneinfo.ZoneInfo(v)
+    except Exception as e:
+        available_timezones = zoneinfo.available_timezones()
+
+        if available_timezones:
+            raise ConfigError(f"{e}. {v} must be in {available_timezones}.")
+        else:
+            raise ConfigError(
+                f"{e}. IANA time zone data is not available on your system. `pip install tzdata` to leverage cron time zones or remove this field which will default to UTC."
+            )
+
+    return None
+
+
+cron_tz_validator = field_validator("cron_tz", mode="before")(_cron_tz_validator)
+
+
 class _Node(DbtInfoMixin, PydanticModel):
     """
     Node is the core abstraction for entity that can be executed within the scheduler.
@@ -302,6 +326,8 @@ class _Node(DbtInfoMixin, PydanticModel):
     _croniter: t.Optional[CroniterCache] = None
     __inferred_interval_unit: t.Optional[IntervalUnit] = None
 
+    _cron_tz_validator = cron_tz_validator
+
     def __str__(self) -> str:
         path = f": {self._path.name}" if self._path else ""
         return f"{self.__class__.__name__}<{self.name}{path}>"
@@ -327,27 +353,6 @@ class _Node(DbtInfoMixin, PydanticModel):
         if isinstance(v, exp.Expr):
             return v.meta["sql"]
         return str(v)
-
-    @field_validator("cron_tz", mode="before")
-    def _cron_tz_validator(cls, v: t.Any) -> t.Optional[zoneinfo.ZoneInfo]:
-        if not v or v == "UTC":
-            return None
-
-        v = str_or_exp_to_str(v)
-
-        try:
-            return zoneinfo.ZoneInfo(v)
-        except Exception as e:
-            available_timezones = zoneinfo.available_timezones()
-
-            if available_timezones:
-                raise ConfigError(f"{e}. {v} must be in {available_timezones}.")
-            else:
-                raise ConfigError(
-                    f"{e}. IANA time zone data is not available on your system. `pip install tzdata` to leverage cron time zones or remove this field which will default to UTC."
-                )
-
-        return None
 
     @field_validator("start", "end", mode="before")
     @classmethod

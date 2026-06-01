@@ -14,7 +14,7 @@ from sqlmesh.core.model.kind import (
     OnAdditiveChange,
 )
 from sqlmesh.core.model.meta import FunctionCall
-from sqlmesh.core.node import IntervalUnit
+from sqlmesh.core.node import IntervalUnit, cron_tz_validator
 from sqlmesh.utils.date import TimeLike
 from sqlmesh.utils.pydantic import field_validator
 
@@ -27,6 +27,7 @@ class ModelDefaultsConfig(BaseConfig):
         dialect: The SQL dialect that the model's query is written in.
         cron: A cron string specifying how often the model should be refreshed, leveraging the
             [croniter](https://github.com/kiorky/croniter) library.
+        cron_tz: The timezone for the cron expression, defaults to UTC. [IANA time zones](https://docs.python.org/3/library/zoneinfo.html).
         owner: The owner of the model.
         start: The earliest date that the model will be backfilled for. If this is None,
             then the date is inferred by taking the most recent start date of its ancestors.
@@ -55,6 +56,7 @@ class ModelDefaultsConfig(BaseConfig):
     kind: t.Optional[ModelKind] = None
     dialect: t.Optional[str] = None
     cron: t.Optional[str] = None
+    cron_tz: t.Any = None
     owner: t.Optional[str] = None
     start: t.Optional[TimeLike] = None
     table_format: t.Optional[str] = None
@@ -78,6 +80,7 @@ class ModelDefaultsConfig(BaseConfig):
     _model_kind_validator = model_kind_validator
     _on_destructive_change_validator = on_destructive_change_validator
     _on_additive_change_validator = on_additive_change_validator
+    _cron_tz_validator = cron_tz_validator
 
     @field_validator("audits", mode="before")
     def _audits_validator(cls, v: t.Any) -> t.Any:
