@@ -65,7 +65,10 @@ class FileCache(t.Generic[T]):
 
             try:
                 stat_result = file.stat()
-                if not file.stem.startswith(self._cache_version) or stat_result.st_atime < threshold:
+                if (
+                    not file.stem.startswith(self._cache_version)
+                    or stat_result.st_atime < threshold
+                ):
                     file.unlink(missing_ok=True)
             except FileNotFoundError:
                 # File was deleted between glob() and stat() — skip stale cache entries gracefully

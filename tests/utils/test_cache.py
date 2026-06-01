@@ -1,5 +1,3 @@
-import os
-import time
 import typing as t
 from pathlib import Path
 
@@ -151,4 +149,3 @@ def test_file_cache_init_handles_stale_file(tmp_path: Path, mocker: MockerFixtur
     mocker.patch.object(Path, "stat", flaky_stat)
 
     FileCache(tmp_path)
-    
