@@ -252,7 +252,7 @@ jobs:
       fail-fast: false
       matrix:
         engine:
-          [duckdb, postgres, mysql, mssql, trino, spark, clickhouse, risingwave]
+          [duckdb, postgres, mysql, mssql, trino, spark, clickhouse, risingwave, starrocks]
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: 2
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
