@@ -52,24 +52,24 @@ PROPERTY_OUTPUT_TYPES = {
     "identifier",  # exp.Identifier
     "literal",  # exp.Literal.string("HASH")
     "column",  # exp.Column(this="HASH")
-    "ast_expr",  # generic exp.Expression
+    "ast_expr",  # generic exp.Expr
 }
 
 
 # ============================================================
 # Fragment parser (robust-ish)
 # ============================================================
-def parse_fragment(text: str) -> t.Union[exp.Expression, t.List[exp.Expression]]:
+def parse_fragment(text: str) -> t.Union[exp.Expr, t.List[exp.Expr]]:
     """
     Try to parse a DSL fragment into SQLGlot AST(s).
 
     Behavior:
-    1. If parse_one succeeds, return the exp.Expression.
+    1. If parse_one succeeds, return the exp.Expr.
     2. If fails but text contains comma, split by commas and parse each part.
     3. If it's parenthesized like "(a, b)", parse and return exp.Tuple or list.
     4. If it's a simple token like "IDENT", return exp.Identifier.
     """
-    if isinstance(text, exp.Expression):
+    if isinstance(text, exp.Expr):
         return text
 
     if not isinstance(text, str):
@@ -381,7 +381,7 @@ class EnumType(DeclarativeType):
         - "identifier": exp.Identifier
         - "literal": exp.Literal.string()
         - "column": exp.Column
-        - "ast_expr": generic exp.Expression (defaults to Identifier)
+        - "ast_expr": generic exp.Expr (defaults to Identifier)
     case_sensitive : bool
         Whether to perform case-sensitive matching (default: False)
 
@@ -682,7 +682,7 @@ class SequenceOf(DeclarativeType):
             return [inner]
 
         # Single AST element: promote to list (if allow_single)
-        if self.allow_single and isinstance(value, exp.Expression):
+        if self.allow_single and isinstance(value, exp.Expr):
             return [value]
 
         return None
@@ -1291,11 +1291,11 @@ class PropertySpecs:
     in the usage layer via factory methods like DistributionTupleInputType.to_unified_dict().
 
     Expected Output Types (after normalization):
-    - table keys: List[exp.Expression] - columns
-    - partitioned_by: List[exp.Expression] - columns, functions
+    - table keys: List[exp.Expr] - columns
+    - partitioned_by: List[exp.Expr] - columns, functions
     - partitions: List[str] - partition definition strings
     - distributed_by: Dict | str | exp.Func - DistributionTupleInputType, EnumType, or FuncType output
-    - order_by: List[exp.Expression] - columns
+    - order_by: List[exp.Expr] - columns
     - generic properties: str - normalized string values
     """
     GeneralColumnListOutputSpec: DeclarativeType = SequenceOf(ColumnType(), allow_single=False)
@@ -1880,7 +1880,7 @@ class StarRocksEngineAdapter(
     def delete_from(
         self,
         table_name: TableName,
-        where: t.Optional[t.Union[str, exp.Expression]] = None,
+        where: t.Optional[t.Union[str, exp.Expr]] = None,
     ) -> None:
         """
         Delete from a table.
@@ -1907,7 +1907,7 @@ class StarRocksEngineAdapter(
             where: The where clause to filter rows to delete
         """
         # Parse where clause if it's a string
-        where_expr: t.Optional[exp.Expression]
+        where_expr: t.Optional[exp.Expr]
         if isinstance(where, str):
             from sqlglot import parse_one
 
@@ -1929,7 +1929,7 @@ class StarRocksEngineAdapter(
         # Note: We conservatively apply restrictions to all tables since we can't easily
         # determine table type at DELETE time. PRIMARY KEY tables will still work with
         # simplified conditions, while non-PRIMARY KEY tables require them.
-        if isinstance(where_expr, exp.Expression):
+        if isinstance(where_expr, exp.Expr):
             original_where = where_expr
             # Remove boolean literals (not supported in any table type)
             where_expr = self._where_clause_remove_boolean_literals(where_expr)
@@ -1946,7 +1946,7 @@ class StarRocksEngineAdapter(
         # Use parent implementation
         super().delete_from(table_name, where_expr)
 
-    def _where_clause_remove_boolean_literals(self, expression: exp.Expression) -> exp.Expression:
+    def _where_clause_remove_boolean_literals(self, expression: exp.Expr) -> exp.Expr:
         """
         Remove TRUE/FALSE boolean literals from WHERE expressions.
 
@@ -1966,7 +1966,7 @@ class StarRocksEngineAdapter(
             Cleaned expression without boolean literals
         """
 
-        def transform(node: exp.Expression) -> exp.Expression:
+        def transform(node: exp.Expr) -> exp.Expr:
             # Handle standalone TRUE/FALSE at the top level
             if node == exp.true():
                 # Convert TRUE to 1=1
@@ -2002,9 +2002,7 @@ class StarRocksEngineAdapter(
         # Transform the expression tree
         return expression.transform(transform, copy=True)
 
-    def _where_clause_convert_between_to_comparison(
-        self, expression: exp.Expression
-    ) -> exp.Expression:
+    def _where_clause_convert_between_to_comparison(self, expression: exp.Expr) -> exp.Expr:
         """
         Convert BETWEEN expressions to >= AND <= comparisons.
 
@@ -2024,7 +2022,7 @@ class StarRocksEngineAdapter(
             Expression with BETWEEN converted to comparisons
         """
 
-        def transform(node: exp.Expression) -> exp.Expression:
+        def transform(node: exp.Expr) -> exp.Expr:
             if isinstance(node, exp.Between):
                 # Extract components: col BETWEEN low AND high
                 column = node.this  # The column being tested
@@ -2044,7 +2042,7 @@ class StarRocksEngineAdapter(
 
     def execute(
         self,
-        expressions: t.Union[str, exp.Expression, t.Sequence[exp.Expression]],
+        expressions: t.Union[str, exp.Expr, t.Sequence[exp.Expr]],
         ignore_unsupported_errors: bool = False,
         quote_identifiers: bool = True,
         track_rows_processed: bool = False,
@@ -2076,9 +2074,9 @@ class StarRocksEngineAdapter(
             return
 
         # Process expressions to remove FOR UPDATE
-        processed_expressions: t.List[exp.Expression] = []
+        processed_expressions: t.List[exp.Expr] = []
         for e in ensure_list(expressions):
-            if not isinstance(e, exp.Expression):
+            if not isinstance(e, exp.Expr):
                 super().execute(
                     expressions,
                     ignore_unsupported_errors=ignore_unsupported_errors,
@@ -2235,7 +2233,7 @@ class StarRocksEngineAdapter(
         materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **create_kwargs: t.Any,
     ) -> None:
@@ -2292,7 +2290,7 @@ class StarRocksEngineAdapter(
         materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **create_kwargs: t.Any,
     ) -> None:
@@ -2403,7 +2401,7 @@ class StarRocksEngineAdapter(
             return table
 
         column_descriptions = column_descriptions or {}
-        expressions: t.List[exp.Expression] = []
+        expressions: t.List[exp.Expr] = []
         for col in columns:
             constraints: t.List[exp.ColumnConstraint] = []
             comment = column_descriptions.get(col)
@@ -2430,10 +2428,10 @@ class StarRocksEngineAdapter(
         catalog_name: t.Optional[str] = None,
         table_format: t.Optional[str] = None,
         storage_format: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
         partition_interval_unit: t.Optional[IntervalUnit] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
@@ -2477,7 +2475,7 @@ class StarRocksEngineAdapter(
                 - replication_num, storage_medium, etc.: Literal values
             table_description: Table comment
         """
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
         table_properties_copy = dict(table_properties) if table_properties else {}
         # logger.debug(
         #     "_build_table_properties_exp: table_properties=%s",
@@ -2566,7 +2564,7 @@ class StarRocksEngineAdapter(
 
     def _build_view_properties_exp(
         self,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         table_description: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
@@ -2574,9 +2572,9 @@ class StarRocksEngineAdapter(
         Build CREATE VIEW properties for StarRocks.
 
         Supports StarRocks view SECURITY syntax: SECURITY {NONE | INVOKER}
-        via exp.SecurityProperty (renders as `SECURITY <value>`).
+        via exp.SqlSecurityProperty (renders as `SECURITY <value>`).
         """
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         if table_description:
             properties.append(
@@ -2592,8 +2590,8 @@ class StarRocksEngineAdapter(
                 security_text = PropertyValidator.validate_and_normalize_property(
                     "security", security
                 )
-                # exp.SecurityProperty renders as `SECURITY <value>` (no '=')
-                properties.append(exp.SecurityProperty(this=exp.Var(this=security_text)))
+                # exp.SqlSecurityProperty renders as `SECURITY <value>` (no '=')
+                properties.append(exp.SqlSecurityProperty(this=exp.Var(this=security_text)))
 
             properties.extend(self._table_or_view_properties_to_expressions(view_properties_copy))
 
@@ -2603,7 +2601,7 @@ class StarRocksEngineAdapter(
 
     def _build_table_key_property(
         self, table_properties: t.Dict[str, t.Any], active_key_type: t.Optional[str]
-    ) -> t.Optional[exp.Expression]:
+    ) -> t.Optional[exp.Expr]:
         """
         Build key constraint property for ALL key types including PRIMARY KEY.
 
@@ -2628,7 +2626,7 @@ class StarRocksEngineAdapter(
             return None
 
         # Configuration: key_name -> Property class (excluding primary_key)
-        KEY_PROPERTY_CLASSES: t.Dict[str, t.Type[exp.Expression]] = {
+        KEY_PROPERTY_CLASSES: t.Dict[str, t.Type[exp.Expr]] = {
             "primary_key": exp.PrimaryKey,
             "duplicate_key": exp.DuplicateKeyProperty,
             "unique_key": exp.UniqueKeyProperty,
@@ -2670,14 +2668,14 @@ class StarRocksEngineAdapter(
 
     def _build_partition_property(
         self,
-        partitioned_by: t.Optional[t.List[exp.Expression]],
+        partitioned_by: t.Optional[t.List[exp.Expr]],
         partition_interval_unit: t.Optional["IntervalUnit"],
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
         catalog_name: t.Optional[str],
         table_properties: t.Dict[str, t.Any],
         key_type: t.Optional[str],
         key_columns: t.Optional[t.Tuple[str, ...]],
-    ) -> t.Optional[exp.Expression]:
+    ) -> t.Optional[exp.Expr]:
         """
         Build partition property expression.
 
@@ -2722,7 +2720,7 @@ class StarRocksEngineAdapter(
             partition_cols,
         )
 
-        def extract_column_name(expr: exp.Expression) -> t.Optional[str]:
+        def extract_column_name(expr: exp.Expr) -> t.Optional[str]:
             if isinstance(expr, exp.Column):
                 return str(expr.name)
             elif isinstance(expr, (exp.Anonymous, exp.Func)):  # noqa: RET505
@@ -2768,8 +2766,8 @@ class StarRocksEngineAdapter(
         return result
 
     def _parse_partition_expressions(
-        self, partitioned_by: t.List[exp.Expression]
-    ) -> t.Tuple[t.Optional[str], t.List[exp.Expression]]:
+        self, partitioned_by: t.List[exp.Expr]
+    ) -> t.Tuple[t.Optional[str], t.List[exp.Expr]]:
         """
         Parse partition expressions and extract partition kind (RANGE/LIST).
 
@@ -2789,7 +2787,7 @@ class StarRocksEngineAdapter(
             - partition_kind: "RANGE", "LIST", or None
             - normalized_columns: List of Column expressions, or function expressions
         """
-        parsed_cols: t.List[exp.Expression] = []
+        parsed_cols: t.List[exp.Expr] = []
         partition_kind: t.Optional[str] = None
 
         normalized = PropertyValidator.validate_and_normalize_property(
@@ -2828,7 +2826,7 @@ class StarRocksEngineAdapter(
 
     def _build_partitioned_by_exp(
         self,
-        partitioned_by: t.List[exp.Expression],
+        partitioned_by: t.List[exp.Expr],
         *,
         partition_interval_unit: t.Optional["IntervalUnit"] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
@@ -2939,15 +2937,15 @@ class StarRocksEngineAdapter(
         kind_expr = exp.Var(this=unified["kind"])
         # Convert columns to expressions
         columns: t.List[exp.Column] = unified.get("columns", [])
-        expressions_list: t.List[exp.Expression] = []
+        expressions_list: t.List[exp.Expr] = []
         for col in columns:
-            if isinstance(col, exp.Expression):
+            if isinstance(col, exp.Expr):
                 expressions_list.append(col)
             else:
                 expressions_list.append(exp.to_column(str(col)))
         # Build buckets expression
         buckets: t.Optional[t.Any] = unified.get("buckets")
-        buckets_expr: t.Optional[exp.Expression] = None
+        buckets_expr: t.Optional[exp.Expr] = None
         if buckets is not None:
             if isinstance(buckets, exp.Literal):
                 buckets_expr = buckets
@@ -2992,10 +2990,10 @@ class StarRocksEngineAdapter(
             )
             method_expr = exp.Var(this=refresh_moment_text)
 
-        kind_expr: t.Optional[exp.Expression] = None
-        starts_expr: t.Optional[exp.Expression] = None
-        every_expr: t.Optional[exp.Expression] = None
-        unit_expr: t.Optional[exp.Expression] = None
+        kind_expr: t.Optional[exp.Expr] = None
+        starts_expr: t.Optional[exp.Expr] = None
+        every_expr: t.Optional[exp.Expr] = None
+        unit_expr: t.Optional[exp.Expr] = None
 
         if refresh_scheme is not None:
             scheme_text = PropertyValidator.validate_and_normalize_property(
@@ -3019,10 +3017,10 @@ class StarRocksEngineAdapter(
     def _parse_refresh_scheme(
         self, refresh_scheme: str
     ) -> t.Tuple[
-        t.Optional[exp.Expression],
-        t.Optional[exp.Expression],
-        t.Optional[exp.Expression],
-        t.Optional[exp.Expression],
+        t.Optional[exp.Expr],
+        t.Optional[exp.Expr],
+        t.Optional[exp.Expr],
+        t.Optional[exp.Expr],
     ]:
         """
         Parse StarRocks refresh_scheme text into (kind, starts, every, unit).
@@ -3042,11 +3040,11 @@ class StarRocksEngineAdapter(
                 f"[StarRocks] Invalid refresh_scheme {refresh_scheme!r}. Expected to start with MANUAL or ASYNC."
             )
         kind = m_kind.group(1).upper()
-        kind_expr: t.Optional[exp.Expression] = exp.Var(this=kind)
+        kind_expr: t.Optional[exp.Expr] = exp.Var(this=kind)
 
-        starts_expr: t.Optional[exp.Expression] = None
-        every_expr: t.Optional[exp.Expression] = None
-        unit_expr: t.Optional[exp.Expression] = None
+        starts_expr: t.Optional[exp.Expr] = None
+        every_expr: t.Optional[exp.Expr] = None
+        unit_expr: t.Optional[exp.Expr] = None
         m_start = re.search(
             r"\bSTART\s*\(\s*(?:'([^']*)'|\"([^\"]*)\"|([^)]*))\s*\)", text, flags=re.IGNORECASE
         )
@@ -3110,7 +3108,7 @@ class StarRocksEngineAdapter(
     def _build_order_by_property(
         self,
         table_properties: t.Dict[str, t.Any],
-        clustered_by: t.Optional[t.List[exp.Expression]],
+        clustered_by: t.Optional[t.List[exp.Expr]],
     ) -> t.Optional[exp.Cluster]:
         """
         Build ORDER BY (clustering) property.

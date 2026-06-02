@@ -2061,7 +2061,7 @@ def _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
         or "primary_key" in properties
     ):
         return properties
-    unique_key: t.Optional[t.List[exp.Expression]] = model.unique_key
+    unique_key: t.Optional[t.List[exp.Expr]] = model.unique_key
     if unique_key:
         properties["primary_key"] = (
             unique_key[0] if len(unique_key) == 1 else exp.Tuple(expressions=unique_key)
