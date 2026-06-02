@@ -1,6 +1,6 @@
 services:
   starrocks-fe:
-    image: starrocks/fe-ubuntu:3.5-latest
+    image: starrocks/fe-ubuntu:4.1-latest
     container_name: starrocks-fe
     hostname: starrocks-fe
     command: |
@@ -18,7 +18,7 @@ services:
       retries: 3
 
   starrocks-be:
-    image: starrocks/be-ubuntu:3.5-latest
+    image: starrocks/be-ubuntu:4.1-latest
     container_name: starrocks-be
     hostname: starrocks-be
     depends_on:
