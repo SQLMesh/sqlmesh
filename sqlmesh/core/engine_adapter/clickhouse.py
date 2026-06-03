@@ -45,10 +45,9 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     @property
     def catalog_support(self) -> CatalogSupport:
-        # When a virtual catalog has been injected via inject_virtual_catalog() (to align
-        # nesting levels with catalog-aware gateways in the same project), treat ClickHouse as
-        # SINGLE_CATALOG_ONLY so the set_catalog decorator strips the virtual catalog from DDL
-        # expressions instead of raising UnsupportedCatalogOperationError.
+        # This property is intentionally dynamic: it transitions from UNSUPPORTED to
+        # SINGLE_CATALOG_ONLY after inject_virtual_catalog() sets _default_catalog. Callers must
+        # not cache the result — always read it live so they see the post-injection state.
         if self._default_catalog:
             return CatalogSupport.SINGLE_CATALOG_ONLY
         return CatalogSupport.UNSUPPORTED

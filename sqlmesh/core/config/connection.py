@@ -2120,6 +2120,15 @@ class ClickhouseConnectionConfig(ConnectionConfig):
 
     _engine_import_validator = _get_engine_import_validator("clickhouse_connect", "clickhouse")
 
+    @field_validator("virtual_catalog")
+    def validate_virtual_catalog(cls, v: t.Optional[str]) -> t.Optional[str]:
+        if v is not None and not v.strip():
+            raise ConfigError(
+                "virtual_catalog cannot be an empty string. "
+                "Omit the field to use the default synthetic prefix (__<gateway_name>__)."
+            )
+        return v
+
     @property
     def _connection_kwargs_keys(self) -> t.Set[str]:
         kwargs = {

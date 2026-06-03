@@ -1474,3 +1474,19 @@ def test_clickhouse_connection_config_virtual_catalog_extra_engine_config():
         host="localhost", username="user", virtual_catalog="my_catalog"
     )
     assert config._extra_engine_config.get("virtual_catalog") == "my_catalog"
+
+
+def test_clickhouse_connection_config_virtual_catalog_empty_string_rejected():
+    """virtual_catalog: "" is a footgun — the empty string propagates to _default_catalog,
+    which is falsy, so catalog_support stays UNSUPPORTED and the nesting error persists.
+    Reject it at config parse time with a clear message."""
+    import pytest
+
+    from sqlmesh.core.config.connection import ClickhouseConnectionConfig
+    from sqlmesh.utils.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="virtual_catalog cannot be an empty string"):
+        ClickhouseConnectionConfig(host="localhost", username="user", virtual_catalog="")
+
+    with pytest.raises(ConfigError, match="virtual_catalog cannot be an empty string"):
+        ClickhouseConnectionConfig(host="localhost", username="user", virtual_catalog="   ")

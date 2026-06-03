@@ -487,12 +487,7 @@ class GenericContext(BaseContext, t.Generic[C]):
     @property
     def snapshot_evaluator(self) -> SnapshotEvaluator:
         if not self._snapshot_evaluator:
-            # Ensure virtual catalog injection (via default_catalog_per_gateway) has run before
-            # cloning adapters with with_settings(). Adapters that support virtual catalogs (e.g.
-            # ClickHouse alongside catalog-aware gateways) mutate _default_catalog during
-            # get_default_catalog_per_gateway. with_settings() forwards _default_catalog to the
-            # clone, so the mutation must happen first or the clones will miss the virtual catalog.
-            self.default_catalog_per_gateway  # noqa: B018
+            self._ensure_virtual_catalog_injection()
             self._snapshot_evaluator = SnapshotEvaluator(
                 {
                     gateway: adapter.with_settings(execute_log_level=logging.INFO)
@@ -502,6 +497,15 @@ class GenericContext(BaseContext, t.Generic[C]):
                 selected_gateway=self.selected_gateway,
             )
         return self._snapshot_evaluator
+
+    def _ensure_virtual_catalog_injection(self) -> None:
+        """Ensure virtual catalog injection has run before adapters are cloned for SnapshotEvaluator.
+
+        Injection is a side effect of get_default_catalog_per_gateway. In normal usage it fires
+        earlier (default_catalog is accessed during model loading), but this guard covers the edge
+        case where snapshot_evaluator is accessed directly on a fresh context before any model ops.
+        """
+        _ = self.default_catalog_per_gateway
 
     def execution_context(
         self,

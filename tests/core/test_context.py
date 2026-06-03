@@ -541,6 +541,23 @@ def test_multi_gateway_clickhouse_custom_virtual_catalog(tmp_path: Path, mocker)
     assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
 
 
+def test_snapshot_evaluator_calls_ensure_virtual_catalog_injection(mocker):
+    """snapshot_evaluator must call _ensure_virtual_catalog_injection before cloning adapters.
+
+    This guards the edge case where snapshot_evaluator is the first property accessed on a fresh
+    context — before default_catalog fires during model loading — and ensures virtual catalog
+    injection still happens even in that order.
+    """
+    ctx = Context(config=Config())
+    ctx._snapshot_evaluator = None  # force re-initialization
+
+    inject_spy = mocker.patch.object(ctx, "_ensure_virtual_catalog_injection")
+
+    _ = ctx.snapshot_evaluator
+
+    inject_spy.assert_called_once()
+
+
 def test_plan_execution_time():
     context = Context(config=Config())
     context.upsert_model(
