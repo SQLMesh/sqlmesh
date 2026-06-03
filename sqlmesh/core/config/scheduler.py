@@ -138,9 +138,25 @@ class BuiltInSchedulerConfig(_EngineAdapterStateSyncSchedulerConfig, BaseConfig)
 
     def get_default_catalog_per_gateway(self, context: GenericContext) -> t.Dict[str, str]:
         default_catalogs_per_gateway: t.Dict[str, str] = {}
+        unsupported_gateways = []
+
         for gateway, adapter in context.engine_adapters.items():
-            if catalog := adapter.default_catalog:
+            if adapter.catalog_support.is_unsupported:
+                unsupported_gateways.append((gateway, adapter))
+            elif catalog := adapter.default_catalog:
                 default_catalogs_per_gateway[gateway] = catalog
+
+        # When catalog-aware gateways exist, assign the gateway name as a virtual catalog for
+        # catalog-unsupported gateways that opt in (e.g. ClickHouse) so that all models in the
+        # project have a uniform 3-level FQN and the MappingSchema nesting level check passes.
+        # Only adapters that explicitly return True from supports_virtual_catalog() are mutated;
+        # other UNSUPPORTED adapters are left unchanged to avoid silent breakage.
+        if default_catalogs_per_gateway and unsupported_gateways:
+            for gateway, adapter in unsupported_gateways:
+                if adapter.supports_virtual_catalog():
+                    adapter.inject_virtual_catalog(gateway)
+                    default_catalogs_per_gateway[gateway] = gateway
+
         return default_catalogs_per_gateway
 
 

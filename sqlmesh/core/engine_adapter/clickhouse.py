@@ -8,6 +8,7 @@ from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import LogicalMergeMixin
 from sqlmesh.core.engine_adapter.base import EngineAdapterWithIndexSupport
 from sqlmesh.core.engine_adapter.shared import (
+    CatalogSupport,
     DataObject,
     DataObjectType,
     EngineRunMode,
@@ -41,6 +42,22 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     DEFAULT_TABLE_ENGINE = "MergeTree"
     ORDER_BY_TABLE_ENGINE_REGEX = "^.*?MergeTree.*$"
+
+    @property
+    def catalog_support(self) -> CatalogSupport:
+        # When a virtual catalog has been injected via inject_virtual_catalog() (to align
+        # nesting levels with catalog-aware gateways in the same project), treat ClickHouse as
+        # SINGLE_CATALOG_ONLY so the set_catalog decorator strips the virtual catalog from DDL
+        # expressions instead of raising UnsupportedCatalogOperationError.
+        if self._default_catalog:
+            return CatalogSupport.SINGLE_CATALOG_ONLY
+        return CatalogSupport.UNSUPPORTED
+
+    def supports_virtual_catalog(self) -> bool:
+        return True
+
+    def inject_virtual_catalog(self, catalog: str) -> None:
+        self._default_catalog = catalog
 
     @property
     def engine_run_mode(self) -> EngineRunMode:
@@ -172,9 +189,27 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
         Clickhouse has a two-level naming scheme [database].[table].
         """
+        from sqlmesh.utils.errors import SQLMeshError
+
         properties_copy = properties.copy()
         if self.engine_run_mode.is_cluster:
             properties_copy.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
+
+        # ClickHouse does not support catalogs. When a virtual catalog has been injected
+        # (self._default_catalog is set), strip it from the schema name. This mirrors the
+        # SINGLE_CATALOG_ONLY branch in the set_catalog decorator, which does not apply here
+        # because this override is not wrapped by @set_catalog().
+        if self._default_catalog:
+            schema_exp = to_schema(schema_name)
+            catalog_name = schema_exp.catalog
+            if catalog_name:
+                if catalog_name != self._default_catalog:
+                    raise SQLMeshError(
+                        f"clickhouse requires that all catalog operations be against a single catalog: "
+                        f"{self._default_catalog}. Provided catalog: {catalog_name}"
+                    )
+                schema_exp.set("catalog", None)
+                schema_name = schema_exp
 
         # can't call super() because it will try to set a catalog
         return self._create_schema(

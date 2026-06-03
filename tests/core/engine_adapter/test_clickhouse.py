@@ -1407,3 +1407,40 @@ def test_exchange_tables(
         'RENAME TABLE "table2" TO "table1"',
         'DROP TABLE IF EXISTS "__temp_table1_abcd"',
     ]
+
+
+def test_virtual_catalog_ddl_stripping(make_mocked_engine_adapter: t.Callable):
+    """After inject_virtual_catalog(), create_schema() with the virtual catalog prefix must strip
+    the catalog and execute without raising, and with a wrong catalog must raise SQLMeshError."""
+    from sqlmesh.utils.errors import SQLMeshError
+
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+
+    assert adapter.supports_virtual_catalog() is True
+    adapter.inject_virtual_catalog("clickhouse_gw")
+
+    # catalog_support must switch to SINGLE_CATALOG_ONLY after injection
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    assert adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+    assert adapter._default_catalog == "clickhouse_gw"
+
+    # create_schema with the virtual catalog prefix must strip the catalog and not raise
+    adapter.create_schema("clickhouse_gw.mydb")
+    assert to_sql_calls(adapter) == ['CREATE DATABASE IF NOT EXISTS "mydb"']
+
+    # create_schema with a wrong catalog must raise SQLMeshError
+    with pytest.raises(SQLMeshError, match="clickhouse_gw"):
+        adapter.create_schema("wrong_catalog.mydb")
+
+
+def test_supports_virtual_catalog_returns_true():
+    """ClickhouseEngineAdapter.supports_virtual_catalog() must return True without any connection."""
+    from unittest.mock import MagicMock
+
+    adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: MagicMock(),
+        dialect="clickhouse",
+    )
+    assert adapter.supports_virtual_catalog() is True
+    assert adapter._default_catalog is None

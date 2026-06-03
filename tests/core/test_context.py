@@ -399,6 +399,114 @@ def test_multiple_gateways(tmp_path: Path):
     assert context.dag._sorted == ['"db"."staging"."stg_model"', '"db"."main"."final_model"']
 
 
+def test_multi_gateway_catalog_aware_and_unsupported(tmp_path: Path, mocker):
+    """ClickHouse (catalog UNSUPPORTED) alongside DuckDB (catalog FULL_SUPPORT) must not raise a
+    nesting-level SchemaError when models are loaded.
+
+    Expected behaviour after the fix:
+    - get_default_catalog_per_gateway assigns the gateway name as a virtual catalog for
+      catalog-unsupported gateways when catalog-aware gateways are present.
+    - ClickHouse models end up with a 3-level FQN so the MappingSchema nesting is uniform.
+    - The virtual catalog is stripped from DDL expressions (not raised as an error) because the
+      adapter's catalog_support flips to SINGLE_CATALOG_ONLY when _default_catalog is set.
+    """
+
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    # Build a real DuckDB adapter for the primary gateway.
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # Build a minimal ClickHouse adapter stub — no real connection needed.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    # Simulate the context's engine_adapters dict and call the scheduler directly.
+    engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": ch_adapter,
+    }
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = engine_adapters
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # DuckDB gateway must have a real catalog entry.
+    assert "duckdb_gw" in catalog_per_gw
+    # DuckDB's default catalog is the database filename without extension.
+    assert catalog_per_gw["duckdb_gw"] == "db"
+    # ClickHouse gateway must now also have a virtual catalog equal to its gateway name.
+    assert "clickhouse_gw" in catalog_per_gw
+    assert catalog_per_gw["clickhouse_gw"] == "clickhouse_gw"
+
+    # The ClickHouse adapter's _default_catalog must be mutated to the virtual catalog name.
+    assert ch_adapter._default_catalog == "clickhouse_gw"
+
+    # The adapter's catalog_support must now be SINGLE_CATALOG_ONLY (not UNSUPPORTED),
+    # so that the set_catalog decorator strips the virtual catalog instead of raising.
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+    # Loading models for both gateways must not raise a SchemaError.
+    duckdb_model = load_sql_based_model(
+        parse("MODEL(name main.duckdb_tbl, kind FULL, gateway duckdb_gw);\nSELECT 1 AS col"),
+        default_catalog="db",
+    )
+    ch_model = load_sql_based_model(
+        parse("MODEL(name mydb.ch_tbl, kind FULL, gateway clickhouse_gw);\nSELECT 1 AS col"),
+        default_catalog="clickhouse_gw",
+    )
+
+    # Both models must have 3-level FQNs so MappingSchema nesting is uniform.
+    assert duckdb_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for duckdb model, got: {duckdb_model.fqn}"
+    )
+    assert ch_model.fqn.count(".") == 2, f"Expected 3-level FQN for ch model, got: {ch_model.fqn}"
+
+    # Both models loaded into the same MappingSchema must not raise a nesting SchemaError.
+    from sqlglot.schema import MappingSchema
+
+    schema = MappingSchema(normalize=False)
+    schema.add_table(duckdb_model.fqn, duckdb_model.columns_to_types or {})
+    schema.add_table(ch_model.fqn, ch_model.columns_to_types or {})
+
+
+def test_single_gateway_clickhouse_no_virtual_catalog(mocker):
+    """When ClickHouse is the only gateway (no catalog-aware peer), it must NOT receive a virtual
+    catalog.  Models remain 2-level and catalog_support stays UNSUPPORTED."""
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {"clickhouse_gw": ch_adapter}
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # With only a catalog-unsupported gateway there must be no entry at all.
+    assert "clickhouse_gw" not in catalog_per_gw
+
+    # The adapter must remain unchanged — no virtual catalog injected.
+    assert ch_adapter._default_catalog is None
+    assert ch_adapter.catalog_support == CatalogSupport.UNSUPPORTED
+
+
 def test_plan_execution_time():
     context = Context(config=Config())
     context.upsert_model(

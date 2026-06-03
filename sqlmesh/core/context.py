@@ -487,6 +487,12 @@ class GenericContext(BaseContext, t.Generic[C]):
     @property
     def snapshot_evaluator(self) -> SnapshotEvaluator:
         if not self._snapshot_evaluator:
+            # Ensure virtual catalog injection (via default_catalog_per_gateway) has run before
+            # cloning adapters with with_settings(). Adapters that support virtual catalogs (e.g.
+            # ClickHouse alongside catalog-aware gateways) mutate _default_catalog during
+            # get_default_catalog_per_gateway. with_settings() forwards _default_catalog to the
+            # clone, so the mutation must happen first or the clones will miss the virtual catalog.
+            self.default_catalog_per_gateway  # noqa: B018
             self._snapshot_evaluator = SnapshotEvaluator(
                 {
                     gateway: adapter.with_settings(execute_log_level=logging.INFO)
