@@ -1423,14 +1423,15 @@ def test_virtual_catalog_ddl_stripping(make_mocked_engine_adapter: t.Callable):
     from sqlmesh.core.engine_adapter.shared import CatalogSupport
 
     assert adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
-    assert adapter._default_catalog == "clickhouse_gw"
+    # The default synthetic virtual catalog wraps the gateway name in double underscores.
+    assert adapter._default_catalog == "__clickhouse_gw__"
 
     # create_schema with the virtual catalog prefix must strip the catalog and not raise
-    adapter.create_schema("clickhouse_gw.mydb")
+    adapter.create_schema("__clickhouse_gw__.mydb")
     assert to_sql_calls(adapter) == ['CREATE DATABASE IF NOT EXISTS "mydb"']
 
     # create_schema with a wrong catalog must raise SQLMeshError
-    with pytest.raises(SQLMeshError, match="clickhouse_gw"):
+    with pytest.raises(SQLMeshError, match="__clickhouse_gw__"):
         adapter.create_schema("wrong_catalog.mydb")
 
 
@@ -1444,3 +1445,32 @@ def test_supports_virtual_catalog_returns_true():
     )
     assert adapter.supports_virtual_catalog() is True
     assert adapter._default_catalog is None
+
+
+def test_inject_virtual_catalog_uses_custom_config(make_mocked_engine_adapter: t.Callable):
+    """When virtual_catalog is set in _extra_config, inject_virtual_catalog uses that value
+    instead of the synthetic __gateway_name__ default."""
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="my_custom_catalog",
+    )
+
+    adapter.inject_virtual_catalog("clickhouse_gw")
+
+    # The user-configured value must take precedence over the synthetic default.
+    assert adapter._default_catalog == "my_custom_catalog"
+
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    assert adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+
+def test_clickhouse_connection_config_virtual_catalog_extra_engine_config():
+    """virtual_catalog set on ClickhouseConnectionConfig must appear in _extra_engine_config
+    so that the value reaches the adapter's _extra_config dict."""
+    from sqlmesh.core.config.connection import ClickhouseConnectionConfig
+
+    config = ClickhouseConnectionConfig(
+        host="localhost", username="user", virtual_catalog="my_catalog"
+    )
+    assert config._extra_engine_config.get("virtual_catalog") == "my_catalog"

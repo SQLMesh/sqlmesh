@@ -155,7 +155,11 @@ class BuiltInSchedulerConfig(_EngineAdapterStateSyncSchedulerConfig, BaseConfig)
             for gateway, adapter in unsupported_gateways:
                 if adapter.supports_virtual_catalog():
                     adapter.inject_virtual_catalog(gateway)
-                    default_catalogs_per_gateway[gateway] = gateway
+                    # Read the actual virtual catalog name back from the adapter — it may differ
+                    # from the gateway name if the user configured a custom virtual_catalog value.
+                    # inject_virtual_catalog() always sets _default_catalog so default_catalog
+                    # cannot return None at this point.
+                    default_catalogs_per_gateway[gateway] = adapter.default_catalog  # type: ignore[assignment]
 
         return default_catalogs_per_gateway
 

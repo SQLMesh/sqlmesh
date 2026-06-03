@@ -2085,6 +2085,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     password: t.Optional[str] = None
     port: t.Optional[int] = None
     cluster: t.Optional[str] = None
+    virtual_catalog: t.Optional[str] = None
     connect_timeout: int = 10
     send_receive_timeout: int = 300
     query_limit: int = 0
@@ -2180,7 +2181,11 @@ class ClickhouseConnectionConfig(ConnectionConfig):
 
     @property
     def _extra_engine_config(self) -> t.Dict[str, t.Any]:
-        return {"cluster": self.cluster, "cloud_mode": self.cloud_mode}
+        return {
+            "cluster": self.cluster,
+            "cloud_mode": self.cloud_mode,
+            "virtual_catalog": self.virtual_catalog,
+        }
 
     @property
     def _static_connection_kwargs(self) -> t.Dict[str, t.Any]:

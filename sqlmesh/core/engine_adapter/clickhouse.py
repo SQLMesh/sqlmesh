@@ -56,8 +56,9 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     def supports_virtual_catalog(self) -> bool:
         return True
 
-    def inject_virtual_catalog(self, catalog: str) -> None:
-        self._default_catalog = catalog
+    def inject_virtual_catalog(self, gateway: str) -> None:
+        configured = self._extra_config.get("virtual_catalog")
+        self._default_catalog = f"__{gateway}__" if configured is None else configured
 
     @property
     def engine_run_mode(self) -> EngineRunMode:

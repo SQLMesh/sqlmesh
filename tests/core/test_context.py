@@ -446,12 +446,12 @@ def test_multi_gateway_catalog_aware_and_unsupported(tmp_path: Path, mocker):
     assert "duckdb_gw" in catalog_per_gw
     # DuckDB's default catalog is the database filename without extension.
     assert catalog_per_gw["duckdb_gw"] == "db"
-    # ClickHouse gateway must now also have a virtual catalog equal to its gateway name.
+    # ClickHouse gateway must now also have a virtual catalog wrapped in double underscores.
     assert "clickhouse_gw" in catalog_per_gw
-    assert catalog_per_gw["clickhouse_gw"] == "clickhouse_gw"
+    assert catalog_per_gw["clickhouse_gw"] == "__clickhouse_gw__"
 
-    # The ClickHouse adapter's _default_catalog must be mutated to the virtual catalog name.
-    assert ch_adapter._default_catalog == "clickhouse_gw"
+    # The ClickHouse adapter's _default_catalog must be mutated to the synthetic virtual catalog.
+    assert ch_adapter._default_catalog == "__clickhouse_gw__"
 
     # The adapter's catalog_support must now be SINGLE_CATALOG_ONLY (not UNSUPPORTED),
     # so that the set_catalog decorator strips the virtual catalog instead of raising.
@@ -464,7 +464,7 @@ def test_multi_gateway_catalog_aware_and_unsupported(tmp_path: Path, mocker):
     )
     ch_model = load_sql_based_model(
         parse("MODEL(name mydb.ch_tbl, kind FULL, gateway clickhouse_gw);\nSELECT 1 AS col"),
-        default_catalog="clickhouse_gw",
+        default_catalog="__clickhouse_gw__",
     )
 
     # Both models must have 3-level FQNs so MappingSchema nesting is uniform.
@@ -505,6 +505,40 @@ def test_single_gateway_clickhouse_no_virtual_catalog(mocker):
     # The adapter must remain unchanged — no virtual catalog injected.
     assert ch_adapter._default_catalog is None
     assert ch_adapter.catalog_support == CatalogSupport.UNSUPPORTED
+
+
+def test_multi_gateway_clickhouse_custom_virtual_catalog(tmp_path: Path, mocker):
+    """When virtual_catalog is configured on the ClickHouse connection, that value is used as the
+    virtual catalog instead of the synthetic __gateway_name__ default."""
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # Pass virtual_catalog via _extra_config (the same path used by ClickhouseConnectionConfig).
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+        virtual_catalog="my_custom_catalog",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {"duckdb_gw": duck_adapter, "clickhouse_gw": ch_adapter}
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # The configured virtual_catalog value must be used, not __clickhouse_gw__.
+    assert catalog_per_gw["clickhouse_gw"] == "my_custom_catalog"
+    assert ch_adapter._default_catalog == "my_custom_catalog"
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
 
 
 def test_plan_execution_time():

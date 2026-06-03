@@ -420,6 +420,45 @@ If a model has many records in each partition, you may see additional performanc
 
     Choose a model's time partitioning granularity based on the characteristics of the data it will process, making sure the total number of partitions is 1000 or fewer.
 
+## Multi-gateway setup
+
+ClickHouse does not have a catalog concept — its fully-qualified table names are two-level (`database.table`), not three-level (`catalog.database.table`).
+
+When a SQLMesh project uses ClickHouse alongside a catalog-aware gateway such as Trino or BigQuery, the two gateway types produce FQNs with different nesting depths. SQLMesh's internal schema tracking requires uniform nesting, so it assigns a **virtual catalog** to ClickHouse models at load time.
+
+### How the virtual catalog works
+
+- SQLMesh automatically detects the nesting mismatch and injects a virtual catalog into each ClickHouse adapter when a catalog-aware gateway is also present.
+- ClickHouse models will appear with three-level FQNs in `sqlmesh plan` output and logs — for example, `__ch_prod__.mydb.mytable` for a gateway named `ch_prod`.
+- The virtual catalog prefix is **never sent to ClickHouse**. It is stripped from every DDL and DML statement before execution.
+- When ClickHouse is the only gateway in a project, no virtual catalog is assigned and models remain two-level.
+
+### Adding a second gateway to an existing ClickHouse-only project
+
+If your project previously used ClickHouse as the only gateway, your models were fingerprinted with 2-level FQNs (`db.table`). Adding a catalog-aware gateway for the first time causes all ClickHouse models to be treated as new versions (their FQNs change to `__{gateway_name}__.db.table`), triggering a full re-materialization on the next `sqlmesh apply`. This is a one-time cost.
+
+### Virtual catalog naming
+
+By default, the virtual catalog name is derived from **the gateway name you chose in your config**, wrapped in double underscores — for example, a gateway named `clickhouse` produces `__clickhouse__`, and a gateway named `ch_prod` produces `__ch_prod__`. The double-underscore wrapping makes it visually clear that this is an internal SQLMesh concept, not a real ClickHouse object.
+
+You can override the default name by setting `virtual_catalog` in your ClickHouse connection configuration:
+
+```yaml
+gateways:
+  clickhouse:
+    connection:
+      type: clickhouse
+      host: my-clickhouse-host
+      username: default
+      virtual_catalog: ch_virtual  # optional; defaults to __{gateway_name}__ (e.g. __clickhouse__)
+  trino:
+    connection:
+      type: trino
+      ...
+```
+
+With this configuration, ClickHouse models will appear as `ch_virtual.mydb.mytable` in plan output instead of `__clickhouse__.mydb.mytable`.
+
 ## Local/Built-in Scheduler
 
 **Engine Adapter Type**: `clickhouse`
@@ -447,3 +486,4 @@ If a model has many records in each partition, you may see additional performanc
 | `tls_mode`                | Controls advanced TLS behavior. proxy and strict do not invoke ClickHouse mutual TLS connection, but do send client cert and key. mutual assumes ClickHouse mutual TLS auth with a client certificate.                                                                          | string |    N     |
 | `connection_settings`     | Additional [connection settings](https://clickhouse.com/docs/integrations/python#settings-argument)                                                                                                                                                                             |  dict  |    N     |
 | `connection_pool_options` | Additional [options](https://clickhouse.com/docs/integrations/python#customizing-the-http-connection-pool)                                                                                                                                         for the HTTP connection pool |  dict  |    N     |
+| `virtual_catalog`         | Override the virtual catalog name used when ClickHouse runs alongside a catalog-aware gateway (e.g. Trino). Defaults to `__{gateway_name}__`. See [Multi-gateway setup](#multi-gateway-setup) for details.                                                                      | string |    N     |
