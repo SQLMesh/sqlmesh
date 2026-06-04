@@ -82,10 +82,13 @@ class SourceConfig(GeneralConfig):
                     f"'source' macro failed for '{self.config_name}' with exception '{e}'."
                 )
 
+            needs_identifier_quoting = bool(
+                self.table_name and ("." in self.table_name or " " in self.table_name)
+            )
             relation = relation.quote(
                 database=False,
                 schema=False,
-                identifier=False,
+                identifier=needs_identifier_quoting,
             )
             if relation.database == context.target.database:
                 relation = relation.include(database=False)
