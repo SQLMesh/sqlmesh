@@ -1672,8 +1672,11 @@ class StarRocksEngineAdapter(
     TODO: later, we can add support for INSERT OVERWRITE, even use Primary Key for beter performance
     """
 
-    COMMENT_CREATION_TABLE = CommentCreationTable.IN_SCHEMA_DEF_CTAS
-    """Table comments are added in both CREATE TABLE statement and CTAS"""
+    COMMENT_CREATION_TABLE = CommentCreationTable.IN_SCHEMA_DEF_NO_CTAS
+    """Column comments are added inline in a plain CREATE TABLE, but StarRocks CTAS only accepts a
+    bare column-name list (no types or per-column COMMENT) before AS SELECT. So for CTAS we emit
+    `CREATE TABLE t COMMENT '...' AS SELECT ...` (table comment only) and register column comments
+    afterward via ALTER TABLE ... MODIFY COLUMN ... COMMENT (see _build_create_comment_column_exp)."""
 
     COMMENT_CREATION_VIEW = CommentCreationView.IN_SCHEMA_DEF_NO_COMMANDS
     """View comments are added in CREATE VIEW statement"""
@@ -2103,6 +2106,48 @@ class StarRocksEngineAdapter(
             quote_identifiers=quote_identifiers,
             track_rows_processed=track_rows_processed,
             **kwargs,
+        )
+
+    def adjust_physical_properties_for_incremental(
+        self,
+        physical_properties: t.Dict[str, t.Any],
+        *,
+        requires_delete_capable_table: bool,
+        unique_key: t.Optional[t.List[exp.Expr]],
+        model_name: str,
+    ) -> t.Dict[str, t.Any]:
+        """Enforce that StarRocks incremental models use a PRIMARY KEY table.
+
+        Incremental kinds rely on DELETE/MERGE statements that StarRocks only supports on PRIMARY
+        KEY tables; DUPLICATE/UNIQUE/AGGREGATE KEY tables reject the predicates SQLMesh generates
+        (e.g. a time-range DELETE with a CAST bound, or any non-key-column predicate). When a
+        unique_key is available (INCREMENTAL_BY_UNIQUE_KEY) we promote it to a PRIMARY KEY;
+        otherwise a PRIMARY KEY must be specified explicitly via physical_properties, and we raise
+        so the failure is clear at creation time rather than producing a broken table.
+
+        The caller owns ``physical_properties`` (it is already a defensive copy), so we mutate and
+        return it in place.
+        """
+        if not requires_delete_capable_table or "primary_key" in physical_properties:
+            return physical_properties
+
+        # Promote the model's unique_key to a PRIMARY KEY table so that complex DELETE/MERGE
+        # statements remain supported.
+        if unique_key:
+            physical_properties["primary_key"] = (
+                unique_key[0] if len(unique_key) == 1 else exp.Tuple(expressions=unique_key)
+            )
+            logger.info(
+                "Model '%s' promoted to PRIMARY KEY table on StarRocks to support rich DELETE operations.",
+                model_name,
+            )
+            return physical_properties
+
+        raise SQLMeshError(
+            f"StarRocks incremental model '{model_name}' requires a PRIMARY KEY table. "
+            "Incremental kinds use DELETE/MERGE operations that StarRocks only supports on PRIMARY KEY "
+            "tables; DUPLICATE/UNIQUE/AGGREGATE KEY tables are not sufficient. "
+            "Specify `physical_properties (primary_key = (...))`, or set `unique_key` on the model."
         )
 
     # ==================== Table Creation (CORE IMPLEMENTATION) ====================
@@ -2546,10 +2591,18 @@ class StarRocksEngineAdapter(
             properties.append(distributed_prop)
 
         # 5. Handle refresh_property (REFRESH ...)
+        # StarRocks only supports ASYNC materialized views, which require a REFRESH clause.
+        # Synchronous MVs are not supported, so a missing refresh is a hard error rather than
+        # a silent fallback (which would create an undetectable sync MV).
         if is_mv:
             refresh_prop = self._build_refresh_property(table_properties_copy)
-            if refresh_prop:
-                properties.append(refresh_prop)
+            if refresh_prop is None:
+                raise SQLMeshError(
+                    "StarRocks materialized views require a REFRESH clause. "
+                    "Specify at least one of 'refresh_moment' or 'refresh_scheme' in the model's "
+                    "physical_properties (e.g. refresh_scheme = 'ASYNC')."
+                )
+            properties.append(refresh_prop)
 
         # 6. Handle order_by/clustered_by (ORDER BY ...)
         order_prop = self._build_order_by_property(table_properties_copy, clustered_by or None)
@@ -3314,9 +3367,9 @@ class StarRocksEngineAdapter(
         StarRocks uses non-standard syntax for table comments:
             ALTER TABLE {table} COMMENT = '{comment}'
 
-        Note: This method is typically NOT called for StarRocks because:
-        - COMMENT_CREATION_TABLE = IN_SCHEMA_DEF_CTAS
-        - Comments are included directly in CREATE TABLE via SchemaCommentProperty
+        Note: This method is typically NOT called for StarRocks because the table comment is
+        included directly in CREATE TABLE (and CTAS) via SchemaCommentProperty, which StarRocks
+        accepts even for `CREATE TABLE ... COMMENT '...' AS SELECT`.
 
         However, this override is provided for potential future use cases:
         - Modifying comments on existing tables via ALTER TABLE
@@ -3346,15 +3399,13 @@ class StarRocksEngineAdapter(
         """
         Build ALTER TABLE MODIFY COLUMN SQL for column comment modification.
 
-        StarRocks requires column type in MODIFY COLUMN statement:
-            ALTER TABLE {table} MODIFY COLUMN {column} {type} COMMENT '{comment}'
+        StarRocks accepts the comment without re-stating the column type:
+            ALTER TABLE {table} MODIFY COLUMN {column} COMMENT '{comment}'
 
-        Note: This method is typically NOT called for StarRocks because:
-        - COMMENT_CREATION_TABLE = IN_SCHEMA_DEF_CTAS
-        - Column comments are included directly in CREATE TABLE DDL
-
-        However, this override is provided for potential future use cases:
-        - Modifying column comments on existing tables via ALTER TABLE
+        Because COMMENT_CREATION_TABLE = IN_SCHEMA_DEF_NO_CTAS, column comments are inlined for a
+        plain CREATE TABLE but NOT for CTAS (StarRocks rejects types/comments in a CTAS column
+        list). This method is therefore the fallback used to register column comments after a CTAS,
+        and to modify column comments on existing tables.
 
         Args:
             table: Table expression

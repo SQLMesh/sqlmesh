@@ -79,7 +79,7 @@ FROM source.user_events;
 
 A `DUPLICATE KEY` table can usually be used as a `FULL` kind model.
 
-### 2) An incremental table (PRIMARY KEY recommended)
+### 2) An incremental table (PRIMARY KEY required)
 
 ```sql
 MODEL (
@@ -129,9 +129,11 @@ MODEL (
 
 ### PRIMARY KEY Type
 
-For incremental models, **PRIMARY KEY tables are needed** (and effectively required for robust deletes) because StarRocks supports *weaker* `DELETE ... WHERE ...` on non-primary-key table types.
+For incremental models, a **PRIMARY KEY table is mandatory**. StarRocks only supports the full `DELETE ... WHERE ...` and `MERGE` semantics that incremental kinds rely on (such as `INCREMENTAL_BY_TIME_RANGE`, `INCREMENTAL_BY_UNIQUE_KEY`, `INCREMENTAL_BY_PARTITION`, and `SCD_TYPE_2`) on PRIMARY KEY tables. On DUPLICATE KEY, UNIQUE KEY, and AGGREGATE KEY tables these operations are not supported well enough.
 
-SQLMesh will apply conservative `WHERE` transformations for compatibility (for example, converting `BETWEEN` to `>= AND <=`, removing boolean literals, and converting `DELETE ... WHERE TRUE` to `TRUNCATE TABLE`). To avoid limitations and keep incremental maintenance reliable, use a `PRIMARY KEY` table by setting `physical_properties.primary_key`.
+SQLMesh enforces this: an incremental model on StarRocks without a primary key fails fast with a clear error. Set `physical_properties.primary_key`, for example `physical_properties (primary_key = (user_id, event_date))`. As a convenience, an `INCREMENTAL_BY_UNIQUE_KEY` model's `unique_key` is automatically promoted to a PRIMARY KEY table.
+
+SQLMesh engine also applies conservative `WHERE` transformations for compatibility (for example, converting `BETWEEN` to `>= AND <=`, removing boolean literals, and converting `DELETE ... WHERE TRUE` to `TRUNCATE TABLE`).
 
 > SQLMesh currently does not support specifying `primary_key` as a model parameter.
 
@@ -160,7 +162,7 @@ GROUP BY user_id, event_date;
 
 ### UNIQUE KEY Type
 
-You can create a UNIQUE KEY table by setting `physical_properties.unique_key`. In most incremental use cases, a PRIMARY KEY table is recommended instead.
+You can create a UNIQUE KEY table by setting `physical_properties.unique_key`. Note that a UNIQUE KEY table is **not** sufficient for incremental models — incremental kinds require a PRIMARY KEY table (see [PRIMARY KEY Type](#primary-key-type)).
 
 **Example:**
 

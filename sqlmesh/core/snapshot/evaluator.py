@@ -2045,38 +2045,36 @@ class PromotableStrategy(EvaluationStrategy, abc.ABC):
         self.adapter.execute(snapshot.model.render_post_statements(**render_kwargs))
 
 
-def _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-    model: Model, physical_properties: t.Optional[t.Dict[str, t.Any]]
+def _adjust_physical_properties_for_engine(
+    adapter: EngineAdapter,
+    model: Model,
+    physical_properties: t.Optional[t.Dict[str, t.Any]],
 ) -> t.Dict[str, t.Any]:
+    """Let the target engine adjust/validate physical properties for an incremental model.
+
+    The generic responsibility here is to determine, from the model kind, whether the table will
+    be the target of DELETE/MERGE statements (vs. append-only INSERTs) and whether its unique_key
+    may be promoted to an engine-specific key. The engine adapter decides what, if anything, to do
+    with that information (see ``EngineAdapter.adjust_physical_properties_for_incremental``).
     """
-    Promote StarRocks incremental-by-unique-key models to PRIMARY KEY tables so that
-    complex DELETE/MERGE statements remain supported.
-    """
+    kind = model.kind
 
-    properties = dict(physical_properties or {})
+    # Only incremental kinds that issue DELETE/MERGE need a delete-capable table. Append-only
+    # INCREMENTAL_UNMANAGED (insert_overwrite=False) only does INSERT, so it does not.
+    requires_delete_capable_table = (
+        kind.is_incremental_by_time_range
+        or kind.is_incremental_by_unique_key
+        or kind.is_incremental_by_partition
+        or kind.is_scd_type_2
+        or (isinstance(kind, IncrementalUnmanagedKind) and kind.insert_overwrite)
+    )
 
-    if (
-        model.dialect != "starrocks"
-        or not model.kind.is_incremental_by_unique_key
-        or "primary_key" in properties
-    ):
-        return properties
-    unique_key: t.Optional[t.List[exp.Expr]] = model.unique_key
-    if unique_key:
-        properties["primary_key"] = (
-            unique_key[0] if len(unique_key) == 1 else exp.Tuple(expressions=unique_key)
-        )
-        logger.info(
-            "Model '%s' promoted to PRIMARY KEY table on StarRocks to support rich DELETE operations.",
-            model.name,
-        )
-    else:
-        logger.warning(
-            f"StarRocks incremental-by-unique-key model '{model.name}' requires a PRIMARY KEY table. "
-            f"Specify `physical_properties['primary_key']` or set `unique_key` on the model.",
-        )
-
-    return properties
+    return adapter.adjust_physical_properties_for_incremental(
+        dict(physical_properties or {}),
+        requires_delete_capable_table=requires_delete_capable_table,
+        unique_key=model.unique_key if kind.is_incremental_by_unique_key else None,
+        model_name=model.name,
+    )
 
 
 class MaterializableStrategy(PromotableStrategy, abc.ABC):
@@ -2090,9 +2088,8 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
         **kwargs: t.Any,
     ) -> None:
         ctas_query = model.ctas_query(**render_kwargs)
-        physical_properties = kwargs.get("physical_properties", model.physical_properties)
-        physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-            model, physical_properties
+        physical_properties = _adjust_physical_properties_for_engine(
+            self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
         )
 
         logger.info("Creating table '%s'", table_name)
@@ -2208,9 +2205,8 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
             except Exception:
                 columns_to_types, source_columns = None, None
 
-        physical_properties = kwargs.get("physical_properties", model.physical_properties)
-        physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-            model, physical_properties
+        physical_properties = _adjust_physical_properties_for_engine(
+            self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
         )
         self.adapter.replace_query(
             name,
@@ -2354,9 +2350,8 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
                 table_name,
                 render_kwargs=render_kwargs,
             )
-            physical_properties = kwargs.get("physical_properties", model.physical_properties)
-            physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-                model, physical_properties
+            physical_properties = _adjust_physical_properties_for_engine(
+                self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
             )
             self.adapter.merge(
                 table_name,
@@ -2384,9 +2379,8 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
         columns_to_types, source_columns = self._get_target_and_source_columns(
             model, table_name, render_kwargs=render_kwargs
         )
-        physical_properties = kwargs.get("physical_properties", model.physical_properties)
-        physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-            model, physical_properties
+        physical_properties = _adjust_physical_properties_for_engine(
+            self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
         )
         self.adapter.merge(
             table_name,
@@ -2594,6 +2588,9 @@ class SCDType2Strategy(IncrementalStrategy):
             columns_to_types = model.columns_to_types_or_raise
             if isinstance(model.kind, SCDType2ByTimeKind):
                 columns_to_types[model.kind.updated_at_name.name] = model.kind.time_data_type
+            physical_properties = _adjust_physical_properties_for_engine(
+                self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+            )
             self.adapter.create_table(
                 table_name,
                 target_columns_to_types=columns_to_types,
@@ -2602,7 +2599,7 @@ class SCDType2Strategy(IncrementalStrategy):
                 partitioned_by=model.partitioned_by,
                 partition_interval_unit=model.partition_interval_unit,
                 clustered_by=model.clustered_by,
-                table_properties=kwargs.get("physical_properties", model.physical_properties),
+                table_properties=physical_properties,
                 table_description=model.description if is_table_deployable else None,
                 column_descriptions=model.column_descriptions if is_table_deployable else None,
             )
@@ -3179,9 +3176,8 @@ class EngineManagedStrategy(MaterializableStrategy):
         if is_table_deployable and is_snapshot_deployable:
             # We could deploy this to prod; create a proper managed table
             logger.info("Creating managed table: %s", table_name)
-            physical_properties = kwargs.get("physical_properties", model.physical_properties)
-            physical_properties = _ensure_primary_key_for_starrocks_when_incremental_by_unique_key(
-                model, physical_properties
+            physical_properties = _adjust_physical_properties_for_engine(
+                self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
             )
             self.adapter.create_managed_table(
                 table_name=table_name,

@@ -132,6 +132,9 @@ def adapter_mock(mocker: MockerFixture):
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+        lambda physical_properties, **kwargs: physical_properties
+    )
     return adapter_mock
 
 
@@ -155,6 +158,9 @@ def adapters(mocker: MockerFixture):
         adapter_mock.wap_supported.return_value = False
         adapter_mock.get_data_objects.return_value = []
         adapter_mock.with_settings.return_value = adapter_mock
+        adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+            lambda physical_properties, **kwargs: physical_properties
+        )
         adapters.append(adapter_mock)
     return adapters
 
@@ -4044,6 +4050,9 @@ def test_migrate_snapshot(snapshot: Snapshot, mocker: MockerFixture, adapter_moc
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+        lambda physical_properties, **kwargs: physical_properties
+    )
 
     evaluator = SnapshotEvaluator(adapter_mock)
     evaluator.create([snapshot], {})

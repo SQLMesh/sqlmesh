@@ -2728,6 +2728,35 @@ class EngineAdapter:
     ) -> t.Optional[exp.Cluster]:
         return None
 
+    def adjust_physical_properties_for_incremental(
+        self,
+        physical_properties: t.Dict[str, t.Any],
+        *,
+        requires_delete_capable_table: bool,
+        unique_key: t.Optional[t.List[exp.Expr]],
+        model_name: str,
+    ) -> t.Dict[str, t.Any]:
+        """Adjusts physical properties for an incremental model before the table is created.
+
+        Some engines require a specific physical table layout before they can run the DELETE/MERGE
+        statements that incremental model kinds rely on (e.g. StarRocks only supports those on
+        PRIMARY KEY tables). This hook lets each engine derive or validate the required properties
+        while keeping the generic evaluator free of engine-specific branching.
+
+        Args:
+            physical_properties: The model's physical properties.
+            requires_delete_capable_table: Whether the model kind issues DELETE/MERGE statements
+                (as opposed to append-only INSERTs), as determined by the generic evaluator.
+            unique_key: The model's unique key, populated only when the kind allows promoting it to
+                an engine-specific key (i.e. INCREMENTAL_BY_UNIQUE_KEY); otherwise None.
+            model_name: The model name, for use in diagnostics.
+
+        Returns:
+            The (possibly adjusted) physical properties. Implementations own the given mapping and
+            may mutate it in place; the base implementation returns it unchanged.
+        """
+        return physical_properties
+
     def _build_table_properties_exp(
         self,
         catalog_name: t.Optional[str] = None,

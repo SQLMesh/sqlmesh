@@ -27,9 +27,12 @@ from sqlmesh.core.engine_adapter.shared import DataObjectType
 from sqlmesh.utils.errors import SQLMeshError
 
 from tests.core.engine_adapter import to_sql_calls
+from sqlmesh.core.engine_adapter.base import EngineAdapter
 from sqlmesh.core.engine_adapter.starrocks import StarRocksEngineAdapter
+from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.dialect import parse
 from sqlmesh.core.model import load_sql_based_model, SqlModel
+from sqlmesh.core.snapshot.evaluator import _adjust_physical_properties_for_engine
 
 pytestmark = [pytest.mark.starrocks, pytest.mark.engine]
 
@@ -328,6 +331,24 @@ class TestTableOperations:
         assert "REFRESH IMMEDIATE ASYNC" in calls[1]
         assert "START ('2025-01-01 00:00:00')" in calls[1]
         assert "EVERY (INTERVAL 5 MINUTE)" in calls[1]
+
+    def test_create_materialized_view_without_refresh_raises(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ):
+        """StarRocks only supports ASYNC MVs, which require a REFRESH clause.
+
+        Creating an MV without refresh_moment/refresh_scheme must raise rather than silently
+        producing an undetectable synchronous MV.
+        """
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        with pytest.raises(SQLMeshError, match="require a REFRESH clause"):
+            adapter.create_view(
+                "test_mv",
+                parse_one("SELECT a FROM tbl"),
+                materialized=True,
+                target_columns_to_types={"a": exp.DataType.build("INT")},
+                view_properties={"replication_num": exp.Literal.string("1")},
+            )
 
     def test_delete_where_true_optimization(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
@@ -889,7 +910,8 @@ class TestPartitionPropertyBuilding:
             dialect starrocks,
             columns (dt DATE, region STRING, year INT, month INT),
             physical_properties (
-                partition_by = {partition_expr}
+                partition_by = {partition_expr},
+                refresh_scheme = ASYNC
             )
         );
         SELECT dt, region, year, month FROM src;
@@ -1878,3 +1900,114 @@ class TestComprehensive:
         assert "DISTRIBUTED BY HASH (`customer_id`) BUCKETS 10" in sql
         assert "ORDER BY (`customer_id`, `order_id`)" in sql
         assert "PROPERTIES ('replication_num'='3')" in sql
+
+
+# =============================================================================
+# Incremental models require a PRIMARY KEY table on StarRocks
+# =============================================================================
+class TestIncrementalRequiresPrimaryKey:
+    """StarRocks incremental kinds rely on DELETE/MERGE, which only work on PRIMARY KEY tables.
+
+    Declaring such a model without a PRIMARY KEY must therefore fail at creation time, while
+    append-only kinds and non-StarRocks engines are unaffected. The rule is enforced by
+    ``StarRocksEngineAdapter.adjust_physical_properties_for_incremental`` (reached from the
+    evaluator's ``_adjust_physical_properties_for_engine``); these tests drive that path with
+    declared models and assert the observable outcome.
+    """
+
+    def _adjust(self, adapter: EngineAdapter, model: SqlModel) -> t.Dict[str, t.Any]:
+        return _adjust_physical_properties_for_engine(adapter, model, model.physical_properties)
+
+    def test_incremental_model_without_primary_key_raises(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ) -> None:
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        model = _load_sql_model(
+            """
+            MODEL (
+                name test_schema.inc_no_pk,
+                kind INCREMENTAL_BY_TIME_RANGE (time_column event_date),
+                dialect starrocks,
+                columns (id INT, event_date DATE)
+            );
+            SELECT id, event_date FROM src WHERE event_date BETWEEN @start_ds AND @end_ds;
+            """
+        )
+        with pytest.raises(SQLMeshError, match="requires a PRIMARY KEY"):
+            self._adjust(adapter, model)
+
+    def test_incremental_model_with_primary_key_is_allowed(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ) -> None:
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        model = _load_sql_model(
+            """
+            MODEL (
+                name test_schema.inc_pk,
+                kind INCREMENTAL_BY_TIME_RANGE (time_column event_date),
+                dialect starrocks,
+                columns (id INT, event_date DATE),
+                physical_properties (primary_key = (id, event_date))
+            );
+            SELECT id, event_date FROM src WHERE event_date BETWEEN @start_ds AND @end_ds;
+            """
+        )
+        assert "primary_key" in self._adjust(adapter, model)
+
+    def test_incremental_by_unique_key_is_promoted_to_primary_key(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ) -> None:
+        # INCREMENTAL_BY_UNIQUE_KEY auto-promotes the unique_key to a PRIMARY KEY (a multi-column
+        # key becomes a tuple) rather than requiring one to be declared explicitly.
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        model = _load_sql_model(
+            """
+            MODEL (
+                name test_schema.inc_by_uk,
+                kind INCREMENTAL_BY_UNIQUE_KEY (unique_key (id, event_date)),
+                dialect starrocks,
+                columns (id INT, event_date DATE)
+            );
+            SELECT id, event_date FROM src;
+            """
+        )
+        primary_key = self._adjust(adapter, model)["primary_key"]
+        assert isinstance(primary_key, exp.Tuple)
+        assert [c.name for c in primary_key.expressions] == ["id", "event_date"]
+
+    def test_append_only_incremental_does_not_require_primary_key(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ) -> None:
+        # Append-only INCREMENTAL_UNMANAGED (insert_overwrite=False) only does INSERT, so it does
+        # not need a PRIMARY KEY table.
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        model = _load_sql_model(
+            """
+            MODEL (
+                name test_schema.inc_append,
+                kind INCREMENTAL_UNMANAGED,
+                dialect starrocks,
+                columns (id INT, event_date DATE)
+            );
+            SELECT id, event_date FROM src;
+            """
+        )
+        assert "primary_key" not in self._adjust(adapter, model)
+
+    def test_non_starrocks_incremental_is_unaffected(
+        self, make_mocked_engine_adapter: t.Callable[..., DuckDBEngineAdapter]
+    ) -> None:
+        # Engines without the PRIMARY KEY requirement inherit the base no-op and never raise.
+        adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+        model = _load_sql_model(
+            """
+            MODEL (
+                name test_schema.inc_duckdb,
+                kind INCREMENTAL_BY_TIME_RANGE (time_column event_date),
+                dialect duckdb,
+                columns (id INT, event_date DATE)
+            );
+            SELECT id, event_date FROM src WHERE event_date BETWEEN @start_ds AND @end_ds;
+            """
+        )
+        assert "primary_key" not in self._adjust(adapter, model)

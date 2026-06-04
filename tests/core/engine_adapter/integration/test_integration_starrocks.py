@@ -30,6 +30,7 @@ from sqlglot import exp
 
 from sqlmesh.core.engine_adapter.starrocks import StarRocksEngineAdapter
 from sqlmesh.core.model.definition import load_sql_based_model, SqlModel
+from sqlmesh.utils.errors import SQLMeshError
 import sqlmesh.core.dialect as d
 
 from tests.core.engine_adapter.integration import TestContext
@@ -654,7 +655,10 @@ class TestViewAndMaterializedViewFeatures:
         ddl = fetchone_or_fail(engine_adapter, f"SHOW CREATE MATERIALIZED VIEW {mv_sql}")[1]
         logger.debug(f"mv ddl: {ddl}")
         ddl_upper = normalize_sql(ddl).upper()
-        assert "REFRESH DEFERRED ASYNC" in ddl_upper
+        # StarRocks renders a scheduled async refresh (ASYNC START ... EVERY ...) as
+        # "REFRESH DEFERRED SCHEDULE START ... EVERY ..." in SHOW CREATE (newer versions);
+        # older versions render it as "REFRESH DEFERRED ASYNC START ...". Accept either.
+        assert "REFRESH DEFERRED SCHEDULE" in ddl_upper or "REFRESH DEFERRED ASYNC" in ddl_upper
         assert (
             "START('2025-01-01 00:00:00')EVERY(INTERVAL 5 MINUTE)" in ddl_upper
             or 'START("2025-01-01 00:00:00")EVERY(INTERVAL 5 MINUTE)' in ddl_upper
@@ -740,6 +744,59 @@ class TestViewAndMaterializedViewFeatures:
             "COMMENT 'ANALYTICS MV COMBO B'" in ddl_upper
             or 'COMMENT "ANALYTICS MV COMBO B"' in ddl_upper
         )
+
+    def test_materialized_view_requires_refresh(
+        self, ctx: TestContext, engine_adapter: StarRocksEngineAdapter
+    ):
+        """StarRocks only supports ASYNC materialized views, which require a REFRESH clause.
+
+        Creating an MV without refresh_moment/refresh_scheme must raise a clear error rather than
+        silently creating an undetectable synchronous MV.
+        """
+        source = ctx.table("sr_mv_no_refresh_src")
+        mv = ctx.table("sr_mv_no_refresh")
+        source_sql = source.sql(dialect=ctx.dialect, identify=True)
+        mv_model_name = _model_name_from_table(mv)
+
+        self._create_sales_source_table(ctx, engine_adapter, source)
+
+        model_sql = f"""
+        MODEL (
+            name {mv_model_name},
+            kind VIEW (
+                materialized true
+            ),
+            dialect starrocks,
+            columns (
+                order_id BIGINT,
+                customer_id INT,
+                event_date DATE,
+                amount DECIMAL(18,2),
+                region VARCHAR(50)
+            ),
+            virtual_properties (
+                distributed_by = 'HASH(order_id) BUCKETS 4',
+                replication_num = '1'
+            )
+        );
+        SELECT order_id, customer_id, event_date, amount, region
+        FROM {source_sql};
+        """
+        model = _load_sql_model(model_sql)
+        query = model.render_query()
+        assert query is not None
+        materialized_properties = _materialized_properties_from_model(model)
+
+        with pytest.raises(SQLMeshError, match="require a REFRESH clause"):
+            engine_adapter.create_view(
+                mv,
+                query,
+                replace=True,
+                materialized=True,
+                target_columns_to_types=model.columns_to_types,
+                materialized_properties=materialized_properties,
+                view_properties=model.virtual_properties,
+            )
 
 
 class TestTableFeatures:
@@ -1071,14 +1128,17 @@ class TestEndToEndModelParsing:
             assert "PARTITION BY " in ddl
             # Note: PARTITION BY may contain function expressions like from_unixtime(ts)
             # We verify the clause exists and contains expected patterns
-            part_match = re.search(r"PARTITION BY \s*\(([^)]+)\)", ddl)
+            # Capture the full PARTITION BY (...) clause, allowing one level of nested parens so
+            # that function expressions like from_unixtime(ts) are included alongside `region`.
+            part_match = re.search(r"PARTITION BY\s*(\((?:[^()]|\([^()]*\))*\))", ddl)
             assert part_match, "PARTITION BY clause not found"
             part_cols = part_match.group(1)
-            # Verify function expression and column references
-            assert (
-                # "from_unixtime" in part_cols or "ts" in part_cols
-                "__generated_partition_column_" in part_cols and "region" in part_cols
-            ), f"Expected partition expression with generated column/region, got {part_cols}"
+            assert "from_unixtime" in part_cols and "ts" in part_cols, (
+                f"Expected partition expression with from_unixtime(ts), got {part_cols}"
+            )
+            assert "region" in part_cols, (
+                f"Expected 'region' partition column in PARTITION BY, got {part_cols}"
+            )
 
             # Verify ORDER BY from clustered_by
             order_match = re.search(r"ORDER BY\s*\(([^)]+)\)", ddl)
@@ -1123,7 +1183,8 @@ class TestEndToEndModelParsing:
                 order_by = (order_id, region),
                 -- clustered_by = (order_id, region),  -- also OK
                 -- replication_num = '1',
-                bucket_size = '12345678',
+                -- bucket_size only applies to RANDOM distribution with enable_automatic_bucket;
+                -- StarRocks rejects it for HASH-distributed tables.
                 enable_persistent_index = 'true'
             )
         );
@@ -1513,7 +1574,8 @@ class TestEndToEndModelParsing:
         has_func: bool,
     ):
         """Expression partitioning for MVs should always keep outer parentheses."""
-        db_name = "sr_e2e_part_expr_mv_db"
+        suffix = "func" if has_func else "cols"
+        db_name = f"sr_e2e_part_expr_mv_db_{suffix}"
         src_table = f"{db_name}.sr_part_expr_src"
         mv_table = f"{db_name}.sr_part_expr_mv"
 
@@ -1962,7 +2024,7 @@ class TestStarRocksAbility:
 
     @pytest.fixture(scope="class")
     def test_tables(
-        self, starrocks_adapter: StarRocksEngineAdapter
+        self, starrocks_adapter: StarRocksEngineAdapter, worker_id: str
     ) -> t.Generator[t.Dict[str, str], None, None]:
         """
         Pre-create tables of different types for testing.
@@ -1970,7 +2032,7 @@ class TestStarRocksAbility:
         Returns:
             Dict mapping table type to fully qualified table name
         """
-        db_name = "sr_ability_test"
+        db_name = f"sr_ability_test_{worker_id}"
         starrocks_adapter.create_schema(db_name, ignore_if_exists=True)
 
         tables = {}
@@ -2479,11 +2541,11 @@ class TestCommentMethods:
     Test _build_create_comment_table_exp and _build_create_comment_column_exp methods.
 
     These methods are used to generate ALTER TABLE SQL for modifying comments.
-    Although StarRocks uses COMMENT_CREATION_TABLE = IN_SCHEMA_DEF_CTAS (comments
-    are included in CREATE TABLE), these methods may be used for:
-    - Modifying existing table comments
+    StarRocks uses COMMENT_CREATION_TABLE = IN_SCHEMA_DEF_NO_CTAS: column comments are inlined for a
+    plain CREATE TABLE but registered via ALTER TABLE ... MODIFY COLUMN ... COMMENT after a CTAS
+    (StarRocks rejects types/comments in a CTAS column list). These methods are also used for:
+    - Modifying existing table/column comments
     - View comments (depending on COMMENT_CREATION_VIEW)
-    - Future ALTER TABLE support
     """
 
     def test_build_create_comment_table_exp(self, starrocks_adapter: StarRocksEngineAdapter):
