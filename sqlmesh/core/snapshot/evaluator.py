@@ -2734,6 +2734,19 @@ class ViewStrategy(PromotableStrategy):
             is_materialized_view and is_first_insert
         )
 
+        # Some engines (e.g. StarRocks) maintain materialized views automatically (via auto/scheduled
+        # REFRESH) and can only recreate them via a destructive DROP + CREATE, which deletes the
+        # materialized data and forces a full rebuild. For those, an existing MV must not be recreated
+        # on routine evaluation (e.g. every `sqlmesh run`); only build it on the first insert (a new
+        # version) or when a rebuild is explicitly forced (intervals cleared by `should_force_rebuild`,
+        # which sets `is_first_insert`).
+        if (
+            is_materialized_view
+            and not is_first_insert
+            and not self.adapter.RECREATE_MATERIALIZED_VIEW_ON_EVALUATION
+        ):
+            must_recreate_view = False
+
         if self.adapter.table_exists(table_name) and not must_recreate_view:
             logger.info("Skipping creation of the view '%s'", table_name)
             return

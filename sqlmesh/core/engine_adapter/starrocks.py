@@ -1691,6 +1691,13 @@ class StarRocksEngineAdapter(
     implement custom MV schema rendering in create_view/_create_materialized_view.
     """
 
+    RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False
+    """
+    StarRocks async materialized views maintain themselves: they revalidate automatically even if the
+    underlying data is dropped, and the data is kept current either by StarRocks' automatic refresh or
+    by an explicit `REFRESH MATERIALIZED VIEW` (which also enables partition-level incremental refresh).
+    """
+
     SUPPORTS_REPLACE_TABLE = False
     """No REPLACE TABLE syntax; use DROP + CREATE instead"""
 

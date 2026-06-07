@@ -350,6 +350,15 @@ class TestTableOperations:
                 view_properties={"replication_num": exp.Literal.string("1")},
             )
 
+    def test_does_not_recreate_materialized_view_on_evaluation(self):
+        """StarRocks async MVs maintain themselves, so SQLMesh must not recreate them on every run.
+
+        The adapter opts out of per-evaluation recreation via
+        RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False, which the evaluator's ViewStrategy honors
+        for materialized views that already exist.
+        """
+        assert StarRocksEngineAdapter.RECREATE_MATERIALIZED_VIEW_ON_EVALUATION is False
+
     def test_delete_where_true_optimization(
         self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
     ):

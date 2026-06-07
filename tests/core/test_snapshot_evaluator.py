@@ -707,6 +707,61 @@ def test_evaluate_materialized_view(
     assert adapter_mock.create_view.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "view_exists, has_intervals, expected_create_view_calls",
+    [
+        # MV already exists and has intervals -> routine evaluation (e.g. `sqlmesh run`): do NOT recreate
+        (True, True, 0),
+        # MV does not exist yet -> first build: create it
+        (False, False, 1),
+        # MV missing but intervals present -> still a first insert (table gone): rebuild it
+        (False, True, 1),
+    ],
+)
+def test_evaluate_materialized_view_not_recreated_on_evaluation(
+    adapter_mock,
+    make_snapshot,
+    view_exists: bool,
+    has_intervals: bool,
+    expected_create_view_calls: int,
+):
+    # Engines that maintain MVs themselves (e.g. StarRocks) opt out of recreating an existing MV on
+    # every evaluation by setting RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False.
+    adapter_mock.RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False
+    adapter_mock.table_exists.return_value = view_exists
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind VIEW (
+                    materialized true
+                )
+            );
+
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    if has_intervals:
+        snapshot.add_interval("2023-01-01", "2023-01-01")
+
+    evaluator.evaluate(
+        snapshot,
+        start="2020-01-01",
+        end="2020-01-02",
+        execution_time="2020-01-02",
+        snapshots={},
+    )
+
+    assert adapter_mock.create_view.call_count == expected_create_view_calls
+
+
 def test_evaluate_materialized_view_with_partitioned_by_cluster_by(
     mocker: MockerFixture, adapter_mock, make_snapshot
 ):

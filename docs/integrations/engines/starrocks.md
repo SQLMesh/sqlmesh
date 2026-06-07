@@ -491,7 +491,11 @@ You can specify `partitioning`, `distribution`, `order by` and `properties` the 
 
 **Notes:**
 
-* If you create materialized views with `replace=true`, SQLMesh may drop and recreate the MV. When an MV is dropped, its data is removed and the MV must be refreshed/rebuilt again.
+* SQLMesh does not recreate materialized views on every `sqlmesh run`. Once an MV exists, SQLMesh leaves it in place and lets StarRocks keep it current. This is intentional:
+    * StarRocks async MVs revalidate themselves automatically, even when the underlying data is dropped, so a periodic drop-and-recreate is unnecessary.
+    * StarRocks async MVs either refresh automatically (per their `refresh_scheme`) or can be refreshed explicitly with `REFRESH MATERIALIZED VIEW`, which also enables partition-level (incremental) refresh. A SQLMesh-driven recreate would instead force a full rebuild.
+
+    The MV is (re)built only when it does not yet exist — for example when you first deploy it, or when a model change produces a new version. To change a materialized view's definition, update the model and run `sqlmesh plan`.
 * There are some restriction for `partitioning`, you need to refer StarRocks' doc for MV partitioning specification.
 * StarRocks MV schema supports a column list but does **not** support explicit data types in that list. Column data types come from the `AS SELECT ...` query.
 * If you create MVs from a dataframe via the Python API, provide `target_columns_to_types` (a `Dict[str, exp.DataType]`). If you don't care about exact types, you can set all columns to `VARCHAR` as a fallback:
