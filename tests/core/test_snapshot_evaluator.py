@@ -843,7 +843,12 @@ def test_evaluate_materialized_view_with_execution_time_macro(
         view_properties={},
         table_description=None,
         column_descriptions={},
-        materialized_properties=None,
+        materialized_properties={
+            "partitioned_by": [],
+            "partition_interval_unit": None,
+            "clustered_by": [],
+            "has_audits": False,
+        },
     )
 
 
@@ -1305,6 +1310,7 @@ def test_create_materialized_view(mocker: MockerFixture, adapter_mock, make_snap
             "clustered_by": [],
             "partition_interval_unit": None,
             "partitioned_by": [],
+            "has_audits": False,
         },
         view_properties={},
         table_description=None,
@@ -1354,6 +1360,7 @@ def test_create_view_with_properties(mocker: MockerFixture, adapter_mock, make_s
             "clustered_by": [],
             "partition_interval_unit": None,
             "partitioned_by": [],
+            "has_audits": False,
         },
         table_description=None,
         replace=False,
@@ -1362,6 +1369,45 @@ def test_create_view_with_properties(mocker: MockerFixture, adapter_mock, make_s
     adapter_mock.create_view.assert_called_once_with(
         snapshot.table_name(), model.render_query(), column_descriptions={}, **common_kwargs
     )
+
+
+def test_create_materialized_view_with_audits_sets_has_audits(
+    mocker: MockerFixture, adapter_mock, make_snapshot
+):
+    """A materialized view model with audits must propagate has_audits=True to the adapter.
+
+    Engines like StarRocks rely on this flag to synchronously refresh the MV before audits run.
+    """
+    adapter_mock.get_data_objects.return_value = []
+    adapter_mock.table_exists.return_value = False
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind VIEW (
+                    materialized true
+                ),
+                audits (
+                    not_null(columns := (a))
+                )
+            );
+
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {})
+
+    _, kwargs = adapter_mock.create_view.call_args
+    assert kwargs["materialized_properties"]["has_audits"] is True
 
 
 def test_promote_model_info(mocker: MockerFixture, make_snapshot):

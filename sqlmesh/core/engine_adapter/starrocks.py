@@ -2310,6 +2310,13 @@ class StarRocksEngineAdapter(
             )
 
         # MATERIALIZED VIEW path
+        # MVs with audits get a synchronous refresh after creation (see _create_materialized_view),
+        # which requires REFRESH DEFERRED. Validate before the drop so we fail without destroying
+        # an existing MV.
+        has_audits = bool((materialized_properties or {}).get("has_audits"))
+        if has_audits:
+            self._validate_deferred_refresh_for_audits(view_name, view_properties)
+
         if replace:
             # Avoid DROP MATERIALIZED VIEW failure when an object with the same name exists but is not an MV.
             self.drop_data_object_on_type_mismatch(
@@ -2430,6 +2437,16 @@ class StarRocksEngineAdapter(
                 ),
                 quote_identifiers=self.QUOTE_IDENTIFIERS_IN_VIEWS,
             )
+
+        # MVs with audits are created with REFRESH DEFERRED (enforced in create_view), so StarRocks
+        # does not populate them on creation. Audits need data, so block on a synchronous refresh.
+        if bool((materialized_properties or {}).get("has_audits")):
+            refresh_sql = (
+                f"REFRESH MATERIALIZED VIEW "
+                f"{exp.to_table(view_name).sql(dialect=self.dialect, identify=True)} "
+                f"WITH SYNC MODE"
+            )
+            self.execute(refresh_sql)
 
         self._clear_data_object_cache(view_name)
 
@@ -3019,6 +3036,37 @@ class StarRocksEngineAdapter(
             order=None,
         )
         return result
+
+    def _validate_deferred_refresh_for_audits(
+        self,
+        view_name: TableName,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]],
+    ) -> None:
+        """
+        Ensure a materialized view with audits uses REFRESH DEFERRED.
+
+        StarRocks audits require data to exist in the MV, so SQLMesh issues an explicit synchronous
+        `REFRESH MATERIALIZED VIEW ... WITH SYNC MODE` right after creating the MV. For that to be
+        deterministic, the MV must use `refresh_moment = 'DEFERRED'`; otherwise StarRocks' automatic
+        (IMMEDIATE) refresh would run concurrently and race with the explicit one. A missing
+        refresh_moment defaults to IMMEDIATE in StarRocks, so it is rejected as well.
+        """
+        refresh_moment = (view_properties or {}).get("refresh_moment")
+        normalized = (
+            PropertyValidator.validate_and_normalize_property("refresh_moment", refresh_moment)
+            if refresh_moment is not None
+            else None
+        )
+        if normalized != "DEFERRED":
+            raise SQLMeshError(
+                f"[StarRocks] Materialized view '{exp.to_table(view_name).sql(dialect=self.dialect)}' "
+                "has audits, which require a synchronous refresh after creation. This is only "
+                "supported with deferred refresh, so the model must set "
+                "`refresh_moment = 'DEFERRED'` in its physical_properties "
+                f"(got {normalized or 'no refresh_moment; StarRocks defaults to IMMEDIATE'}). "
+                "DEFERRED prevents StarRocks' "
+                "automatic refresh from racing with the synchronous refresh SQLMesh issues."
+            )
 
     def _build_refresh_property(
         self, table_properties: t.Dict[str, t.Any]

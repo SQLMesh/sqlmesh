@@ -350,6 +350,118 @@ class TestTableOperations:
                 view_properties={"replication_num": exp.Literal.string("1")},
             )
 
+    def test_create_materialized_view_with_audits_emits_sync_refresh(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ):
+        """When an MV has audits, SQLMesh must synchronously refresh it right after creation.
+
+        Audits require data to exist in the MV. With REFRESH DEFERRED, StarRocks does not populate
+        the MV on creation, so SQLMesh issues an explicit `REFRESH MATERIALIZED VIEW ... WITH SYNC
+        MODE` that blocks until the data is materialized.
+        """
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        adapter.create_view(
+            "test_mv",
+            parse_one("SELECT a FROM tbl"),
+            materialized=True,
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+            materialized_properties={"has_audits": True},
+            view_properties={
+                "refresh_moment": exp.Var(this="DEFERRED"),
+                "refresh_scheme": exp.Var(this="ASYNC"),
+            },
+        )
+
+        calls = to_sql_calls(adapter)
+        assert calls[0] == "DROP MATERIALIZED VIEW IF EXISTS `test_mv`"
+        assert "CREATE MATERIALIZED VIEW" in calls[1]
+        assert "REFRESH DEFERRED" in calls[1]
+        assert calls[2] == "REFRESH MATERIALIZED VIEW `test_mv` WITH SYNC MODE"
+
+    def test_create_materialized_view_with_audits_emits_sync_refresh_on_first_create(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ):
+        """The sync refresh must also fire on first-time creation (replace=False).
+
+        ViewStrategy.create calls create_view with replace=False, so the DROP is skipped, but the
+        synchronous refresh still needs to populate the MV before audits run.
+        """
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        adapter.create_view(
+            "test_mv",
+            parse_one("SELECT a FROM tbl"),
+            replace=False,
+            materialized=True,
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+            materialized_properties={"has_audits": True},
+            view_properties={
+                "refresh_moment": exp.Var(this="DEFERRED"),
+                "refresh_scheme": exp.Var(this="ASYNC"),
+            },
+        )
+
+        calls = to_sql_calls(adapter)
+        assert all("DROP MATERIALIZED VIEW" not in sql for sql in calls)
+        assert "CREATE MATERIALIZED VIEW" in calls[0]
+        assert "REFRESH DEFERRED" in calls[0]
+        assert calls[1] == "REFRESH MATERIALIZED VIEW `test_mv` WITH SYNC MODE"
+
+    def test_create_materialized_view_with_audits_immediate_refresh_raises(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ):
+        """An MV with audits must use REFRESH DEFERRED; IMMEDIATE must raise and not create anything."""
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        with pytest.raises(SQLMeshError, match="DEFERRED"):
+            adapter.create_view(
+                "test_mv",
+                parse_one("SELECT a FROM tbl"),
+                materialized=True,
+                target_columns_to_types={"a": exp.DataType.build("INT")},
+                materialized_properties={"has_audits": True},
+                view_properties={
+                    "refresh_moment": exp.Var(this="IMMEDIATE"),
+                    "refresh_scheme": exp.Var(this="ASYNC"),
+                },
+            )
+
+        # Fail-fast: nothing should have been dropped or created.
+        assert all("CREATE MATERIALIZED VIEW" not in sql for sql in to_sql_calls(adapter))
+        assert all("DROP MATERIALIZED VIEW" not in sql for sql in to_sql_calls(adapter))
+
+    def test_create_materialized_view_with_audits_missing_refresh_moment_raises(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ):
+        """A missing refresh_moment defaults to IMMEDIATE in StarRocks, so audits must raise."""
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        with pytest.raises(SQLMeshError, match="DEFERRED"):
+            adapter.create_view(
+                "test_mv",
+                parse_one("SELECT a FROM tbl"),
+                materialized=True,
+                target_columns_to_types={"a": exp.DataType.build("INT")},
+                materialized_properties={"has_audits": True},
+                view_properties={"refresh_scheme": exp.Var(this="ASYNC")},
+            )
+
+    def test_create_materialized_view_without_audits_does_not_sync_refresh(
+        self, make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter]
+    ):
+        """Without audits, no synchronous refresh is issued and IMMEDIATE refresh is allowed."""
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        adapter.create_view(
+            "test_mv",
+            parse_one("SELECT a FROM tbl"),
+            materialized=True,
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+            materialized_properties={"has_audits": False},
+            view_properties={
+                "refresh_moment": exp.Var(this="IMMEDIATE"),
+                "refresh_scheme": exp.Var(this="ASYNC"),
+            },
+        )
+
+        assert all("WITH SYNC MODE" not in sql for sql in to_sql_calls(adapter))
+
     def test_does_not_recreate_materialized_view_on_evaluation(self):
         """StarRocks async MVs maintain themselves, so SQLMesh must not recreate them on every run.
 

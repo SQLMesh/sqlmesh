@@ -485,6 +485,31 @@ FROM user_events
 GROUP BY user_id;
 ```
 
+**Audits on materialized views:**
+
+Audits require data to exist in the materialized view when they run. Because StarRocks refreshes async MVs as background jobs, the data is not guaranteed to be present immediately after the MV is created. To make audits deterministic, when a materialized view has audits SQLMesh issues a synchronous `REFRESH MATERIALIZED VIEW <name> WITH SYNC MODE` right after creating the MV, which blocks until the data is materialized.
+
+For this to work safely, a materialized view with audits **must** set `refresh_moment = 'DEFERRED'`. This prevents StarRocks' automatic (IMMEDIATE) refresh from racing with the synchronous refresh that SQLMesh issues. If the MV has audits and `refresh_moment` is `IMMEDIATE` (or unset, which defaults to `IMMEDIATE` in StarRocks), SQLMesh raises an error before creating the MV.
+
+```sql
+MODEL (
+  name user_summary_mv,
+  kind VIEW (
+    materialized true
+  ),
+  audits (
+    not_null(columns := (user_id))
+  ),
+  physical_properties (
+    -- required when the MV has audits
+    refresh_moment = DEFERRED,
+    refresh_scheme = 'ASYNC'
+  )
+);
+
+SELECT user_id, COUNT(*) AS event_count FROM user_events GROUP BY user_id;
+```
+
 **Other properties:**
 
 You can specify `partitioning`, `distribution`, `order by` and `properties` the same as normal table properties. But notice that only supported MV properties are useful, Refer to StarRocks' doc for MV creation.
@@ -512,6 +537,9 @@ target_columns_to_types = {
 ## Limitations
 
 * **No SYNC MV support**: synchronous materialized views are not supported yet.
+* **`FULL` models are not replaced atomically**: StarRocks does not support `CREATE OR REPLACE TABLE` and has no multi-statement transactions (in version 3.5 and lower), so SQLMesh refreshes a `FULL` model by emptying the existing table (a `TRUNCATE`, or a `DELETE` when a filter applies) and then inserting the new result set as separate, auto-committed statements. There is a brief window between the truncate/delete and the completion of the insert during which the table is empty or partially populated, so readers querying it during that window may see missing or incomplete data. Incremental kinds (e.g. `INCREMENTAL_BY_TIME_RANGE`, `INCREMENTAL_BY_PARTITION`) do not fully eliminate this — StarRocks applies them as the same non-atomic delete-then-insert — but they narrow the affected rows to the partition/time range being processed rather than emptying the whole table, so unaffected partitions remain readable throughout. SQLMesh has no way to make these replacements atomic on StarRocks 3.5 and lower.
+
+    Future work: this PR targeted StarRocks 3.5, but StarRocks has since expanded its capabilities considerably (the integration now runs against 4.1). Later work should investigate using `INSERT OVERWRITE` together with the transactional/atomic-swap guarantees available in newer StarRocks versions to close this gap (see the `INSERT_OVERWRITE_STRATEGY` and `SUPPORTS_TRANSACTIONS` flags in the StarRocks engine adapter).
 * **No tuple IN**: StarRocks does not support `(c1, c2) IN ((v1, v2), ...)`.
 * **No `SELECT ... FOR UPDATE`**: StarRocks is an OLAP database and does not support row locks; SQLMesh removes `FOR UPDATE` when executing SQLGlot expressions.
 * **RENAME caveat**: `ALTER TABLE db.old RENAME db.new` is not supported; the `RENAME` target cannot be qualified with a database name.

@@ -2753,13 +2753,12 @@ class ViewStrategy(PromotableStrategy):
 
         logger.info("Replacing view '%s'", table_name)
         materialized_properties = None
-        if is_materialized_view and (
-            model.partitioned_by or model.partition_interval_unit or model.clustered_by
-        ):
+        if is_materialized_view:
             materialized_properties = {
                 "partitioned_by": model.partitioned_by,
                 "partition_interval_unit": model.partition_interval_unit,
                 "clustered_by": model.clustered_by,
+                "has_audits": bool(model.audits_with_args),
             }
         self.adapter.create_view(
             table_name,
@@ -2818,6 +2817,7 @@ class ViewStrategy(PromotableStrategy):
                 "partitioned_by": model.partitioned_by,
                 "clustered_by": model.clustered_by,
                 "partition_interval_unit": model.partition_interval_unit,
+                "has_audits": bool(model.audits_with_args),
             }
         self.adapter.create_view(
             table_name,
@@ -2853,11 +2853,22 @@ class ViewStrategy(PromotableStrategy):
             execution_time=now(), snapshots=kwargs["snapshots"], engine_adapter=self.adapter
         )
 
+        is_materialized_view = self._is_materialized_view(model)
+        materialized_properties = None
+        if is_materialized_view:
+            materialized_properties = {
+                "partitioned_by": model.partitioned_by,
+                "clustered_by": model.clustered_by,
+                "partition_interval_unit": model.partition_interval_unit,
+                "has_audits": bool(model.audits_with_args),
+            }
+
         self.adapter.create_view(
             target_table_name,
             model.render_query_or_raise(**render_kwargs),
             model.columns_to_types,
-            materialized=self._is_materialized_view(model),
+            materialized=is_materialized_view,
+            materialized_properties=materialized_properties,
             view_properties=model.render_physical_properties(**render_kwargs),
             table_description=model.description,
             column_descriptions=model.column_descriptions,
