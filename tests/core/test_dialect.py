@@ -291,6 +291,8 @@ def test_macro_format():
     assert parse_one("@EACH(ARRAY(1,2), x -> x)").sql() == "@EACH(ARRAY(1, 2), x -> x)"
     assert parse_one("INTERVAL @x DAY").sql() == "INTERVAL @x DAY"
     assert parse_one("INTERVAL @'@{bar}' DAY").sql() == "INTERVAL @'@{bar}' DAY"
+    assert parse_one("INTERVAL @x @y").sql() == "INTERVAL @x @y"
+    assert parse_one("INTERVAL 1 @y").sql() == "INTERVAL '1' @y"
 
 
 def test_format_body_macros():
