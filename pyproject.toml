@@ -27,7 +27,7 @@ dependencies = [
     "sqlglot~=30.8.0",
     "tenacity",
     "time-machine",
-    "json-stream"
+    "json-stream",
 ]
 classifiers = [
     "Intended Audience :: Developers",
@@ -42,10 +42,7 @@ classifiers = [
 athena = ["PyAthena[Pandas]"]
 azuresql = ["pymssql"]
 azuresql-odbc = ["pyodbc>=5.0.0"]
-bigquery = [
-    "google-cloud-bigquery[pandas]",
-    "google-cloud-bigquery-storage"
-]
+bigquery = ["google-cloud-bigquery[pandas]", "google-cloud-bigquery-storage"]
 # bigframes has to be separate to support environments with an older google-cloud-bigquery pin
 # this is because that pin pulls in an older bigframes and the bigframes team
 # pinned an older SQLGlot which is incompatible with SQLMesh
@@ -71,6 +68,7 @@ dev = [
     "dbt-redshift",
     "dbt-trino",
     "Faker",
+    "feldera",
     "google-auth",
     "google-cloud-bigquery",
     "google-cloud-bigquery-storage",
@@ -109,6 +107,7 @@ dbt = ["dbt-core<2"]
 dlt = ["dlt"]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
+feldera = ["feldera"]
 gcppostgres = ["cloud-sql-python-connector[pg8000]>=1.8.0"]
 github = ["PyGithub>=2.6.0"]
 motherduck = ["duckdb>=1.3.2"]
@@ -183,11 +182,7 @@ no_implicit_optional = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = [
-    "examples.*.macros.*",
-    "tests.*",
-    "sqlmesh.migrations.*"
-]
+module = ["examples.*.macros.*", "tests.*", "sqlmesh.migrations.*"]
 disallow_untyped_defs = false
 # Sometimes it's helpful to use types within an "untyped" function because it allows IDE assistance
 # Unfortunately this causes MyPy to print an annoying 'By default the bodies of untyped functions are not checked'
@@ -225,9 +220,10 @@ module = [
     "bs4.*",
     "pydantic_core.*",
     "dlt.*",
+    "feldera.*",
     "bigframes.*",
     "json_stream.*",
-    "duckdb.*"
+    "duckdb.*",
 ]
 ignore_missing_imports = true
 
@@ -259,6 +255,7 @@ markers = [
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
     "duckdb: test for DuckDB",
+    "feldera: test for Feldera",
     "fabric: test for Fabric",
     "motherduck: test for MotherDuck",
     "mssql: test for MSSQL",
@@ -274,7 +271,7 @@ markers = [
 
     # Other
     "set_default_connection",
-    "registry_isolation"
+    "registry_isolation",
 ]
 addopts = "-n 0 --dist=loadgroup"
 asyncio_default_fixture_loop_scope = "session"
@@ -282,7 +279,7 @@ log_cli = false # Set this to true to enable logging during tests
 log_cli_format = "%(asctime)s.%(msecs)03d %(filename)s:%(lineno)d %(levelname)s %(message)s"
 log_cli_level = "INFO"
 filterwarnings = [
-    "ignore:The localize method is no longer necessary, as this time zone supports the fold attribute"
+    "ignore:The localize method is no longer necessary, as this time zone supports the fold attribute",
 ]
 reruns_delay = 10
 
@@ -290,20 +287,12 @@ reruns_delay = 10
 line-length = 100
 
 [tool.ruff.lint]
-select = [
-    "F401",
-    "RET505",
-    "T100",
-]
+select = ["F401", "RET505", "T100"]
 extend-select = ["TID"]
 
 
 [tool.ruff.lint.flake8-tidy-imports]
-banned-module-level-imports = [
-    "duckdb",
-    "numpy",
-    "pandas",
-]
+banned-module-level-imports = ["duckdb", "numpy", "pandas"]
 
 # Bans imports from sqlmesh.lsp in files outside of sqlmesh/lsp
 [tool.ruff.lint.flake8-tidy-imports.banned-api]

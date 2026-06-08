@@ -56,6 +56,7 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Do not support row-level operations
     "spark",
     "trino",
+    "feldera",
     # Nullable types are problematic
     "clickhouse",
 }
@@ -2347,6 +2348,60 @@ class RisingwaveConnectionConfig(ConnectionConfig):
             cursor.execute(sql)
 
         return init
+
+
+class FelderaConnectionConfig(ConnectionConfig):
+    """Feldera connection configuration.
+
+    Args:
+        host: The Feldera API base URL.
+        api_key: The optional Feldera API key.
+        pipeline_name: The name of the backing Feldera pipeline.
+        compilation_profile: The Feldera compilation profile to use during deploys.
+        workers: The number of workers in the Feldera runtime config.
+        timeout: The timeout, in seconds, for Feldera API operations.
+    """
+
+    host: str = "http://localhost:8080"
+    api_key: t.Optional[str] = None
+    pipeline_name: str
+    compilation_profile: str = "dev"
+    workers: int = 4
+    timeout: int = 300
+
+    type_: t.Literal["feldera"] = Field(alias="type", default="feldera")
+    DIALECT: t.ClassVar[t.Literal["feldera"]] = "feldera"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Feldera"]] = "Feldera"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[18]] = 18
+
+    concurrent_tasks: int = 1
+    register_comments: t.Literal[False] = False
+    pre_ping: t.Literal[False] = False
+
+    _engine_import_validator = _get_engine_import_validator("feldera", "feldera")
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        return {
+            "host",
+            "api_key",
+            "pipeline_name",
+            "workers",
+            "compilation_profile",
+            "timeout",
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        from sqlmesh.core.engine_adapter.feldera import FelderaEngineAdapter
+
+        return FelderaEngineAdapter
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        from sqlmesh.engines.feldera.db_api import connect
+
+        return connect
 
 
 _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {

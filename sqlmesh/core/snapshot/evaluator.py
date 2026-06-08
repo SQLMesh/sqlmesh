@@ -2079,7 +2079,7 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
             # Only sql models have queries that can be tested.
             # We also need to make sure that we don't dry run on Redshift because its planner / optimizer sometimes
             # breaks on our CTAS queries due to us relying on the WHERE FALSE LIMIT 0 combo.
-            if model.is_sql and dry_run and self.adapter.dialect != "redshift":
+            if model.is_sql and dry_run and self.adapter.dialect not in {"redshift", "feldera"}:
                 logger.info("Dry running model '%s'", model.name)
                 self.adapter.fetchall(ctas_query)
         else:
