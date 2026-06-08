@@ -123,6 +123,10 @@ class EngineAdapter:
     ATTACH_CORRELATION_ID = True
     SUPPORTS_QUERY_EXECUTION_TRACKING = False
     SUPPORTS_METADATA_TABLE_LAST_MODIFIED_TS = False
+    RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES: t.FrozenSet[str] = frozenset()
+    """Physical property keys whose values may contain logical model references that
+    should be resolved to physical table names during property rendering.  Engines that
+    need such resolution (e.g. StarRocks' excluded_trigger_tables) override this set."""
 
     def __init__(
         self,

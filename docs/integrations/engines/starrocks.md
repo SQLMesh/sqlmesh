@@ -510,6 +510,36 @@ MODEL (
 SELECT user_id, COUNT(*) AS event_count FROM user_events GROUP BY user_id;
 ```
 
+**Excluding tables from refresh:**
+
+`excluded_trigger_tables` and `excluded_refresh_tables` let you control which base tables participate in an async MV's refresh cycle:
+
+* `excluded_trigger_tables`: base tables whose data changes should **not** automatically trigger a refresh of this MV.
+* `excluded_refresh_tables`: base tables that should **not** be scanned when the MV refreshes.
+
+Both properties accept a single table reference or a comma-separated list of table references.
+
+StarRocks requires the **physical** base table name for these properties, not the logical view name that SQLMesh normally exposes. SQLMesh handles this automatically: when a reference matches a managed SQLMesh model, the logical name is resolved to its physical table name before the `CREATE MATERIALIZED VIEW` statement is issued. References that do not match any managed model are passed through unchanged.
+
+```sql
+MODEL (
+  name mydb.order_summary_mv,
+  kind VIEW (
+    materialized true
+  ),
+  physical_properties (
+    refresh_scheme = 'ASYNC',
+    -- SQLMesh resolves mydb.orders and mydb.order_items to their physical table names
+    excluded_trigger_tables = 'mydb.orders,mydb.order_items',
+    excluded_refresh_tables = mydb.orders
+  )
+);
+
+SELECT order_id, SUM(amount) AS total FROM mydb.orders GROUP BY order_id;
+```
+
+A single reference can be written as a bare identifier (`mydb.orders`) or as a quoted string. Multiple references must be provided as a quoted, comma-separated string (`'mydb.orders,mydb.order_items'`).
+
 **Other properties:**
 
 You can specify `partitioning`, `distribution`, `order by` and `properties` the same as normal table properties. But notice that only supported MV properties are useful, Refer to StarRocks' doc for MV creation.

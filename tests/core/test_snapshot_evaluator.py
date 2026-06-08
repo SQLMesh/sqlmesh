@@ -129,6 +129,7 @@ def adapter_mock(mocker: MockerFixture):
     adapter_mock.session.return_value = session_mock
     adapter_mock.dialect = "duckdb"
     adapter_mock.HAS_VIEW_BINDING = False
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock
@@ -155,6 +156,7 @@ def adapters(mocker: MockerFixture):
         adapter_mock.session.return_value = session_mock
         adapter_mock.dialect = "duckdb"
         adapter_mock.HAS_VIEW_BINDING = False
+        adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
         adapter_mock.wap_supported.return_value = False
         adapter_mock.get_data_objects.return_value = []
         adapter_mock.with_settings.return_value = adapter_mock
@@ -1171,6 +1173,7 @@ def test_create_tables_exist(
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
     snapshot.categorize_as(category=snapshot_category, forward_only=forward_only)
@@ -1414,6 +1417,7 @@ def test_promote_model_info(mocker: MockerFixture, make_snapshot):
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -1443,6 +1447,7 @@ def test_promote_deployable(mocker: MockerFixture, make_snapshot):
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -4151,6 +4156,7 @@ def test_migrate_snapshot(snapshot: Snapshot, mocker: MockerFixture, adapter_moc
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
         lambda physical_properties, **kwargs: physical_properties
     )
@@ -5068,6 +5074,7 @@ def test_properties_are_preserved_in_both_create_statements(
     adapter_mock.session.return_value = session_mock
     adapter_mock.dialect = "trino"
     adapter_mock.HAS_VIEW_BINDING = False
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock

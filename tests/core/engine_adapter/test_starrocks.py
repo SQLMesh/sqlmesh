@@ -32,6 +32,11 @@ from sqlmesh.core.engine_adapter.starrocks import StarRocksEngineAdapter
 from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.dialect import parse
 from sqlmesh.core.model import load_sql_based_model, SqlModel
+from sqlmesh.core.snapshot.definition import (
+    DeployabilityIndex,
+    Snapshot,
+    SnapshotChangeCategory,
+)
 from sqlmesh.core.snapshot.evaluator import _adjust_physical_properties_for_engine
 
 pytestmark = [pytest.mark.starrocks, pytest.mark.engine]
@@ -2132,3 +2137,352 @@ class TestIncrementalRequiresPrimaryKey:
             """
         )
         assert "primary_key" not in self._adjust(adapter, model)
+
+
+# =============================================================================
+# excluded_trigger_tables / excluded_refresh_tables physical table ref resolution
+# =============================================================================
+class TestExcludedTablesResolution:
+    """Tests for automatic resolution of logical model names to physical table names
+    in excluded_trigger_tables and excluded_refresh_tables physical_properties.
+
+    StarRocks async materialized views accept these properties to skip certain tables
+    from triggering or participating in refreshes. When a value is a managed SQLMesh
+    model, StarRocks needs the physical name (db.table), not the logical view name.
+    """
+
+    @staticmethod
+    def _make_snapshot(model: SqlModel) -> Snapshot:
+        snapshot = Snapshot.from_node(model, nodes={}, ttl="in 1 week")
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        return snapshot
+
+    def _build_mv_with_excluded_tables(
+        self,
+        adapter: StarRocksEngineAdapter,
+        model: SqlModel,
+        snapshots: t.Dict[str, Snapshot],
+    ) -> str:
+        """Render physical properties with snapshot resolution and create the MV, returning DDL."""
+        rendered_props = model.render_physical_properties(
+            snapshots=snapshots,
+            engine_adapter=adapter,
+        )
+        query = model.render_query()
+        adapter.create_view(
+            model.name,
+            query,
+            replace=False,
+            materialized=True,
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+            view_properties=rendered_props,
+        )
+        calls = to_sql_calls(adapter)
+        return calls[-1]
+
+    def test_single_managed_model_ref_is_resolved_to_physical_name(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """excluded_trigger_tables referencing a managed model is resolved to physical db.table."""
+        base_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_1_model,
+                kind FULL,
+                dialect starrocks,
+                columns (a INT)
+            );
+            SELECT 1 AS a;
+            """
+        )
+        base_snapshot = self._make_snapshot(base_model)
+        physical_name = exp.to_table(base_snapshot.table_name())
+        expected_physical = f"{physical_name.db}.{physical_name.name}"
+
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = starrocks.test_1_model
+                )
+            );
+            SELECT a FROM starrocks.test_1_model;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        snapshots = {base_snapshot.name: base_snapshot}
+        ddl = self._build_mv_with_excluded_tables(adapter, mv_model, snapshots)
+
+        assert expected_physical in ddl
+        # Logical name must NOT appear as the property value
+        assert f"'excluded_trigger_tables'='starrocks.test_1_model'" not in ddl
+
+    def test_single_managed_model_ref_in_excluded_refresh_tables(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """excluded_refresh_tables referencing a managed model is also resolved."""
+        base_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.source_model,
+                kind FULL,
+                dialect starrocks,
+                columns (a INT)
+            );
+            SELECT 1 AS a;
+            """
+        )
+        base_snapshot = self._make_snapshot(base_model)
+        physical_name = exp.to_table(base_snapshot.table_name())
+        expected_physical = f"{physical_name.db}.{physical_name.name}"
+
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv2,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_refresh_tables = starrocks.source_model
+                )
+            );
+            SELECT a FROM starrocks.source_model;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        snapshots = {base_snapshot.name: base_snapshot}
+        ddl = self._build_mv_with_excluded_tables(adapter, mv_model, snapshots)
+
+        assert expected_physical in ddl
+
+    def test_unmanaged_source_is_left_as_is(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """A raw source that is not a managed snapshot passes through unchanged."""
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv3,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = "external_db.raw_table"
+                )
+            );
+            SELECT 1 AS a;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        ddl = self._build_mv_with_excluded_tables(adapter, mv_model, snapshots={})
+
+        assert "external_db.raw_table" in ddl
+
+    def test_unmanaged_external_catalog_ref_keeps_catalog(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """A three-part external-catalog reference is preserved in full (catalog not stripped)."""
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv_ext,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = "ext_catalog.ext_db.raw_table"
+                )
+            );
+            SELECT 1 AS a;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        ddl = self._build_mv_with_excluded_tables(adapter, mv_model, snapshots={})
+
+        assert "ext_catalog.ext_db.raw_table" in ddl
+
+    def test_mixed_list_managed_and_unmanaged(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """A comma-separated list: managed model resolved, unmanaged source left as-is."""
+        base_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.managed_model,
+                kind FULL,
+                dialect starrocks,
+                columns (a INT)
+            );
+            SELECT 1 AS a;
+            """
+        )
+        base_snapshot = self._make_snapshot(base_model)
+        physical_name = exp.to_table(base_snapshot.table_name())
+        expected_physical = f"{physical_name.db}.{physical_name.name}"
+
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv4,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = "starrocks.managed_model,external_db.raw_table"
+                )
+            );
+            SELECT 1 AS a;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        snapshots = {base_snapshot.name: base_snapshot}
+        ddl = self._build_mv_with_excluded_tables(adapter, mv_model, snapshots)
+
+        assert expected_physical in ddl
+        assert "external_db.raw_table" in ddl
+        # The logical name must NOT appear as a property value; the physical name MUST be present.
+        # StarRocks DDL format: PROPERTIES ('key'='value'), both key and value in single quotes.
+        import re
+
+        match = re.search(r"'excluded_trigger_tables'='([^']*)'", ddl)
+        assert match is not None, "excluded_trigger_tables property not found in DDL"
+        prop_value = match.group(1)
+        assert "starrocks.managed_model" not in prop_value, (
+            "Logical model name leaked into excluded_trigger_tables property value"
+        )
+        assert expected_physical in prop_value, (
+            "Physical table name not found in excluded_trigger_tables property value"
+        )
+
+    def test_no_snapshots_passes_value_through(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """When no snapshots are provided, the value passes through unchanged."""
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv5,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = starrocks.some_table
+                )
+            );
+            SELECT 1 AS a;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        ddl = self._build_mv_with_excluded_tables(adapter, mv_model, snapshots={})
+
+        assert "starrocks.some_table" in ddl
+
+    def test_dev_plan_non_deployable_snapshot_resolves_to_dev_table(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """When a snapshot is non-deployable (dev plan), the dev physical table is used.
+
+        A snapshot that is not representative in the deployability_index has its dev
+        (``__dev``-suffixed) table selected by ``to_table_mapping``.  The property value
+        must reference this dev physical name, NOT the production physical name.
+        """
+        base_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.upstream,
+                kind FULL,
+                dialect starrocks,
+                columns (a INT)
+            );
+            SELECT 1 AS a;
+            """
+        )
+        base_snapshot = self._make_snapshot(base_model)
+        prod_physical_name = exp.to_table(base_snapshot.table_name(is_deployable=True))
+        dev_physical_name = exp.to_table(base_snapshot.table_name(is_deployable=False))
+
+        prod_expected = f"{prod_physical_name.db}.{prod_physical_name.name}"
+        dev_expected = f"{dev_physical_name.db}.{dev_physical_name.name}"
+
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv_dev,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = starrocks.upstream
+                )
+            );
+            SELECT a FROM starrocks.upstream;
+            """
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        snapshots = {base_snapshot.name: base_snapshot}
+
+        # With all_deployable (default/prod plan): resolves to prod physical name
+        deployability_all = DeployabilityIndex.all_deployable()
+        rendered_prod = mv_model.render_physical_properties(
+            snapshots=snapshots,
+            engine_adapter=adapter,
+            deployability_index=deployability_all,
+        )
+        prod_value = rendered_prod["excluded_trigger_tables"]
+        assert hasattr(prod_value, "this"), "expected exp.Literal"
+        # prod value must equal the prod table exactly (no __dev suffix)
+        assert prod_value.this == prod_expected
+        assert "__dev" not in prod_value.this
+
+        # With none_deployable (dev plan): resolves to dev (__dev-suffixed) physical name
+        deployability_none = DeployabilityIndex.none_deployable()
+        rendered_dev = mv_model.render_physical_properties(
+            snapshots=snapshots,
+            engine_adapter=adapter,
+            deployability_index=deployability_none,
+        )
+        dev_value = rendered_dev["excluded_trigger_tables"]
+        assert hasattr(dev_value, "this"), "expected exp.Literal"
+        # dev value must equal the dev table exactly (has __dev suffix)
+        assert dev_value.this == dev_expected
+        assert "__dev" in dev_value.this
+
+    def test_non_starrocks_engine_is_not_affected(self) -> None:
+        """The RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES set is empty on the base EngineAdapter."""
+        from sqlmesh.core.engine_adapter.base import EngineAdapter
+
+        assert len(EngineAdapter.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES) == 0
+        assert (
+            "excluded_trigger_tables"
+            in StarRocksEngineAdapter.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES
+        )
+        assert (
+            "excluded_refresh_tables"
+            in StarRocksEngineAdapter.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES
+        )

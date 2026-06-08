@@ -1740,6 +1740,16 @@ class StarRocksEngineAdapter(
     MAX_IDENTIFIER_LENGTH = 64
     """Maximum length for table/column names"""
 
+    RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES: t.FrozenSet[str] = frozenset(
+        {"excluded_trigger_tables", "excluded_refresh_tables"}
+    )
+    """StarRocks async materialized views accept these properties to exclude certain tables from
+    triggering or participating in refreshes.  When the value references a managed SQLMesh model,
+    StarRocks needs the physical table name (db.table), not the logical view name.  Managed-model
+    physical names carry no catalog prefix (catalog support is UNSUPPORTED), so they are already in
+    the warehouse-local db.table form StarRocks expects; unmanaged references (e.g. an external
+    catalog's ext_catalog.db.table) pass through unchanged."""
+
     # ==================== Schema Operations ====================
     # StarRocks supports CREATE/DROP SCHEMA the same as CREATE/DROP DATABSE.
     # So, no need to implement create_schema / drop_schema
