@@ -1203,6 +1203,22 @@ def test_invalidate_environment_no_sync_skips_cleanup(sushi_context, mocker: Moc
 
 
 @pytest.mark.slow
+def test_invalidate_environment_nonexistent_raises(
+    sushi_context, mocker: MockerFixture
+) -> None:
+    """invalidate_environment should raise SQLMeshError if the environment does not exist."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_environment.return_value = None
+
+    with pytest.raises(SQLMeshError, match="Environment 'doesnotexist' does not exist."):
+        sushi_context.invalidate_environment("doesnotexist")
+
+    state_sync_mock.invalidate_environment.assert_not_called()
+
+
+@pytest.mark.slow
 def test_plan_default_end(sushi_context_pre_scheduling: Context):
     prod_plan_builder = sushi_context_pre_scheduling.plan_builder("prod")
     # Simulate that the prod is 3 days behind.
