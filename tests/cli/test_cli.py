@@ -2239,21 +2239,29 @@ FROM table1""")
         del os.environ["SQLMESH__FORMAT__LEADING_COMMA"]
 
 
-def _setup_local_only_project(tmp_path, mocker):
-    create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
-    config_path = tmp_path / "config.yaml"
+def _create_local_only_project(path: Path, project: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    create_example_project(path, template=ProjectTemplate.EMPTY)
+    config_path = path / "config.yaml"
     existing = config_path.read_text(encoding="utf-8")
-    config_path.write_text("project: cli_test\n\n" + existing, encoding="utf-8")
+    config_path.write_text(f"project: {project}\n\n" + existing, encoding="utf-8")
 
-    (tmp_path / "models" / "example.sql").write_text(
-        "MODEL(name local.example, dialect 'duckdb'); SELECT 1 AS col\n",
+    (path / "models" / "example.sql").write_text(
+        f"MODEL(name {project}.example, dialect 'duckdb'); SELECT 1 AS col\n",
         encoding="utf-8",
     )
 
+
+def _patch_state_access(mocker):
     return mocker.patch(
         "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
         side_effect=RuntimeError("state should not be accessed"),
     )
+
+
+def _setup_local_only_project(tmp_path, mocker):
+    _create_local_only_project(tmp_path, "cli_test")
+    return _patch_state_access(mocker)
 
 
 def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
@@ -2267,6 +2275,23 @@ def test_lint_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
     mock = _setup_local_only_project(tmp_path, mocker)
     result = runner.invoke(cli, ["--paths", str(tmp_path), "lint"])
     assert result.exit_code == 0, f"Lint failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["format", "lint"])
+def test_local_only_commands_skip_state_multiple_paths(
+    runner: CliRunner, tmp_path: Path, mocker, command: str
+):
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    _create_local_only_project(project_a, "proj_a")
+    _create_local_only_project(project_b, "proj_b")
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(project_a), "--paths", str(project_b), command])
+    assert result.exit_code == 0, (
+        f"{command} failed: {result.output}\nException: {result.exception}"
+    )
     mock.assert_not_called()
 
 
