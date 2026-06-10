@@ -29,7 +29,7 @@ import clsx from 'clsx'
 import {
   type ColumnDescription,
   type Column,
-  type ColumnLineageApiLineageModelNameColumnNameGet200,
+  type ColumnLineageApiLineageModelNameColumnsColumnNameGet200,
   type LineageColumn,
   type LineageColumnSource,
   type LineageColumnExpression,
@@ -391,7 +391,7 @@ function ModelColumn({
   expression?: LineageColumnExpression
   withDescription?: boolean
   updateColumnLineage: (
-    lineage: ColumnLineageApiLineageModelNameColumnNameGet200,
+    lineage: ColumnLineageApiLineageModelNameColumnsColumnNameGet200,
   ) => void
   removeEdges: (columnId: string) => void
   selectManually?: React.Dispatch<

@@ -26,8 +26,8 @@ import {
   getModelsApiModelsGet,
   type ModelLineageApiLineageModelNameGet200,
   modelLineageApiLineageModelNameGet,
-  type ColumnLineageApiLineageModelNameColumnNameGet200,
-  columnLineageApiLineageModelNameColumnNameGet,
+  type ColumnLineageApiLineageModelNameColumnsColumnNameGet200,
+  columnLineageApiLineageModelNameColumnsColumnNameGet,
   fetchdfApiCommandsFetchdfPost,
   renderApiCommandsRenderPost,
   type RenderInput,
@@ -51,7 +51,7 @@ import {
   getModelApiModelsNameGet,
   getApiModulesApiModulesGet,
   type Modules,
-  type ColumnLineageApiLineageModelNameColumnNameGetParams,
+  type ColumnLineageApiLineageModelNameColumnsColumnNameGetParams,
 } from './client'
 import {
   useNotificationCenter,
@@ -213,13 +213,13 @@ export function useApiColumnLineage(
   model: string,
   column: string,
   options?: ApiOptions,
-  params?: ColumnLineageApiLineageModelNameColumnNameGetParams,
-): UseQueryWithTimeoutOptions<ColumnLineageApiLineageModelNameColumnNameGet200> {
+  params?: ColumnLineageApiLineageModelNameColumnsColumnNameGetParams,
+): UseQueryWithTimeoutOptions<ColumnLineageApiLineageModelNameColumnsColumnNameGet200> {
   return useQueryWithTimeout(
     {
       queryKey: ['/api/lineage', model, column],
       queryFn: async ({ signal }) =>
-        await columnLineageApiLineageModelNameColumnNameGet(
+        await columnLineageApiLineageModelNameColumnsColumnNameGet(
           model,
           column,
           params,

@@ -130,7 +130,7 @@ def create_models_only_lineage_adjacency_list(
     return graph
 
 
-@router.get("/{model_name:str}/{column_name:str}")
+@router.get("/{model_name:path}/columns/{column_name:str}")
 def column_lineage(
     model_name: str,
     column_name: str,
@@ -150,7 +150,7 @@ def column_lineage(
         )
 
 
-@router.get("/{model_name:str}")
+@router.get("/{model_name:path}")
 def model_lineage(
     model_name: str,
     context: Context = Depends(get_loaded_context),

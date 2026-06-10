@@ -45,7 +45,7 @@ async def get_environments(
     )
 
 
-@router.delete("/{environment:str}")
+@router.delete("/{environment:path}")
 async def delete_environment(
     response: Response,
     environment: str,
