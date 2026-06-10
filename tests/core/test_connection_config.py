@@ -20,6 +20,7 @@ from sqlmesh.core.config.connection import (
     MySQLConnectionConfig,
     PostgresConnectionConfig,
     SnowflakeConnectionConfig,
+    StarRocksConnectionConfig,
     TrinoAuthenticationMethod,
     AthenaConnectionConfig,
     MSSQLConnectionConfig,
@@ -1998,3 +1999,59 @@ def test_schema_differ_overrides(make_config) -> None:
     adapter = config.create_engine_adapter()
     assert adapter._schema_differ_overrides == override
     assert adapter.schema_differ.parameterized_type_defaults == {}
+
+
+def test_starrocks(make_config):
+    """Test StarRocksConnectionConfig basic functionality"""
+    # Basic configuration
+    config = make_config(
+        type="starrocks",
+        host="localhost",
+        user="root",
+        password="password",
+        port=9030,
+        database="testdb",
+        check_import=False,
+    )
+    assert isinstance(config, StarRocksConnectionConfig)
+    assert config.type_ == "starrocks"
+    assert config.host == "localhost"
+    assert config.user == "root"
+    assert config.password == "password"
+    assert config.port == 9030
+    assert config.database == "testdb"
+    assert config.DIALECT == "starrocks"
+    assert config.DISPLAY_NAME == "StarRocks"
+    assert config.DISPLAY_ORDER == 18
+    assert config.is_recommended_for_state_sync is False
+
+    # Test with minimal configuration (using default port)
+    minimal_config = make_config(
+        type="starrocks",
+        host="starrocks-fe",
+        user="starrocks_user",
+        password="starrocks_pswd",
+        check_import=False,
+    )
+    assert isinstance(minimal_config, StarRocksConnectionConfig)
+    assert minimal_config.port == 9030  # Default StarRocks FE port
+    assert minimal_config.host == "starrocks-fe"
+    assert minimal_config.user == "starrocks_user"
+
+    # Test with additional MySQL-compatible options
+    advanced_config = make_config(
+        type="starrocks",
+        host="starrocks-fe",
+        user="admin",
+        password="admin123",
+        port=9030,
+        database="testdb",
+        charset="utf8mb4",
+        ssl_disabled=True,
+        concurrent_tasks=10,
+        check_import=False,
+    )
+    assert isinstance(advanced_config, StarRocksConnectionConfig)
+    assert advanced_config.charset == "utf8mb4"
+    assert advanced_config.ssl_disabled is True
+    assert advanced_config.concurrent_tasks == 10

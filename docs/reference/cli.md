@@ -15,6 +15,9 @@ Options:
   --debug              Enable debug mode.
   --log-to-stdout      Display logs in stdout.
   --log-file-dir TEXT  The directory to write log files to.
+  --dotenv PATH        Path to a custom .env file to load environment
+                       variables. Can also be set via SQLMESH_DOTENV_PATH
+                       environment variable.
   --help               Show this message and exit.
 
 Commands:
@@ -307,9 +310,17 @@ Usage: sqlmesh janitor [OPTIONS]
   The janitor cleans up old environments and expired snapshots.
 
 Options:
-  --ignore-ttl  Cleanup snapshots that are not referenced in any environment,
-                regardless of when they're set to expire
-  --help        Show this message and exit.
+  --ignore-ttl      Cleanup snapshots that are not referenced in any
+                    environment, regardless of when they're set to expire. Has
+                    no effect when --environment is specified.
+  --force-delete    Delete expired environment and snapshot state records even
+                    when the physical table or view drops fail. Any objects
+                    that could not be dropped become orphaned and must be
+                    removed manually.
+  -e, --environment TEXT
+                    Scope cleanup to a single expired environment. Global
+                    snapshot and interval compaction are skipped.
+  --help            Show this message and exit.
 ```
 
 ## migrate

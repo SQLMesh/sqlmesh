@@ -920,6 +920,7 @@ These pages describe the connection configuration options for each execution eng
 * [GCP Postgres](../integrations/engines/gcp-postgres.md)
 * [Redshift](../integrations/engines/redshift.md)
 * [Snowflake](../integrations/engines/snowflake.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Spark](../integrations/engines/spark.md)
 * [Trino](../integrations/engines/trino.md)
 
@@ -952,6 +953,7 @@ Unsupported state engines, even for development:
 
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 This example gateway configuration uses Snowflake for the data warehouse connection and Postgres for the state backend connection:

@@ -129,9 +129,13 @@ def adapter_mock(mocker: MockerFixture):
     adapter_mock.session.return_value = session_mock
     adapter_mock.dialect = "duckdb"
     adapter_mock.HAS_VIEW_BINDING = False
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+        lambda physical_properties, **kwargs: physical_properties
+    )
     return adapter_mock
 
 
@@ -152,9 +156,13 @@ def adapters(mocker: MockerFixture):
         adapter_mock.session.return_value = session_mock
         adapter_mock.dialect = "duckdb"
         adapter_mock.HAS_VIEW_BINDING = False
+        adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
         adapter_mock.wap_supported.return_value = False
         adapter_mock.get_data_objects.return_value = []
         adapter_mock.with_settings.return_value = adapter_mock
+        adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+            lambda physical_properties, **kwargs: physical_properties
+        )
         adapters.append(adapter_mock)
     return adapters
 
@@ -701,6 +709,61 @@ def test_evaluate_materialized_view(
     assert adapter_mock.create_view.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "view_exists, has_intervals, expected_create_view_calls",
+    [
+        # MV already exists and has intervals -> routine evaluation (e.g. `sqlmesh run`): do NOT recreate
+        (True, True, 0),
+        # MV does not exist yet -> first build: create it
+        (False, False, 1),
+        # MV missing but intervals present -> still a first insert (table gone): rebuild it
+        (False, True, 1),
+    ],
+)
+def test_evaluate_materialized_view_not_recreated_on_evaluation(
+    adapter_mock,
+    make_snapshot,
+    view_exists: bool,
+    has_intervals: bool,
+    expected_create_view_calls: int,
+):
+    # Engines that maintain MVs themselves (e.g. StarRocks) opt out of recreating an existing MV on
+    # every evaluation by setting RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False.
+    adapter_mock.RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False
+    adapter_mock.table_exists.return_value = view_exists
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind VIEW (
+                    materialized true
+                )
+            );
+
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    if has_intervals:
+        snapshot.add_interval("2023-01-01", "2023-01-01")
+
+    evaluator.evaluate(
+        snapshot,
+        start="2020-01-01",
+        end="2020-01-02",
+        execution_time="2020-01-02",
+        snapshots={},
+    )
+
+    assert adapter_mock.create_view.call_count == expected_create_view_calls
+
+
 def test_evaluate_materialized_view_with_partitioned_by_cluster_by(
     mocker: MockerFixture, adapter_mock, make_snapshot
 ):
@@ -782,6 +845,12 @@ def test_evaluate_materialized_view_with_execution_time_macro(
         view_properties={},
         table_description=None,
         column_descriptions={},
+        materialized_properties={
+            "partitioned_by": [],
+            "partition_interval_unit": None,
+            "clustered_by": [],
+            "has_audits": False,
+        },
     )
 
 
@@ -1104,6 +1173,7 @@ def test_create_tables_exist(
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
     snapshot.categorize_as(category=snapshot_category, forward_only=forward_only)
@@ -1243,6 +1313,7 @@ def test_create_materialized_view(mocker: MockerFixture, adapter_mock, make_snap
             "clustered_by": [],
             "partition_interval_unit": None,
             "partitioned_by": [],
+            "has_audits": False,
         },
         view_properties={},
         table_description=None,
@@ -1292,6 +1363,7 @@ def test_create_view_with_properties(mocker: MockerFixture, adapter_mock, make_s
             "clustered_by": [],
             "partition_interval_unit": None,
             "partitioned_by": [],
+            "has_audits": False,
         },
         table_description=None,
         replace=False,
@@ -1302,10 +1374,50 @@ def test_create_view_with_properties(mocker: MockerFixture, adapter_mock, make_s
     )
 
 
+def test_create_materialized_view_with_audits_sets_has_audits(
+    mocker: MockerFixture, adapter_mock, make_snapshot
+):
+    """A materialized view model with audits must propagate has_audits=True to the adapter.
+
+    Engines like StarRocks rely on this flag to synchronously refresh the MV before audits run.
+    """
+    adapter_mock.get_data_objects.return_value = []
+    adapter_mock.table_exists.return_value = False
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind VIEW (
+                    materialized true
+                ),
+                audits (
+                    not_null(columns := (a))
+                )
+            );
+
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {})
+
+    _, kwargs = adapter_mock.create_view.call_args
+    assert kwargs["materialized_properties"]["has_audits"] is True
+
+
 def test_promote_model_info(mocker: MockerFixture, make_snapshot):
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -1335,6 +1447,7 @@ def test_promote_deployable(mocker: MockerFixture, make_snapshot):
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -4043,6 +4156,10 @@ def test_migrate_snapshot(snapshot: Snapshot, mocker: MockerFixture, adapter_moc
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
+    adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+        lambda physical_properties, **kwargs: physical_properties
+    )
 
     evaluator = SnapshotEvaluator(adapter_mock)
     evaluator.create([snapshot], {})
@@ -4957,6 +5074,7 @@ def test_properties_are_preserved_in_both_create_statements(
     adapter_mock.session.return_value = session_mock
     adapter_mock.dialect = "trino"
     adapter_mock.HAS_VIEW_BINDING = False
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock

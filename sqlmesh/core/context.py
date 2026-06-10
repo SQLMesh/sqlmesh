@@ -887,12 +887,20 @@ class GenericContext(BaseContext, t.Generic[C]):
         return completion_status
 
     @python_api_analytics
-    def run_janitor(self, ignore_ttl: bool, force_delete: bool = False) -> bool:
+    def run_janitor(
+        self,
+        ignore_ttl: bool,
+        force_delete: bool = False,
+        environment: t.Optional[str] = None,
+    ) -> bool:
+        if environment is not None:
+            environment = Environment.sanitize_name(environment)
+
         success = False
 
         if self.console.start_cleanup(ignore_ttl):
             try:
-                self._run_janitor(ignore_ttl, force_delete=force_delete)
+                self._run_janitor(ignore_ttl, force_delete=force_delete, environment=environment)
                 success = True
             finally:
                 self.console.stop_cleanup(success=success)
@@ -1825,7 +1833,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         name = Environment.sanitize_name(name)
         self.state_sync.invalidate_environment(name)
         if sync:
-            self._cleanup_environments()
+            self._cleanup_environments(name=name)
             self.console.log_success(f"Environment '{name}' deleted.")
         else:
             self.console.log_success(f"Environment '{name}' invalidated.")
@@ -2896,27 +2904,35 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         return True
 
-    def _run_janitor(self, ignore_ttl: bool = False, force_delete: bool = False) -> None:
+    def _run_janitor(
+        self,
+        ignore_ttl: bool = False,
+        force_delete: bool = False,
+        environment: t.Optional[str] = None,
+    ) -> None:
         current_ts = now_timestamp()
         failures: t.List[str] = []
 
         # Clean up expired environments by removing their views and schemas
         failures.extend(
-            self._cleanup_environments(current_ts=current_ts, force_delete=force_delete)
-        )
-
-        failures.extend(
-            delete_expired_snapshots(
-                self.state_sync,
-                self.snapshot_evaluator,
-                current_ts=current_ts,
-                ignore_ttl=ignore_ttl,
-                force_delete=force_delete,
-                console=self.console,
-                batch_size=self.config.janitor.expired_snapshots_batch_size,
+            self._cleanup_environments(
+                current_ts=current_ts, force_delete=force_delete, name=environment
             )
         )
-        self.state_sync.compact_intervals()
+
+        if environment is None:
+            failures.extend(
+                delete_expired_snapshots(
+                    self.state_sync,
+                    self.snapshot_evaluator,
+                    current_ts=current_ts,
+                    ignore_ttl=ignore_ttl,
+                    force_delete=force_delete,
+                    console=self.console,
+                    batch_size=self.config.janitor.expired_snapshots_batch_size,
+                )
+            )
+            self.state_sync.compact_intervals()
 
         if failures:
             failure_string = "\n  - ".join(failures)
@@ -2929,14 +2945,22 @@ class GenericContext(BaseContext, t.Generic[C]):
                 raise SQLMeshError(summary)
 
     def _cleanup_environments(
-        self, current_ts: t.Optional[int] = None, force_delete: bool = False
+        self,
+        current_ts: t.Optional[int] = None,
+        force_delete: bool = False,
+        name: t.Optional[str] = None,
     ) -> t.List[str]:
         current_ts = current_ts or now_timestamp()
         failures: t.List[str] = []
 
         expired_environments_summaries = self.state_sync.get_expired_environments(
-            current_ts=current_ts
+            current_ts=current_ts, name=name
         )
+
+        if name is not None and not expired_environments_summaries:
+            self.console.log_warning(
+                f"Environment '{name}' is not expired or does not exist. Nothing to clean up."
+            )
 
         for expired_env_summary in expired_environments_summaries:
             expired_env = self.state_reader.get_environment(expired_env_summary.name)
@@ -2954,7 +2978,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         # we want to retry on the next janitor pass if drops failed, unless
         # force_delete is set in which case we purge state records regardless
         if not failures or force_delete:
-            self.state_sync.delete_expired_environments(current_ts=current_ts)
+            self.state_sync.delete_expired_environments(current_ts=current_ts, name=name)
         return failures
 
     def _try_connection(self, connection_name: str, validator: t.Callable[[], None]) -> None:

@@ -745,6 +745,16 @@ def _whens_sql(self: Generator, expression: exp.Whens) -> str:
     return self.wrap(self.expressions(expression, sep=" ", indent=False))
 
 
+def _parse_interval_span(self: Parser, this: exp.Expr) -> exp.Interval:
+    interval = self.__parse_interval_span(this)  # type: ignore
+    # Without this, @unit in `INTERVAL @value @unit` is misread as an alias.
+    if not interval.args.get("unit") and self._match(TokenType.PARAMETER):
+        macro = _parse_macro(self)
+        if macro is not None:
+            interval.set("unit", macro)
+    return interval
+
+
 def _override(klass: t.Type[Tokenizer | Parser], func: t.Callable) -> None:
     name = func.__name__
     setattr(klass, f"_{name}", getattr(klass, name))
@@ -1126,6 +1136,7 @@ def extend_sqlglot() -> None:
     _override(TSQL.Parser, Parser._parse_if)
     _override(Parser, _parse_if)
     _override(Parser, _parse_id_var)
+    _override(Parser, _parse_interval_span)
     _override(Parser, _warn_unsupported)
     _override(Snowflake.Parser, _parse_table_parts)
 
