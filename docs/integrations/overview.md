@@ -24,6 +24,8 @@ SQLMesh supports the following execution engines for running SQLMesh projects (e
 * [Postgres](./engines/postgres.md) (postgres)
 * [GCP Postgres](./engines/gcp-postgres.md) (gcppostgres)
 * [Redshift](./engines/redshift.md) (redshift)
+* [RisingWave](./engines/risingwave.md) (risingwave)
 * [Snowflake](./engines/snowflake.md) (snowflake)
 * [Spark](./engines/spark.md) (spark)
+* [StarRocks](./engines/starrocks.md) (starrocks)
 * [Trino](./engines/trino.md) (trino)

@@ -15,6 +15,9 @@ Options:
   --debug              Enable debug mode.
   --log-to-stdout      Display logs in stdout.
   --log-file-dir TEXT  The directory to write log files to.
+  --dotenv PATH        Path to a custom .env file to load environment
+                       variables. Can also be set via SQLMESH_DOTENV_PATH
+                       environment variable.
   --help               Show this message and exit.
 
 Commands:

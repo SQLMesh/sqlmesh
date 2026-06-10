@@ -1,10 +1,10 @@
 import { isNil, isArrayNotEmpty, isNotNil, toID, isFalse } from '@utils/index'
 import clsx from 'clsx'
-import { useMemo, useCallback, useState } from 'react'
+import { useMemo, useCallback, useState, useRef } from 'react'
 import { ModelType } from '@api/client'
 import { useLineageFlow } from './context'
 import { type GraphNodeData } from './help'
-import { Position, type NodeProps } from 'reactflow'
+import { Position, type NodeProps, NodeResizeControl } from 'reactflow'
 import { type Column } from '@api/client'
 import ModelNodeHeaderHandles from './ModelNodeHeaderHandles'
 import ModelColumns from './ModelColumns'
@@ -82,6 +82,8 @@ export default function ModelNode({
   )
 
   const [isMouseOver, setIsMouseOver] = useState(false)
+  const headerRef = useRef<HTMLDivElement>(null)
+  const columnsWrapperRef = useRef<HTMLDivElement>(null)
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -153,7 +155,7 @@ export default function ModelNode({
       onMouseEnter={() => setIsMouseOver(true)}
       onMouseLeave={() => setIsMouseOver(false)}
       className={clsx(
-        'text-xs font-semibold border-4',
+        'text-xs font-semibold border-4 relative',
         isMouseOver ? 'z-50' : 'z-1',
         showColumns ? 'rounded-xl' : 'rounded-2xl',
         (hasHighlightedNodes ? isHighlightedNode : isActiveNode) || isMainNode
@@ -181,46 +183,64 @@ export default function ModelNode({
             ? 'ring-8 ring-neutral-50'
             : isSelected && 'ring-8 ring-secondary-50 dark:ring-primary-50',
       )}
-      style={{
-        maxWidth: isNil(nodeData.width)
-          ? 'auto'
-          : `${nodeData.width as number}px`,
-      }}
+      style={{ width: '100%' }}
     >
-      <ModelNodeHeaderHandles
-        id={id}
-        type={nodeData.type}
-        label={nodeData.label}
-        isSelected={isSelected}
-        isDraggable={true}
-        className={clsx(
-          'bg-theme-lighter',
-          showColumns ? 'rounded-t-[8px]' : 'rounded-xl',
-        )}
-        hasLeft={targetPosition === Position.Left && isNil(lineageCache)}
-        hasRight={sourcePosition === Position.Right && isNil(lineageCache)}
-        handleClick={isInteractive ? handleClick : undefined}
-        handleSelect={
-          mainNode === id ||
-          isCTE ||
-          hasHighlightedNodes ||
-          isNotNil(lineageCache)
-            ? undefined
-            : handleSelect
-        }
-        count={hasHighlightedNodes ? undefined : columns.length}
+      <NodeResizeControl
+        minWidth={150}
+        minHeight={36}
+        position="bottom-right"
+        style={{
+          background: 'transparent',
+          border: 'none',
+          width: 10,
+          height: 10,
+        }}
+        onResize={(_, params) => {
+          const headerH = headerRef.current?.offsetHeight ?? 0
+          const available = Math.max(0, params.height - headerH)
+          if (columnsWrapperRef.current) {
+            columnsWrapperRef.current.style.height = `${available}px`
+          }
+        }}
       />
-      {showColumns && (
-        <ModelColumns
-          className="nowheel rounded-b-lg bg-theme-lighter text-xs"
-          nodeId={id}
-          columns={columns}
-          disabled={shouldDisableColumns}
-          withHandles={true}
-          withSource={true}
-          withDescription={false}
-          maxHeight="10rem"
+      <div ref={headerRef}>
+        <ModelNodeHeaderHandles
+          id={id}
+          type={nodeData.type}
+          label={nodeData.label}
+          isSelected={isSelected}
+          isDraggable={true}
+          className={clsx(
+            'bg-theme-lighter',
+            showColumns ? 'rounded-t-[8px]' : 'rounded-xl',
+          )}
+          hasLeft={targetPosition === Position.Left && isNil(lineageCache)}
+          hasRight={sourcePosition === Position.Right && isNil(lineageCache)}
+          handleClick={isInteractive ? handleClick : undefined}
+          handleSelect={
+            mainNode === id ||
+            isCTE ||
+            hasHighlightedNodes ||
+            isNotNil(lineageCache)
+              ? undefined
+              : handleSelect
+          }
+          count={hasHighlightedNodes ? undefined : columns.length}
         />
+      </div>
+      {showColumns && (
+        <div ref={columnsWrapperRef} style={{ height: '10rem', overflow: 'hidden' }}>
+          <ModelColumns
+            className="nowheel rounded-b-lg bg-theme-lighter text-xs h-full"
+            nodeId={id}
+            columns={columns}
+            disabled={shouldDisableColumns}
+            withHandles={true}
+            withSource={true}
+            withDescription={false}
+            maxHeight="100%"
+          />
+        </div>
       )}
     </div>
   )

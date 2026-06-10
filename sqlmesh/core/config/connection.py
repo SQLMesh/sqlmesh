@@ -58,6 +58,7 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     "trino",
     # Nullable types are problematic
     "clickhouse",
+    "starrocks",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
@@ -2347,6 +2348,80 @@ class RisingwaveConnectionConfig(ConnectionConfig):
             cursor.execute(sql)
 
         return init
+
+
+class StarRocksConnectionConfig(ConnectionConfig):
+    """Configuration for the StarRocks connection.
+
+    StarRocks uses MySQL network protocol and is compatible with MySQL ecosystem tools,
+    JDBC/ODBC drivers, and various visualization tools.
+
+    Args:
+        host: The hostname of the StarRocks FE (Frontend) node.
+        user: The StarRocks username.
+        password: The StarRocks password.
+        port: The port number of the StarRocks FE node. Default is 9030.
+        database: The optional database name.
+        charset: The optional character set.  TODO: may be not supported yet.
+        collation: The optional collation.  TODO: may be not supported yet.
+        ssl_disabled: Whether to disable SSL connection.  TODO: need to check it.
+        concurrent_tasks: The maximum number of tasks that can use this connection concurrently.
+        register_comments: Whether or not to register model comments with the SQL engine.
+        local_infile: Whether or not to allow local file access.
+        pre_ping: Whether or not to pre-ping the connection before starting a new transaction to ensure it is still alive.
+    """
+
+    host: str
+    user: str
+    password: str
+    port: t.Optional[int] = 9030
+    database: t.Optional[str] = None
+    charset: t.Optional[str] = None
+    collation: t.Optional[str] = None
+    ssl_disabled: t.Optional[bool] = None
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    local_infile: bool = False
+    pre_ping: bool = True
+
+    type_: t.Literal["starrocks"] = Field(alias="type", default="starrocks")
+    DIALECT: t.ClassVar[t.Literal["starrocks"]] = "starrocks"
+    DISPLAY_NAME: t.ClassVar[t.Literal["StarRocks"]] = "StarRocks"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[18]] = 18
+
+    _engine_import_validator = _get_engine_import_validator("pymysql", "starrocks")
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        connection_keys = {
+            "host",
+            "user",
+            "password",
+        }
+        if self.port is not None:
+            connection_keys.add("port")
+        if self.database is not None:
+            connection_keys.add("database")
+        if self.charset is not None:
+            connection_keys.add("charset")
+        if self.collation is not None:
+            connection_keys.add("collation")
+        if self.ssl_disabled is not None:
+            connection_keys.add("ssl_disabled")
+        if self.local_infile is not None:
+            connection_keys.add("local_infile")
+        return connection_keys
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        return engine_adapter.StarRocksEngineAdapter
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        from pymysql import connect
+
+        return connect
 
 
 _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {
