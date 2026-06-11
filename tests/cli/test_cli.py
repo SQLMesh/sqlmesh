@@ -2271,6 +2271,16 @@ def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
     mock.assert_not_called()
 
 
+def test_format_runs_without_state_multi_repo_partial(runner: CliRunner, copy_to_temp_path, mocker):
+    """Format one repo of a multi-repo project whose upstream models live only in prod state."""
+    repo_2 = copy_to_temp_path("examples/multi")[0] / "repo_2"
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--gateway", "memory", "--paths", str(repo_2), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
 def test_lint_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
     """Guard that `lint` explicitly passes `load_state=True` and still reaches state sync."""
     mock = _setup_local_only_project(tmp_path, mocker)

@@ -116,7 +116,7 @@ def cli(
     configure_console(ignore_warnings=ignore_warnings)
 
     load = True
-    # Outside the single-path block: applies regardless of --paths count.
+    # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
 
     if len(paths) == 1:
