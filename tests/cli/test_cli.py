@@ -2271,14 +2271,25 @@ def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
     mock.assert_not_called()
 
 
-def test_lint_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+def test_lint_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `lint` explicitly passes `load_state=True` and still reaches state sync."""
     mock = _setup_local_only_project(tmp_path, mocker)
-    result = runner.invoke(cli, ["--paths", str(tmp_path), "lint"])
-    assert result.exit_code == 0, f"Lint failed: {result.output}\nException: {result.exception}"
-    mock.assert_not_called()
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "lint"])
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `lint`"
+        )
+    assert mock.called, "state-sync was never accessed during `lint`"
 
 
-@pytest.mark.parametrize("command", ["format", "lint"])
+@pytest.mark.parametrize("command", ["format"])
 def test_local_only_commands_skip_state_multiple_paths(
     runner: CliRunner, tmp_path: Path, mocker, command: str
 ):

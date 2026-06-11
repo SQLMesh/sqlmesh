@@ -41,7 +41,7 @@ SKIP_LOAD_COMMANDS = (
     "table_name",
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
-LOCAL_ONLY_COMMANDS = ("format", "lint")
+LOCAL_ONLY_COMMANDS = ("format",)
 
 
 def _sqlmesh_version() -> str:
