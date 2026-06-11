@@ -521,6 +521,32 @@ def test_quoting():
     assert str(BaseRelation.create(**source.relation_info)) == 'foo."bar"'
 
 
+@pytest.mark.parametrize(
+    ("identifier", "expected"),
+    [
+        ("FILENAME.CSV", 'raw."FILENAME.CSV"'),
+        ("FILE NAME", 'raw."FILE NAME"'),
+    ],
+)
+def test_source_config_canonical_name_quotes_identifier_with_dot_or_space(
+    identifier: str, expected: str
+):
+    context = DbtContext()
+    context.project_name = "test"
+    context.target = DuckDbConfig(name="target", schema="raw")
+
+    source = SourceConfig(
+        name="my_table",
+        source_name="my_source",
+        schema="raw",
+        identifier=identifier,
+        quoting={"identifier": False},
+    )
+    context.sources = {source.config_name: source}
+
+    assert source.canonical_name(context) == expected
+
+
 def _test_warehouse_config(
     config_yaml: str, target_class: t.Type[TargetConfig], *params_path: str
 ) -> TargetConfig:
