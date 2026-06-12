@@ -556,6 +556,10 @@ def _parse_if(self: Parser) -> t.Optional[exp.Expr]:
     # to parse a statement / command to support the macro @IF(condition, statement)
     index = self._index
     try:
+        if self.dialect == "tsql":
+            if not (self._index >= 2 and self._tokens[self._index - 2].text == "@"):
+                return self.__parse_if()  # type: ignore
+            return Parser.__parse_if(self)  # type: ignore
         return self.__parse_if()  # type: ignore
     except ParseError:
         self._retreat(index)
@@ -1133,8 +1137,8 @@ def extend_sqlglot() -> None:
     _override(Parser, _parse_value)
     _override(Parser, _parse_lambda)
     _override(Parser, _parse_types)
-    _override(TSQL.Parser, Parser._parse_if)
     _override(Parser, _parse_if)
+    _override(TSQL.Parser, Parser._parse_if)
     _override(Parser, _parse_id_var)
     _override(Parser, _parse_interval_span)
     _override(Parser, _warn_unsupported)
