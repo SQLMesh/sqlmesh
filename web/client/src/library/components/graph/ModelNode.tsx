@@ -2,6 +2,7 @@ import { isNil, isArrayNotEmpty, isNotNil, toID, isFalse } from '@utils/index'
 import clsx from 'clsx'
 import { useMemo, useCallback, useState, useRef } from 'react'
 import { ModelType } from '@api/client'
+import { useStoreContext } from '@context/context'
 import { useLineageFlow } from './context'
 import { type GraphNodeData } from './help'
 import { Position, type NodeProps, NodeResizeControl } from 'reactflow'
@@ -44,6 +45,7 @@ export default function ModelNode({
     highlightedNodes,
     activeNodes,
   } = useLineageFlow()
+  const nodeColors = useStoreContext(s => s.nodeColors)
 
   const columns: Column[] = useMemo(() => {
     const model = models.get(id)
@@ -112,6 +114,16 @@ export default function ModelNode({
     },
     [setSelectedNodes, highlightedNodeModels],
   )
+
+  const tagColor = useMemo(() => {
+    const tags = nodeData.tags
+    if (isNil(tags) || Object.keys(nodeColors).length === 0) return undefined
+    for (const tag of tags) {
+      const color = nodeColors[tag]
+      if (color) return color
+    }
+    return undefined
+  }, [nodeData.tags, nodeColors])
 
   const splat = highlightedNodes['*']
   const hasSelectedColumns = columns.some(({ name }) =>
@@ -183,7 +195,12 @@ export default function ModelNode({
             ? 'ring-8 ring-neutral-50'
             : isSelected && 'ring-8 ring-secondary-50 dark:ring-primary-50',
       )}
-      style={{ width: '100%' }}
+      style={{
+        width: '100%',
+        ...(tagColor != null
+          ? { borderColor: tagColor, backgroundColor: tagColor, color: tagColor }
+          : {}),
+      }}
     >
       <NodeResizeControl
         minWidth={150}

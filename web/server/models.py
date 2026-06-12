@@ -133,6 +133,7 @@ class Directory(PydanticModel):
 class Meta(PydanticModel):
     version: str
     has_running_task: bool = False
+    node_colors: t.Dict[str, str] = {}
 
 
 class Reference(PydanticModel):
