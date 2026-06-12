@@ -709,6 +709,20 @@ def test_conditional_statement():
     q = parse_one("@IF(cond, VACUUM ANALYZE);", read="postgres")
     assert q.sql(dialect="postgres") == "@IF(cond, VACUUM ANALYZE)"
 
+    # Verify that the original error case from issue #5823 (Required keyword: 'true' missing) is resolved.
+    # It must be parsed as a macro function containing an Anonymous expression rather than exp.If.
+    q = parse_one("@IF(1 = 1, ALTER TABLE x ADD y INT);", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(1 = 1, ALTER TABLE x ADD y INTEGER)"
+    assert isinstance(q.this, exp.Anonymous)
+    assert q.this.name == "IF"
+
+    # Note: SQLGlot's fallback Command parser strips quotes from string literal tokens when parsing unparsed commands
+    q = parse_one("@IF(cond, PRINT 'hello');", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(cond, PRINT hello)"
+
+    q = parse_one("@IF(@runtime_stage = 'evaluating', SELECT 1);", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(@runtime_stage = 'evaluating', SELECT 1)"
+
 
 def test_model_name_cannot_be_string():
     with pytest.raises(ParseError) as parse_error:
