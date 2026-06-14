@@ -464,10 +464,10 @@ def test_model_qualification(tmp_path: Path):
         ctx.upsert_model(load_sql_based_model(expressions))
         ctx.plan_builder("dev")
 
-        assert (
-            """Column '"a"' could not be resolved for model '"db"."table"', the column may not exist or is ambiguous."""
-            in mock_logger.call_args[0][0]
-        )
+        warning_msg = mock_logger.call_args[0][0]
+        assert "ambiguousorinvalidcolumn:" in warning_msg
+        assert "could not be resolved" in warning_msg
+        assert "db.table" in warning_msg
 
 
 @use_terminal_console
@@ -1663,6 +1663,37 @@ def test_audits():
         ("audit_c", {"key": d.MacroVar(this="start_ds")}),
     ]
     assert model.tags == ["foo"]
+
+
+def test_custom_audit_arg_changes_affect_fingerprint():
+    def make_model(min_val: int) -> t.Any:
+        expressions = d.parse(
+            f"""
+            MODEL (
+                name db.model,
+                audits (check_count(min := {min_val}))
+            );
+            SELECT 1 AS id;
+            """
+        )
+        audit_definitions = {
+            "check_count": load_audit(
+                d.parse(
+                    "AUDIT (name check_count); SELECT * FROM @this_model HAVING COUNT(*) < @min"
+                ),
+                dialect="duckdb",
+            )
+        }
+        return load_sql_based_model(
+            expressions,
+            path=Path("./examples/sushi/models/test_model.sql"),
+            audit_definitions=audit_definitions,
+        )
+
+    model_a = make_model(33111)
+    model_b = make_model(5142)
+
+    assert model_a.audit_metadata_hash() != model_b.audit_metadata_hash()
 
 
 def test_enable_audits_from_model_defaults():
@@ -3650,7 +3681,7 @@ def test_model_ctas_query():
 
     assert (
         load_sql_based_model(expressions, dialect="bigquery").ctas_query().sql()
-        == 'WITH RECURSIVE "a" AS (SELECT * FROM (SELECT * FROM (SELECT * FROM "x" AS "x" WHERE FALSE) AS "_q_0" WHERE FALSE) AS "_q_1" WHERE FALSE), "b" AS (SELECT * FROM "a" AS "a" WHERE FALSE UNION ALL SELECT * FROM "a" AS "a" WHERE FALSE) SELECT * FROM "b" AS "b" WHERE FALSE LIMIT 0'
+        == 'WITH RECURSIVE "a" AS (SELECT * FROM (SELECT * FROM (SELECT * FROM "x" AS "x" WHERE FALSE) AS "_0" WHERE FALSE) AS "_1" WHERE FALSE), "b" AS (SELECT * FROM "a" AS "a" WHERE FALSE UNION ALL SELECT * FROM "a" AS "a" WHERE FALSE) SELECT * FROM "b" AS "b" WHERE FALSE LIMIT 0'
     )
 
     expressions = d.parse(
@@ -3671,7 +3702,7 @@ def test_model_ctas_query():
 
     assert (
         load_sql_based_model(expressions, dialect="bigquery").ctas_query().sql()
-        == 'WITH RECURSIVE "a" AS (WITH "nested_a" AS (SELECT * FROM (SELECT * FROM (SELECT * FROM "x" AS "x" WHERE FALSE) AS "_q_0" WHERE FALSE) AS "_q_1" WHERE FALSE) SELECT * FROM "nested_a" AS "nested_a" WHERE FALSE), "b" AS (SELECT * FROM "a" AS "a" WHERE FALSE UNION ALL SELECT * FROM "a" AS "a" WHERE FALSE) SELECT * FROM "b" AS "b" WHERE FALSE LIMIT 0'
+        == 'WITH RECURSIVE "a" AS (WITH "nested_a" AS (SELECT * FROM (SELECT * FROM (SELECT * FROM "x" AS "x" WHERE FALSE) AS "_0" WHERE FALSE) AS "_1" WHERE FALSE) SELECT * FROM "nested_a" AS "nested_a" WHERE FALSE), "b" AS (SELECT * FROM "a" AS "a" WHERE FALSE UNION ALL SELECT * FROM "a" AS "a" WHERE FALSE) SELECT * FROM "b" AS "b" WHERE FALSE LIMIT 0'
     )
 
 
@@ -4995,7 +5026,7 @@ def test_model_session_properties(sushi_context):
         )
     )
     assert model.session_properties == {
-        "query_label": parse_one("[('key1', 'value1'), ('key2', 'value2')]")
+        "query_label": parse_one("[('key1', 'value1'), ('key2', 'value2')]", dialect="bigquery")
     }
 
     model = load_sql_based_model(
@@ -6011,7 +6042,7 @@ def test_when_matched_normalization() -> None:
     assert isinstance(model.kind, IncrementalByUniqueKeyKind)
     assert isinstance(model.kind.when_matched, exp.Whens)
     first_expression = model.kind.when_matched.expressions[0]
-    assert isinstance(first_expression, exp.Expression)
+    assert isinstance(first_expression, exp.Expr)
     assert (
         first_expression.sql(dialect="snowflake")
         == 'WHEN MATCHED THEN UPDATE SET "__MERGE_TARGET__"."KEY_A" = "__MERGE_SOURCE__"."KEY_A", "__MERGE_TARGET__"."KEY_B" = "__MERGE_SOURCE__"."KEY_B"'
@@ -6039,7 +6070,7 @@ def test_when_matched_normalization() -> None:
     assert isinstance(model.kind, IncrementalByUniqueKeyKind)
     assert isinstance(model.kind.when_matched, exp.Whens)
     first_expression = model.kind.when_matched.expressions[0]
-    assert isinstance(first_expression, exp.Expression)
+    assert isinstance(first_expression, exp.Expr)
     assert (
         first_expression.sql(dialect="snowflake")
         == 'WHEN MATCHED THEN UPDATE SET "__MERGE_TARGET__"."kEy_A" = "__MERGE_SOURCE__"."kEy_A", "__MERGE_TARGET__"."kEY_b" = "__MERGE_SOURCE__"."KEY_B"'
@@ -6447,7 +6478,7 @@ def test_end_no_start():
 
 def test_variables():
     @macro()
-    def test_macro_var(evaluator) -> exp.Expression:
+    def test_macro_var(evaluator) -> exp.Expr:
         return exp.convert(evaluator.var("TEST_VAR_D") + 10)
 
     expressions = parse(
@@ -6946,7 +6977,7 @@ def test_unrendered_macros_sql_model(mocker: MockerFixture) -> None:
     # merge_filter will stay unrendered as well
     assert model.unique_key[0] == exp.column("a", quoted=True)
     assert (
-        t.cast(exp.Expression, model.merge_filter).sql()
+        t.cast(exp.Expr, model.merge_filter).sql()
         == '"__MERGE_SOURCE__"."id" > 0 AND "__MERGE_TARGET__"."updated_at" < @end_ds AND "__MERGE_SOURCE__"."updated_at" > @start_ds AND @merge_filter_var'
     )
 
@@ -7149,7 +7180,7 @@ def test_gateway_macro() -> None:
     assert model.render_query_or_raise().sql() == "SELECT 'in_memory' AS \"gateway\""
 
     @macro()
-    def macro_uses_gateway(evaluator) -> exp.Expression:
+    def macro_uses_gateway(evaluator) -> exp.Expr:
         return exp.convert(evaluator.gateway + "_from_macro")
 
     model = load_sql_based_model(
@@ -8729,7 +8760,7 @@ def test_merge_filter_macro():
     def predicate(
         evaluator: MacroEvaluator,
         cluster_column: exp.Column,
-    ) -> exp.Expression:
+    ) -> exp.Expr:
         return parse_one(f"source.{cluster_column} > dateadd(day, -7, target.{cluster_column})")
 
     expressions = d.parse(
@@ -9904,7 +9935,7 @@ def entrypoint(evaluator):
         {"customer": SqlValue(sql="customer1"), "customer_field": SqlValue(sql="'bar'")}
     )
 
-    assert t.cast(exp.Expression, customer1_model.render_query()).sql() == (
+    assert t.cast(exp.Expr, customer1_model.render_query()).sql() == (
         """SELECT 'bar' AS "foo", "bar" AS "foo2", 'bar' AS "foo3" FROM "db"."customer1"."my_source" AS "my_source\""""
     )
 
@@ -9917,7 +9948,7 @@ def entrypoint(evaluator):
         {"customer": SqlValue(sql="customer2"), "customer_field": SqlValue(sql="qux")}
     )
 
-    assert t.cast(exp.Expression, customer2_model.render_query()).sql() == (
+    assert t.cast(exp.Expr, customer2_model.render_query()).sql() == (
         '''SELECT "qux" AS "foo", "qux" AS "foo2", "qux" AS "foo3" FROM "db"."customer2"."my_source" AS "my_source"'''
     )
 
@@ -10703,12 +10734,12 @@ def m4_non_metadata_references_v6(evaluator):
     query_with_vars = macro_evaluator.transform(
         parse_one("SELECT " + ", ".join(f"@v{var}, @VAR('v{var}')" for var in [1, 2, 3, 6]))
     )
-    assert t.cast(exp.Expression, query_with_vars).sql() == "SELECT 1, 1, 2, 2, 3, 3, 6, 6"
+    assert t.cast(exp.Expr, query_with_vars).sql() == "SELECT 1, 1, 2, 2, 3, 3, 6, 6"
 
     query_with_blueprint_vars = macro_evaluator.transform(
         parse_one("SELECT " + ", ".join(f"@v{var}, @BLUEPRINT_VAR('v{var}')" for var in [4, 5]))
     )
-    assert t.cast(exp.Expression, query_with_blueprint_vars).sql() == "SELECT 4, 4, 5, 5"
+    assert t.cast(exp.Expr, query_with_blueprint_vars).sql() == "SELECT 4, 4, 5, 5"
 
 
 def test_variable_mentioned_in_both_metadata_and_non_metadata_macro(tmp_path: Path) -> None:
@@ -12342,3 +12373,170 @@ def test_audits_in_embedded_model():
     )
     with pytest.raises(ConfigError, match="Audits are not supported for embedded models"):
         load_sql_based_model(expression).validate_definition()
+
+
+def test_default_catalog_not_leaked_to_unsupported_gateway():
+    """
+    Regression test for https://github.com/SQLMesh/sqlmesh/issues/5748
+
+    When a model targets a gateway that is NOT in default_catalog_per_gateway,
+    the global default_catalog should be cleared (set to None) instead of
+    leaking through from the default gateway.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            gateway clickhouse_gw,
+            dialect clickhouse,
+        );
+
+        SELECT 1 AS id
+        """,
+        read="clickhouse",
+    )
+
+    default_catalog_per_gateway = {
+        "default_gw": "example_catalog",
+    }
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gw: {},
+        dialect="clickhouse",
+        default_catalog_per_gateway=default_catalog_per_gateway,
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 1
+    model = models[0]
+
+    assert not model.catalog, (
+        f"Default gateway catalog leaked into catalog-unsupported gateway model. "
+        f"Expected no catalog, got: {model.catalog}"
+    )
+    assert "example_catalog" not in model.fqn, (
+        f"Default gateway catalog found in model FQN: {model.fqn}"
+    )
+
+
+def test_default_catalog_still_applied_to_supported_gateway():
+    """
+    Control test: when a model targets a gateway that IS in default_catalog_per_gateway,
+    the catalog should still be correctly applied.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            gateway other_duckdb,
+        );
+
+        SELECT 1 AS id
+        """,
+        read="duckdb",
+    )
+
+    default_catalog_per_gateway = {
+        "default_gw": "example_catalog",
+        "other_duckdb": "other_db",
+    }
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gw: {},
+        dialect="duckdb",
+        default_catalog_per_gateway=default_catalog_per_gateway,
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 1
+    model = models[0]
+
+    assert model.catalog == "other_db", f"Expected catalog 'other_db', got: {model.catalog}"
+
+
+def test_no_gateway_uses_global_default_catalog():
+    """
+    Control test: when a model does NOT specify a gateway, the global
+    default_catalog should still be applied as before.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+        );
+
+        SELECT 1 AS id
+        """,
+        read="duckdb",
+    )
+
+    model = load_sql_based_model(
+        expressions,
+        default_catalog="example_catalog",
+        dialect="duckdb",
+    )
+
+    assert model.catalog == "example_catalog"
+
+
+def test_blueprint_catalog_not_cross_contaminated():
+    """
+    When blueprints iterate over different gateways, the catalog from one
+    blueprint iteration should not leak into the next. A ClickHouse blueprint
+    setting default_catalog to None should not prevent the following blueprint
+    from getting its correct catalog.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name @{blueprint}.my_model,
+            kind FULL,
+            gateway @{gw},
+            blueprints (
+                (blueprint := ch_schema, gw := clickhouse_gw),
+                (blueprint := db_schema, gw := default_gw),
+            ),
+        );
+
+        SELECT 1 AS id
+        """,
+        read="duckdb",
+    )
+
+    default_catalog_per_gateway = {
+        "default_gw": "example_catalog",
+    }
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gw: {},
+        dialect="duckdb",
+        default_catalog_per_gateway=default_catalog_per_gateway,
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 2
+
+    ch_model = next(m for m in models if "ch_schema" in m.fqn)
+    db_model = next(m for m in models if "db_schema" in m.fqn)
+
+    assert not ch_model.catalog, (
+        f"Catalog leaked into ClickHouse blueprint. Got: {ch_model.catalog}"
+    )
+
+    assert db_model.catalog == "example_catalog", (
+        f"Catalog lost for DuckDB blueprint after ClickHouse iteration. Got: {db_model.catalog}"
+    )

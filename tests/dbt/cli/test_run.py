@@ -1,6 +1,7 @@
 import typing as t
 import pytest
 from pathlib import Path
+import shutil
 from click.testing import Result
 import time_machine
 from sqlmesh_dbt.operations import create
@@ -70,6 +71,10 @@ def test_run_with_changes_and_full_refresh(
     partial_parse_file = project_path / "target" / "sqlmesh_partial_parse.msgpack"
     if partial_parse_file.exists():
         partial_parse_file.unlink()
+
+    cache_dir = project_path / ".cache"
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
 
     # run with --full-refresh. this should:
     # - fully refresh model_a (pick up the new records from external_table)

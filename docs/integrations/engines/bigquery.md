@@ -22,7 +22,7 @@ Follow the [quickstart installation guide](../../installation.md) up to the step
 Instead of installing just SQLMesh core, we will also include the BigQuery engine libraries:
 
 ```bash
-> pip install "sqlmesh[bigquery]"
+pip install "sqlmesh[bigquery]"
 ```
 
 ### Install Google Cloud SDK
@@ -35,19 +35,19 @@ Follow these steps to install and configure the Google Cloud SDK on your compute
 - Unpack the downloaded file with the `tar` command:
 
     ```bash
-    > tar -xzvf google-cloud-cli-{SYSTEM_SPECIFIC_INFO}.tar.gz
+    tar -xzvf google-cloud-cli-{SYSTEM_SPECIFIC_INFO}.tar.gz
     ```
 
 - Run the installation script:
 
     ```bash
-    > ./google-cloud-sdk/install.sh
+    ./google-cloud-sdk/install.sh
     ```
 
 - Reload your shell profile (e.g., for zsh):
 
     ```bash
-    > source $HOME/.zshrc
+    source $HOME/.zshrc
     ```
 
 - Run [`gcloud init` to setup authentication](https://cloud.google.com/sdk/gcloud/reference/init)
@@ -114,7 +114,7 @@ The output will look something like this:
 We've verified our connection, so we're ready to create and execute a plan in BigQuery:
 
 ```bash
-> sqlmesh plan
+sqlmesh plan
 ```
 
 ### View results in BigQuery Console

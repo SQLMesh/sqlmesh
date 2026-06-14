@@ -17,7 +17,10 @@ dialects = json.dumps(
 
 def parse_to_json(sql: str, read: DialectType = None) -> str:
     return json.dumps(
-        [exp.dump() if exp else {} for exp in sqlglot.parse(sql, read=read, error_level="ignore")]
+        [
+            exp.dump() if exp else {}
+            for exp in sqlglot.parse(sql, read=read, error_level=sqlglot.ErrorLevel.IGNORE)
+        ]
     )
 
 

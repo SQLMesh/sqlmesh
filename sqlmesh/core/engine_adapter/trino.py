@@ -129,7 +129,7 @@ class TrinoEngineAdapter(
             yield
             return
 
-        if not isinstance(authorization, exp.Expression):
+        if not isinstance(authorization, exp.Expr):
             authorization = exp.Literal.string(authorization)
 
         if not authorization.is_string:
@@ -326,13 +326,13 @@ class TrinoEngineAdapter(
         self,
         target_table: TableName,
         source_table: QueryOrDF,
-        unique_key: t.Sequence[exp.Expression],
+        unique_key: t.Sequence[exp.Expr],
         valid_from_col: exp.Column,
         valid_to_col: exp.Column,
         execution_time: t.Union[TimeLike, exp.Column],
         invalidate_hard_deletes: bool = True,
         updated_at_col: t.Optional[exp.Column] = None,
-        check_columns: t.Optional[t.Union[exp.Star, t.Sequence[exp.Expression]]] = None,
+        check_columns: t.Optional[t.Union[exp.Star, t.Sequence[exp.Expr]]] = None,
         updated_at_as_valid_from: bool = False,
         execution_time_as_valid_from: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
@@ -409,7 +409,7 @@ class TrinoEngineAdapter(
         schema_name: SchemaName,
         ignore_if_exists: bool,
         warn_on_error: bool,
-        properties: t.List[exp.Expression],
+        properties: t.List[exp.Expr],
         kind: str,
     ) -> None:
         if mapped_location := self._schema_location(schema_name):
@@ -426,7 +426,7 @@ class TrinoEngineAdapter(
     def _create_table(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,

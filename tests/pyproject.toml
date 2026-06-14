@@ -8,8 +8,8 @@ license = { text = "Apache License 2.0" }
 [project.urls]
 Homepage = "https://sqlmesh.com/"
 Documentation = "https://sqlmesh.readthedocs.io/en/stable/"
-Repository = "https://github.com/TobikoData/sqlmesh"
-Issues = "https://github.com/TobikoData/sqlmesh/issues"
+Repository = "https://github.com/SQLMesh/sqlmesh"
+Issues = "https://github.com/SQLMesh/sqlmesh/issues"
 
 [build-system]
 requires = ["setuptools", "setuptools_scm", "toml"]

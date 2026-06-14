@@ -316,33 +316,66 @@ def test_model_properties(adapter: ClickhouseEngineAdapter):
         == "ENGINE=MergeTree ORDER BY (a, b + 1) PRIMARY KEY (a, b)"
     )
 
+    # Multiple physical_properties must be combined into a single comma-separated
+    # SETTINGS clause. ClickHouse rejects repeated SETTINGS keywords with a syntax
+    # error (see https://github.com/SQLMesh/sqlmesh/issues/5803).
     assert (
         build_properties_sql(
             order_by="ORDER_BY = (a, b + 1),",
             primary_key="PRIMARY_KEY = (a, b),",
             properties="PROP1 = 1, PROP2 = '2'",
         )
-        == "ENGINE=MergeTree ORDER BY (a, b + 1) PRIMARY KEY (a, b) SETTINGS prop1 = 1 SETTINGS prop2 = '2'"
+        == "ENGINE=MergeTree ORDER BY (a, b + 1) PRIMARY KEY (a, b) SETTINGS prop1 = 1, prop2 = '2'"
+    )
+
+    # Regression test for #5803: three or more SETTINGS entries also combine.
+    assert (
+        build_properties_sql(
+            order_by="ORDER_BY = (orders_id),",
+            properties=(
+                "min_age_to_force_merge_seconds = 3600, "
+                "min_age_to_force_merge_on_partition_only = 1, "
+                "index_granularity = 8192"
+            ),
+        )
+        == "ENGINE=MergeTree ORDER BY (orders_id) "
+        "SETTINGS min_age_to_force_merge_seconds = 3600, "
+        "min_age_to_force_merge_on_partition_only = 1, "
+        "index_granularity = 8192"
     )
 
     assert (
         build_properties_sql(
-            order_by="ORDER_BY = 'timestamp with fill to toStartOfDay(toDateTime64(\\'2024-07-11\\', 3)) step toIntervalDay(1) interpolate(price as price)',"
+            order_by="ORDER_BY = 'timestamp with fill to dateTrunc(\\'DAY\\', toDateTime64(\\'2024-07-11\\', 3)) step toIntervalDay(1) interpolate(price as price)',"
         )
-        == "ENGINE=MergeTree ORDER BY (timestamp WITH FILL TO toStartOfDay(toDateTime64('2024-07-11', 3)) STEP toIntervalDay(1) INTERPOLATE (price AS price))"
+        == "ENGINE=MergeTree ORDER BY (timestamp WITH FILL TO dateTrunc('DAY', toDateTime64('2024-07-11', 3)) STEP toIntervalDay(1) INTERPOLATE (price AS price))"
     )
 
     assert (
         build_properties_sql(
-            order_by="ORDER_BY = (\"a\", 'timestamp with fill to toStartOfDay(toDateTime64(\\'2024-07-11\\', 3)) step toIntervalDay(1) interpolate(price as price)'),"
+            order_by="ORDER_BY = (\"a\", 'timestamp with fill to dateTrunc(\\'DAY\\', toDateTime64(\\'2024-07-11\\', 3)) step toIntervalDay(1) interpolate(price as price)'),"
         )
-        == "ENGINE=MergeTree ORDER BY (\"a\", timestamp WITH FILL TO toStartOfDay(toDateTime64('2024-07-11', 3)) STEP toIntervalDay(1) INTERPOLATE (price AS price))"
+        == "ENGINE=MergeTree ORDER BY (\"a\", timestamp WITH FILL TO dateTrunc('DAY', toDateTime64('2024-07-11', 3)) STEP toIntervalDay(1) INTERPOLATE (price AS price))"
     )
 
     assert (
         build_properties_sql(properties="TTL = time + INTERVAL 1 WEEK")
         == "ENGINE=MergeTree ORDER BY () TTL time + INTERVAL '1' WEEK"
     )
+
+
+def test_view_properties_combine_settings(adapter: ClickhouseEngineAdapter):
+    # View properties hit the same SettingsProperty code path as table
+    # properties (#5803): multiple entries must collapse into one SETTINGS
+    # clause rather than emit repeated SETTINGS keywords.
+    view_properties_exp = adapter._build_view_properties_exp(
+        view_properties={
+            "prop1": exp.Literal.number(1),
+            "prop2": exp.Literal.string("2"),
+        }
+    )
+    assert view_properties_exp is not None
+    assert view_properties_exp.sql("clickhouse") == "SETTINGS prop1 = 1, prop2 = '2'"
 
 
 def test_partitioned_by_expr(make_mocked_engine_adapter: t.Callable):
@@ -368,7 +401,7 @@ def test_partitioned_by_expr(make_mocked_engine_adapter: t.Callable):
 
     assert (
         model.partitioned_by[0].sql("clickhouse")
-        == """toMonday(CAST("ds" AS DateTime64(9, 'UTC')))"""
+        == """dateTrunc('WEEK', CAST("ds" AS DateTime64(9, 'UTC')))"""
     )
 
     # user specifies without time column, unknown time column type
@@ -393,7 +426,7 @@ def test_partitioned_by_expr(make_mocked_engine_adapter: t.Callable):
     )
 
     assert [p.sql("clickhouse") for p in model.partitioned_by] == [
-        """toMonday(CAST("ds" AS DateTime64(9, 'UTC')))""",
+        """dateTrunc('WEEK', CAST("ds" AS DateTime64(9, 'UTC')))""",
         '"x"',
     ]
 
@@ -417,7 +450,7 @@ def test_partitioned_by_expr(make_mocked_engine_adapter: t.Callable):
         )
     )
 
-    assert model.partitioned_by[0].sql("clickhouse") == 'toMonday("ds")'
+    assert model.partitioned_by[0].sql("clickhouse") == """dateTrunc('WEEK', "ds")"""
 
     # user doesn't specify, non-conformable time column type
     model = load_sql_based_model(
@@ -441,7 +474,7 @@ def test_partitioned_by_expr(make_mocked_engine_adapter: t.Callable):
 
     assert (
         model.partitioned_by[0].sql("clickhouse")
-        == """CAST(toMonday(CAST("ds" AS DateTime64(9, 'UTC'))) AS String)"""
+        == """CAST(dateTrunc('WEEK', CAST("ds" AS DateTime64(9, 'UTC'))) AS String)"""
     )
 
     # user specifies partitioned_by with time column
@@ -993,7 +1026,7 @@ def test_insert_overwrite_by_condition_replace_partitioned(
     temp_table_mock.return_value = make_temp_table_name(table_name, "abcd")
 
     fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
-    fetchone_mock.return_value = "toMonday(ds)"
+    fetchone_mock.return_value = "dateTrunc('WEEK', ds)"
 
     insert_table_name = make_temp_table_name("new_records", "abcd")
     existing_table_name = make_temp_table_name("existing_records", "abcd")
@@ -1069,7 +1102,7 @@ def test_insert_overwrite_by_condition_where_partitioned(
     temp_table_mock.return_value = make_temp_table_name(table_name, "abcd")
 
     fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
-    fetchone_mock.return_value = "toMonday(ds)"
+    fetchone_mock.return_value = "dateTrunc('WEEK', ds)"
 
     fetchall_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchall")
     fetchall_mock.side_effect = [
@@ -1175,7 +1208,7 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
     temp_table_mock.return_value = make_temp_table_name(table_name, "abcd")
 
     fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
-    fetchone_mock.side_effect = ["toMonday(ds)", "toMonday(ds)"]
+    fetchone_mock.side_effect = ["dateTrunc('WEEK', ds)", "dateTrunc('WEEK', ds)"]
 
     fetchall_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchall")
     fetchall_mock.side_effect = [
@@ -1240,7 +1273,7 @@ def test_insert_overwrite_by_condition_inc_by_partition(
     temp_table_mock.return_value = make_temp_table_name(table_name, "abcd")
 
     fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
-    fetchone_mock.return_value = "toMonday(ds)"
+    fetchone_mock.return_value = "dateTrunc('WEEK', ds)"
 
     fetchall_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchall")
     fetchall_mock.return_value = [("1",), ("2",), ("4",)]
@@ -1365,7 +1398,7 @@ def test_exchange_tables(
     # The EXCHANGE TABLES call errored, so we RENAME TABLE instead
     assert [
         quote_identifiers(call.args[0]).sql("clickhouse")
-        if isinstance(call.args[0], exp.Expression)
+        if isinstance(call.args[0], exp.Expr)
         else call.args[0]
         for call in execute_mock.call_args_list
     ] == [

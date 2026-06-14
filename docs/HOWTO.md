@@ -92,7 +92,7 @@ You will work on the docs in a local copy of the sqlmesh git repository.
 If you don't have a copy of the repo on your machine, open a terminal and clone it into a `sqlmesh` directory by executing:
 
 ``` bash
-git clone https://github.com/TobikoData/sqlmesh.git
+git clone https://github.com/SQLMesh/sqlmesh.git
 ```
 
 And navigate to the directory:

@@ -176,7 +176,7 @@ class MSSQLEngineAdapter(
         schema_name: SchemaName,
         ignore_if_not_exists: bool = True,
         cascade: bool = False,
-        **drop_args: t.Dict[str, exp.Expression],
+        **drop_args: t.Dict[str, exp.Expr],
     ) -> None:
         """
         MsSql doesn't support CASCADE clause and drops schemas unconditionally.
@@ -205,9 +205,9 @@ class MSSQLEngineAdapter(
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        unique_key: t.Sequence[exp.Expression],
+        unique_key: t.Sequence[exp.Expr],
         when_matched: t.Optional[exp.Whens] = None,
-        merge_filter: t.Optional[exp.Expression] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **kwargs: t.Any,
     ) -> None:
@@ -401,7 +401,7 @@ class MSSQLEngineAdapter(
             for row in dataframe.itertuples()
         ]
 
-    def _to_sql(self, expression: exp.Expression, quote: bool = True, **kwargs: t.Any) -> str:
+    def _to_sql(self, expression: exp.Expr, quote: bool = True, **kwargs: t.Any) -> str:
         sql = super()._to_sql(expression, quote=quote, **kwargs)
         return f"{sql};"
 
@@ -448,7 +448,7 @@ class MSSQLEngineAdapter(
             **kwargs,
         )
 
-    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expression]) -> None:
+    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
         if where == exp.true():
             # "A TRUNCATE TABLE operation can be rolled back within a transaction."
             # ref: https://learn.microsoft.com/en-us/sql/t-sql/statements/truncate-table-transact-sql?view=sql-server-ver15#remarks

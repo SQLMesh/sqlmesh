@@ -12,7 +12,8 @@ from traceback import walk_tb
 
 from jinja2 import Environment, Template, nodes, UndefinedError
 from jinja2.runtime import Macro
-from sqlglot import Dialect, Expression, Parser, TokenType
+from sqlglot import Dialect, Parser, TokenType
+from sqlglot.expressions import Expression
 
 from sqlmesh.core import constants as c
 from sqlmesh.core import dialect as d
@@ -78,6 +79,11 @@ class MacroExtractor(Parser):
         self.reset()
         self.sql = jinja
         self._tokens = Dialect.get_or_raise(dialect).tokenize(jinja)
+
+        # guard for older sqlglot versions (before 30.0.3)
+        if hasattr(self, "_tokens_size"):
+            # keep the cached length in sync
+            self._tokens_size = len(self._tokens)
         self._index = -1
         self._advance()
 

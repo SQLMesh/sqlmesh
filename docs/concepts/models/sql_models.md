@@ -149,7 +149,8 @@ MODEL (
 
 SELECT
   @field_a,
-  @{field_b} AS field_b
+  @{field_b} AS field_b,
+  @'prefix_@{field_a}_suffix' AS literal_example
 FROM @customer.some_source
 ```
 
@@ -163,8 +164,9 @@ MODEL (
 );
 
 SELECT
-  'x',
-  y AS field_b
+  x,
+  y AS field_b,
+  'prefix_x_suffix' AS literal_example
 FROM customer1.some_source
 
 -- This uses the second variable mapping
@@ -174,14 +176,13 @@ MODEL (
 );
 
 SELECT
-  'z',
-  w AS field_b
+  z,
+  w AS field_b,
+  'prefix_z_suffix' AS literal_example
 FROM customer2.some_source
 ```
 
-Note the use of curly brace syntax `@{field_b} AS field_b` in the model query above. It is used to tell SQLMesh that the rendered variable value should be treated as a SQL identifier instead of a string literal.
-
-You can see the different behavior in the first rendered model. `@field_a` is resolved to the string literal `'x'` (with single quotes) and `@{field_b}` is resolved to the identifier `y` (without quotes). Learn more about the curly brace syntax [here](../../concepts/macros/sqlmesh_macros.md#embedding-variables-in-strings).
+Both `@field_a` and `@{field_b}` resolve blueprint variable values as SQL identifiers. The curly brace syntax is useful when embedding a variable within a larger string where the variable boundary would otherwise be ambiguous (e.g. `@{customer}_suffix`). To produce a string literal with interpolated variables, use the `@'...@{var}...'` syntax as shown with `literal_example` above. Learn more about the curly brace syntax [here](../../concepts/macros/sqlmesh_macros.md#embedding-variables-in-strings).
 
 Blueprint variable mappings can also be constructed dynamically, e.g., by using a macro: `blueprints @gen_blueprints()`. This is useful in cases where the `blueprints` list needs to be sourced from external sources, such as CSV files.
 

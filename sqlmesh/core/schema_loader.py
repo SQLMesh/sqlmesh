@@ -24,26 +24,31 @@ def create_external_models_file(
     gateway: t.Optional[str] = None,
     max_workers: int = 1,
     strict: bool = False,
+    all_models: t.Optional[t.Dict[str, Model]] = None,
 ) -> None:
     """Create or replace a YAML file with column and types of all columns in all external models.
 
     Args:
         path: The path to store the YAML file.
-        models: FQN to model
+        models: FQN to model for the current repo/config being processed.
         adapter: The engine adapter.
         state_reader: The state reader.
         dialect: The dialect to serialize the schema as.
         gateway: If the model should be associated with a specific gateway; the gateway key
         max_workers: The max concurrent workers to fetch columns.
         strict: If True, raise an error if the external model is missing in the database.
+        all_models: FQN to model across all loaded repos. When provided, a dependency is only
+            classified as external if it is absent from this full set. This prevents cross-repo
+            internal models from being misclassified as external in multi-repo setups.
     """
+    known_models: t.Dict[str, Model] = all_models if all_models is not None else models
     external_model_fqns = set()
 
     for fqn, model in models.items():
         if model.kind.is_external:
             external_model_fqns.add(fqn)
         for dep in model.depends_on:
-            if dep not in models:
+            if dep not in known_models:
                 external_model_fqns.add(dep)
 
     # Make sure we don't convert internal models into external ones.

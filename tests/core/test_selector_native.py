@@ -309,7 +309,7 @@ def test_select_change_schema(mocker: MockerFixture, make_snapshot):
 
     selector = NativeSelector(state_reader_mock, local_models)
 
-    selected = selector.select_models(["db.parent"], env_name)
+    selected, _ = selector.select_models(["db.parent"], env_name)
     assert selected[local_child.fqn].render_query() != child.render_query()
 
     _assert_models_equal(
@@ -320,7 +320,7 @@ def test_select_change_schema(mocker: MockerFixture, make_snapshot):
         },
     )
 
-    selected = selector.select_models(["db.child"], env_name)
+    selected, _ = selector.select_models(["db.child"], env_name)
     assert selected[local_child.fqn].data_hash == child.data_hash
 
     _assert_models_equal(
@@ -343,12 +343,12 @@ def test_select_models_missing_env(mocker: MockerFixture, make_snapshot):
 
     selector = NativeSelector(state_reader_mock, local_models)
 
-    assert selector.select_models([model.name], "missing_env").keys() == {model.fqn}
-    assert not selector.select_models(["missing"], "missing_env")
+    assert selector.select_models([model.name], "missing_env")[0].keys() == {model.fqn}
+    assert not selector.select_models(["missing"], "missing_env")[0]
 
     assert selector.select_models(
         [model.name], "missing_env", fallback_env_name="another_missing_env"
-    ).keys() == {model.fqn}
+    )[0].keys() == {model.fqn}
 
     state_reader_mock.get_environment.assert_has_calls(
         [
@@ -789,7 +789,7 @@ def test_select_models_local_tags_take_precedence_over_remote(
 
     selector = NativeSelector(state_reader_mock, local_models)
 
-    selected = selector.select_models(["tag:a"], env_name)
+    selected, _ = selector.select_models(["tag:a"], env_name)
 
     # both should get selected because they both now have the 'a' tag locally, even though one exists in remote state without the 'a' tag
     _assert_models_equal(
@@ -801,7 +801,135 @@ def test_select_models_local_tags_take_precedence_over_remote(
     )
 
 
-def _assert_models_equal(actual: t.Dict[str, Model], expected: t.Dict[str, Model]) -> None:
+def test_select_models_returns_selected_fqns(mocker: MockerFixture, make_snapshot):
+    """select_models should return the set of all matched FQNs (including env-only models)
+    alongside the model dict."""
+    local_model = SqlModel(
+        name="db.local_model",
+        query=d.parse_one("SELECT 1 AS a"),
+    )
+    deleted_model = SqlModel(
+        name="db.deleted_model",
+        query=d.parse_one("SELECT 2 AS b"),
+    )
+
+    deleted_model_snapshot = make_snapshot(deleted_model)
+    deleted_model_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    env_name = "test_env"
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.get_environment.return_value = Environment(
+        name=env_name,
+        snapshots=[deleted_model_snapshot.table_info],
+        start_at="2023-01-01",
+        end_at="2023-02-01",
+        plan_id="test_plan_id",
+    )
+    state_reader_mock.get_snapshots.return_value = {
+        deleted_model_snapshot.snapshot_id: deleted_model_snapshot,
+    }
+
+    local_models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+    local_models[local_model.fqn] = local_model
+
+    selector = NativeSelector(state_reader_mock, local_models)
+
+    # Selecting a deleted model: selected_fqns includes it even though models dict won't.
+    _, selected_fqns = selector.select_models(["db.deleted_model"], env_name)
+    assert deleted_model.fqn in selected_fqns
+
+    # Selecting a local model: selected_fqns includes it.
+    _, selected_fqns = selector.select_models(["db.local_model"], env_name)
+    assert local_model.fqn in selected_fqns
+
+    # Mixed selection (active + deleted): both appear in selected_fqns.
+    _, selected_fqns = selector.select_models(["db.deleted_model", "db.local_model"], env_name)
+    assert selected_fqns == {deleted_model.fqn, local_model.fqn}
+
+    # Wildcard should match both local and env models.
+    _, selected_fqns = selector.select_models(["*_model"], env_name)
+    assert selected_fqns == {deleted_model.fqn, local_model.fqn}
+
+    # Non-existent model should not appear.
+    _, selected_fqns = selector.select_models(["db.nonexistent"], env_name)
+    assert selected_fqns == set()
+
+
+def test_select_models_selected_fqns_fallback(mocker: MockerFixture, make_snapshot):
+    """select_models selected_fqns should include env models found via fallback environment."""
+    deleted_model = SqlModel(
+        name="db.deleted_model",
+        query=d.parse_one("SELECT 1 AS a"),
+    )
+
+    deleted_model_snapshot = make_snapshot(deleted_model)
+    deleted_model_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    fallback_env = Environment(
+        name="prod",
+        snapshots=[deleted_model_snapshot.table_info],
+        start_at="2023-01-01",
+        end_at="2023-02-01",
+        plan_id="test_plan_id",
+    )
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.get_environment.side_effect = (
+        lambda name: fallback_env if name == "prod" else None
+    )
+    state_reader_mock.get_snapshots.return_value = {
+        deleted_model_snapshot.snapshot_id: deleted_model_snapshot,
+    }
+
+    local_models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+    selector = NativeSelector(state_reader_mock, local_models)
+
+    _, selected_fqns = selector.select_models(
+        ["db.deleted_model"], "missing_env", fallback_env_name="prod"
+    )
+    assert deleted_model.fqn in selected_fqns
+
+
+def test_select_models_selected_fqns_expired(mocker: MockerFixture, make_snapshot):
+    """select_models should not match env models from expired environments."""
+    deleted_model = SqlModel(
+        name="db.deleted_model",
+        query=d.parse_one("SELECT 1 AS a"),
+    )
+
+    deleted_model_snapshot = make_snapshot(deleted_model)
+    deleted_model_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    expired_env = Environment(
+        name="test_env",
+        snapshots=[deleted_model_snapshot.table_info],
+        start_at="2023-01-01",
+        end_at="2023-02-01",
+        plan_id="test_plan_id",
+        expiration_ts=now_timestamp() - 1,
+    )
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.get_environment.return_value = expired_env
+    state_reader_mock.get_snapshots.return_value = {
+        deleted_model_snapshot.snapshot_id: deleted_model_snapshot,
+    }
+
+    local_models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+    selector = NativeSelector(state_reader_mock, local_models)
+
+    _, selected_fqns = selector.select_models(["db.deleted_model"], "test_env")
+    assert selected_fqns == set()
+
+
+def _assert_models_equal(
+    actual: t.Union[t.Dict[str, Model], t.Tuple[t.Dict[str, Model], t.Set[str]]],
+    expected: t.Dict[str, Model],
+) -> None:
+    # select_models returns a tuple; unwrap if needed.
+    if isinstance(actual, tuple):
+        actual = actual[0]
     assert set(actual) == set(expected)
     for name, model in actual.items():
         # Use dict() to make Pydantic V2 happy.

@@ -186,6 +186,7 @@ def test_mutating_clustered_by_forward_only(
     assert not metadata.is_clustered
 
 
+@pytest.mark.skip(reason="External volume LIST privileges not configured for CI test databases")
 def test_create_iceberg_table(ctx: TestContext) -> None:
     # Note: this test relies on a default Catalog and External Volume being configured in Snowflake
     # ref: https://docs.snowflake.com/en/user-guide/tables-iceberg-configure-catalog-integration#set-a-default-catalog-at-the-account-database-or-schema-level

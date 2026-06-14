@@ -2213,7 +2213,7 @@ def test_clickhouse_properties(mocker: MockerFixture):
     ]
 
     assert [e.sql("clickhouse") for e in model_to_sqlmesh.partitioned_by] == [
-        'toMonday("ds")',
+        "dateTrunc('WEEK', \"ds\")",
         '"partition_col"',
     ]
     assert model_to_sqlmesh.storage_format == "MergeTree()"

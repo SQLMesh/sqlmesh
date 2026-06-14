@@ -193,7 +193,7 @@ class model(registry_decorator):
         )
 
         rendered_name = rendered_fields["name"]
-        if isinstance(rendered_name, exp.Expression):
+        if isinstance(rendered_name, exp.Expr):
             rendered_fields["name"] = rendered_name.sql(dialect=dialect)
 
         rendered_defaults = (

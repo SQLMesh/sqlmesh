@@ -35,7 +35,7 @@ Start by installing the `tobiko-cloud-scheduler-facade` library in your Airflow 
 Make sure to include the `[airflow]` extra in the installation command:
 
 ``` bash
-$ pip install tobiko-cloud-scheduler-facade[airflow]
+pip install tobiko-cloud-scheduler-facade[airflow]
 ```
 
 !!! info "Mac Users"

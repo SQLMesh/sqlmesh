@@ -37,6 +37,7 @@ from sqlmesh.utils.pydantic import (
     field_validator,
     get_concrete_types_from_typehint,
     model_validator,
+    validation_data,
     validation_error_message,
 )
 
@@ -58,6 +59,7 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     "trino",
     # Nullable types are problematic
     "clickhouse",
+    "starrocks",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
@@ -239,6 +241,7 @@ class DuckDBAttachOptions(BaseConfig):
 
     # DuckLake specific options
     data_path: t.Optional[str] = None
+    override_data_path: t.Optional[bool] = False
     encrypted: bool = False
     data_inlining_row_limit: t.Optional[int] = None
     metadata_schema: t.Optional[str] = None
@@ -259,6 +262,8 @@ class DuckDBAttachOptions(BaseConfig):
                 path = f"ducklake:{path}"
             if self.data_path is not None:
                 options.append(f"DATA_PATH '{self.data_path}'")
+                if self.override_data_path:
+                    options.append("OVERRIDE_DATA_PATH true")
             if self.encrypted:
                 options.append("ENCRYPTED")
             if self.data_inlining_row_limit is not None:
@@ -815,6 +820,8 @@ class DatabricksConnectionConfig(ConnectionConfig):
     DISPLAY_NAME: t.ClassVar[t.Literal["Databricks"]] = "Databricks"
     DISPLAY_ORDER: t.ClassVar[t.Literal[3]] = 3
 
+    shared_connection: t.ClassVar[bool] = True
+
     _concurrent_tasks_validator = concurrent_tasks_validator
     _http_headers_validator = http_headers_validator
 
@@ -1064,6 +1071,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
     job_retry_deadline_seconds: t.Optional[int] = None
     priority: t.Optional[BigQueryPriority] = None
     maximum_bytes_billed: t.Optional[int] = None
+    reservation: t.Optional[str] = None
 
     concurrent_tasks: int = 1
     register_comments: bool = True
@@ -1082,7 +1090,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
         v: t.Optional[str],
         info: ValidationInfo,
     ) -> t.Optional[str]:
-        if v and not info.data.get("project"):
+        if v and not validation_data(info).get("project"):
             raise ConfigError(
                 "If the `execution_project` field is specified, you must also specify the `project` field to provide a default object location."
             )
@@ -1094,7 +1102,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
         v: t.Optional[str],
         info: ValidationInfo,
     ) -> t.Optional[str]:
-        if v and not info.data.get("project"):
+        if v and not validation_data(info).get("project"):
             raise ConfigError(
                 "If the `quota_project` field is specified, you must also specify the `project` field to provide a default object location."
             )
@@ -1173,6 +1181,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
                 "job_retry_deadline_seconds",
                 "priority",
                 "maximum_bytes_billed",
+                "reservation",
             }
         }
 
@@ -2136,7 +2145,17 @@ class TrinoConnectionConfig(ConnectionConfig):
             OAuth2Authentication,
         )
 
+        auth: t.Optional[
+            t.Union[
+                BasicAuthentication,
+                KerberosAuthentication,
+                OAuth2Authentication,
+                JWTAuthentication,
+                CertificateAuthentication,
+            ]
+        ] = None
         if self.method.is_basic or self.method.is_ldap:
+            assert self.password is not None  # for mypy since validator already checks this
             auth = BasicAuthentication(self.user, self.password)
         elif self.method.is_kerberos:
             if self.keytab:
@@ -2155,11 +2174,12 @@ class TrinoConnectionConfig(ConnectionConfig):
         elif self.method.is_oauth:
             auth = OAuth2Authentication()
         elif self.method.is_jwt:
+            assert self.jwt_token is not None
             auth = JWTAuthentication(self.jwt_token)
         elif self.method.is_certificate:
+            assert self.client_certificate is not None
+            assert self.client_private_key is not None
             auth = CertificateAuthentication(self.client_certificate, self.client_private_key)
-        else:
-            auth = None
 
         return {
             "auth": auth,
@@ -2204,6 +2224,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     https_proxy: t.Optional[str] = None
     server_host_name: t.Optional[str] = None
     tls_mode: t.Optional[str] = None
+    secure: bool = False
 
     concurrent_tasks: int = 1
     register_comments: bool = True
@@ -2240,6 +2261,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             "https_proxy",
             "server_host_name",
             "tls_mode",
+            "secure",
         }
         return kwargs
 
@@ -2452,23 +2474,94 @@ class RisingwaveConnectionConfig(ConnectionConfig):
         return init
 
 
+class StarRocksConnectionConfig(ConnectionConfig):
+    """Configuration for the StarRocks connection.
+
+    StarRocks uses MySQL network protocol and is compatible with MySQL ecosystem tools,
+    JDBC/ODBC drivers, and various visualization tools.
+
+    Args:
+        host: The hostname of the StarRocks FE (Frontend) node.
+        user: The StarRocks username.
+        password: The StarRocks password.
+        port: The port number of the StarRocks FE node. Default is 9030.
+        database: The optional database name.
+        charset: The optional character set.  TODO: may be not supported yet.
+        collation: The optional collation.  TODO: may be not supported yet.
+        ssl_disabled: Whether to disable SSL connection.  TODO: need to check it.
+        concurrent_tasks: The maximum number of tasks that can use this connection concurrently.
+        register_comments: Whether or not to register model comments with the SQL engine.
+        local_infile: Whether or not to allow local file access.
+        pre_ping: Whether or not to pre-ping the connection before starting a new transaction to ensure it is still alive.
+    """
+
+    host: str
+    user: str
+    password: str
+    port: t.Optional[int] = 9030
+    database: t.Optional[str] = None
+    charset: t.Optional[str] = None
+    collation: t.Optional[str] = None
+    ssl_disabled: t.Optional[bool] = None
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    local_infile: bool = False
+    pre_ping: bool = True
+
+    type_: t.Literal["starrocks"] = Field(alias="type", default="starrocks")
+    DIALECT: t.ClassVar[t.Literal["starrocks"]] = "starrocks"
+    DISPLAY_NAME: t.ClassVar[t.Literal["StarRocks"]] = "StarRocks"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[18]] = 18
+
+    _engine_import_validator = _get_engine_import_validator("pymysql", "starrocks")
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        connection_keys = {
+            "host",
+            "user",
+            "password",
+        }
+        if self.port is not None:
+            connection_keys.add("port")
+        if self.database is not None:
+            connection_keys.add("database")
+        if self.charset is not None:
+            connection_keys.add("charset")
+        if self.collation is not None:
+            connection_keys.add("collation")
+        if self.ssl_disabled is not None:
+            connection_keys.add("ssl_disabled")
+        if self.local_infile is not None:
+            connection_keys.add("local_infile")
+        return connection_keys
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        return engine_adapter.StarRocksEngineAdapter
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        from pymysql import connect
+
+        return connect
+
+
+_CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {
+    ConnectionConfig,  # type: ignore[type-abstract]
+    BaseDuckDBConnectionConfig,  # type: ignore[type-abstract]
+}
+
 CONNECTION_CONFIG_TO_TYPE = {
     # Map all subclasses of ConnectionConfig to the value of their `type_` field.
     tpe.all_field_infos()["type_"].default: tpe
-    for tpe in subclasses(
-        __name__,
-        ConnectionConfig,
-        exclude=(ConnectionConfig, BaseDuckDBConnectionConfig),
-    )
+    for tpe in subclasses(__name__, ConnectionConfig, exclude=_CONNECTION_CONFIG_EXCLUDE)
 }
 
 DIALECT_TO_TYPE = {
     tpe.all_field_infos()["type_"].default: tpe.DIALECT
-    for tpe in subclasses(
-        __name__,
-        ConnectionConfig,
-        exclude=(ConnectionConfig, BaseDuckDBConnectionConfig),
-    )
+    for tpe in subclasses(__name__, ConnectionConfig, exclude=_CONNECTION_CONFIG_EXCLUDE)
 }
 
 INIT_DISPLAY_INFO_TO_TYPE = {
@@ -2476,11 +2569,7 @@ INIT_DISPLAY_INFO_TO_TYPE = {
         tpe.DISPLAY_ORDER,
         tpe.DISPLAY_NAME,
     )
-    for tpe in subclasses(
-        __name__,
-        ConnectionConfig,
-        exclude=(ConnectionConfig, BaseDuckDBConnectionConfig),
-    )
+    for tpe in subclasses(__name__, ConnectionConfig, exclude=_CONNECTION_CONFIG_EXCLUDE)
 }
 
 

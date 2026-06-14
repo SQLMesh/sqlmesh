@@ -2111,7 +2111,7 @@ FROM some_table;
 
 Generics can be nested and are resolved recursively allowing for fairly robust type hinting.
 
-See examples of the coercion function in action in the test suite [here](https://github.com/TobikoData/sqlmesh/blob/main/tests/core/test_macros.py).
+See examples of the coercion function in action in the test suite [here](https://github.com/SQLMesh/sqlmesh/blob/main/tests/core/test_macros.py).
 
 #### Conclusion
 

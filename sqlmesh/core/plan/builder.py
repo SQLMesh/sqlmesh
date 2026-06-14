@@ -165,7 +165,7 @@ class PlanBuilder:
         # There may be an significant delay between the PlanBuilder producing a Plan and the Plan actually being run
         # so if execution_time=None is passed to the PlanBuilder, then the resulting Plan should also have execution_time=None
         # in order to prevent the Plan that was intended to run "as at now" from having "now" fixed to some time in the past
-        # ref: https://github.com/TobikoData/sqlmesh/pull/4702#discussion_r2140696156
+        # ref: https://github.com/SQLMesh/sqlmesh/pull/4702#discussion_r2140696156
         self._execution_time = execution_time
 
         self._backfill_models = backfill_models

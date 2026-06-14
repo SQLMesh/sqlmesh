@@ -42,4 +42,4 @@ LEFT JOIN (
   ON o.customer_id = m.customer_id
 LEFT JOIN raw.demographics AS d
   ON o.customer_id = d.customer_id
-WHERE sushi.orders.customer_id > 0
+WHERE o.customer_id > 0

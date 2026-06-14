@@ -129,9 +129,13 @@ def adapter_mock(mocker: MockerFixture):
     adapter_mock.session.return_value = session_mock
     adapter_mock.dialect = "duckdb"
     adapter_mock.HAS_VIEW_BINDING = False
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+        lambda physical_properties, **kwargs: physical_properties
+    )
     return adapter_mock
 
 
@@ -152,9 +156,13 @@ def adapters(mocker: MockerFixture):
         adapter_mock.session.return_value = session_mock
         adapter_mock.dialect = "duckdb"
         adapter_mock.HAS_VIEW_BINDING = False
+        adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
         adapter_mock.wap_supported.return_value = False
         adapter_mock.get_data_objects.return_value = []
         adapter_mock.with_settings.return_value = adapter_mock
+        adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+            lambda physical_properties, **kwargs: physical_properties
+        )
         adapters.append(adapter_mock)
     return adapters
 
@@ -570,12 +578,12 @@ def test_cleanup_fails(adapter_mock, make_snapshot):
     snapshot.version = "test_version"
 
     evaluator.promote([snapshot], EnvironmentNamingInfo(name="test_env"))
-    with pytest.raises(NodeExecutionFailedError) as exc_info:
+    with pytest.raises(SQLMeshError) as exc_info:
         evaluator.cleanup(
             [SnapshotTableCleanupTask(snapshot=snapshot.table_info, dev_table_only=True)]
         )
 
-    assert str(exc_info.value.__cause__) == "test_error"
+    assert "test_error" in str(exc_info.value)
 
 
 def test_cleanup_skip_missing_table(adapter_mock, make_snapshot):
@@ -701,6 +709,61 @@ def test_evaluate_materialized_view(
     assert adapter_mock.create_view.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "view_exists, has_intervals, expected_create_view_calls",
+    [
+        # MV already exists and has intervals -> routine evaluation (e.g. `sqlmesh run`): do NOT recreate
+        (True, True, 0),
+        # MV does not exist yet -> first build: create it
+        (False, False, 1),
+        # MV missing but intervals present -> still a first insert (table gone): rebuild it
+        (False, True, 1),
+    ],
+)
+def test_evaluate_materialized_view_not_recreated_on_evaluation(
+    adapter_mock,
+    make_snapshot,
+    view_exists: bool,
+    has_intervals: bool,
+    expected_create_view_calls: int,
+):
+    # Engines that maintain MVs themselves (e.g. StarRocks) opt out of recreating an existing MV on
+    # every evaluation by setting RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False.
+    adapter_mock.RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False
+    adapter_mock.table_exists.return_value = view_exists
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind VIEW (
+                    materialized true
+                )
+            );
+
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    if has_intervals:
+        snapshot.add_interval("2023-01-01", "2023-01-01")
+
+    evaluator.evaluate(
+        snapshot,
+        start="2020-01-01",
+        end="2020-01-02",
+        execution_time="2020-01-02",
+        snapshots={},
+    )
+
+    assert adapter_mock.create_view.call_count == expected_create_view_calls
+
+
 def test_evaluate_materialized_view_with_partitioned_by_cluster_by(
     mocker: MockerFixture, adapter_mock, make_snapshot
 ):
@@ -782,6 +845,12 @@ def test_evaluate_materialized_view_with_execution_time_macro(
         view_properties={},
         table_description=None,
         column_descriptions={},
+        materialized_properties={
+            "partitioned_by": [],
+            "partition_interval_unit": None,
+            "clustered_by": [],
+            "has_audits": False,
+        },
     )
 
 
@@ -1104,6 +1173,7 @@ def test_create_tables_exist(
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
     snapshot.categorize_as(category=snapshot_category, forward_only=forward_only)
@@ -1243,6 +1313,7 @@ def test_create_materialized_view(mocker: MockerFixture, adapter_mock, make_snap
             "clustered_by": [],
             "partition_interval_unit": None,
             "partitioned_by": [],
+            "has_audits": False,
         },
         view_properties={},
         table_description=None,
@@ -1292,6 +1363,7 @@ def test_create_view_with_properties(mocker: MockerFixture, adapter_mock, make_s
             "clustered_by": [],
             "partition_interval_unit": None,
             "partitioned_by": [],
+            "has_audits": False,
         },
         table_description=None,
         replace=False,
@@ -1302,10 +1374,50 @@ def test_create_view_with_properties(mocker: MockerFixture, adapter_mock, make_s
     )
 
 
+def test_create_materialized_view_with_audits_sets_has_audits(
+    mocker: MockerFixture, adapter_mock, make_snapshot
+):
+    """A materialized view model with audits must propagate has_audits=True to the adapter.
+
+    Engines like StarRocks rely on this flag to synchronously refresh the MV before audits run.
+    """
+    adapter_mock.get_data_objects.return_value = []
+    adapter_mock.table_exists.return_value = False
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind VIEW (
+                    materialized true
+                ),
+                audits (
+                    not_null(columns := (a))
+                )
+            );
+
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {})
+
+    _, kwargs = adapter_mock.create_view.call_args
+    assert kwargs["materialized_properties"]["has_audits"] is True
+
+
 def test_promote_model_info(mocker: MockerFixture, make_snapshot):
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -1335,6 +1447,7 @@ def test_promote_deployable(mocker: MockerFixture, make_snapshot):
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
 
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -2131,7 +2244,7 @@ def test_temp_table_includes_schema_for_ignore_changes(
     model = SqlModel(
         name="test_schema.test_model",
         kind=IncrementalByTimeRangeKind(
-            time_column="a", on_destructive_change=OnDestructiveChange.IGNORE
+            time_column="ds", on_destructive_change=OnDestructiveChange.IGNORE
         ),
         query=parse_one("SELECT c, a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
     )
@@ -2148,6 +2261,7 @@ def test_temp_table_includes_schema_for_ignore_changes(
         return {
             "c": exp.DataType.build("int"),
             "a": exp.DataType.build("int"),
+            "ds": exp.DataType.build("timestamp"),
         }
 
     adapter.columns = columns  # type: ignore
@@ -3682,7 +3796,7 @@ def test_custom_materialization_strategy_with_custom_properties(adapter_mock, ma
     custom_insert_kind = None
 
     class TestCustomKind(CustomKind):
-        _primary_key: t.List[exp.Expression]  # type: ignore[no-untyped-def]
+        _primary_key: t.List[exp.Expr]  # type: ignore[no-untyped-def]
 
         @model_validator(mode="after")
         def _validate_model(self) -> Self:
@@ -3694,7 +3808,7 @@ def test_custom_materialization_strategy_with_custom_properties(adapter_mock, ma
             return self
 
         @property
-        def primary_key(self) -> t.List[exp.Expression]:
+        def primary_key(self) -> t.List[exp.Expr]:
             return self._primary_key
 
     class TestCustomMaterializationStrategy(CustomMaterialization[TestCustomKind]):
@@ -4042,6 +4156,10 @@ def test_migrate_snapshot(snapshot: Snapshot, mocker: MockerFixture, adapter_moc
     adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
     adapter_mock.dialect = "duckdb"
     adapter_mock.with_settings.return_value = adapter_mock
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
+    adapter_mock.adjust_physical_properties_for_incremental.side_effect = (
+        lambda physical_properties, **kwargs: physical_properties
+    )
 
     evaluator = SnapshotEvaluator(adapter_mock)
     evaluator.create([snapshot], {})
@@ -4321,13 +4439,14 @@ def test_multiple_engine_promotion(mocker: MockerFixture, adapter_mock, make_sna
     def columns(table_name):
         return {
             "a": exp.DataType.build("int"),
+            "ds": exp.DataType.build("timestamp"),
         }
 
     adapter.columns = columns  # type: ignore
 
     model = SqlModel(
         name="test_schema.test_model",
-        kind=IncrementalByTimeRangeKind(time_column="a"),
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
         gateway="secondary",
         query=parse_one("SELECT a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
     )
@@ -4350,10 +4469,10 @@ def test_multiple_engine_promotion(mocker: MockerFixture, adapter_mock, make_sna
     cursor_mock.execute.assert_has_calls(
         [
             call(
-                f'DELETE FROM "sqlmesh__test_schema"."test_schema__test_model__{snapshot.version}" WHERE "a" BETWEEN 2020-01-01 00:00:00+00:00 AND 2020-01-02 23:59:59.999999+00:00'
+                f'DELETE FROM "sqlmesh__test_schema"."test_schema__test_model__{snapshot.version}" WHERE "ds" BETWEEN CAST(\'2020-01-01 00:00:00\' AS TIMESTAMP) AND CAST(\'2020-01-02 23:59:59.999999\' AS TIMESTAMP)'
             ),
             call(
-                f'INSERT INTO "sqlmesh__test_schema"."test_schema__test_model__{snapshot.version}" ("a") SELECT "a" FROM (SELECT "a" AS "a" FROM "tbl" AS "tbl" WHERE "ds" BETWEEN \'2020-01-01\' AND \'2020-01-02\') AS "_subquery" WHERE "a" BETWEEN 2020-01-01 00:00:00+00:00 AND 2020-01-02 23:59:59.999999+00:00'
+                f'INSERT INTO "sqlmesh__test_schema"."test_schema__test_model__{snapshot.version}" ("a", "ds") SELECT "a", "ds" FROM (SELECT "a" AS "a" FROM "tbl" AS "tbl" WHERE "ds" BETWEEN \'2020-01-01\' AND \'2020-01-02\') AS "_subquery" WHERE "ds" BETWEEN CAST(\'2020-01-01 00:00:00\' AS TIMESTAMP) AND CAST(\'2020-01-02 23:59:59.999999\' AS TIMESTAMP)'
             ),
         ]
     )
@@ -4498,6 +4617,41 @@ def test_multiple_engine_cleanup(snapshot: Snapshot, adapters, make_snapshot):
     )
     engine_adapters["secondary"].drop_table.assert_called_once_with(
         f"sqlmesh__test_schema.test_schema__test_model__{snapshot_2.version}__dev", cascade=True
+    )
+
+
+def test_cleanup_skips_unavailable_gateway(snapshot: Snapshot, adapters, make_snapshot):
+    engine_adapters = {"default": adapters[0]}
+    evaluator = SnapshotEvaluator(engine_adapters)
+
+    model_with_missing_gw = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind FULL,
+                gateway nonexistent_gateway,
+            );
+            SELECT a::int FROM tbl;
+            """
+        ),
+    )
+
+    snapshot_missing_gw = make_snapshot(model_with_missing_gw)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_missing_gw.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {}, DeployabilityIndex.all_deployable())
+
+    evaluator.cleanup(
+        [
+            SnapshotTableCleanupTask(snapshot=snapshot.table_info, dev_table_only=True),
+            SnapshotTableCleanupTask(snapshot=snapshot_missing_gw.table_info, dev_table_only=True),
+        ],
+    )
+
+    engine_adapters["default"].drop_table.assert_called_once_with(
+        f"sqlmesh__db.db__model__{snapshot.version}__dev", cascade=True
     )
 
 
@@ -4920,6 +5074,7 @@ def test_properties_are_preserved_in_both_create_statements(
     adapter_mock.session.return_value = session_mock
     adapter_mock.dialect = "trino"
     adapter_mock.HAS_VIEW_BINDING = False
+    adapter_mock.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES = frozenset()
     adapter_mock.wap_supported.return_value = False
     adapter_mock.get_data_objects.return_value = []
     adapter_mock.with_settings.return_value = adapter_mock

@@ -364,7 +364,7 @@ These are the possible outputs (based on how the bot is configured) that are cre
 * `prod_plan_preview`
 * `prod_environment_synced`
 
-[There are many possible conclusions](https://github.com/TobikoData/sqlmesh/blob/main/sqlmesh/integrations/github/cicd/controller.py#L96-L102) so the best use case for this is likely to check for `success` conclusion in order to potentially run follow up steps. 
+[There are many possible conclusions](https://github.com/SQLMesh/sqlmesh/blob/main/sqlmesh/integrations/github/cicd/controller.py#L96-L102) so the best use case for this is likely to check for `success` conclusion in order to potentially run follow up steps. 
 Note that in error cases conclusions may not be set and therefore you will get an empty string.
 
 Example of running a step after pr environment has been synced:

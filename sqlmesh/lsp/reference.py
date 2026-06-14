@@ -209,7 +209,7 @@ def get_macro_reference(
     target: t.Union[Model, StandaloneAudit],
     read_file: t.List[str],
     config_path: t.Optional[Path],
-    node: exp.Expression,
+    node: exp.Expr,
     macro_name: str,
 ) -> t.Optional[Reference]:
     # Get the file path where the macro is defined

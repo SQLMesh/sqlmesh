@@ -878,7 +878,6 @@ def test_dlt_pipeline_errors(runner, tmp_path):
     assert "Error: Could not attach to pipeline" in result.output
 
 
-@time_machine.travel(FREEZE_TIME)
 def test_dlt_filesystem_pipeline(tmp_path):
     import dlt
 
@@ -982,7 +981,6 @@ WHERE
         rmtree(storage_path)
 
 
-@time_machine.travel(FREEZE_TIME)
 def test_dlt_pipeline(runner, tmp_path):
     from dlt.common.pipeline import get_dlt_pipelines_dir
 
@@ -1951,7 +1949,7 @@ def test_init_dbt_template(runner: CliRunner, tmp_path: Path):
 def test_init_project_engine_configs(tmp_path):
     engine_type_to_config = {
         "redshift": "# concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # database: \n      # host: \n      # port: \n      # source_address: \n      # unix_sock: \n      # ssl: \n      # sslmode: \n      # timeout: \n      # tcp_keepalive: \n      # application_name: \n      # preferred_role: \n      # principal_arn: \n      # credentials_provider: \n      # region: \n      # cluster_identifier: \n      # iam: \n      # is_serverless: \n      # serverless_acct_id: \n      # serverless_work_group: \n      # enable_merge: ",
-        "bigquery": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # method: oauth\n      # project: \n      # execution_project: \n      # quota_project: \n      # location: \n      # keyfile: \n      # keyfile_json: \n      # token: \n      # refresh_token: \n      # client_id: \n      # client_secret: \n      # token_uri: \n      # scopes: \n      # impersonated_service_account: \n      # job_creation_timeout_seconds: \n      # job_execution_timeout_seconds: \n      # job_retries: 1\n      # job_retry_deadline_seconds: \n      # priority: \n      # maximum_bytes_billed: ",
+        "bigquery": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # method: oauth\n      # project: \n      # execution_project: \n      # quota_project: \n      # location: \n      # keyfile: \n      # keyfile_json: \n      # token: \n      # refresh_token: \n      # client_id: \n      # client_secret: \n      # token_uri: \n      # scopes: \n      # impersonated_service_account: \n      # job_creation_timeout_seconds: \n      # job_execution_timeout_seconds: \n      # job_retries: 1\n      # job_retry_deadline_seconds: \n      # priority: \n      # maximum_bytes_billed: \n      # reservation: ",
         "snowflake": "account: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # warehouse: \n      # database: \n      # role: \n      # authenticator: \n      # token: \n      # host: \n      # port: \n      # application: Tobiko_SQLMesh\n      # private_key: \n      # private_key_path: \n      # private_key_passphrase: \n      # session_parameters: ",
         "databricks": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # server_hostname: \n      # http_path: \n      # access_token: \n      # auth_type: \n      # oauth_client_id: \n      # oauth_client_secret: \n      # catalog: \n      # http_headers: \n      # session_configuration: \n      # databricks_connect_server_hostname: \n      # databricks_connect_access_token: \n      # databricks_connect_cluster_id: \n      # databricks_connect_use_serverless: False\n      # force_databricks_connect: False\n      # disable_databricks_connect: False\n      # disable_spark_session: False",
         "postgres": "host: \n      user: \n      password: \n      port: \n      database: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: True\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # keepalives_idle: \n      # connect_timeout: 10\n      # role: \n      # sslmode: \n      # application_name: ",
@@ -2239,3 +2237,146 @@ FROM table1""")
         assert result.exit_code == 0
     finally:
         del os.environ["SQLMESH__FORMAT__LEADING_COMMA"]
+
+
+def _create_local_only_project(path: Path, project: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    create_example_project(path, template=ProjectTemplate.EMPTY)
+    config_path = path / "config.yaml"
+    existing = config_path.read_text(encoding="utf-8")
+    config_path.write_text(f"project: {project}\n\n" + existing, encoding="utf-8")
+
+    (path / "models" / "example.sql").write_text(
+        f"MODEL(name {project}.example, dialect 'duckdb'); SELECT 1 AS col\n",
+        encoding="utf-8",
+    )
+
+
+def _patch_state_access(mocker):
+    return mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+
+def _setup_local_only_project(tmp_path, mocker):
+    _create_local_only_project(tmp_path, "cli_test")
+    return _patch_state_access(mocker)
+
+
+def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_format_runs_without_state_multi_repo_partial(runner: CliRunner, copy_to_temp_path, mocker):
+    """Format one repo of a multi-repo project whose upstream models live only in prod state."""
+    repo_2 = copy_to_temp_path("examples/multi")[0] / "repo_2"
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--gateway", "memory", "--paths", str(repo_2), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_lint_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `lint` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "lint"])
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `lint`"
+        )
+    assert mock.called, "state-sync was never accessed during `lint`"
+
+
+@pytest.mark.parametrize("command", ["format"])
+def test_local_only_commands_skip_state_multiple_paths(
+    runner: CliRunner, tmp_path: Path, mocker, command: str
+):
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    _create_local_only_project(project_a, "proj_a")
+    _create_local_only_project(project_b, "proj_b")
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(project_a), "--paths", str(project_b), command])
+    assert result.exit_code == 0, (
+        f"{command} failed: {result.output}\nException: {result.exception}"
+    )
+    mock.assert_not_called()
+
+
+def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `plan` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `plan`"
+        )
+    assert mock.called, "state-sync was never accessed during `plan`"
+
+
+def test_format_does_not_open_state_connection(
+    runner: CliRunner, tmp_path: Path, mocker, monkeypatch
+):
+    """Format must not open a configured remote Postgres state connection when CI secrets are unset."""
+    pytest.importorskip("psycopg2")
+
+    for var in ("PG_HOST", "PG_USER", "PG_PASSWORD", "PG_DATABASE"):
+        monkeypatch.delenv(var, raising=False)
+
+    create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
+    (tmp_path / "config.yaml").write_text(
+        """project: cli_test
+
+gateways:
+  prod:
+    state_connection:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'postgres.internal.example.com') }}"
+      port: 5432
+      user: "{{ env_var('PG_USER') }}"
+      password: "{{ env_var('PG_PASSWORD') }}"
+      database: "{{ env_var('PG_DATABASE', 'sqlmesh_state') }}"
+    connection:
+      type: duckdb
+      database: "warehouse.db"
+
+default_gateway: prod
+
+model_defaults:
+  dialect: duckdb
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "example.sql").write_text(
+        "MODEL(name local.example, dialect 'duckdb'); SELECT 1 AS col\n",
+        encoding="utf-8",
+    )
+
+    mock = mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()

@@ -145,7 +145,7 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
             for row in df.itertuples()
         ]
 
-    def _normalize_decimal_value(self, col: exp.Expression, precision: int) -> exp.Expression:
+    def _normalize_decimal_value(self, col: exp.Expr, precision: int) -> exp.Expr:
         """
         duckdb truncates instead of rounding when casting to decimal.
 
@@ -163,7 +163,7 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
     def _create_table(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,

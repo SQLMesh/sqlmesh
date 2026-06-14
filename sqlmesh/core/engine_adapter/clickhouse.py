@@ -64,7 +64,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     #     doesn't use the row index at all
     def fetchone(
         self,
-        query: t.Union[exp.Expression, str],
+        query: t.Union[exp.Expr, str],
         ignore_unsupported_errors: bool = False,
         quote_identifiers: bool = False,
     ) -> t.Tuple:
@@ -77,13 +77,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             return self.cursor.fetchall()[0]
 
     def _fetch_native_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> pd.DataFrame:
         """Fetches a Pandas DataFrame from the cursor"""
         return self.cursor.client.query_df(
-            self._to_sql(query, quote=quote_identifiers)
-            if isinstance(query, exp.Expression)
-            else query,
+            self._to_sql(query, quote=quote_identifiers) if isinstance(query, exp.Expr) else query,
             use_extended_dtypes=True,
         )
 
@@ -168,7 +166,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         schema_name: SchemaName,
         ignore_if_exists: bool = True,
         warn_on_error: bool = True,
-        properties: t.List[exp.Expression] = [],
+        properties: t.List[exp.Expr] = [],
     ) -> None:
         """Create a Clickhouse database from a name or qualified table name.
 
@@ -229,7 +227,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         # REPLACE BY KEY: extract kwargs if present
         dynamic_key = kwargs.get("dynamic_key")
         if dynamic_key:
-            dynamic_key_exp = t.cast(exp.Expression, kwargs.get("dynamic_key_exp"))
+            dynamic_key_exp = t.cast(exp.Expr, kwargs.get("dynamic_key_exp"))
             dynamic_key_unique = t.cast(bool, kwargs.get("dynamic_key_unique"))
 
         try:
@@ -414,7 +412,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        key: t.Sequence[exp.Expression],
+        key: t.Sequence[exp.Expr],
         is_unique_key: bool,
         source_columns: t.Optional[t.List[str]] = None,
     ) -> None:
@@ -425,7 +423,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             source_columns=source_columns,
         )
 
-        key_exp = exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key) if len(key) > 1 else key[0]
+        key_exp = (
+            exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key, dialect=self.dialect)
+            if len(key) > 1
+            else key[0]
+        )
 
         self._insert_overwrite_by_condition(
             target_table,
@@ -440,7 +442,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         self,
         table_name: TableName,
         query_or_df: QueryOrDF,
-        partitioned_by: t.List[exp.Expression],
+        partitioned_by: t.List[exp.Expr],
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         source_columns: t.Optional[t.List[str]] = None,
     ) -> None:
@@ -487,7 +489,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     def _create_table(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
@@ -595,7 +597,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
         self.execute(f"RENAME TABLE {old_table_sql} TO {new_table_sql}{self._on_cluster_sql()}")
 
-    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expression]) -> None:
+    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
         delete_expr = exp.delete(table_name, where)
         if self.engine_run_mode.is_cluster:
             delete_expr.set("cluster", exp.OnCluster(this=exp.to_identifier(self.cluster)))
@@ -649,7 +651,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     def _build_partitioned_by_exp(
         self,
-        partitioned_by: t.List[exp.Expression],
+        partitioned_by: t.List[exp.Expr],
         **kwargs: t.Any,
     ) -> t.Optional[t.Union[exp.PartitionedByProperty, exp.Property]]:
         return exp.PartitionedByProperty(
@@ -714,16 +716,21 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         return query
 
     def _build_settings_property(
-        self, key: str, value: exp.Expression | str | int | float
+        self, settings: t.Mapping[str, exp.Expr | str | int | float]
     ) -> exp.SettingsProperty:
+        # ClickHouse requires every key=value pair to live under a single
+        # SETTINGS clause (`SETTINGS a = 1, b = 2`). Emitting one
+        # SettingsProperty per pair produces repeated SETTINGS keywords and a
+        # syntax error at execution time.
         return exp.SettingsProperty(
             expressions=[
                 exp.EQ(
                     this=exp.var(key.lower()),
                     expression=value
-                    if isinstance(value, exp.Expression)
+                    if isinstance(value, exp.Expr)
                     else exp.Literal(this=value, is_string=isinstance(value, str)),
                 )
+                for key, value in settings.items()
             ]
         )
 
@@ -732,17 +739,17 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         catalog_name: t.Optional[str] = None,
         table_format: t.Optional[str] = None,
         storage_format: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
         partition_interval_unit: t.Optional[IntervalUnit] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
         empty_ctas: bool = False,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         table_engine = self.DEFAULT_TABLE_ENGINE
         if storage_format:
@@ -809,9 +816,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         ttl = table_properties_copy.pop("TTL", None)
         if ttl:
             properties.append(
-                exp.MergeTreeTTL(
-                    expressions=[ttl if isinstance(ttl, exp.Expression) else exp.var(ttl)]
-                )
+                exp.MergeTreeTTL(expressions=[ttl if isinstance(ttl, exp.Expr) else exp.var(ttl)])
             )
 
         if (
@@ -827,9 +832,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             properties.append(exp.EmptyProperty())
 
         if table_properties_copy:
-            properties.extend(
-                [self._build_settings_property(k, v) for k, v in table_properties_copy.items()]
-            )
+            properties.append(self._build_settings_property(table_properties_copy))
 
         if table_description:
             properties.append(
@@ -845,12 +848,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     def _build_view_properties_exp(
         self,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         table_description: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
         """Creates a SQLGlot table properties expression for view"""
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         view_properties_copy = view_properties.copy() if view_properties else {}
 
@@ -858,9 +861,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             properties.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
 
         if view_properties_copy:
-            properties.extend(
-                [self._build_settings_property(k, v) for k, v in view_properties_copy.items()]
-            )
+            properties.append(self._build_settings_property(view_properties_copy))
 
         if table_description:
             properties.append(

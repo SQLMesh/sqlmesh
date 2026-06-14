@@ -118,6 +118,16 @@ gateways:
       host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
       port: 4566
       check_import: false
+  inttest_starrocks:
+    connection:
+      type: starrocks
+      host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
+      port: 9030
+      user: root
+      password: ""
+      check_import: false
+    state_connection:
+      type: duckdb
 
 
   # Cloud databases
@@ -128,6 +138,7 @@ gateways:
       warehouse: {{ env_var('SNOWFLAKE_WAREHOUSE') }}
       database: {{ env_var('SNOWFLAKE_DATABASE') }}
       user: {{ env_var('SNOWFLAKE_USER') }}
+      authenticator: SNOWFLAKE_JWT
       private_key_path: {{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE', 'tests/fixtures/snowflake/rsa_key_no_pass.p8') }}
       check_import: false
     state_connection:

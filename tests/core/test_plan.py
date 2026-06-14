@@ -1795,7 +1795,7 @@ def test_forward_only_models_model_kind_changed(make_snapshot, mocker: MockerFix
 )
 def test_forward_only_models_model_kind_changed_to_incremental_by_time_range(
     make_snapshot,
-    partitioned_by: t.List[exp.Expression],
+    partitioned_by: t.List[exp.Expr],
     expected_forward_only: bool,
 ):
     snapshot = make_snapshot(

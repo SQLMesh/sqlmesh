@@ -689,7 +689,7 @@ In the terminal output, I can see the change displayed like before, but I see so
 
 I leave the [effective date](../concepts/plans.md#effective-date) prompt blank because I do not want to reprocess historical data in `prod` - I only want to apply this new business logic going forward.
 
-However, I do want to preview the new business logic in my `dev` environment before pushing to `prod`. Because I have [configured SQLMesh to create previews](https://github.com/TobikoData/sqlmesh-demos/blob/e0e3899e173cf7b8447ae707402a9df59911d1c0/config.yaml#L42) for forward-only models in my `config.yaml` file, SQLMesh has created a temporary copy of the `prod` table in my `dev` environment, so I can test the new logic on historical data.
+However, I do want to preview the new business logic in my `dev` environment before pushing to `prod`. Because I have [configured SQLMesh to create previews](https://github.com/SQLMesh/sqlmesh-demos/blob/e0e3899e173cf7b8447ae707402a9df59911d1c0/config.yaml#L42) for forward-only models in my `config.yaml` file, SQLMesh has created a temporary copy of the `prod` table in my `dev` environment, so I can test the new logic on historical data.
 
 I specify the beginning of the preview's historical data window as `2024-10-27` in the preview start date prompt, and I specify the end of the window as now by leaving the preview end date prompt blank.
 

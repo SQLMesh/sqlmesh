@@ -321,10 +321,17 @@ class StateReader(abc.ABC):
         """
 
     @abc.abstractmethod
-    def get_expired_environments(self, current_ts: int) -> t.List[EnvironmentSummary]:
+    def get_expired_environments(
+        self, current_ts: int, name: t.Optional[str] = None
+    ) -> t.List[EnvironmentSummary]:
         """Returns the expired environments.
 
         Expired environments are environments that have exceeded their time-to-live value.
+
+        Args:
+            current_ts: The current timestamp in milliseconds used to determine expiration.
+            name: If provided, only the environment with this name is considered.
+
         Returns:
             The list of environment summaries to remove.
         """
@@ -436,11 +443,15 @@ class StateSync(StateReader, abc.ABC):
 
     @abc.abstractmethod
     def delete_expired_environments(
-        self, current_ts: t.Optional[int] = None
+        self, current_ts: t.Optional[int] = None, name: t.Optional[str] = None
     ) -> t.List[EnvironmentSummary]:
         """Removes expired environments.
 
         Expired environments are environments that have exceeded their time-to-live value.
+
+        Args:
+            current_ts: The current timestamp in milliseconds. Defaults to now.
+            name: If provided, only the environment with this name is deleted.
 
         Returns:
             The list of removed environments.

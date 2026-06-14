@@ -78,7 +78,7 @@ NOTE: the `--backfill-model` argument can only be used in development environmen
 
 ## Examples
 
-We now demonstrate the use of `--select-model` and `--backfill-model` with the SQLMesh `sushi` example project, available in the `examples/sushi` directory of the [SQLMesh Github repository](https://github.com/TobikoData/sqlmesh).
+We now demonstrate the use of `--select-model` and `--backfill-model` with the SQLMesh `sushi` example project, available in the `examples/sushi` directory of the [SQLMesh Github repository](https://github.com/SQLMesh/sqlmesh).
 
 ### sushi
 

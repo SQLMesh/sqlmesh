@@ -41,7 +41,7 @@ def test_model_reference_with_column_prefix():
 
     model_refs = get_all_references(lsp_context, URI.from_path(sushi_customers_path), position)
 
-    assert len(model_refs) >= 7
+    assert len(model_refs) >= 6
 
     # Verify that we have the FROM clause reference
     assert any(ref.range.start.line == from_clause_range.start.line for ref in model_refs), (
@@ -65,8 +65,8 @@ def test_column_prefix_references_are_found():
     # Find all occurrences of sushi.orders in the file
     ranges = find_ranges_from_regex(read_file, r"sushi\.orders")
 
-    # Should find exactly 2: FROM clause and WHERE clause with column prefix
-    assert len(ranges) == 2, f"Expected 2 occurrences of 'sushi.orders', found {len(ranges)}"
+    # Should find exactly 1 in FROM clause with column prefix
+    assert len(ranges) == 1, f"Expected 1 occurrence of 'sushi.orders', found {len(ranges)}"
 
     # Verify we have the expected lines
     line_contents = [read_file[r.start.line].strip() for r in ranges]
@@ -74,11 +74,6 @@ def test_column_prefix_references_are_found():
     # Should find FROM clause
     assert any("FROM sushi.orders" in content for content in line_contents), (
         "Should find FROM clause with sushi.orders"
-    )
-
-    # Should find customer_id in WHERE clause with column prefix
-    assert any("WHERE sushi.orders.customer_id" in content for content in line_contents), (
-        "Should find WHERE clause with sushi.orders.customer_id"
     )
 
 
