@@ -1726,7 +1726,7 @@ class MSSQLConnectionConfig(ConnectionConfig):
 
                 conn.add_output_converter(-155, handle_datetimeoffset_mssql_python)
 
-                return conn
+                return t.cast(t.Any, conn)
 
             return connect_mssql_python
 
@@ -1818,7 +1818,7 @@ class MSSQLConnectionConfig(ConnectionConfig):
 
                 conn.add_output_converter(-155, handle_datetimeoffset_pyodbc)
 
-                return conn
+                return t.cast(t.Any, conn)
 
             return connect_pyodbc
 
