@@ -187,10 +187,12 @@ class PlanBuilder:
         self._start = start
         if not self._start and self._forward_only_preview_needed:
             self._preview_start = self._preview_start or default_start or yesterday_ds()
-            # Only use the preview fallback as the plan start for implicit selection.
+            # Keep the forward-only preview window separate from the plan start.
+            # The plan start bounds regular backfills, so it should continue to
+            # use the state-derived default start when one is available.
             # None means no explicit selection; an empty set intentionally backfills no models.
             if self._backfill_models is None:
-                self._start = self._preview_start
+                self._start = default_start or yesterday_ds()
 
         if not self._start and self._non_forward_only_preview_needed:
             # Do not bind explicit non-preview backfills to the short preview range.

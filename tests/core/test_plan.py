@@ -2986,6 +2986,63 @@ def _make_forward_only_preview_context_diff(make_snapshot):
     return context_diff, new_snapshot
 
 
+def test_forward_only_preview_start_does_not_override_implicit_backfill_start(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    normal_old_snapshot = make_snapshot(
+        SqlModel(
+            name="normal",
+            query=parse_one("select 1, ds"),
+            dialect="duckdb",
+            kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
+            start="2025-01-01",
+        )
+    )
+    normal_old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    normal_new_snapshot = make_snapshot(
+        SqlModel(
+            name="normal",
+            query=parse_one("select 2, ds"),
+            dialect="duckdb",
+            kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
+            start="2025-01-01",
+        )
+    )
+    normal_new_snapshot.previous_versions = normal_old_snapshot.all_versions
+
+    context_diff.modified_snapshots[normal_new_snapshot.name] = (
+        normal_new_snapshot,
+        normal_old_snapshot,
+    )
+    context_diff.snapshots[normal_new_snapshot.snapshot_id] = normal_new_snapshot
+    context_diff.new_snapshots[normal_new_snapshot.snapshot_id] = normal_new_snapshot
+
+    plan = PlanBuilder(
+        context_diff,
+        default_start="2025-01-01",
+        end="2025-01-04",
+        preview_start="2025-01-03",
+        skip_backfill=False,
+        is_dev=True,
+        enable_preview=True,
+    ).build()
+
+    assert plan.start == "2025-01-01"
+    assert plan.restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-03"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+    missing_intervals = {i.snapshot_id: i.intervals for i in plan.missing_intervals}
+    assert missing_intervals[normal_new_snapshot.snapshot_id] == [
+        (to_timestamp("2025-01-01"), to_timestamp("2025-01-02")),
+        (to_timestamp("2025-01-02"), to_timestamp("2025-01-03")),
+        (to_timestamp("2025-01-03"), to_timestamp("2025-01-04")),
+        (to_timestamp("2025-01-04"), to_timestamp("2025-01-05")),
+    ]
+
+
 def test_forward_only_preview_start_does_not_limit_regular_backfill(make_snapshot):
     context_diff, preview_new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
 
