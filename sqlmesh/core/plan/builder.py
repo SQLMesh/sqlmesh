@@ -152,6 +152,7 @@ class PlanBuilder:
             allow_additive_models if allow_additive_models is not None else []
         )
         self._enable_preview = enable_preview
+        self._preview_start_provided = preview_start is not None
         self._preview_start = preview_start
         self._preview_min_intervals = preview_min_intervals
         self._end_bounded = end_bounded
@@ -241,6 +242,8 @@ class PlanBuilder:
 
     def set_start(self, new_start: TimeLike) -> PlanBuilder:
         self._start = new_start
+        if not self._preview_start_provided and self._forward_only_preview_needed:
+            self._preview_start = new_start
         self.override_start = True
         self._latest_plan = None
         return self
@@ -262,6 +265,8 @@ class PlanBuilder:
         self._effective_from = effective_from
         if effective_from and self._is_dev and not self.override_start:
             self._start = effective_from
+            if not self._preview_start_provided and self._forward_only_preview_needed:
+                self._preview_start = effective_from
         self._latest_plan = None
         return self
 

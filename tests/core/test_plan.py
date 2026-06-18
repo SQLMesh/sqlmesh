@@ -3043,6 +3043,40 @@ def test_forward_only_preview_start_does_not_override_implicit_backfill_start(ma
     ]
 
 
+def test_forward_only_preview_start_follows_implicit_plan_start_updates(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    plan_builder = PlanBuilder(
+        context_diff,
+        default_start="2025-01-03",
+        end="2025-01-04",
+        is_dev=True,
+        forward_only=True,
+        enable_preview=True,
+    )
+
+    assert plan_builder.build().restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-03"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+
+    assert plan_builder.set_effective_from("2025-01-01").build().restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-01"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+
+    assert plan_builder.set_start("2025-01-02").build().restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-02"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+
+
 def test_forward_only_preview_start_does_not_limit_regular_backfill(make_snapshot):
     context_diff, preview_new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
 
