@@ -188,17 +188,16 @@ class PlanBuilder:
         self._start = start
         if not self._start and self._forward_only_preview_needed:
             self._preview_start = self._preview_start or default_start or yesterday_ds()
-            # Keep the forward-only preview window separate from the plan start.
-            # The plan start bounds regular backfills, so it should continue to
-            # use the state-derived default start when one is available.
-            # None means no explicit selection; an empty set intentionally backfills no models.
-            if self._backfill_models is None:
+            # If a separate preview start was provided, don't let it shorten the
+            # plan start for regular backfills. Fallback preview starts preserve
+            # the previous preview behavior of using default_start or yesterday.
+            if self._preview_start_provided and not self._skip_backfill:
                 self._start = default_start or yesterday_ds()
+            else:
+                self._start = self._preview_start
 
         if not self._start and self._non_forward_only_preview_needed:
-            # Do not bind explicit non-preview backfills to the short preview range.
-            if self._backfill_models is None:
-                self._start = default_start or yesterday_ds()
+            self._start = default_start or yesterday_ds()
 
         self._plan_id: str = random_id()
         self._model_fqn_to_snapshot = {s.name: s for s in self._context_diff.snapshots.values()}
