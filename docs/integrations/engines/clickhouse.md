@@ -435,7 +435,16 @@ When a SQLMesh project uses ClickHouse alongside a catalog-aware gateway such as
 
 ### Adding a second gateway to an existing ClickHouse-only project
 
-If your project previously used ClickHouse as the only gateway, your models were fingerprinted with 2-level FQNs (`db.table`). Adding a catalog-aware gateway for the first time causes all ClickHouse models to be treated as new versions (their FQNs change to `__{gateway_name}__.db.table`), triggering a full re-materialization on the next `sqlmesh apply`. This is a one-time cost.
+!!! warning "Re-materialization required"
+    Adding a catalog-aware gateway (such as Trino or BigQuery) to a project that previously used ClickHouse as the only gateway triggers a **full re-materialization of every ClickHouse model** on the next `sqlmesh apply`. Plan for this before making the change.
+
+If your project previously used ClickHouse as the only gateway, your models were fingerprinted with 2-level FQNs (`db.table`). Adding a catalog-aware gateway causes all ClickHouse models to be treated as new versions (their FQNs change to `__{gateway_name}__.db.table`):
+
+- `FULL` models are recreated once — cost is proportional to the size of each table.
+- `INCREMENTAL_BY_TIME_RANGE` models require a **full historical backfill** from the model's configured start date.
+- The old 2-level model names appear as **Removed** in the plan and will be cleaned up after the environment TTL expires.
+
+This is a one-time cost at the transition point and does not recur. There is no way to skip it — `--forward-only` does not apply because SQLMesh treats the 3-level names as new models, not modified ones.
 
 ### Virtual catalog naming
 
