@@ -265,7 +265,12 @@ def normalize_source(obj: t.Any) -> str:
 
             # remove docstrings
             body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Str):
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
                 node.body = body[1:]
 
             # remove function return type annotation
