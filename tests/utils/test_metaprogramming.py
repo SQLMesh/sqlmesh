@@ -220,8 +220,7 @@ def test_func_globals() -> None:
 def test_normalize_source() -> None:
     assert (
         normalize_source(main_func)
-        == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
-    ):
+        == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2):
     sqlglot.parse_one('1')
     MyClass(47)
     DataClass(x=y)
@@ -271,8 +270,7 @@ def test_serialize_env() -> None:
             name="main_func",
             alias="MAIN",
             path="test_metaprogramming.py",
-            payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
-    ):
+            payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2):
     sqlglot.parse_one('1')
     MyClass(47)
     DataClass(x=y)
@@ -370,7 +368,7 @@ def sample_context_manager():
         "my_lambda": Executable(
             name="my_lambda",
             path="test_metaprogramming.py",
-            payload="my_lambda = lambda : print('z')",
+            payload="my_lambda = lambda: print('z')",
         ),
         "normalize_model_name": Executable(
             payload="from sqlmesh.core.dialect import normalize_model_name",
