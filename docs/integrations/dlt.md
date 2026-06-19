@@ -8,7 +8,7 @@ SQLMesh enables efforless project generation using data ingested through [dlt](h
 To load data from a dlt pipeline into SQLMesh, ensure the dlt pipeline has been run or restored locally. Then simply execute the sqlmesh `init` command *within the dlt project root directory* using the `dlt` template option and specifying the pipeline's name with the `dlt-pipeline` option:
 
 ```bash
-$ sqlmesh init -t dlt --dlt-pipeline <pipeline-name> dialect
+sqlmesh init -t dlt --dlt-pipeline <pipeline-name> dialect
 ```
 
 This will create the configuration file and directories, which are found in all SQLMesh projects:
@@ -33,7 +33,7 @@ SQLMesh will also automatically generate models to ingest data from the pipeline
 The default location for dlt pipelines is `~/.dlt/pipelines/<pipeline_name>`. If your pipelines are in a [different directory](https://dlthub.com/docs/general-usage/pipeline#separate-working-environments-with-pipelines_dir), use the `--dlt-path` argument to specify the path explicitly:
 
 ```bash
-$ sqlmesh init -t dlt --dlt-pipeline <pipeline-name> --dlt-path <pipelines-directory> dialect
+sqlmesh init -t dlt --dlt-pipeline <pipeline-name> --dlt-path <pipelines-directory> dialect
 ```
 
 ### Generating models on demand
@@ -43,25 +43,25 @@ To update the models in your SQLMesh project on demand, use the `dlt_refresh` co
 - **Generate all missing tables**:
 
 ```bash
-$ sqlmesh dlt_refresh <pipeline-name>
+sqlmesh dlt_refresh <pipeline-name>
 ```
 
 - **Generate all missing tables and overwrite existing ones** (use with `--force` or `-f`):
 
 ```bash
-$ sqlmesh dlt_refresh <pipeline-name> --force
+sqlmesh dlt_refresh <pipeline-name> --force
 ```
 
 - **Generate specific dlt tables** (using `--table` or `-t`):
 
 ```bash
-$ sqlmesh dlt_refresh <pipeline-name> --table <dlt-table>
+sqlmesh dlt_refresh <pipeline-name> --table <dlt-table>
 ```
 
 - **Provide the explicit path to the pipelines directory** (using `--dlt-path`):
 
 ```bash
-$ sqlmesh dlt_refresh <pipeline-name> --dlt-path <pipelines-directory>
+sqlmesh dlt_refresh <pipeline-name> --dlt-path <pipelines-directory>
 ```
 
 #### Configuration
@@ -83,7 +83,7 @@ Load package 1728074157.660565 is LOADED and contains no failed jobs
 After the pipeline has run, generate a SQLMesh project by executing:
 
 ```bash
-$ sqlmesh init -t dlt --dlt-pipeline sushi duckdb
+sqlmesh init -t dlt --dlt-pipeline sushi duckdb
 ```
 
 Then the SQLMesh project is all set up. You can then proceed to run the SQLMesh `plan` command to ingest the dlt pipeline data and populate the SQLMesh tables:

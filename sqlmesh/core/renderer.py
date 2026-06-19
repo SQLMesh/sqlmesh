@@ -331,7 +331,7 @@ class BaseExpressionRenderer:
         deployability_index: t.Optional[DeployabilityIndex] = None,
     ) -> exp.Table:
         table = exp.replace_tables(
-            exp.maybe_parse(table_name, into=exp.Table, dialect=self._dialect),
+            t.cast(exp.Table, exp.maybe_parse(table_name, into=exp.Table, dialect=self._dialect)),
             {
                 **self._to_table_mapping((snapshots or {}).values(), deployability_index),
                 **(table_mapping or {}),

@@ -62,7 +62,7 @@ class Selector(abc.ABC):
         target_env_name: str,
         fallback_env_name: t.Optional[str] = None,
         ensure_finalized_snapshots: bool = False,
-    ) -> UniqueKeyDict[str, Model]:
+    ) -> t.Tuple[UniqueKeyDict[str, Model], t.Set[str]]:
         """Given a set of selections returns models from the current state with names matching the
         selection while sourcing the remaining models from the target environment.
 
@@ -76,29 +76,11 @@ class Selector(abc.ABC):
                 the environment is not finalized.
 
         Returns:
-            A dictionary of models.
+            A tuple of (models dict, set of all matched FQNs including env models).
         """
-        target_env = self._state_reader.get_environment(Environment.sanitize_name(target_env_name))
-        if target_env and target_env.expired:
-            target_env = None
-
-        if not target_env and fallback_env_name:
-            target_env = self._state_reader.get_environment(
-                Environment.sanitize_name(fallback_env_name)
-            )
-
-        env_models: t.Dict[str, Model] = {}
-        if target_env:
-            environment_snapshot_infos = (
-                target_env.snapshots
-                if not ensure_finalized_snapshots
-                else target_env.finalized_or_current_snapshots
-            )
-            env_models = {
-                s.name: s.model
-                for s in self._state_reader.get_snapshots(environment_snapshot_infos).values()
-                if s.is_model
-            }
+        env_models = self._load_env_models(
+            target_env_name, fallback_env_name, ensure_finalized_snapshots
+        )
 
         all_selected_models = self.expand_model_selections(
             model_selections, models={**env_models, **self._models}
@@ -166,7 +148,37 @@ class Selector(abc.ABC):
         if needs_update:
             update_model_schemas(dag, models=models, cache_dir=self._cache_dir)
 
-        return models
+        return models, all_selected_models
+
+    def _load_env_models(
+        self,
+        target_env_name: str,
+        fallback_env_name: t.Optional[str] = None,
+        ensure_finalized_snapshots: bool = False,
+    ) -> t.Dict[str, "Model"]:
+        """Loads models from the target environment, falling back to the fallback environment if needed."""
+        target_env = self._state_reader.get_environment(Environment.sanitize_name(target_env_name))
+        if target_env and target_env.expired:
+            target_env = None
+
+        if not target_env and fallback_env_name:
+            target_env = self._state_reader.get_environment(
+                Environment.sanitize_name(fallback_env_name)
+            )
+
+        if not target_env:
+            return {}
+
+        environment_snapshot_infos = (
+            target_env.snapshots
+            if not ensure_finalized_snapshots
+            else target_env.finalized_or_current_snapshots
+        )
+        return {
+            s.name: s.model
+            for s in self._state_reader.get_snapshots(environment_snapshot_infos).values()
+            if s.is_model
+        }
 
     def expand_model_selections(
         self, model_selections: t.Iterable[str], models: t.Optional[t.Dict[str, Node]] = None

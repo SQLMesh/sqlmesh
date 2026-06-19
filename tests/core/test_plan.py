@@ -2934,6 +2934,213 @@ def test_unaligned_start_model_with_forward_only_preview(make_snapshot):
     assert not plan.deployability_index.is_deployable(snapshot_b)
 
 
+def _make_forward_only_preview_context_diff(make_snapshot):
+    old_snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select 1, ds"),
+            kind=dict(
+                name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
+                forward_only=True,
+                time_column="ds",
+            ),
+            start="2025-01-01",
+        )
+    )
+    old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    new_snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select 2, ds"),
+            kind=dict(
+                name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
+                forward_only=True,
+                time_column="ds",
+            ),
+            start="2025-01-01",
+        )
+    )
+    new_snapshot.previous_versions = old_snapshot.all_versions
+
+    context_diff = ContextDiff(
+        environment="test_environment",
+        is_new_environment=True,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        snapshots={new_snapshot.snapshot_id: new_snapshot},
+        new_snapshots={new_snapshot.snapshot_id: new_snapshot},
+        modified_snapshots={old_snapshot.name: (new_snapshot, old_snapshot)},
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+
+    return context_diff, new_snapshot
+
+
+def test_forward_only_preview_start_does_not_override_implicit_backfill_start(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    normal_old_snapshot = make_snapshot(
+        SqlModel(
+            name="normal",
+            query=parse_one("select 1, ds"),
+            dialect="duckdb",
+            kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
+            start="2025-01-01",
+        )
+    )
+    normal_old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    normal_new_snapshot = make_snapshot(
+        SqlModel(
+            name="normal",
+            query=parse_one("select 2, ds"),
+            dialect="duckdb",
+            kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
+            start="2025-01-01",
+        )
+    )
+    normal_new_snapshot.previous_versions = normal_old_snapshot.all_versions
+
+    context_diff.modified_snapshots[normal_new_snapshot.name] = (
+        normal_new_snapshot,
+        normal_old_snapshot,
+    )
+    context_diff.snapshots[normal_new_snapshot.snapshot_id] = normal_new_snapshot
+    context_diff.new_snapshots[normal_new_snapshot.snapshot_id] = normal_new_snapshot
+
+    plan = PlanBuilder(
+        context_diff,
+        default_start="2025-01-01",
+        end="2025-01-04",
+        preview_start="2025-01-03",
+        skip_backfill=False,
+        is_dev=True,
+        enable_preview=True,
+    ).build()
+
+    assert plan.start == "2025-01-01"
+    assert plan.restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-03"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+    missing_intervals = {i.snapshot_id: i.intervals for i in plan.missing_intervals}
+    assert missing_intervals[normal_new_snapshot.snapshot_id] == [
+        (to_timestamp("2025-01-01"), to_timestamp("2025-01-02")),
+        (to_timestamp("2025-01-02"), to_timestamp("2025-01-03")),
+        (to_timestamp("2025-01-03"), to_timestamp("2025-01-04")),
+        (to_timestamp("2025-01-04"), to_timestamp("2025-01-05")),
+    ]
+
+
+def test_forward_only_preview_start_follows_implicit_plan_start_updates(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    plan_builder = PlanBuilder(
+        context_diff,
+        default_start="2025-01-03",
+        end="2025-01-04",
+        is_dev=True,
+        forward_only=True,
+        enable_preview=True,
+    )
+
+    assert plan_builder.build().restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-03"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+
+    assert plan_builder.set_effective_from("2025-01-01").build().restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-01"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+
+    assert plan_builder.set_start("2025-01-02").build().restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-02"),
+            to_timestamp("2025-01-05"),
+        )
+    }
+
+
+@time_machine.travel("2026-06-02 00:00:00 UTC")
+def test_forward_only_preview_uses_preview_start(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    plan = PlanBuilder(
+        context_diff,
+        start="2025-01-01",
+        preview_start="yesterday",
+        preview_min_intervals=1,
+        enable_preview=True,
+        is_dev=True,
+    ).build()
+
+    assert plan.start == "2025-01-01"
+    assert plan.restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2026-06-01"),
+            to_timestamp("2026-06-02"),
+        )
+    }
+
+
+@time_machine.travel("2026-06-02 00:00:00 UTC")
+def test_forward_only_preview_min_intervals_expands_preview_start(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    plan = PlanBuilder(
+        context_diff,
+        start="2025-01-01",
+        preview_start="now",
+        preview_min_intervals=1,
+        enable_preview=True,
+        is_dev=True,
+    ).build()
+
+    assert plan.restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2026-06-01"),
+            to_timestamp("2026-06-02"),
+        )
+    }
+
+
+@time_machine.travel("2026-06-02 00:00:00 UTC")
+def test_forward_only_preview_start_can_exceed_preview_min_intervals(make_snapshot):
+    context_diff, new_snapshot = _make_forward_only_preview_context_diff(make_snapshot)
+
+    plan = PlanBuilder(
+        context_diff,
+        start="2025-01-01",
+        preview_start="2025-01-01",
+        preview_min_intervals=1,
+        enable_preview=True,
+        is_dev=True,
+    ).build()
+
+    assert plan.restatements == {
+        new_snapshot.snapshot_id: (
+            to_timestamp("2025-01-01"),
+            to_timestamp("2026-06-02"),
+        )
+    }
+
+
 def test_restate_production_model_in_dev(make_snapshot, mocker: MockerFixture):
     snapshot = make_snapshot(
         SqlModel(

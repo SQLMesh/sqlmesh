@@ -404,6 +404,8 @@ class GithubController:
                 categorizer_config=self.bot_config.auto_categorize_changes,
                 start=self.bot_config.default_pr_start,
                 min_intervals=self.bot_config.pr_min_intervals,
+                preview_start=self.bot_config.default_pr_preview_start,
+                preview_min_intervals=self.bot_config.pr_preview_min_intervals,
                 skip_backfill=self.bot_config.skip_pr_backfill,
                 include_unmodified=self.bot_config.pr_include_unmodified,
                 forward_only=self.forward_only_plan,

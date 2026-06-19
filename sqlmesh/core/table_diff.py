@@ -255,12 +255,13 @@ class TableDiff:
         self.source_alias = source_alias
         self.target_alias = target_alias
 
+        cols: t.List[str] = ensure_list(skip_columns)
         self.skip_columns = {
             normalize_identifiers(
-                exp.parse_identifier(t.cast(str, col)),
+                exp.parse_identifier(col),
                 dialect=self.model_dialect or self.dialect,
             ).name
-            for col in ensure_list(skip_columns)
+            for col in cols
         }
 
         self._on = on

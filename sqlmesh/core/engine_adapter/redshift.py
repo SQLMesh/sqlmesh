@@ -4,6 +4,7 @@ import logging
 import typing as t
 
 from sqlglot import exp
+from sqlglot.helper import ensure_list
 
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.base import MERGE_SOURCE_ALIAS, MERGE_TARGET_ALIAS
@@ -30,6 +31,7 @@ if t.TYPE_CHECKING:
 
     from sqlmesh.core._typing import SchemaName, TableName
     from sqlmesh.core.engine_adapter.base import QueryOrDF, Query
+    from sqlmesh.core.node import IntervalUnit
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +250,63 @@ class RedshiftEngineAdapter(
             source_columns=source_columns,
             **create_kwargs,
         )
+
+    def _build_table_properties_exp(
+        self,
+        catalog_name: t.Optional[str] = None,
+        table_format: t.Optional[str] = None,
+        storage_format: t.Optional[str] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
+        partition_interval_unit: t.Optional[IntervalUnit] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        table_description: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
+        **kwargs: t.Any,
+    ) -> t.Optional[exp.Properties]:
+        properties: t.List[exp.Expr] = []
+
+        if table_description:
+            properties.append(
+                exp.SchemaCommentProperty(
+                    this=exp.Literal.string(self._truncate_table_comment(table_description))
+                )
+            )
+
+        def _to_identifier_if_string(expression: exp.Expr) -> exp.Expr:
+            if isinstance(expression, exp.Literal) and expression.is_string:
+                return exp.to_identifier(expression.this)
+            return expression.copy()
+
+        if table_properties:
+            table_properties = {k.upper(): v for k, v in table_properties.items()}
+
+            table_type = self._pop_creatable_type_from_properties(table_properties)
+            properties.extend(ensure_list(table_type))
+
+            diststyle = table_properties.get("DISTSTYLE")
+            if diststyle:
+                properties.append(exp.DistStyleProperty(this=exp.var(diststyle.name.upper())))
+
+            distkey = table_properties.get("DISTKEY")
+            if distkey:
+                properties.append(exp.DistKeyProperty(this=_to_identifier_if_string(distkey)))
+
+            sortkey = table_properties.get("SORTKEY")
+            if sortkey:
+                sortkey_expressions = sortkey.expressions if sortkey.expressions else [sortkey]
+                properties.append(
+                    exp.SortKeyProperty(
+                        this=[
+                            _to_identifier_if_string(expression)
+                            for expression in sortkey_expressions
+                        ],
+                        compound=False,
+                    )
+                )
+
+        return exp.Properties(expressions=properties) if properties else None
 
     def replace_query(
         self,

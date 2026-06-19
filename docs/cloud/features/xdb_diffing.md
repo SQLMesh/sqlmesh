@@ -47,7 +47,7 @@ Then, specify each table's gateway in the `table_diff` command with this syntax:
 For example, we could diff the `landing.table` table across `bigquery` and `snowflake` gateways like this:
 
 ```sh
-$ tcloud sqlmesh table_diff 'bigquery|landing.table:snowflake|landing.table'
+tcloud sqlmesh table_diff 'bigquery|landing.table:snowflake|landing.table'
 ```
 
 This syntax tells SQLMesh to use the cross-database diffing algorithm instead of the normal within-database diffing algorithm.

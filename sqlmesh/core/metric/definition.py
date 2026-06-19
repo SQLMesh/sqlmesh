@@ -10,7 +10,7 @@ from sqlmesh.core import dialect as d
 from sqlmesh.core.node import str_or_exp_to_str
 from sqlmesh.utils import UniqueKeyDict
 from sqlmesh.utils.errors import ConfigError
-from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator
+from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator, validation_data
 
 MeasureAndDimTables = t.Tuple[str, t.Tuple[str, ...]]
 
@@ -89,7 +89,7 @@ class MetricMeta(PydanticModel, frozen=True):
     @field_validator("expression", mode="before")
     def _validate_expression(cls, v: t.Any, info: ValidationInfo) -> exp.Expr:
         if isinstance(v, str):
-            dialect = info.data.get("dialect")
+            dialect = validation_data(info).get("dialect")
             return d.parse_one(v, dialect=dialect)
         if isinstance(v, exp.Expr):
             return v

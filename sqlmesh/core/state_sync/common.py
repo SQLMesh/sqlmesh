@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pydantic_core.core_schema import ValidationInfo
 from sqlglot import exp
 
-from sqlmesh.utils.pydantic import PydanticModel, field_validator
+from sqlmesh.utils.pydantic import PydanticModel, field_validator, validation_data
 from sqlmesh.core.environment import Environment, EnvironmentStatements, EnvironmentNamingInfo
 from sqlmesh.core.snapshot import (
     Snapshot,
@@ -269,7 +269,7 @@ class PromotionResult(PydanticModel):
     def _validate_removed_environment_naming_info(
         cls, v: t.Optional[EnvironmentNamingInfo], info: ValidationInfo
     ) -> t.Optional[EnvironmentNamingInfo]:
-        if v and not info.data.get("removed"):
+        if v and not validation_data(info).get("removed"):
             raise ValueError("removed_environment_naming_info must be None if removed is empty")
         return v
 

@@ -178,6 +178,7 @@ The SQLMesh project-level `model_defaults` key supports the following options, d
 - kind
 - dialect
 - cron
+- cron_tz
 - owner
 - start
 - table_format

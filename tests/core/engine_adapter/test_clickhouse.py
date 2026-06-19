@@ -316,13 +316,32 @@ def test_model_properties(adapter: ClickhouseEngineAdapter):
         == "ENGINE=MergeTree ORDER BY (a, b + 1) PRIMARY KEY (a, b)"
     )
 
+    # Multiple physical_properties must be combined into a single comma-separated
+    # SETTINGS clause. ClickHouse rejects repeated SETTINGS keywords with a syntax
+    # error (see https://github.com/SQLMesh/sqlmesh/issues/5803).
     assert (
         build_properties_sql(
             order_by="ORDER_BY = (a, b + 1),",
             primary_key="PRIMARY_KEY = (a, b),",
             properties="PROP1 = 1, PROP2 = '2'",
         )
-        == "ENGINE=MergeTree ORDER BY (a, b + 1) PRIMARY KEY (a, b) SETTINGS prop1 = 1 SETTINGS prop2 = '2'"
+        == "ENGINE=MergeTree ORDER BY (a, b + 1) PRIMARY KEY (a, b) SETTINGS prop1 = 1, prop2 = '2'"
+    )
+
+    # Regression test for #5803: three or more SETTINGS entries also combine.
+    assert (
+        build_properties_sql(
+            order_by="ORDER_BY = (orders_id),",
+            properties=(
+                "min_age_to_force_merge_seconds = 3600, "
+                "min_age_to_force_merge_on_partition_only = 1, "
+                "index_granularity = 8192"
+            ),
+        )
+        == "ENGINE=MergeTree ORDER BY (orders_id) "
+        "SETTINGS min_age_to_force_merge_seconds = 3600, "
+        "min_age_to_force_merge_on_partition_only = 1, "
+        "index_granularity = 8192"
     )
 
     assert (
@@ -343,6 +362,20 @@ def test_model_properties(adapter: ClickhouseEngineAdapter):
         build_properties_sql(properties="TTL = time + INTERVAL 1 WEEK")
         == "ENGINE=MergeTree ORDER BY () TTL time + INTERVAL '1' WEEK"
     )
+
+
+def test_view_properties_combine_settings(adapter: ClickhouseEngineAdapter):
+    # View properties hit the same SettingsProperty code path as table
+    # properties (#5803): multiple entries must collapse into one SETTINGS
+    # clause rather than emit repeated SETTINGS keywords.
+    view_properties_exp = adapter._build_view_properties_exp(
+        view_properties={
+            "prop1": exp.Literal.number(1),
+            "prop2": exp.Literal.string("2"),
+        }
+    )
+    assert view_properties_exp is not None
+    assert view_properties_exp.sql("clickhouse") == "SETTINGS prop1 = 1, prop2 = '2'"
 
 
 def test_partitioned_by_expr(make_mocked_engine_adapter: t.Callable):

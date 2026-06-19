@@ -571,7 +571,7 @@ def copy_to_temp_path(tmp_path: Path) -> t.Callable:
         return [name for name in names if name == ".cache"]
 
     def _make_function(
-        paths: t.Union[t.Union[str, Path], t.Collection[t.Union[str, Path]]],
+        paths: t.Union[str, Path, t.List[t.Union[str, Path]], t.Tuple[t.Union[str, Path], ...]],
     ) -> t.List[Path]:
         paths = ensure_list(paths)
         all_paths = [Path(p) for p in paths]

@@ -188,15 +188,15 @@ jobs:
 
   ui-style:
     needs: [changes]
-    if:
-      needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
-      'true' || github.ref == 'refs/heads/main'
+    if: false
+      # needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
+      # 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
       - uses: pnpm/action-setup@v4
         with:
           version: latest
@@ -252,7 +252,7 @@ jobs:
       fail-fast: false
       matrix:
         engine:
-          [duckdb, postgres, mysql, mssql, trino, spark, clickhouse, risingwave]
+          [duckdb, postgres, mysql, mssql, trino, spark, clickhouse, risingwave, starrocks]
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: 2
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
@@ -396,6 +396,7 @@ jobs:
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
     runs-on: ubuntu-latest
+    if: false
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6

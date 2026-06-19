@@ -144,9 +144,10 @@ class BuiltInSchedulerConfig(_EngineAdapterStateSyncSchedulerConfig, BaseConfig)
         return default_catalogs_per_gateway
 
 
-SCHEDULER_CONFIG_TO_TYPE = {
+SCHEDULER_CONFIG_TO_TYPE: t.Dict[str, t.Type[SchedulerConfig]] = {
     tpe.all_field_infos()["type_"].default: tpe
     for tpe in subclasses(__name__, BaseConfig, exclude={BaseConfig})
+    if issubclass(tpe, SchedulerConfig)
 }
 
 

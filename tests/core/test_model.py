@@ -334,7 +334,9 @@ FROM "memory"."sushi"."marketing" AS "marketing"
             "@get_date() == '1996-02-10'",
             "'all'",
             3,
-            lambda expected_select: f"{expected_select}\nUNION ALL\n{expected_select}\nUNION ALL\n{expected_select}\n",
+            lambda expected_select: (
+                f"{expected_select}\nUNION ALL\n{expected_select}\nUNION ALL\n{expected_select}\n"
+            ),
         ),
         # Test case 4: DISTINCT type
         (
@@ -374,7 +376,9 @@ FROM "memory"."sushi"."marketing" AS "marketing"
             "",
             "",
             3,
-            lambda expected_select: f"{expected_select}\nUNION ALL\n{expected_select}\n\nUNION ALL\n{expected_select}\n",
+            lambda expected_select: (
+                f"{expected_select}\nUNION ALL\n{expected_select}\n\nUNION ALL\n{expected_select}\n"
+            ),
         ),
         # Test case 9: Missing union type AND condition one table
         (
@@ -1663,6 +1667,37 @@ def test_audits():
         ("audit_c", {"key": d.MacroVar(this="start_ds")}),
     ]
     assert model.tags == ["foo"]
+
+
+def test_custom_audit_arg_changes_affect_fingerprint():
+    def make_model(min_val: int) -> t.Any:
+        expressions = d.parse(
+            f"""
+            MODEL (
+                name db.model,
+                audits (check_count(min := {min_val}))
+            );
+            SELECT 1 AS id;
+            """
+        )
+        audit_definitions = {
+            "check_count": load_audit(
+                d.parse(
+                    "AUDIT (name check_count); SELECT * FROM @this_model HAVING COUNT(*) < @min"
+                ),
+                dialect="duckdb",
+            )
+        }
+        return load_sql_based_model(
+            expressions,
+            path=Path("./examples/sushi/models/test_model.sql"),
+            audit_definitions=audit_definitions,
+        )
+
+    model_a = make_model(33111)
+    model_b = make_model(5142)
+
+    assert model_a.audit_metadata_hash() != model_b.audit_metadata_hash()
 
 
 def test_enable_audits_from_model_defaults():
@@ -10322,6 +10357,94 @@ def entrypoint(context, *args, **kwargs):
     assert ctx.fetchdf("SELECT * FROM test_schema2.foo").to_dict() == {"id": {0: 1}}
 
 
+def test_python_model_blueprint_column_names(tmp_path: Path) -> None:
+    """Blueprint variables can be used as column names and types in Python model definitions."""
+    py_model = tmp_path / "models" / "blueprint_col_names.py"
+    py_model.parent.mkdir(parents=True, exist_ok=True)
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model
+
+@model(
+    "test_schema.@model_name",
+    blueprints=[
+        {"model_name": "hotel_revenue", "col_a": "revenue", "type_a": "int",    "col_b": "cost",   "type_b": "double"},
+        {"model_name": "coffee_sales", "col_a": "sales",   "type_a": "bigint", "col_b": "profit", "type_b": "text"},
+    ],
+    kind="FULL",
+    columns={
+        "@{col_a}": "@{type_a}",
+        "@{col_b}": "@{type_b}",
+    },
+)
+def entrypoint(context, *args, **kwargs):
+    return pd.DataFrame({
+        context.blueprint_var("col_a"): [1],
+        context.blueprint_var("col_b"): [1.5],
+    })
+        """
+    )
+
+    ctx = Context(
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+        paths=tmp_path,
+    )
+    assert len(ctx.models) == 2
+
+    model1 = ctx.get_model("test_schema.hotel_revenue", raise_if_missing=True)
+    model2 = ctx.get_model("test_schema.coffee_sales", raise_if_missing=True)
+
+    assert model1.columns_to_types_ is not None
+    assert set(model1.columns_to_types_.keys()) == {"revenue", "cost"}
+    assert model1.columns_to_types_["revenue"] == exp.DataType.build("int")
+    assert model1.columns_to_types_["cost"] == exp.DataType.build("double")
+
+    assert model2.columns_to_types_ is not None
+    assert set(model2.columns_to_types_.keys()) == {"sales", "profit"}
+    assert model2.columns_to_types_["sales"] == exp.DataType.build("bigint")
+    assert model2.columns_to_types_["profit"] == exp.DataType.build("text")
+
+
+def test_python_model_variable_column_names(tmp_path: Path) -> None:
+    """Global variables can be used as column names in Python model definitions."""
+    py_model = tmp_path / "models" / "var_col_names.py"
+    py_model.parent.mkdir(parents=True, exist_ok=True)
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model
+
+@model(
+    "test_schema.model",
+    kind="FULL",
+    columns={
+        "@{metric_col}": "int",
+        "static_col": "text",
+    },
+)
+def entrypoint(context, *args, **kwargs):
+    return pd.DataFrame({"revenue": [1], "static_col": ["x"]})
+        """
+    )
+
+    ctx = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            variables={"metric_col": "revenue"},
+        ),
+        paths=tmp_path,
+    )
+    assert len(ctx.models) == 1
+
+    model = ctx.get_model("test_schema.model", raise_if_missing=True)
+
+    assert model.columns_to_types_ is not None
+    assert set(model.columns_to_types_.keys()) == {"revenue", "static_col"}
+    assert model.columns_to_types_["revenue"] == exp.DataType.build("int")
+    assert model.columns_to_types_["static_col"] == exp.DataType.build("text")
+
+
 @time_machine.travel("2020-01-01 00:00:00 UTC")
 def test_dynamic_date_spine_model(assert_exp_eq):
     @macro()
@@ -12342,3 +12465,170 @@ def test_audits_in_embedded_model():
     )
     with pytest.raises(ConfigError, match="Audits are not supported for embedded models"):
         load_sql_based_model(expression).validate_definition()
+
+
+def test_default_catalog_not_leaked_to_unsupported_gateway():
+    """
+    Regression test for https://github.com/SQLMesh/sqlmesh/issues/5748
+
+    When a model targets a gateway that is NOT in default_catalog_per_gateway,
+    the global default_catalog should be cleared (set to None) instead of
+    leaking through from the default gateway.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            gateway clickhouse_gw,
+            dialect clickhouse,
+        );
+
+        SELECT 1 AS id
+        """,
+        read="clickhouse",
+    )
+
+    default_catalog_per_gateway = {
+        "default_gw": "example_catalog",
+    }
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gw: {},
+        dialect="clickhouse",
+        default_catalog_per_gateway=default_catalog_per_gateway,
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 1
+    model = models[0]
+
+    assert not model.catalog, (
+        f"Default gateway catalog leaked into catalog-unsupported gateway model. "
+        f"Expected no catalog, got: {model.catalog}"
+    )
+    assert "example_catalog" not in model.fqn, (
+        f"Default gateway catalog found in model FQN: {model.fqn}"
+    )
+
+
+def test_default_catalog_still_applied_to_supported_gateway():
+    """
+    Control test: when a model targets a gateway that IS in default_catalog_per_gateway,
+    the catalog should still be correctly applied.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            gateway other_duckdb,
+        );
+
+        SELECT 1 AS id
+        """,
+        read="duckdb",
+    )
+
+    default_catalog_per_gateway = {
+        "default_gw": "example_catalog",
+        "other_duckdb": "other_db",
+    }
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gw: {},
+        dialect="duckdb",
+        default_catalog_per_gateway=default_catalog_per_gateway,
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 1
+    model = models[0]
+
+    assert model.catalog == "other_db", f"Expected catalog 'other_db', got: {model.catalog}"
+
+
+def test_no_gateway_uses_global_default_catalog():
+    """
+    Control test: when a model does NOT specify a gateway, the global
+    default_catalog should still be applied as before.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+        );
+
+        SELECT 1 AS id
+        """,
+        read="duckdb",
+    )
+
+    model = load_sql_based_model(
+        expressions,
+        default_catalog="example_catalog",
+        dialect="duckdb",
+    )
+
+    assert model.catalog == "example_catalog"
+
+
+def test_blueprint_catalog_not_cross_contaminated():
+    """
+    When blueprints iterate over different gateways, the catalog from one
+    blueprint iteration should not leak into the next. A ClickHouse blueprint
+    setting default_catalog to None should not prevent the following blueprint
+    from getting its correct catalog.
+    """
+    from sqlglot import parse
+
+    expressions = parse(
+        """
+        MODEL (
+            name @{blueprint}.my_model,
+            kind FULL,
+            gateway @{gw},
+            blueprints (
+                (blueprint := ch_schema, gw := clickhouse_gw),
+                (blueprint := db_schema, gw := default_gw),
+            ),
+        );
+
+        SELECT 1 AS id
+        """,
+        read="duckdb",
+    )
+
+    default_catalog_per_gateway = {
+        "default_gw": "example_catalog",
+    }
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gw: {},
+        dialect="duckdb",
+        default_catalog_per_gateway=default_catalog_per_gateway,
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 2
+
+    ch_model = next(m for m in models if "ch_schema" in m.fqn)
+    db_model = next(m for m in models if "db_schema" in m.fqn)
+
+    assert not ch_model.catalog, (
+        f"Catalog leaked into ClickHouse blueprint. Got: {ch_model.catalog}"
+    )
+
+    assert db_model.catalog == "example_catalog", (
+        f"Catalog lost for DuckDB blueprint after ClickHouse iteration. Got: {db_model.catalog}"
+    )

@@ -138,7 +138,7 @@ class SnapshotState:
         ):
             self.engine_adapter.update_table(
                 self.snapshots_table,
-                {"unpaused_ts": None, "updated_ts": updated_ts},
+                {"unpaused_ts": None},
                 where=where,
             )
 
