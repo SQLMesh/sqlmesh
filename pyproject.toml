@@ -124,6 +124,7 @@ snowflake = [
     "snowflake-connector-python[pandas,secure-local-storage]",
     "snowflake-snowpark-python",
 ]
+starrocks = ["pymysql"]
 trino = ["trino"]
 web = [
     "fastapi==0.120.1",
@@ -271,6 +272,7 @@ markers = [
     "pyspark: test for PySpark that need to run separately from the other spark tests",
     "trino: test for Trino (all connectors)",
     "risingwave: test for Risingwave",
+    "starrocks: test for StarRocks",
 
     # Other
     "set_default_connection",

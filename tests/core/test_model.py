@@ -334,7 +334,9 @@ FROM "memory"."sushi"."marketing" AS "marketing"
             "@get_date() == '1996-02-10'",
             "'all'",
             3,
-            lambda expected_select: f"{expected_select}\nUNION ALL\n{expected_select}\nUNION ALL\n{expected_select}\n",
+            lambda expected_select: (
+                f"{expected_select}\nUNION ALL\n{expected_select}\nUNION ALL\n{expected_select}\n"
+            ),
         ),
         # Test case 4: DISTINCT type
         (
@@ -374,7 +376,9 @@ FROM "memory"."sushi"."marketing" AS "marketing"
             "",
             "",
             3,
-            lambda expected_select: f"{expected_select}\nUNION ALL\n{expected_select}\n\nUNION ALL\n{expected_select}\n",
+            lambda expected_select: (
+                f"{expected_select}\nUNION ALL\n{expected_select}\n\nUNION ALL\n{expected_select}\n"
+            ),
         ),
         # Test case 9: Missing union type AND condition one table
         (
@@ -10351,6 +10355,94 @@ def entrypoint(context, *args, **kwargs):
 
     ctx.plan(no_prompts=True, auto_apply=True)
     assert ctx.fetchdf("SELECT * FROM test_schema2.foo").to_dict() == {"id": {0: 1}}
+
+
+def test_python_model_blueprint_column_names(tmp_path: Path) -> None:
+    """Blueprint variables can be used as column names and types in Python model definitions."""
+    py_model = tmp_path / "models" / "blueprint_col_names.py"
+    py_model.parent.mkdir(parents=True, exist_ok=True)
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model
+
+@model(
+    "test_schema.@model_name",
+    blueprints=[
+        {"model_name": "hotel_revenue", "col_a": "revenue", "type_a": "int",    "col_b": "cost",   "type_b": "double"},
+        {"model_name": "coffee_sales", "col_a": "sales",   "type_a": "bigint", "col_b": "profit", "type_b": "text"},
+    ],
+    kind="FULL",
+    columns={
+        "@{col_a}": "@{type_a}",
+        "@{col_b}": "@{type_b}",
+    },
+)
+def entrypoint(context, *args, **kwargs):
+    return pd.DataFrame({
+        context.blueprint_var("col_a"): [1],
+        context.blueprint_var("col_b"): [1.5],
+    })
+        """
+    )
+
+    ctx = Context(
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+        paths=tmp_path,
+    )
+    assert len(ctx.models) == 2
+
+    model1 = ctx.get_model("test_schema.hotel_revenue", raise_if_missing=True)
+    model2 = ctx.get_model("test_schema.coffee_sales", raise_if_missing=True)
+
+    assert model1.columns_to_types_ is not None
+    assert set(model1.columns_to_types_.keys()) == {"revenue", "cost"}
+    assert model1.columns_to_types_["revenue"] == exp.DataType.build("int")
+    assert model1.columns_to_types_["cost"] == exp.DataType.build("double")
+
+    assert model2.columns_to_types_ is not None
+    assert set(model2.columns_to_types_.keys()) == {"sales", "profit"}
+    assert model2.columns_to_types_["sales"] == exp.DataType.build("bigint")
+    assert model2.columns_to_types_["profit"] == exp.DataType.build("text")
+
+
+def test_python_model_variable_column_names(tmp_path: Path) -> None:
+    """Global variables can be used as column names in Python model definitions."""
+    py_model = tmp_path / "models" / "var_col_names.py"
+    py_model.parent.mkdir(parents=True, exist_ok=True)
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model
+
+@model(
+    "test_schema.model",
+    kind="FULL",
+    columns={
+        "@{metric_col}": "int",
+        "static_col": "text",
+    },
+)
+def entrypoint(context, *args, **kwargs):
+    return pd.DataFrame({"revenue": [1], "static_col": ["x"]})
+        """
+    )
+
+    ctx = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            variables={"metric_col": "revenue"},
+        ),
+        paths=tmp_path,
+    )
+    assert len(ctx.models) == 1
+
+    model = ctx.get_model("test_schema.model", raise_if_missing=True)
+
+    assert model.columns_to_types_ is not None
+    assert set(model.columns_to_types_.keys()) == {"revenue", "static_col"}
+    assert model.columns_to_types_["revenue"] == exp.DataType.build("int")
+    assert model.columns_to_types_["static_col"] == exp.DataType.build("text")
 
 
 @time_machine.travel("2020-01-01 00:00:00 UTC")

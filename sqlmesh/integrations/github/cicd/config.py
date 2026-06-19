@@ -27,11 +27,13 @@ class GithubCICDBotConfig(BaseConfig):
         default=None, alias="auto_categorize_changes"
     )
     default_pr_start: t.Optional[TimeLike] = None
+    default_pr_preview_start: TimeLike = "yesterday"
     skip_pr_backfill_: t.Optional[bool] = Field(default=None, alias="skip_pr_backfill")
     pr_include_unmodified_: t.Optional[bool] = Field(default=None, alias="pr_include_unmodified")
     run_on_deploy_to_prod: bool = False
     pr_environment_name: t.Optional[str] = None
     pr_min_intervals: t.Optional[int] = None
+    pr_preview_min_intervals: int = Field(default=1, ge=0)
     prod_branch_names_: t.Optional[str] = Field(default=None, alias="prod_branch_name")
     forward_only_branch_suffix_: t.Optional[str] = Field(
         default=None, alias="forward_only_branch_suffix"
@@ -88,9 +90,11 @@ class GithubCICDBotConfig(BaseConfig):
         "command_namespace",
         "auto_categorize_changes",
         "default_pr_start",
+        "default_pr_preview_start",
         "skip_pr_backfill",
         "pr_include_unmodified",
         "run_on_deploy_to_prod",
         "pr_min_intervals",
+        "pr_preview_min_intervals",
         "forward_only_branch_suffix",
     }

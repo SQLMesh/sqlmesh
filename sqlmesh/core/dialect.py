@@ -556,6 +556,10 @@ def _parse_if(self: Parser) -> t.Optional[exp.Expr]:
     # to parse a statement / command to support the macro @IF(condition, statement)
     index = self._index
     try:
+        if self.dialect == "tsql":
+            if not (self._index >= 2 and self._tokens[self._index - 2].text == "@"):
+                return self.__parse_if()  # type: ignore
+            return Parser.__parse_if(self)  # type: ignore
         return self.__parse_if()  # type: ignore
     except ParseError:
         self._retreat(index)
@@ -743,6 +747,16 @@ def _whens_sql(self: Generator, expression: exp.Whens) -> str:
     # If the `WHEN` clauses aren't part of a MERGE statement (e.g. they
     # appear in the `MODEL` DDL), then we will wrap them with parentheses.
     return self.wrap(self.expressions(expression, sep=" ", indent=False))
+
+
+def _parse_interval_span(self: Parser, this: exp.Expr) -> exp.Interval:
+    interval = self.__parse_interval_span(this)  # type: ignore
+    # Without this, @unit in `INTERVAL @value @unit` is misread as an alias.
+    if not interval.args.get("unit") and self._match(TokenType.PARAMETER):
+        macro = _parse_macro(self)
+        if macro is not None:
+            interval.set("unit", macro)
+    return interval
 
 
 def _override(klass: t.Type[Tokenizer | Parser], func: t.Callable) -> None:
@@ -1082,8 +1096,9 @@ def extend_sqlglot() -> None:
                     DColonCast: lambda self, e: f"{self.sql(e, 'this')}::{self.sql(e, 'to')}",
                     Jinja: lambda self, e: e.name,
                     JinjaQuery: lambda self, e: f"{JINJA_QUERY_BEGIN};\n{e.name}\n{JINJA_END};",
-                    JinjaStatement: lambda self,
-                    e: f"{JINJA_STATEMENT_BEGIN};\n{e.name}\n{JINJA_END};",
+                    JinjaStatement: lambda self, e: (
+                        f"{JINJA_STATEMENT_BEGIN};\n{e.name}\n{JINJA_END};"
+                    ),
                     VirtualUpdateStatement: lambda self, e: _on_virtual_update_sql(self, e),
                     MacroDef: lambda self, e: f"@DEF({self.sql(e.this)}, {self.sql(e.expression)})",
                     MacroFunc: _macro_func_sql,
@@ -1123,9 +1138,10 @@ def extend_sqlglot() -> None:
     _override(Parser, _parse_value)
     _override(Parser, _parse_lambda)
     _override(Parser, _parse_types)
-    _override(TSQL.Parser, Parser._parse_if)
     _override(Parser, _parse_if)
+    _override(TSQL.Parser, Parser._parse_if)
     _override(Parser, _parse_id_var)
+    _override(Parser, _parse_interval_span)
     _override(Parser, _warn_unsupported)
     _override(Snowflake.Parser, _parse_table_parts)
 

@@ -363,6 +363,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             connection as it appears in configuration will be used.
         concurrent_tasks: The maximum number of tasks that can use the connection concurrently.
         load: Whether or not to automatically load all models and macros (default True).
+        load_state: Whether to merge remote state into the local project during load (default True).
+            Only intended for local-only operations like format; plan/apply in multi-repo projects
+            require it to see models owned by other projects.
         console: The rich instance used for printing out CLI command results.
         users: A list of users to make known to SQLMesh.
     """
@@ -386,6 +389,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         users: t.Optional[t.List[User]] = None,
         config_loader_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
         selector: t.Optional[t.Type[Selector]] = None,
+        load_state: bool = True,
     ):
         self.configs = (
             config
@@ -413,6 +417,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        self._load_state: bool = load_state
         self._selector_cls = selector or NativeSelector
 
         self.path, self.config = t.cast(t.Tuple[Path, C], next(iter(self.configs.items())))
@@ -684,7 +689,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
 
         # Load environment statements from state for projects not in current load
-        if any(self._projects):
+        if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
             if prod:
                 existing_statements = self.state_reader.get_environment_statements(c.PROD)
@@ -694,7 +699,7 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         uncached = set()
 
-        if any(self._projects):
+        if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:
@@ -1489,6 +1494,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         backfill_models: t.Optional[t.Collection[str]] = None,
         categorizer_config: t.Optional[CategorizerConfig] = None,
         enable_preview: t.Optional[bool] = None,
+        preview_start: t.Optional[TimeLike] = None,
+        preview_min_intervals: t.Optional[int] = None,
         run: t.Optional[bool] = None,
         diff_rendered: t.Optional[bool] = None,
         skip_linter: t.Optional[bool] = None,
@@ -1530,6 +1537,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             select_models: A list of model selection strings to filter the models that should be included into this plan.
             backfill_models: A list of model selection strings to filter the models for which the data should be backfilled.
             enable_preview: Indicates whether to enable preview for forward-only models in development environments.
+            preview_start: The start date for forward-only previews.
+            preview_min_intervals: The minimum number of intervals to preview for each forward-only preview snapshot.
             run: Whether to run latest intervals as part of the plan application.
             diff_rendered: Whether the diff should compare raw vs rendered models
             min_intervals: Adjust the plan start date on a per-model basis in order to ensure at least this many intervals are covered
@@ -1563,6 +1572,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             "select_models": list(select_models) if select_models is not None else None,
             "backfill_models": list(backfill_models) if backfill_models is not None else None,
             "enable_preview": enable_preview,
+            "preview_start": preview_start,
+            "preview_min_intervals": preview_min_intervals,
             "run": run,
             "diff_rendered": diff_rendered,
             "skip_linter": skip_linter,
@@ -1764,6 +1775,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             enable_preview=(
                 enable_preview if enable_preview is not None else self._plan_preview_enabled
             ),
+            preview_start=preview_start,
+            preview_min_intervals=preview_min_intervals or 0,
             end_bounded=not run,
             ensure_finalized_snapshots=self.config.plan.use_finalized_state,
             start_override_per_model=start_override_per_model,

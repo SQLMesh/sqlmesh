@@ -718,7 +718,30 @@ class _Model(ModelMeta, frozen=True):
         }
 
     def render_physical_properties(self, **render_kwargs: t.Any) -> t.Dict[str, t.Any]:
-        return self._render_properties(properties=self.physical_properties, **render_kwargs)
+        rendered = self._render_properties(properties=self.physical_properties, **render_kwargs)
+
+        # Some engines (e.g. StarRocks) accept properties whose values reference other models and
+        # need the physical table name rather than the logical view SQLMesh exposes. Resolve those.
+        engine_adapter = render_kwargs.get("engine_adapter")
+        resolve_keys: t.FrozenSet[str] = getattr(
+            engine_adapter, "RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES", frozenset()
+        )
+        keys_to_resolve = [key for key in resolve_keys if key in rendered]
+        if keys_to_resolve:
+            # Local import: sqlmesh.core.snapshot.definition imports _Model, so importing
+            # to_table_mapping at module scope would be circular.
+            from sqlmesh.core.snapshot.definition import to_table_mapping
+
+            table_mapping = to_table_mapping(
+                (render_kwargs.get("snapshots") or {}).values(),
+                render_kwargs.get("deployability_index"),
+            )
+            for key in keys_to_resolve:
+                rendered[key] = _resolve_model_refs_to_physical_tables(
+                    rendered[key], table_mapping, self.dialect
+                )
+
+        return rendered
 
     def render_virtual_properties(self, **render_kwargs: t.Any) -> t.Dict[str, t.Any]:
         return self._render_properties(properties=self.virtual_properties, **render_kwargs)
@@ -2813,6 +2836,32 @@ def _split_sql_model_statements(
     return query, sql_statements[:pos], sql_statements[pos + 1 :], on_virtual_update, inline_audits
 
 
+def _resolve_model_refs_to_physical_tables(
+    value: exp.Expr, table_mapping: t.Dict[str, str], dialect: DialectType
+) -> exp.Literal:
+    """Resolve managed-model references in a property value to their physical table names.
+
+    The value is a single table reference or a comma-separated list of them. Each reference that
+    matches a managed model (via ``table_mapping``) is swapped for its physical ``db.table`` name;
+    anything else (e.g. a raw source) is kept as written. Returns a single string literal so the
+    property renders just like a hand-written value.
+    """
+    if isinstance(value, exp.Literal) and value.is_string:
+        refs = value.this.split(",")
+    else:
+        refs = [value.sql(dialect=dialect)]
+
+    def resolve(ref: str) -> str:
+        table = exp.to_table(ref.strip(), dialect=dialect)
+        physical = table_mapping.get(exp.table_name(table, identify=True))
+        # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
+        return exp.table_name(
+            exp.to_table(physical, dialect=dialect) if physical else table, identify=False
+        )
+
+    return exp.Literal.string(",".join(resolve(ref) for ref in refs if ref.strip()))
+
+
 def _resolve_properties(
     default: t.Optional[t.Dict[str, t.Any]],
     provided: t.Optional[exp.Expr | t.Dict[str, t.Any]],
@@ -2928,7 +2977,15 @@ def render_meta_fields(
         if isinstance(field_value, dict):
             rendered_dict = {}
             for key, value in field_value.items():
-                if key in RUNTIME_RENDERED_MODEL_FIELDS:
+                if field == "columns":
+                    column_name = render_field_value(key)
+                    column_type = render_field_value(value)
+                    # If column_type is an Expr (from rendering macros), convert to string.
+                    # Otherwise, leave it as-is (string) for the validator to parse with the correct dialect.
+                    if isinstance(column_type, exp.Expr):
+                        column_type = column_type.sql(dialect=dialect)
+                    rendered_dict[column_name] = column_type
+                elif key in RUNTIME_RENDERED_MODEL_FIELDS:
                     rendered_dict[key] = parse_strings_with_macro_refs(value, dialect)
                 elif (
                     # don't parse kind auto_restatement_cron="@..." kwargs (e.g. @daily) into MacroVar

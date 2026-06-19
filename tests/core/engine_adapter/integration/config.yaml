@@ -118,6 +118,16 @@ gateways:
       host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
       port: 4566
       check_import: false
+  inttest_starrocks:
+    connection:
+      type: starrocks
+      host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
+      port: 9030
+      user: root
+      password: ""
+      check_import: false
+    state_connection:
+      type: duckdb
 
 
   # Cloud databases
