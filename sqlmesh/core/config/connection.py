@@ -2127,6 +2127,10 @@ class ClickhouseConnectionConfig(ConnectionConfig):
                 "virtual_catalog cannot be an empty string. "
                 "Omit the field to use the default synthetic prefix (__<gateway_name>__)."
             )
+        if v is not None and "." in v:
+            raise ConfigError(
+                f"virtual_catalog must be a single identifier with no dots (got: {v!r})"
+            )
         return v
 
     @property

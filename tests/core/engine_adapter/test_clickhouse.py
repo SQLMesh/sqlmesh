@@ -1490,3 +1490,88 @@ def test_clickhouse_connection_config_virtual_catalog_empty_string_rejected():
 
     with pytest.raises(ConfigError, match="virtual_catalog cannot be an empty string"):
         ClickhouseConnectionConfig(host="localhost", username="user", virtual_catalog="   ")
+
+
+def test_virtual_catalog_stripped_in_delete_from(make_mocked_engine_adapter: t.Callable):
+    """delete_from() must strip the virtual catalog prefix before building the DELETE expression."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    assert adapter._default_catalog == "__ch_gw__"
+
+    adapter.delete_from("__ch_gw__.mydb.my_table", "a = 1")
+
+    sql_calls = to_sql_calls(adapter)
+    assert len(sql_calls) == 1
+    assert "__ch_gw__" not in sql_calls[0]
+    assert "mydb" in sql_calls[0]
+    assert "my_table" in sql_calls[0]
+    assert "DELETE FROM" in sql_calls[0]
+
+
+def test_virtual_catalog_stripped_in_insert_overwrite_by_partition(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    """insert_overwrite_by_partition() must strip the virtual catalog prefix before any SQL is sent."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    assert adapter._default_catalog == "__ch_gw__"
+
+    # Patch _insert_overwrite_by_condition so we can inspect how table_name was passed.
+    overwrite_mock = mocker.patch.object(adapter, "_insert_overwrite_by_condition")
+    # Also patch _get_source_queries_and_columns_to_types to avoid needing a real query.
+    source_query_mock = mocker.patch.object(
+        adapter,
+        "_get_source_queries_and_columns_to_types",
+        return_value=([], {}),
+    )
+
+    adapter.insert_overwrite_by_partition(
+        "__ch_gw__.mydb.my_table",
+        parse_one("SELECT 1 AS col"),
+        partitioned_by=[exp.column("ds")],
+    )
+
+    # The table_name passed to _insert_overwrite_by_condition must not contain the virtual catalog.
+    assert overwrite_mock.called
+    table_name_arg = overwrite_mock.call_args[0][0]
+    table_name_sql = (
+        table_name_arg.sql("clickhouse")
+        if isinstance(table_name_arg, exp.Expression)
+        else str(table_name_arg)
+    )
+    assert "__ch_gw__" not in table_name_sql
+
+    # The target_table passed to _get_source_queries_and_columns_to_types must also be stripped.
+    assert source_query_mock.called
+    target_table_kwarg = source_query_mock.call_args[1].get(
+        "target_table",
+        source_query_mock.call_args[0][2] if len(source_query_mock.call_args[0]) > 2 else None,
+    )
+    if target_table_kwarg is not None:
+        target_sql = (
+            target_table_kwarg.sql("clickhouse")
+            if isinstance(target_table_kwarg, exp.Expression)
+            else str(target_table_kwarg)
+        )
+        assert "__ch_gw__" not in target_sql
+
+
+def test_virtual_catalog_stripped_in_alter_table(make_mocked_engine_adapter: t.Callable):
+    """alter_table() must strip the virtual catalog prefix from each ALTER TABLE statement."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    assert adapter._default_catalog == "__ch_gw__"
+
+    alter_expr = exp.Alter(
+        this=exp.to_table("__ch_gw__.mydb.my_table"),
+        kind="TABLE",
+        actions=[exp.Drop(this=exp.to_column("col_a"), kind="COLUMN")],
+    )
+    adapter.alter_table([alter_expr])
+
+    sql_calls = to_sql_calls(adapter)
+    assert len(sql_calls) == 1
+    assert "__ch_gw__" not in sql_calls[0]
+    assert "mydb" in sql_calls[0]
+    assert "my_table" in sql_calls[0]
+    assert "ALTER TABLE" in sql_calls[0]

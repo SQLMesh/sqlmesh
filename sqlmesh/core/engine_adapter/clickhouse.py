@@ -208,8 +208,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                         f"clickhouse requires that all catalog operations be against a single catalog: "
                         f"{self._default_catalog}. Provided catalog: {catalog_name}"
                     )
-                schema_exp.set("catalog", None)
-                schema_name = schema_exp
+                schema_name = self._strip_virtual_catalog(schema_exp)
 
         # can't call super() because it will try to set a catalog
         return self._create_schema(
@@ -481,6 +480,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         source_columns: t.Optional[t.List[str]] = None,
     ) -> None:
+        table_name = self._strip_virtual_catalog(table_name)
         source_queries, target_columns_to_types = self._get_source_queries_and_columns_to_types(
             query_or_df,
             target_columns_to_types,
@@ -595,6 +595,20 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 target_columns_to_types or self.columns(table_name),
             )
 
+    def _strip_virtual_catalog(self, name: "TableName") -> exp.Table:
+        """Strip the virtual catalog prefix from a table name if present.
+
+        When a virtual catalog has been injected, ClickHouse table names carry a
+        synthetic catalog prefix (e.g. ``__gw__``) so they match the 3-level FQN
+        depth of catalog-aware peers.  This helper removes that prefix before any
+        SQL is sent to the wire, since ClickHouse only supports a two-level
+        ``[database].[table]`` naming scheme.
+        """
+        table = exp.to_table(name)
+        if self._default_catalog and table.catalog == self._default_catalog:
+            table.set("catalog", None)
+        return table
+
     def _exchange_tables(
         self,
         old_table_name: TableName,
@@ -633,7 +647,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         self.execute(f"RENAME TABLE {old_table_sql} TO {new_table_sql}{self._on_cluster_sql()}")
 
     def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
-        delete_expr = exp.delete(table_name, where)
+        delete_expr = exp.delete(self._strip_virtual_catalog(table_name), where)
         if self.engine_run_mode.is_cluster:
             delete_expr.set("cluster", exp.OnCluster(this=exp.to_identifier(self.cluster)))
         self.execute(delete_expr)
@@ -649,6 +663,9 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             for alter_expression in [
                 x.expression if isinstance(x, TableAlterOperation) else x for x in alter_expressions
             ]:
+                if self._default_catalog and isinstance(alter_expression.this, exp.Table):
+                    if alter_expression.this.catalog == self._default_catalog:
+                        alter_expression.this.set("catalog", None)
                 if self.engine_run_mode.is_cluster:
                     alter_expression.set(
                         "cluster", exp.OnCluster(this=exp.to_identifier(self.cluster))

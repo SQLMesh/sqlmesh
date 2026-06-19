@@ -229,12 +229,14 @@ class EngineAdapter:
         """
         return False
 
-    def inject_virtual_catalog(self, catalog: str) -> None:
-        """Inject a virtual catalog name for multi-gateway nesting alignment.
+    def inject_virtual_catalog(self, gateway: str) -> None:
+        """Inject a gateway name to configure the adapter's virtual catalog.
 
-        Only call this on adapters that return True from supports_virtual_catalog(). After
-        injection, catalog_support should return SINGLE_CATALOG_ONLY so the set_catalog decorator
-        strips the virtual catalog from DDL expressions instead of raising an error.
+        The adapter determines the final catalog name from the gateway name (e.g. ClickHouse
+        wraps it as __{gateway}__). Only call this on adapters that return True from
+        supports_virtual_catalog(). After injection, catalog_support should return
+        SINGLE_CATALOG_ONLY so the set_catalog decorator strips the virtual catalog from DDL
+        expressions instead of raising an error.
         """
         raise NotImplementedError(
             f"{self.dialect} does not support virtual catalog injection. "
