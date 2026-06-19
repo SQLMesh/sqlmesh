@@ -28,12 +28,12 @@ This will create the configuration file and directories, which are found in all 
 
 SQLMesh will also automatically generate models to ingest data from the pipeline incrementally. Incremental loading is ideal for large datasets where recomputing entire tables is resource-intensive. In this case utilizing the [`INCREMENTAL_BY_TIME_RANGE` model kind](../concepts/models/model_kinds.md#incremental_by_time_range). However, these model definitions can be customized to meet your specific project needs.
 
-#### Specify the path to the pipelines directory
+#### Specify the path to the pipelines working directory
 
-The default location for dlt pipelines is `~/.dlt/pipelines/<pipeline_name>`. If your pipelines are in a [different directory](https://dlthub.com/docs/general-usage/pipeline#separate-working-environments-with-pipelines_dir), use the `--dlt-path` argument to specify the path explicitly:
+The default location for dlt pipeline working state is `~/.dlt/pipelines/<pipeline_name>`. If dlt stores your pipeline state in a [different pipelines working directory](https://dlthub.com/docs/general-usage/pipeline#separate-working-environments-with-pipelines_dir), use the `--dlt-path` argument to specify that directory explicitly. This should be the directory where dlt stores pipeline state, not the directory containing your pipeline scripts:
 
 ```bash
-sqlmesh init -t dlt --dlt-pipeline <pipeline-name> --dlt-path <pipelines-directory> dialect
+sqlmesh init -t dlt --dlt-pipeline <pipeline-name> --dlt-path <pipelines-working-directory> dialect
 ```
 
 ### Generating models on demand
@@ -58,10 +58,10 @@ sqlmesh dlt_refresh <pipeline-name> --force
 sqlmesh dlt_refresh <pipeline-name> --table <dlt-table>
 ```
 
-- **Provide the explicit path to the pipelines directory** (using `--dlt-path`):
+- **Provide the explicit path to the pipelines working directory** (using `--dlt-path`):
 
 ```bash
-sqlmesh dlt_refresh <pipeline-name> --dlt-path <pipelines-directory>
+sqlmesh dlt_refresh <pipeline-name> --dlt-path <pipelines-working-directory>
 ```
 
 #### Configuration
