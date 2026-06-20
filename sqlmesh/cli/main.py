@@ -620,6 +620,11 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
     is_flag=True,
     help="Wait for the environment to be deleted before returning. If not specified, the environment will be deleted asynchronously by the janitor process. This option requires a connection to the data warehouse.",
 )
+@click.option(
+    "--cleanup-snapshots",
+    is_flag=True,
+    help="After invalidating, immediately delete physical snapshot tables that are exclusively owned by this environment (not referenced by any other environment). Implies --sync.",
+)
 @click.pass_context
 @error_handler
 @cli_analytics

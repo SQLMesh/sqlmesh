@@ -108,7 +108,11 @@ from sqlmesh.core.state_sync import (
     StateReader,
     StateSync,
 )
-from sqlmesh.core.janitor import cleanup_expired_views, delete_expired_snapshots
+from sqlmesh.core.janitor import (
+    cleanup_expired_views,
+    delete_expired_snapshots,
+    delete_snapshots_for_environment,
+)
 from sqlmesh.core.table_diff import TableDiff
 from sqlmesh.core.test import (
     ModelTextTestResult,
@@ -1835,18 +1839,44 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     @python_api_analytics
-    def invalidate_environment(self, name: str, sync: bool = False) -> None:
+    def invalidate_environment(
+        self, name: str, sync: bool = False, cleanup_snapshots: bool = False
+    ) -> None:
         """Invalidates the target environment by setting its expiration timestamp to now.
 
         Args:
             name: The name of the environment to invalidate.
             sync: If True, the call blocks until the environment is deleted. Otherwise, the environment will
                 be deleted asynchronously by the janitor process.
+            cleanup_snapshots: If True, immediately deletes physical snapshot tables that are exclusively
+                owned by this environment (not referenced by any other environment). Implies sync=True.
         """
         name = Environment.sanitize_name(name)
+
+        if cleanup_snapshots:
+            # Capture snapshot IDs before invalidation so we can scope the cleanup afterwards.
+            env = self.state_sync.get_environment(name)
+            target_snapshot_ids = {s.snapshot_id for s in env.snapshots} if env else set()
+
         self.state_sync.invalidate_environment(name)
-        if sync:
+
+        if sync or cleanup_snapshots:
             self._cleanup_environments(name=name)
+            if cleanup_snapshots and target_snapshot_ids:
+                failures = delete_snapshots_for_environment(
+                    self.state_sync,
+                    self.snapshot_evaluator,
+                    target_snapshot_ids,
+                    console=self.console,
+                )
+                if failures:
+                    summary = "\n".join(failures)
+                    if self.config.janitor.warn_on_delete_failure:
+                        self.console.log_warning(
+                            f"Snapshot cleanup completed with failures:\n{summary}"
+                        )
+                    else:
+                        raise SQLMeshError(f"Snapshot cleanup completed with failures:\n{summary}")
             self.console.log_success(f"Environment '{name}' deleted.")
         else:
             self.console.log_success(f"Environment '{name}' invalidated.")

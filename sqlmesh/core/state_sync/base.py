@@ -308,6 +308,7 @@ class StateReader(abc.ABC):
         batch_range: ExpiredBatchRange,
         current_ts: t.Optional[int] = None,
         ignore_ttl: bool = False,
+        target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     ) -> t.Optional[ExpiredSnapshotBatch]:
         """Returns a single batch of expired snapshots ordered by (updated_ts, name, identifier).
 
@@ -315,6 +316,8 @@ class StateReader(abc.ABC):
             current_ts: Timestamp used to evaluate expiration.
             ignore_ttl: If True, include snapshots regardless of TTL (only checks if unreferenced).
             batch_range: The range of the batch to fetch.
+            target_snapshot_ids: If provided, only consider snapshots with these IDs. Useful for
+                scoped cleanup after environment invalidation.
 
         Returns:
             A batch describing expired snapshots or None if no snapshots are pending cleanup.
@@ -368,6 +371,7 @@ class StateSync(StateReader, abc.ABC):
         batch_range: ExpiredBatchRange,
         ignore_ttl: bool = False,
         current_ts: t.Optional[int] = None,
+        target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     ) -> None:
         """Removes expired snapshots.
 
@@ -379,6 +383,8 @@ class StateSync(StateReader, abc.ABC):
             ignore_ttl: Ignore the TTL on the snapshot when considering it expired. This has the effect of deleting
                 all snapshots that are not referenced in any environment
             current_ts: Timestamp used to evaluate expiration.
+            target_snapshot_ids: If provided, only delete snapshots with these IDs. Useful for
+                scoped cleanup after environment invalidation.
         """
 
     @abc.abstractmethod

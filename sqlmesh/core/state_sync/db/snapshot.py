@@ -170,6 +170,7 @@ class SnapshotState:
         current_ts: int,
         ignore_ttl: bool,
         batch_range: ExpiredBatchRange,
+        target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     ) -> t.Optional[ExpiredSnapshotBatch]:
         expired_query = exp.select("name", "identifier", "version", "updated_ts").from_(
             self.snapshots_table
@@ -179,6 +180,17 @@ class SnapshotState:
             expired_query = expired_query.where(
                 (exp.column("updated_ts") + exp.column("ttl_ms")) <= current_ts
             )
+
+        if target_snapshot_ids is not None:
+            target_conditions = list(
+                snapshot_id_filter(
+                    self.engine_adapter,
+                    target_snapshot_ids,
+                    batch_size=self.SNAPSHOT_BATCH_SIZE,
+                )
+            )
+            if target_conditions:
+                expired_query = expired_query.where(exp.or_(*target_conditions))
 
         expired_query = expired_query.where(batch_range.where_filter)
 
