@@ -189,8 +189,7 @@ class SnapshotState:
                     batch_size=self.SNAPSHOT_BATCH_SIZE,
                 )
             )
-            if target_conditions:
-                expired_query = expired_query.where(exp.or_(*target_conditions))
+            expired_query = expired_query.where(exp.or_(*target_conditions))
 
         expired_query = expired_query.where(batch_range.where_filter)
 

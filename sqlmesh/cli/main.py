@@ -623,7 +623,7 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
 @click.option(
     "--cleanup-snapshots",
     is_flag=True,
-    help="After invalidating, immediately delete physical snapshot tables that are exclusively owned by this environment (not referenced by any other environment). Implies --sync.",
+    help="After invalidating, immediately delete physical snapshot tables that are exclusively owned by this environment (not referenced by any other environment). Cleanup runs synchronously regardless of --sync.",
 )
 @click.pass_context
 @error_handler

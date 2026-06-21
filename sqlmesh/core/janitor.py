@@ -251,11 +251,7 @@ def delete_snapshots_for_environment(
 
     if cleanup_succeeded or force_delete:
         try:
-            state_sync.delete_expired_snapshots(
-                batch_range=ExpiredBatchRange.all_batch_range(),
-                ignore_ttl=True,
-                target_snapshot_ids=target_snapshot_ids,
-            )
+            state_sync.delete_snapshots(batch.expired_snapshot_ids)
             logger.info(
                 "Cleaned up %s snapshots from invalidated environment",
                 len(batch.expired_snapshot_ids),

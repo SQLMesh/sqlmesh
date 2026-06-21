@@ -99,6 +99,7 @@ from sqlmesh.core.snapshot import (
     Snapshot,
     SnapshotEvaluator,
     SnapshotFingerprint,
+    SnapshotId,
     missing_intervals,
     to_table_mapping,
 )
@@ -1849,18 +1850,24 @@ class GenericContext(BaseContext, t.Generic[C]):
             sync: If True, the call blocks until the environment is deleted. Otherwise, the environment will
                 be deleted asynchronously by the janitor process.
             cleanup_snapshots: If True, immediately deletes physical snapshot tables that are exclusively
-                owned by this environment (not referenced by any other environment). Implies sync=True.
+                owned by this environment (not referenced by any other environment). Cleanup runs
+                synchronously regardless of --sync.
         """
         name = Environment.sanitize_name(name)
+        sync = sync or cleanup_snapshots
 
+        target_snapshot_ids: t.Set[SnapshotId] = set()
         if cleanup_snapshots:
             # Capture snapshot IDs before invalidation so we can scope the cleanup afterwards.
             env = self.state_sync.get_environment(name)
-            target_snapshot_ids = {s.snapshot_id for s in env.snapshots} if env else set()
+            if env is None:
+                logger.warning("Environment '%s' does not exist; skipping snapshot cleanup.", name)
+                return
+            target_snapshot_ids = {s.snapshot_id for s in env.snapshots}
 
         self.state_sync.invalidate_environment(name)
 
-        if sync or cleanup_snapshots:
+        if sync:
             self._cleanup_environments(name=name)
             if cleanup_snapshots and target_snapshot_ids:
                 failures = delete_snapshots_for_environment(
