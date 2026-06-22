@@ -169,7 +169,7 @@ def cli(
 @click.option(
     "--dlt-path",
     type=str,
-    help="The directory where the DLT pipeline resides. Use alongside template: dlt",
+    help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines). Use alongside template: dlt",
 )
 @click.pass_context
 @error_handler
@@ -1155,7 +1155,7 @@ def table_name(
 @click.option(
     "--dlt-path",
     type=str,
-    help="The directory where the DLT pipeline resides.",
+    help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines).",
 )
 @click.pass_context
 @error_handler

@@ -2086,6 +2086,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     password: t.Optional[str] = None
     port: t.Optional[int] = None
     cluster: t.Optional[str] = None
+    virtual_catalog: t.Optional[str] = None
     connect_timeout: int = 10
     send_receive_timeout: int = 300
     query_limit: int = 0
@@ -2119,6 +2120,19 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     DISPLAY_ORDER: t.ClassVar[t.Literal[6]] = 6
 
     _engine_import_validator = _get_engine_import_validator("clickhouse_connect", "clickhouse")
+
+    @field_validator("virtual_catalog")
+    def validate_virtual_catalog(cls, v: t.Optional[str]) -> t.Optional[str]:
+        if v is not None and not v.strip():
+            raise ConfigError(
+                "virtual_catalog cannot be an empty string. "
+                "Omit the field to use the default synthetic prefix (__<gateway_name>__)."
+            )
+        if v is not None and "." in v:
+            raise ConfigError(
+                f"virtual_catalog must be a single identifier with no dots (got: {v!r})"
+            )
+        return v
 
     @property
     def _connection_kwargs_keys(self) -> t.Set[str]:
@@ -2181,7 +2195,11 @@ class ClickhouseConnectionConfig(ConnectionConfig):
 
     @property
     def _extra_engine_config(self) -> t.Dict[str, t.Any]:
-        return {"cluster": self.cluster, "cloud_mode": self.cloud_mode}
+        return {
+            "cluster": self.cluster,
+            "cloud_mode": self.cloud_mode,
+            "virtual_catalog": self.virtual_catalog,
+        }
 
     @property
     def _static_connection_kwargs(self) -> t.Dict[str, t.Any]:

@@ -22,7 +22,8 @@ def generate_dlt_models_and_settings(
         pipeline_name: The name of the DLT pipeline to attach to.
         dialect: The SQL dialect to use for generating SQLMesh models.
         tables: A list of table names to include.
-        dlt_path: The path to the directory containing the DLT pipelines.
+        dlt_path: The path to the DLT pipelines working directory, where DLT stores
+            pipeline state (by default ~/.dlt/pipelines).
 
     Returns:
         A tuple containing a set of the SQLMesh model definitions, the connection config and the start date.
@@ -34,8 +35,21 @@ def generate_dlt_models_and_settings(
 
     try:
         pipeline = dlt.attach(pipeline_name=pipeline_name, pipelines_dir=dlt_path or "")
-    except CannotRestorePipelineException:
-        raise click.ClickException(f"Could not attach to pipeline {pipeline_name}")
+    except CannotRestorePipelineException as e:
+        from pathlib import Path
+        from dlt.common.pipeline import get_dlt_pipelines_dir
+
+        searched_dir = dlt_path or get_dlt_pipelines_dir()
+        msg = f"Could not attach to pipeline {pipeline_name}.\nSearched in: {searched_dir}\n{e}"
+        if dlt_path and (Path(get_dlt_pipelines_dir()) / pipeline_name).exists():
+            msg += (
+                f"\nHint: A pipeline named '{pipeline_name}' exists in the default pipelines "
+                f"working directory '{get_dlt_pipelines_dir()}'. Note that --dlt-path must "
+                "point to the directory where DLT stores pipeline working state (by default "
+                "~/.dlt/pipelines), not the directory containing your pipeline scripts. "
+                "Try omitting --dlt-path."
+            )
+        raise click.ClickException(msg)
 
     schema = pipeline.default_schema
     dataset = pipeline.dataset_name
