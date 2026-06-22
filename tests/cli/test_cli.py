@@ -995,7 +995,7 @@ def test_dlt_pipeline(runner, tmp_path):
         exec(file.read())
 
     # This should fail since it won't be able to locate the pipeline in this path
-    with pytest.raises(ClickException, match=r".*Could not attach to pipeline*"):
+    with pytest.raises(ClickException, match=r".*Could not attach to pipeline*") as excinfo:
         init_example_project(
             tmp_path,
             "duckdb",
@@ -1003,6 +1003,12 @@ def test_dlt_pipeline(runner, tmp_path):
             pipeline="sushi",
             dlt_path="./dlt2/pipelines",
         )
+
+    # The error should surface where the pipeline was searched for and, since the
+    # pipeline exists in the default working directory, a hint about --dlt-path
+    error_message = str(excinfo.value)
+    assert "Searched in: ./dlt2/pipelines" in error_message
+    assert "Try omitting --dlt-path" in error_message
 
     # By setting the pipelines path where the pipeline directory is located, it should work
     dlt_path = get_dlt_pipelines_dir()

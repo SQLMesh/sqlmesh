@@ -223,6 +223,31 @@ class EngineAdapter:
     def catalog_support(self) -> CatalogSupport:
         return CatalogSupport.UNSUPPORTED
 
+    def supports_virtual_catalog(self) -> bool:
+        """Return True if this adapter can accept a virtual catalog for multi-gateway nesting alignment.
+
+        When a project mixes catalog-aware gateways (e.g. DuckDB) with catalog-unsupported gateways
+        (e.g. ClickHouse), all adapters need a uniform 3-level FQN so MappingSchema nesting stays
+        consistent. Adapters that return True here opt in to receiving an injected virtual catalog
+        via inject_virtual_catalog(), which causes the set_catalog decorator to strip the catalog
+        from DDL expressions rather than raising UnsupportedCatalogOperationError.
+        """
+        return False
+
+    def inject_virtual_catalog(self, gateway: str) -> None:
+        """Inject a gateway name to configure the adapter's virtual catalog.
+
+        The adapter determines the final catalog name from the gateway name (e.g. ClickHouse
+        wraps it as __{gateway}__). Only call this on adapters that return True from
+        supports_virtual_catalog(). After injection, catalog_support should return
+        SINGLE_CATALOG_ONLY so the set_catalog decorator strips the virtual catalog from DDL
+        expressions instead of raising an error.
+        """
+        raise NotImplementedError(
+            f"{self.dialect} does not support virtual catalog injection. "
+            "Override supports_virtual_catalog() to return True and implement inject_virtual_catalog()."
+        )
+
     @cached_property
     def schema_differ(self) -> SchemaDiffer:
         return SchemaDiffer(
