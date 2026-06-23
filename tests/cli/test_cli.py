@@ -1020,8 +1020,8 @@ def test_dlt_pipeline(runner, tmp_path):
 gateways:
   duckdb:
     connection:
-      type: duckdb
       database: {dataset_path}
+      type: duckdb
 default_gateway: duckdb
 
 # --- Model Defaults ---
