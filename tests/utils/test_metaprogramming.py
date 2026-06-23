@@ -1,3 +1,4 @@
+import ast
 import typing as t
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ def test_print_exception(mocker: MockerFixture):
     except Exception as ex:
         print_exception(ex, test_env, out_mock)
 
-    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 49, in test_print_exception
+    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 50, in test_print_exception
     eval\("test_fun\(\)", env\).*
 
   File '/test/path.py' \(or imported file\), line 2, in test_fun
@@ -368,7 +369,8 @@ def sample_context_manager():
         "my_lambda": Executable(
             name="my_lambda",
             path="test_metaprogramming.py",
-            payload="my_lambda = lambda: print('z')",
+            # Match normalize_source output across Python versions
+            payload=ast.unparse(ast.parse("my_lambda = lambda: print('z')")).strip(),
         ),
         "normalize_model_name": Executable(
             payload="from sqlmesh.core.dialect import normalize_model_name",
