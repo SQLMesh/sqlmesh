@@ -5190,6 +5190,90 @@ def test_session_properties_authorization_validation():
         )
 
 
+def test_session_properties_query_tags_validation():
+    model = load_sql_based_model(
+        d.parse(
+            """
+        MODEL (
+            name test_schema.test_model,
+            dialect databricks,
+            session_properties (
+                query_tags = MAP('team', 'data-eng', 'app', 'sqlmesh', 'feature', NULL)
+            )
+        );
+        SELECT a FROM tbl;
+        """,
+            default_dialect="databricks",
+        )
+    )
+    assert model.session_properties == {
+        "query_tags": parse_one(
+            "MAP('team', 'data-eng', 'app', 'sqlmesh', 'feature', NULL)",
+            dialect="databricks",
+        )
+    }
+
+    with pytest.raises(
+        ConfigError,
+        match=r"Invalid value for `session_properties.query_tags`. Must be a map.",
+    ):
+        load_sql_based_model(
+            d.parse(
+                """
+            MODEL (
+                name test_schema.test_model,
+                dialect databricks,
+                session_properties (
+                    query_tags = 'invalid value'
+                )
+            );
+            SELECT a FROM tbl;
+            """,
+                default_dialect="databricks",
+            )
+        )
+
+    with pytest.raises(
+        ConfigError,
+        match=r"Invalid key in `session_properties.query_tags`. Keys must be string literals.",
+    ):
+        load_sql_based_model(
+            d.parse(
+                """
+            MODEL (
+                name test_schema.test_model,
+                dialect databricks,
+                session_properties (
+                    query_tags = MAP(1, 'data-eng')
+                )
+            );
+            SELECT a FROM tbl;
+            """,
+                default_dialect="databricks",
+            )
+        )
+
+    with pytest.raises(
+        ConfigError,
+        match=r"Invalid value in `session_properties.query_tags`. Values must be string literals or NULL.",
+    ):
+        load_sql_based_model(
+            d.parse(
+                """
+            MODEL (
+                name test_schema.test_model,
+                dialect databricks,
+                session_properties (
+                    query_tags = MAP('team', 1)
+                )
+            );
+            SELECT a FROM tbl;
+            """,
+                default_dialect="databricks",
+            )
+        )
+
+
 def test_model_jinja_macro_rendering():
     expressions = d.parse(
         """
@@ -11716,6 +11800,35 @@ def test_query_label_and_authorization_macro() -> None:
     assert model.render_session_properties() == {
         "query_label": d.parse_one("[('key', 'value')]"),
         "authorization": d.parse_one("'test_authorization'"),
+    }
+
+
+def test_query_tags_macro() -> None:
+    @macro()
+    def test_query_tags_macro(evaluator):
+        return "MAP('team', 'data-eng')"
+
+    expressions = d.parse(
+        """
+        MODEL (
+           name db.table,
+           dialect databricks,
+           session_properties (
+            query_tags = @test_query_tags_macro()
+           )
+        );
+
+        SELECT 1 AS c;
+        """
+    )
+
+    model = load_sql_based_model(expressions)
+    assert model.session_properties == {
+        "query_tags": d.parse_one("@test_query_tags_macro()"),
+    }
+
+    assert model.render_session_properties() == {
+        "query_tags": d.parse_one("MAP('team', 'data-eng')", dialect="databricks"),
     }
 
 

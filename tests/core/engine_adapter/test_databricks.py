@@ -135,7 +135,13 @@ def test_session_query_tags(mocker: MockFixture, make_mocked_engine_adapter: t.C
     )
     adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
 
-    with adapter.session({"query_tags": _query_tags_map("team", "data-eng", "app", "sqlmesh")}):
+    with adapter.session(
+        {
+            "query_tags": d.parse_one(
+                "MAP('team', 'data-eng', 'app', 'sqlmesh')", dialect="databricks"
+            )
+        }
+    ):
         adapter.execute("SELECT 1")
 
     adapter.cursor.execute.assert_called_with(

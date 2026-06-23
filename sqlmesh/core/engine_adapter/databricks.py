@@ -36,7 +36,7 @@ def _query_tags(
     if not query_tags:
         return None
 
-    if not isinstance(query_tags, exp.Map):
+    if not isinstance(query_tags, (exp.Map, exp.VarMap)):
         raise SQLMeshError("Invalid value for `session_properties.query_tags`. Must be a map.")
 
     keys = query_tags.args.get("keys")
