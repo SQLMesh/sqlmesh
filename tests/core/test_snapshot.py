@@ -1720,6 +1720,95 @@ def test_categorize_change_sql_redundant_cast(make_snapshot):
         is None
     )
 
+    # Mid-list insert with ORDER BY ordinal shifts the referenced projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t ORDER BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t ORDER BY 2"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Append at end with ORDER BY ordinal leaves existing ordinal bindings unchanged.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, s::TEXT, x::TEXT FROM t ORDER BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t ORDER BY 2"))
+            ),
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # Mid-list insert with GROUP BY ordinal shifts the referenced projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t GROUP BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t GROUP BY 2"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Aliased UDTF projection via fallback path: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one(
+                        "SELECT a::DATE AS a, x::TEXT AS x, EXPLODE(y) AS y, s::TEXT AS s FROM t"
+                    ),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE AS a, s::TEXT AS s FROM t"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # UDTF inside aliased scalar subquery remains non-breaking.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one(
+                        "SELECT a::DATE AS a, (SELECT x FROM unnest(b) x) AS sub, s::TEXT AS s FROM t"
+                    ),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE AS a, s::TEXT AS s FROM t"))
+            ),
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
 
 def test_categorize_change_seed(make_snapshot, tmp_path):
     config = CategorizerConfig(seed=AutoCategorizationMode.SEMI)

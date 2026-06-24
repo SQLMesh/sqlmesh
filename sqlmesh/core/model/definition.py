@@ -2907,6 +2907,18 @@ def _is_projection(expr: exp.Expr) -> bool:
     return isinstance(parent, exp.Select) and expr.arg_key == "expressions"
 
 
+def _has_ordinal_references(query: exp.Select) -> bool:
+    order = query.args.get("order")
+    if order and any(
+        isinstance(ob.this, exp.Literal) and ob.this.is_number for ob in order.expressions
+    ):
+        return True
+    group = query.args.get("group")
+    return bool(
+        group and any(isinstance(gb, exp.Literal) and gb.is_number for gb in group.expressions)
+    )
+
+
 def _additive_projection_change(
     previous_query: exp.Query,
     this_query: exp.Query,
@@ -2923,8 +2935,9 @@ def _additive_projection_change(
     Returns ``False`` (non-breaking) only when the change is provably additive:
       * both queries are simple ``SELECT`` statements,
       * everything other than the projection list is structurally identical,
-      * no added projection is a (potentially cardinality-changing) ``UDTF``, and
-      * every previous projection is preserved, in order, within the new projection list.
+      * no added projection is a (potentially cardinality-changing) ``UDTF``,
+      * every previous projection is preserved, in order, within the new projection list, and
+      * no mid-list insert shifts ordinal ``ORDER BY`` / ``GROUP BY`` references.
 
     Otherwise returns ``None`` (undetermined), preserving the conservative default.
     """
@@ -2942,7 +2955,8 @@ def _additive_projection_change(
     # Adding a UDTF projection (e.g. EXPLODE / UNNEST) can change row cardinality, so such a
     # change is not safely non-breaking even when it appears as an extra SELECT item.
     for projection in this_projections:
-        if isinstance(projection, exp.UDTF) and not projection.find_ancestor(exp.Subquery):
+        bare = projection.this if isinstance(projection, exp.Alias) else projection
+        if isinstance(bare, exp.UDTF):
             return None
 
     # Everything other than the projection list must be structurally identical. Replacing each
@@ -2960,15 +2974,24 @@ def _additive_projection_change(
     # parser built distinct object identities.
     this_projection_sql = [p.sql(dialect=dialect, comments=False) for p in this_projections]
     search_start = 0
+    matched_at: list[int] = []
     for projection in previous_projections:
         target_sql = projection.sql(dialect=dialect, comments=False)
         # Continue after the previous match so added columns can appear before, between, or after
         # the original projections, but existing projections cannot be reordered or rewritten.
         for index in range(search_start, len(this_projection_sql)):
             if this_projection_sql[index] == target_sql:
+                matched_at.append(index)
                 search_start = index + 1
                 break
         else:
+            return None
+
+    # Mid-list inserts shift ordinal references in ORDER BY / GROUP BY clauses.
+    if _has_ordinal_references(this_query):
+        matched_set = set(matched_at)
+        last_matched = matched_at[-1]
+        if any(i < last_matched for i in range(len(this_projections)) if i not in matched_set):
             return None
 
     # At this point the query shape is unchanged and all prior outputs are preserved, so the only
