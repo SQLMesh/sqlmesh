@@ -10,9 +10,21 @@ from sqlmesh.core import dialect as d
 from sqlmesh.core.engine_adapter import DatabricksEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 from sqlmesh.core.node import IntervalUnit
+from sqlmesh.utils.errors import SQLMeshError
 from tests.core.engine_adapter import to_sql_calls
 
 pytestmark = [pytest.mark.databricks, pytest.mark.engine]
+
+
+def _query_tags_map(*items: t.Optional[str]) -> exp.Map:
+    return exp.Map(
+        keys=exp.Array(expressions=[exp.Literal.string(item) for item in items[::2]]),
+        values=exp.Array(
+            expressions=[
+                exp.Null() if item is None else exp.Literal.string(item) for item in items[1::2]
+            ]
+        ),
+    )
 
 
 def test_replace_query_not_exists(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
@@ -115,6 +127,120 @@ def test_set_current_catalog(mocker: MockFixture, make_mocked_engine_adapter: t.
     adapter.set_current_catalog("test_catalog2")
 
     assert to_sql_calls(adapter) == ["USE CATALOG `test_catalog2`"]
+
+
+def test_session_query_tags(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with adapter.session(
+        {
+            "query_tags": d.parse_one(
+                "MAP('team', 'data-eng', 'app', 'sqlmesh')", dialect="databricks"
+            )
+        }
+    ):
+        adapter.execute("SELECT 1")
+
+    adapter.cursor.execute.assert_called_with(
+        "SELECT 1", query_tags={"team": "data-eng", "app": "sqlmesh"}
+    )
+
+    adapter.execute("SELECT 2")
+
+    adapter.cursor.execute.assert_called_with("SELECT 2")
+
+
+def test_session_query_tags_allow_none_values(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng", "feature", None)}):
+        adapter.execute("SELECT 1")
+
+    adapter.cursor.execute.assert_called_with(
+        "SELECT 1", query_tags={"team": "data-eng", "feature": None}
+    )
+
+
+def test_session_query_tags_do_not_override_explicit_query_tags(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng")}):
+        adapter.execute("SELECT 1", query_tags={"team": "analytics"})
+
+    adapter.cursor.execute.assert_called_with("SELECT 1", query_tags={"team": "analytics"})
+
+
+def test_session_query_tags_not_applied_to_spark_session_connection(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    mocker.patch.object(
+        DatabricksEngineAdapter,
+        "is_spark_session_connection",
+        new_callable=mocker.PropertyMock,
+        return_value=True,
+    )
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng")}):
+        adapter.execute("SELECT 1")
+
+    adapter.cursor.execute.assert_called_with("SELECT 1")
+
+
+def test_session_query_tags_not_applied_to_spark_engine_adapter(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    spark_cursor = mocker.Mock()
+    adapter._spark_engine_adapter = mocker.Mock(cursor=spark_cursor)
+    adapter._connection_pool.set_attribute("use_spark_engine_adapter", True)
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng")}):
+        adapter._connection_pool.set_attribute("use_spark_engine_adapter", True)
+        adapter.execute("SELECT 1")
+
+    spark_cursor.execute.assert_called_with("SELECT 1")
+
+
+@pytest.mark.parametrize(
+    "query_tags",
+    [
+        "team:data-eng",
+        exp.Map(
+            keys=exp.Array(expressions=[exp.Literal.number(1)]),
+            values=exp.Array(expressions=[exp.Literal.string("data-eng")]),
+        ),
+        exp.Map(
+            keys=exp.Array(expressions=[exp.Literal.string("team")]),
+            values=exp.Array(expressions=[exp.Literal.number(1)]),
+        ),
+    ],
+)
+def test_session_query_tags_invalid(query_tags, make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with pytest.raises(SQLMeshError, match="session_properties.query_tags"):
+        with adapter.session({"query_tags": query_tags}):
+            pass
 
 
 def test_get_current_catalog(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):

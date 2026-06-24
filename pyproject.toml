@@ -51,7 +51,7 @@ bigquery = [
 # pinned an older SQLGlot which is incompatible with SQLMesh
 bigframes = ["bigframes>=1.32.0"]
 clickhouse = ["clickhouse-connect"]
-databricks = ["databricks-sql-connector[pyarrow]"]
+databricks = ["databricks-sql-connector[pyarrow]>=4.2.6"]
 dev = [
     "agate",
     "beautifulsoup4",

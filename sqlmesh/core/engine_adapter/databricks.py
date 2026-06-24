@@ -30,6 +30,43 @@ if t.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _query_tags(
+    query_tags: t.Optional[t.Union[exp.Expr, str, int, float, bool]],
+) -> t.Optional[t.Dict[str, t.Optional[str]]]:
+    if not query_tags:
+        return None
+
+    if not isinstance(query_tags, (exp.Map, exp.VarMap)):
+        raise SQLMeshError("Invalid value for `session_properties.query_tags`. Must be a map.")
+
+    keys = query_tags.args.get("keys")
+    values = query_tags.args.get("values")
+    if not isinstance(keys, exp.Array) or not isinstance(values, exp.Array):
+        raise SQLMeshError(
+            "Invalid value for `session_properties.query_tags`. Must be a map with array "
+            "keys and array values."
+        )
+
+    tags: t.Dict[str, t.Optional[str]] = {}
+    for key, value in zip(keys.expressions, values.expressions):
+        if not isinstance(key, exp.Literal) or not key.is_string:
+            raise SQLMeshError(
+                "Invalid key in `session_properties.query_tags`. Keys must be string literals."
+            )
+
+        if isinstance(value, exp.Null):
+            tags[key.this] = None
+        elif isinstance(value, exp.Literal) and value.is_string:
+            tags[key.this] = value.this
+        else:
+            raise SQLMeshError(
+                "Invalid value in `session_properties.query_tags`. Values must be string "
+                "literals or NULL."
+            )
+
+    return tags
+
+
 class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
     DIALECT = "databricks"
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.REPLACE_WHERE
@@ -97,6 +134,12 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
     @property
     def is_spark_session_connection(self) -> bool:
         return isinstance(self.connection, SparkSessionConnection)
+
+    @property
+    def _is_databricks_sql_connector_connection(self) -> bool:
+        return not self.is_spark_session_connection and not self._connection_pool.get_attribute(
+            "use_spark_engine_adapter"
+        )
 
     def _set_spark_engine_adapter_if_needed(self) -> None:
         self._spark_engine_adapter = None
@@ -181,9 +224,22 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         """Begin a new session."""
         # Align the different possible connectors to a single catalog
         self.set_current_catalog(self.default_catalog)  # type: ignore
+        self._connection_pool.set_attribute("query_tags", _query_tags(properties.get("query_tags")))
 
     def _end_session(self) -> None:
+        self._connection_pool.set_attribute("query_tags", None)
         self._connection_pool.set_attribute("use_spark_engine_adapter", False)
+
+    def _execute(self, sql: str, track_rows_processed: bool = False, **kwargs: t.Any) -> None:
+        query_tags = self._connection_pool.get_attribute("query_tags")
+        if (
+            query_tags
+            and "query_tags" not in kwargs
+            and self._is_databricks_sql_connector_connection
+        ):
+            kwargs["query_tags"] = query_tags
+
+        return super()._execute(sql, track_rows_processed, **kwargs)
 
     def _df_to_source_queries(
         self,

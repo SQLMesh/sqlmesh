@@ -396,6 +396,38 @@ class ModelMeta(_Node):
                     raise ConfigError(
                         "Invalid value for `session_properties.authorization`. Must be a string literal."
                     )
+            elif prop_name == "query_tags":
+                query_tags = eq.right
+                if isinstance(query_tags, (d.MacroFunc, d.MacroVar)):
+                    continue
+
+                if not isinstance(query_tags, (exp.Map, exp.VarMap)):
+                    raise ConfigError(
+                        "Invalid value for `session_properties.query_tags`. Must be a map."
+                    )
+
+                keys = query_tags.args.get("keys")
+                values = query_tags.args.get("values")
+                if not isinstance(keys, exp.Array) or not isinstance(values, exp.Array):
+                    raise ConfigError(
+                        "Invalid value for `session_properties.query_tags`. Must be a map with array "
+                        "keys and array values."
+                    )
+
+                for key, value in zip(keys.expressions, values.expressions):
+                    if not isinstance(key, exp.Literal) or not key.is_string:
+                        raise ConfigError(
+                            "Invalid key in `session_properties.query_tags`. Keys must be string literals."
+                        )
+
+                    if not (
+                        isinstance(value, exp.Null)
+                        or (isinstance(value, exp.Literal) and value.is_string)
+                    ):
+                        raise ConfigError(
+                            "Invalid value in `session_properties.query_tags`. Values must be string "
+                            "literals or NULL."
+                        )
 
         return parsed_session_properties
 
