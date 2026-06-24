@@ -325,9 +325,13 @@ def _parse_join(
     macro = _parse_matching_macro(self, "JOIN")
     if not macro:
         self._retreat(index)
-        return self.__parse_join(skip_join_token=skip_join_token, parse_bracket=parse_bracket, alias_tokens=alias_tokens)  # type: ignore
+        return super(Parser, self)._parse_join(
+            skip_join_token=skip_join_token,
+            parse_bracket=parse_bracket,
+            alias_tokens=alias_tokens,
+        )
 
-    join = self.__parse_join(skip_join_token=True, alias_tokens=alias_tokens)  # type: ignore
+    join = super(Parser, self)._parse_join(skip_join_token=True, alias_tokens=alias_tokens)
     if method:
         join.set("method", method.text)
     if side:
