@@ -334,7 +334,9 @@ FROM "memory"."sushi"."marketing" AS "marketing"
             "@get_date() == '1996-02-10'",
             "'all'",
             3,
-            lambda expected_select: f"{expected_select}\nUNION ALL\n{expected_select}\nUNION ALL\n{expected_select}\n",
+            lambda expected_select: (
+                f"{expected_select}\nUNION ALL\n{expected_select}\nUNION ALL\n{expected_select}\n"
+            ),
         ),
         # Test case 4: DISTINCT type
         (
@@ -374,7 +376,9 @@ FROM "memory"."sushi"."marketing" AS "marketing"
             "",
             "",
             3,
-            lambda expected_select: f"{expected_select}\nUNION ALL\n{expected_select}\n\nUNION ALL\n{expected_select}\n",
+            lambda expected_select: (
+                f"{expected_select}\nUNION ALL\n{expected_select}\n\nUNION ALL\n{expected_select}\n"
+            ),
         ),
         # Test case 9: Missing union type AND condition one table
         (
@@ -2180,6 +2184,97 @@ def test_render_definition_partitioned_by():
   kind FULL,
   partitioned_by (DAY("a"), TRUNCATE("b", 4), BUCKET("c", 3))
 )"""
+    )
+
+
+def test_render_definition_clustered_by():
+    # Unquoted AUTO keyword → rendered without backticks or parens
+    for keyword in ("AUTO", "NONE"):
+        model = load_sql_based_model(
+            d.parse(
+                f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by {keyword}
+            );
+            SELECT 1 AS a
+            """
+            )
+        )
+        assert model.render_definition()[0].sql(pretty=True) == (
+            f"MODEL (\n"
+            f"  name db.test,\n"
+            f"  dialect databricks,\n"
+            f"  kind FULL,\n"
+            f"  clustered_by {keyword}\n"
+            f")"
+        )
+
+    # Backtick-quoted `auto` / `none` → treated as a real column name, rendered quoted
+    for name in ("auto", "none"):
+        model = load_sql_based_model(
+            d.parse(
+                f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by `{name}`
+            );
+            SELECT 1 AS `{name}`
+            """
+            )
+        )
+        assert model.render_definition()[0].sql(pretty=True) == (
+            f"MODEL (\n"
+            f"  name db.test,\n"
+            f"  dialect databricks,\n"
+            f"  kind FULL,\n"
+            f'  clustered_by "{name}"\n'
+            f")"
+        )
+
+    # Parens-wrapped (AUTO) → treated as a real column name, rendered quoted
+    model = load_sql_based_model(
+        d.parse(
+            """
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (auto)
+        );
+        SELECT 1 AS auto
+        """
+        )
+    )
+    assert model.render_definition()[0].sql(pretty=True) == (
+        'MODEL (\n  name db.test,\n  dialect databricks,\n  kind FULL,\n  clustered_by "auto"\n)'
+    )
+
+    # Multi-column → rendered with parens, unchanged
+    model = load_sql_based_model(
+        d.parse(
+            """
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (a, b)
+        );
+        SELECT 1 AS a, 2 AS b
+        """
+        )
+    )
+    assert model.render_definition()[0].sql(pretty=True) == (
+        "MODEL (\n"
+        "  name db.test,\n"
+        "  dialect databricks,\n"
+        "  kind FULL,\n"
+        '  clustered_by ("a", "b")\n'
+        ")"
     )
 
 
@@ -4048,6 +4143,138 @@ def test_model_normalization():
         clustered_by=["a", "b"],
     )
     assert model.clustered_by == [exp.to_column('"A"'), exp.to_column('"B"')]
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_clustered_by_keyword(keyword: str):
+    # Via SQL DDL
+    expr = d.parse(
+        f"""
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by {keyword}
+        );
+        SELECT 1 AS a
+        """
+    )
+    model = load_sql_based_model(expr)
+    assert len(model.clustered_by) == 1
+    assert model.clustered_by[0].sql(dialect="databricks").upper() == keyword
+    model.validate_definition()
+
+    # Via Python API with exp.Var
+    model2 = create_sql_model(
+        "db.test",
+        parse_one("SELECT 1 AS a"),
+        dialect="databricks",
+        kind=FullKind(),
+        clustered_by=exp.Var(this=keyword),
+    )
+    assert len(model2.clustered_by) == 1
+    assert model2.clustered_by[0].sql(dialect="databricks").upper() == keyword
+    model2.validate_definition()
+
+    # Via Python API with a plain string — must not silently become a quoted column
+    model3 = create_sql_model(
+        "db.test",
+        parse_one("SELECT 1 AS a"),
+        dialect="databricks",
+        kind=FullKind(),
+        clustered_by=keyword,
+    )
+    assert len(model3.clustered_by) == 1
+    assert isinstance(model3.clustered_by[0], exp.Var)
+    assert model3.clustered_by[0].name.upper() == keyword
+    model3.validate_definition()
+
+
+def test_clustered_by_quoted_keyword_column():
+    """A backtick-quoted column named `auto` or `none` is a real column, not a keyword."""
+    for name in ("auto", "none"):
+        expr = d.parse(
+            f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by `{name}`
+            );
+            SELECT 1 AS `{name}`
+            """
+        )
+        model = load_sql_based_model(expr)
+        assert len(model.clustered_by) == 1
+        # Must be a Column (quoted identifier), not treated as a keyword
+        assert isinstance(model.clustered_by[0], exp.Column)
+        assert model.clustered_by[0].name.lower() == name
+        model.validate_definition()
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_clustered_by_keyword_non_databricks_dialect(keyword: str):
+    """AUTO/NONE should be rejected for non-Databricks dialects as they are meaningless there."""
+    with pytest.raises((ConfigError, Exception)):
+        model = load_sql_based_model(
+            d.parse(
+                f"""
+                MODEL (
+                    name db.test,
+                    kind FULL,
+                    dialect duckdb,
+                    clustered_by {keyword}
+                );
+                SELECT 1 AS a
+                """
+            )
+        )
+        model.validate_definition()
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_clustered_by_mixed_list_pins_behaviour(keyword: str):
+    """clustered_by (a, AUTO) — AUTO alongside a real column is treated as a column named AUTO."""
+    expr = d.parse(
+        f"""
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (a, {keyword})
+        );
+        SELECT 1 AS a, 2 AS {keyword.lower()}
+        """
+    )
+    model = load_sql_based_model(expr)
+    # Both entries are real columns (AUTO/NONE inside parens is a column, not a keyword)
+    assert len(model.clustered_by) == 2
+    assert all(isinstance(c_expr, exp.Column) for c_expr in model.clustered_by)
+    model.validate_definition()
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_clustered_by_keyword_serialisation_round_trip(keyword: str):
+    """exp.Var(AUTO/NONE) must survive JSON serialisation and deserialisation unchanged."""
+    model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by {keyword}
+            );
+            SELECT 1 AS a
+            """
+        )
+    )
+    model_json = model.json()
+    deserialized = SqlModel.parse_raw(model_json)
+    assert deserialized.clustered_by == model.clustered_by
+    assert len(deserialized.clustered_by) == 1
+    assert isinstance(deserialized.clustered_by[0], exp.Var)
+    assert deserialized.clustered_by[0].name.upper() == keyword
 
 
 def test_incremental_unmanaged_validation():

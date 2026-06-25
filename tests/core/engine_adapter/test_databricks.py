@@ -458,6 +458,31 @@ def test_create_table_clustered_by(mocker: MockFixture, make_mocked_engine_adapt
     ]
 
 
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_create_table_clustered_by_keyword(
+    keyword: str, mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    columns_to_types = {
+        "cola": exp.DataType.build("INT"),
+        "colb": exp.DataType.build("TEXT"),
+    }
+    adapter.create_table(
+        "test_table",
+        columns_to_types,
+        clustered_by=[exp.Var(this=keyword)],
+    )
+
+    sql_calls = to_sql_calls(adapter)
+    assert sql_calls == [
+        f"CREATE TABLE IF NOT EXISTS `test_table` (`cola` INT, `colb` STRING) CLUSTER BY {keyword}",
+    ]
+
+
 def test_get_data_objects_distinguishes_view_types(mocker):
     adapter = DatabricksEngineAdapter(lambda: None, default_catalog="test_catalog")
 

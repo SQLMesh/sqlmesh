@@ -12,6 +12,7 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core import dialect as d
 from sqlmesh.core.config.common import VirtualEnvironmentMode
+from sqlmesh.core.constants import LIQUID_CLUSTERING_KEYWORDS
 from sqlmesh.core.config.linter import LinterConfig
 from sqlmesh.core.dialect import normalize_model_name
 from sqlmesh.utils import classproperty
@@ -190,10 +191,13 @@ class ModelMeta(_Node):
 
     @field_validator("partitioned_by_", "clustered_by", mode="before")
     def _partition_and_cluster_validator(cls, v: t.Any, info: ValidationInfo) -> t.List[exp.Expr]:
+        field = info.field_name or ""
+        dialect = (get_dialect(info) or "").lower()
+
         if (
             isinstance(v, list)
             and all(isinstance(i, str) for i in v)
-            and (info.field_name or "") == "partitioned_by_"
+            and field == "partitioned_by_"
         ):
             # this branch gets hit when we are deserializing from json because `partitioned_by` is stored as a List[str]
             # however, we should only invoke this if the list contains strings because this validator is also
@@ -206,9 +210,33 @@ class ModelMeta(_Node):
             )
             v = parsed.this.expressions if isinstance(parsed.this, exp.Schema) else v
 
+        if isinstance(v, str) and field == "clustered_by":
+            v = [v]
+
+        if isinstance(v, list) and field == "clustered_by" and dialect == "databricks":
+            # When deserializing from JSON, clustered_by is stored as List[str].
+            # Restore keyword sentinels (AUTO/NONE) before list_of_fields_validator normalises
+            # them into quoted columns.
+            v = [
+                exp.Var(this=item.upper())
+                if isinstance(item, str) and item.upper() in LIQUID_CLUSTERING_KEYWORDS
+                else item
+                for item in v
+            ]
+
         expressions = list_of_fields_validator(v, validation_data(info))
 
         for expression in expressions:
+            # AUTO and NONE are Databricks liquid clustering keywords, not column references.
+            # Only skip for clustered_by with the Databricks dialect — meaningless elsewhere.
+            if (
+                field == "clustered_by"
+                and dialect == "databricks"
+                and isinstance(expression, exp.Var)
+                and expression.name.upper() in LIQUID_CLUSTERING_KEYWORDS
+            ):
+                continue
+
             num_cols = len(list(expression.find_all(exp.Column)))
 
             error_msg: t.Optional[str] = None

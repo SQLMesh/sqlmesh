@@ -992,6 +992,12 @@ class _Model(ModelMeta, frozen=True):
                 values = [
                     col.name
                     for expr in values
+                    if not (
+                        field == "clustered_by"
+                        and (self.dialect or "").lower() == "databricks"
+                        and isinstance(expr, exp.Var)
+                        and expr.name.upper() in c.LIQUID_CLUSTERING_KEYWORDS
+                    )
                     for col in t.cast(
                         exp.Expr, exp.maybe_parse(expr, dialect=self.dialect)
                     ).find_all(exp.Column)
