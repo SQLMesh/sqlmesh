@@ -85,7 +85,7 @@ async def watch_project() -> None:
                         path not in loader._path_mtimes for loader in context._loaders
                     )
                     should_track_file = path.is_file() and in_paths
-                    should_reset_mtime = Change.added or is_modified_new_file
+                    should_reset_mtime = change == Change.added or is_modified_new_file
                     if should_track_file and should_reset_mtime:
                         for loader in context._loaders:
                             loader._path_mtimes[path] = 0
