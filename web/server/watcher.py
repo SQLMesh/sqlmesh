@@ -21,6 +21,7 @@ from web.server.utils import is_relative_to
 async def watch_project() -> None:
     settings = get_settings()
     context = get_context(settings)
+    project_root = settings.project_path.resolve()
     paths = [
         (settings.project_path / c.AUDITS).resolve(),
         (settings.project_path / c.MACROS).resolve(),
@@ -48,8 +49,11 @@ async def watch_project() -> None:
         changes: t.List[models.ArtifactChange] = []
         directories: t.Dict[str, models.Directory] = {}
         for change, path_str in entries:
-            path = Path(path_str)
-            relative_path = path.relative_to(settings.project_path)
+            event_path = Path(path_str)
+            # `awatch` may yield resolved paths even when the watched root is a symlink,
+            # so compare in resolved space and convert back to the symlinked project path
+            relative_path = event_path.resolve().relative_to(project_root)
+            path = settings.project_path / relative_path
             try:
                 if change == Change.deleted or not path.exists():
                     changes.append(
@@ -76,7 +80,7 @@ async def watch_project() -> None:
                         )
                     )
                 if context:
-                    in_paths = any(is_relative_to(path, p) for p in paths)
+                    in_paths = any(is_relative_to(path.resolve(), p) for p in paths)
                     is_modified_new_file = change == Change.modified and any(
                         path not in loader._path_mtimes for loader in context._loaders
                     )
