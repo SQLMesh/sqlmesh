@@ -92,9 +92,7 @@ def test_replace_by_key_composite_uses_join_delete(
 ):
     """Composite key DELETE uses JOIN instead of CONCAT_WS to allow index usage."""
     adapter = make_mocked_engine_adapter(MySQLEngineAdapter)
-    temp_table_mock = mocker.patch(
-        "sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table"
-    )
+    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table")
     temp_table_mock.return_value = exp.to_table("temporary")
 
     adapter.merge(
@@ -135,14 +133,81 @@ def test_replace_by_key_composite_uses_join_delete(
     )
 
 
+def test_replace_by_key_three_column_composite_key(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    """3-column composite key matching the original issue scenario (#5711)."""
+    adapter = make_mocked_engine_adapter(MySQLEngineAdapter)
+    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table")
+    temp_table_mock.return_value = exp.to_table("temporary")
+
+    adapter.merge(
+        target_table="target",
+        source_table=t.cast(exp.Select, parse_one("SELECT id, region, ts, val FROM source")),
+        target_columns_to_types={
+            "id": exp.DataType(this=exp.DataType.Type.INT),
+            "region": exp.DataType(this=exp.DataType.Type.VARCHAR),
+            "ts": exp.DataType(this=exp.DataType.Type.TIMESTAMP),
+            "val": exp.DataType(this=exp.DataType.Type.INT),
+        },
+        unique_key=[parse_one("id"), parse_one("region"), parse_one("ts")],
+    )
+
+    sql_calls = to_sql_calls(adapter)
+
+    assert any("CONCAT_WS" in s for s in sql_calls) is False
+    assert any("INNER JOIN" in s for s in sql_calls) is True
+
+    adapter.cursor.execute.assert_has_calls(
+        [
+            call(
+                "DELETE `_target` FROM `target` AS `_target` INNER JOIN `temporary` AS `_temp` ON `_target`.`id` = `_temp`.`id` AND `_target`.`region` = `_temp`.`region` AND `_target`.`ts` = `_temp`.`ts`"
+            ),
+        ]
+    )
+
+
+def test_replace_by_key_expression_based_composite_key(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    """Expression-based composite keys (e.g. DATE_TRUNC + column) via insert_overwrite_by_partition."""
+    adapter = make_mocked_engine_adapter(MySQLEngineAdapter)
+    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table")
+    temp_table_mock.return_value = exp.to_table("temporary")
+
+    adapter.insert_overwrite_by_partition(
+        table_name="target",
+        query_or_df=t.cast(exp.Select, parse_one("SELECT id, ts, val FROM source")),
+        partitioned_by=[
+            parse_one("DATE_TRUNC('month', ts)"),
+            parse_one("id"),
+        ],
+        target_columns_to_types={
+            "id": exp.DataType(this=exp.DataType.Type.INT),
+            "ts": exp.DataType(this=exp.DataType.Type.TIMESTAMP),
+            "val": exp.DataType(this=exp.DataType.Type.INT),
+        },
+    )
+
+    sql_calls = to_sql_calls(adapter)
+
+    assert any("CONCAT_WS" in s for s in sql_calls) is False
+    assert any("INNER JOIN" in s for s in sql_calls) is True
+
+    # DATE_TRUNC transpiles to STR_TO_DATE in MySQL; both key parts should be qualified
+    delete_sql = [s for s in sql_calls if "DELETE" in s][0]
+    assert "`_target`.`ts`" in delete_sql
+    assert "`_temp`.`ts`" in delete_sql
+    assert "`_target`.`id`" in delete_sql
+    assert "`_temp`.`id`" in delete_sql
+
+
 def test_replace_by_key_single_key_uses_in(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
 ):
     """Single key DELETE still uses the IN-based approach (indexes work fine for single column)."""
     adapter = make_mocked_engine_adapter(MySQLEngineAdapter)
-    temp_table_mock = mocker.patch(
-        "sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table"
-    )
+    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.base.EngineAdapter._get_temp_table")
     temp_table_mock.return_value = exp.to_table("temporary")
 
     adapter.merge(

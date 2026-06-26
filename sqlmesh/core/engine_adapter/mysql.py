@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import typing as t
-from functools import reduce
-
 from sqlglot import exp, parse_one
 
 from sqlmesh.core.dialect import to_schema
@@ -22,7 +20,8 @@ from sqlmesh.core.engine_adapter.shared import (
 )
 
 if t.TYPE_CHECKING:
-    from sqlmesh.core._typing import QueryOrDF, SchemaName, TableName
+    from sqlmesh.core._typing import SchemaName, TableName
+    from sqlmesh.core.engine_adapter._typing import QueryOrDF
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +197,12 @@ class MySQLEngineAdapter(
     ) -> None:
         if len(key) <= 1:
             return super()._replace_by_key(
-                target_table, source_table, target_columns_to_types, key, is_unique_key, source_columns
+                target_table,
+                source_table,
+                target_columns_to_types,
+                key,
+                is_unique_key,
+                source_columns,
             )
 
         if target_columns_to_types is None:
@@ -222,14 +226,13 @@ class MySQLEngineAdapter(
             try:
                 # Build a JOIN-based DELETE instead of using CONCAT_WS.
                 # CONCAT_WS prevents MySQL/MariaDB from using indexes, causing full table scans.
-                on_condition = reduce(
-                    lambda a, b: exp.And(this=a, expression=b),
-                    [
+                on_condition = exp.and_(
+                    *[
                         self._qualify_columns(k, target_alias).eq(
                             self._qualify_columns(k, temp_alias)
                         )
                         for k in key
-                    ],
+                    ]
                 )
 
                 target_table_aliased = exp.to_table(target_table).as_(target_alias, quoted=True)
