@@ -1686,7 +1686,6 @@ def test_mssql_connection_kwargs_keys():
         assert "conn_properties" not in mssql_python_keys
 
 
-@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
 def test_mssql_pyodbc_connection_string_generation():
     """Test pyodbc.connect gets invoked with the correct ODBC connection string."""
     with patch("pyodbc.connect") as mock_pyodbc_connect:
@@ -1774,7 +1773,6 @@ def test_mssql_pyodbc_connection_string_with_odbc_properties():
         assert conn_str.count("TrustServerCertificate") == 1
 
 
-@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
 def test_mssql_pyodbc_connection_string_minimal():
     """Test pyodbc connection string with minimal configuration."""
     with patch("pyodbc.connect") as mock_pyodbc_connect:
