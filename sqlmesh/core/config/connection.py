@@ -1519,6 +1519,7 @@ class MSSQLConnectionConfig(ConnectionConfig):
     database: t.Optional[str] = ""
     timeout: t.Optional[int] = 0
     login_timeout: t.Optional[int] = 60
+    login_attempts: t.Optional[int] = 1
     charset: t.Optional[str] = "UTF-8"
     appname: t.Optional[str] = None
     port: t.Optional[int] = 1433
@@ -1610,6 +1611,7 @@ class MSSQLConnectionConfig(ConnectionConfig):
                     "trust_server_certificate",
                     "encrypt",
                     "odbc_properties",
+                    "login_attempts",
                 }
             )
             # Remove pymssql-specific parameters
@@ -1648,8 +1650,9 @@ class MSSQLConnectionConfig(ConnectionConfig):
                 authentication = kwargs.pop("authentication", None)
                 trust_server_certificate = kwargs.pop("trust_server_certificate", False)
                 encrypt = kwargs.pop("encrypt", True)
+                timeout = kwargs.pop("timeout", 0)
                 login_timeout = kwargs.pop("login_timeout", 59)
-                login_attempts = kwargs.pop("login_attempts", 1)  # TODO: document
+                login_attempts = kwargs.pop("login_attempts", 1)
 
                 # Build connection string
                 conn_str_parts = [
@@ -1664,6 +1667,11 @@ class MSSQLConnectionConfig(ConnectionConfig):
                 if trust_server_certificate:
                     conn_str_parts.append("TrustServerCertificate=yes")
 
+                # `Connection Timeout=` is not a valid option so we leverage `ConnectRetry*`.
+                # See the following:
+                # - https://github.com/microsoft/mssql-python/issues/339
+                # - https://github.com/microsoft/mssql-python/wiki/Connection-to-SQL-Database
+                # - https://github.com/microsoft/mssql-python/wiki/Connection#timeout
                 conn_str_parts.append(f"ConnectRetryCount={login_attempts}")
                 conn_str_parts.append(f"ConnectRetryInterval={min(int(login_timeout), 60)}")
 
@@ -1687,6 +1695,8 @@ class MSSQLConnectionConfig(ConnectionConfig):
                             "pwd",
                             "encrypt",
                             "trustservercertificate",
+                            "connectretrycount",
+                            "connectretryinterval",
                             "connection timeout",
                         ):
                             continue
@@ -1700,7 +1710,11 @@ class MSSQLConnectionConfig(ConnectionConfig):
                 # Create the connection
                 conn_str = ";".join(conn_str_parts)
 
-                conn = mssql_python.connect(conn_str, autocommit=kwargs.get("autocommit", False))
+                conn = mssql_python.connect(
+                    conn_str,
+                    autocommit=kwargs.get("autocommit", False),
+                    timeout=timeout,
+                )
 
                 # TODO: Remove this output converter as DATETIMEOFFSET
                 # should be handled natively by `mssql-python`.

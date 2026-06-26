@@ -1671,6 +1671,7 @@ def test_mssql_connection_kwargs_keys():
             "host",
             "timeout",
             "login_timeout",
+            "login_attempts",
             "charset",
             "appname",
             "port",
@@ -1862,10 +1863,16 @@ def test_mssql_mssql_python_connection_string_with_odbc_properties():
             odbc_properties={
                 "Authentication": "ActiveDirectoryServicePrincipal",
                 "ClientCertificate": "/path/to/cert.pem",
-                "TrustServerCertificate": "NO",  # This should be ignored since we set it explicitly
+                # These should be ignored since we set them explicitly:
+                "TrustServerCertificate": "NO",
+                "ConnectRetryCount": 3,
+                "ConnectRetryInterval": 15,
             },
-            trust_server_certificate=True,  # This should take precedence
             check_import=False,
+            # These should take precedence:
+            trust_server_certificate=True,
+            login_timeout=10,
+            login_attempts=2,
         )
 
         # Get the connection factory with kwargs and call it
@@ -1880,11 +1887,15 @@ def test_mssql_mssql_python_connection_string_with_odbc_properties():
         assert "Authentication=ActiveDirectoryServicePrincipal" in conn_str
         assert "ClientCertificate=/path/to/cert.pem" in conn_str
 
-        # Verify that explicit trust_server_certificate takes precedence
+        # Verify that explicit kwargs take precedence over odbc_properties
         assert "TrustServerCertificate=yes" in conn_str
+        assert "ConnectRetryCount=2" in conn_str
+        assert "ConnectRetryInterval=10" in conn_str
 
-        # Should not have the conflicting property from odbc_properties
+        # Should not have conflicting properties from odbc_properties
         assert conn_str.count("TrustServerCertificate") == 1
+        assert conn_str.count("ConnectRetryCount") == 1
+        assert conn_str.count("ConnectRetryInterval") == 1
 
 
 @pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
