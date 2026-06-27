@@ -256,7 +256,7 @@ This example shows an email notification target, where `sushi@example.com` email
 
 In Python configuration files, new notification targets can be configured to send custom messages.
 
-To customize a notification, create a new notification target class as a subclass of one of the three target classes described above (`SlackWebhookNotificationTarget`, `SlackApiNotificationTarget`, or `BasicSMTPNotificationTarget`). See the definitions of these classes on Github [here](https://github.com/TobikoData/sqlmesh/blob/main/sqlmesh/core/notification_target.py).
+To customize a notification, create a new notification target class as a subclass of one of the three target classes described above (`SlackWebhookNotificationTarget`, `SlackApiNotificationTarget`, or `BasicSMTPNotificationTarget`). See the definitions of these classes on Github [here](https://github.com/SQLMesh/sqlmesh/blob/main/sqlmesh/core/notification_target.py).
 
 Each of those notification target classes is a subclass of `BaseNotificationTarget`, which contains a `notify` function corresponding to each event type. This table lists the notification functions, along with the contextual information available to them at calling time (e.g., the environment name for start/end events):
 

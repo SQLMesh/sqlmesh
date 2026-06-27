@@ -8,6 +8,7 @@ from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import LogicalMergeMixin
 from sqlmesh.core.engine_adapter.base import EngineAdapterWithIndexSupport
 from sqlmesh.core.engine_adapter.shared import (
+    CatalogSupport,
     DataObject,
     DataObjectType,
     EngineRunMode,
@@ -43,6 +44,22 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     ORDER_BY_TABLE_ENGINE_REGEX = "^.*?MergeTree.*$"
 
     @property
+    def catalog_support(self) -> CatalogSupport:
+        # This property is intentionally dynamic: it transitions from UNSUPPORTED to
+        # SINGLE_CATALOG_ONLY after inject_virtual_catalog() sets _default_catalog. Callers must
+        # not cache the result — always read it live so they see the post-injection state.
+        if self._default_catalog:
+            return CatalogSupport.SINGLE_CATALOG_ONLY
+        return CatalogSupport.UNSUPPORTED
+
+    def supports_virtual_catalog(self) -> bool:
+        return True
+
+    def inject_virtual_catalog(self, gateway: str) -> None:
+        configured = self._extra_config.get("virtual_catalog")
+        self._default_catalog = f"__{gateway}__" if configured is None else configured
+
+    @property
     def engine_run_mode(self) -> EngineRunMode:
         if self._extra_config.get("cloud_mode"):
             return EngineRunMode.CLOUD
@@ -64,7 +81,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     #     doesn't use the row index at all
     def fetchone(
         self,
-        query: t.Union[exp.Expression, str],
+        query: t.Union[exp.Expr, str],
         ignore_unsupported_errors: bool = False,
         quote_identifiers: bool = False,
     ) -> t.Tuple:
@@ -77,13 +94,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             return self.cursor.fetchall()[0]
 
     def _fetch_native_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> pd.DataFrame:
         """Fetches a Pandas DataFrame from the cursor"""
         return self.cursor.client.query_df(
-            self._to_sql(query, quote=quote_identifiers)
-            if isinstance(query, exp.Expression)
-            else query,
+            self._to_sql(query, quote=quote_identifiers) if isinstance(query, exp.Expr) else query,
             use_extended_dtypes=True,
         )
 
@@ -168,15 +183,32 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         schema_name: SchemaName,
         ignore_if_exists: bool = True,
         warn_on_error: bool = True,
-        properties: t.List[exp.Expression] = [],
+        properties: t.List[exp.Expr] = [],
     ) -> None:
         """Create a Clickhouse database from a name or qualified table name.
 
         Clickhouse has a two-level naming scheme [database].[table].
         """
+        from sqlmesh.utils.errors import SQLMeshError
+
         properties_copy = properties.copy()
         if self.engine_run_mode.is_cluster:
             properties_copy.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
+
+        # ClickHouse does not support catalogs. When a virtual catalog has been injected
+        # (self._default_catalog is set), strip it from the schema name. This mirrors the
+        # SINGLE_CATALOG_ONLY branch in the set_catalog decorator, which does not apply here
+        # because this override is not wrapped by @set_catalog().
+        if self._default_catalog:
+            schema_exp = to_schema(schema_name)
+            catalog_name = schema_exp.catalog
+            if catalog_name:
+                if catalog_name != self._default_catalog:
+                    raise SQLMeshError(
+                        f"clickhouse requires that all catalog operations be against a single catalog: "
+                        f"{self._default_catalog}. Provided catalog: {catalog_name}"
+                    )
+                schema_name = self._strip_virtual_catalog(schema_exp)
 
         # can't call super() because it will try to set a catalog
         return self._create_schema(
@@ -229,7 +261,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         # REPLACE BY KEY: extract kwargs if present
         dynamic_key = kwargs.get("dynamic_key")
         if dynamic_key:
-            dynamic_key_exp = t.cast(exp.Expression, kwargs.get("dynamic_key_exp"))
+            dynamic_key_exp = t.cast(exp.Expr, kwargs.get("dynamic_key_exp"))
             dynamic_key_unique = t.cast(bool, kwargs.get("dynamic_key_unique"))
 
         try:
@@ -414,7 +446,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        key: t.Sequence[exp.Expression],
+        key: t.Sequence[exp.Expr],
         is_unique_key: bool,
         source_columns: t.Optional[t.List[str]] = None,
     ) -> None:
@@ -425,7 +457,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             source_columns=source_columns,
         )
 
-        key_exp = exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key) if len(key) > 1 else key[0]
+        key_exp = (
+            exp.func("CONCAT_WS", "'__SQLMESH_DELIM__'", *key, dialect=self.dialect)
+            if len(key) > 1
+            else key[0]
+        )
 
         self._insert_overwrite_by_condition(
             target_table,
@@ -440,10 +476,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         self,
         table_name: TableName,
         query_or_df: QueryOrDF,
-        partitioned_by: t.List[exp.Expression],
+        partitioned_by: t.List[exp.Expr],
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         source_columns: t.Optional[t.List[str]] = None,
     ) -> None:
+        table_name = self._strip_virtual_catalog(table_name)
         source_queries, target_columns_to_types = self._get_source_queries_and_columns_to_types(
             query_or_df,
             target_columns_to_types,
@@ -487,7 +524,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     def _create_table(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
@@ -558,6 +595,20 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 target_columns_to_types or self.columns(table_name),
             )
 
+    def _strip_virtual_catalog(self, name: "TableName") -> exp.Table:
+        """Strip the virtual catalog prefix from a table name if present.
+
+        When a virtual catalog has been injected, ClickHouse table names carry a
+        synthetic catalog prefix (e.g. ``__gw__``) so they match the 3-level FQN
+        depth of catalog-aware peers.  This helper removes that prefix before any
+        SQL is sent to the wire, since ClickHouse only supports a two-level
+        ``[database].[table]`` naming scheme.
+        """
+        table = exp.to_table(name)
+        if self._default_catalog and table.catalog == self._default_catalog:
+            table.set("catalog", None)
+        return table
+
     def _exchange_tables(
         self,
         old_table_name: TableName,
@@ -595,8 +646,8 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
         self.execute(f"RENAME TABLE {old_table_sql} TO {new_table_sql}{self._on_cluster_sql()}")
 
-    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expression]) -> None:
-        delete_expr = exp.delete(table_name, where)
+    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
+        delete_expr = exp.delete(self._strip_virtual_catalog(table_name), where)
         if self.engine_run_mode.is_cluster:
             delete_expr.set("cluster", exp.OnCluster(this=exp.to_identifier(self.cluster)))
         self.execute(delete_expr)
@@ -612,6 +663,9 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             for alter_expression in [
                 x.expression if isinstance(x, TableAlterOperation) else x for x in alter_expressions
             ]:
+                if self._default_catalog and isinstance(alter_expression.this, exp.Table):
+                    if alter_expression.this.catalog == self._default_catalog:
+                        alter_expression.this.set("catalog", None)
                 if self.engine_run_mode.is_cluster:
                     alter_expression.set(
                         "cluster", exp.OnCluster(this=exp.to_identifier(self.cluster))
@@ -649,7 +703,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     def _build_partitioned_by_exp(
         self,
-        partitioned_by: t.List[exp.Expression],
+        partitioned_by: t.List[exp.Expr],
         **kwargs: t.Any,
     ) -> t.Optional[t.Union[exp.PartitionedByProperty, exp.Property]]:
         return exp.PartitionedByProperty(
@@ -714,16 +768,21 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         return query
 
     def _build_settings_property(
-        self, key: str, value: exp.Expression | str | int | float
+        self, settings: t.Mapping[str, exp.Expr | str | int | float]
     ) -> exp.SettingsProperty:
+        # ClickHouse requires every key=value pair to live under a single
+        # SETTINGS clause (`SETTINGS a = 1, b = 2`). Emitting one
+        # SettingsProperty per pair produces repeated SETTINGS keywords and a
+        # syntax error at execution time.
         return exp.SettingsProperty(
             expressions=[
                 exp.EQ(
                     this=exp.var(key.lower()),
                     expression=value
-                    if isinstance(value, exp.Expression)
+                    if isinstance(value, exp.Expr)
                     else exp.Literal(this=value, is_string=isinstance(value, str)),
                 )
+                for key, value in settings.items()
             ]
         )
 
@@ -732,17 +791,17 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         catalog_name: t.Optional[str] = None,
         table_format: t.Optional[str] = None,
         storage_format: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
         partition_interval_unit: t.Optional[IntervalUnit] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
         empty_ctas: bool = False,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         table_engine = self.DEFAULT_TABLE_ENGINE
         if storage_format:
@@ -809,9 +868,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         ttl = table_properties_copy.pop("TTL", None)
         if ttl:
             properties.append(
-                exp.MergeTreeTTL(
-                    expressions=[ttl if isinstance(ttl, exp.Expression) else exp.var(ttl)]
-                )
+                exp.MergeTreeTTL(expressions=[ttl if isinstance(ttl, exp.Expr) else exp.var(ttl)])
             )
 
         if (
@@ -827,9 +884,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             properties.append(exp.EmptyProperty())
 
         if table_properties_copy:
-            properties.extend(
-                [self._build_settings_property(k, v) for k, v in table_properties_copy.items()]
-            )
+            properties.append(self._build_settings_property(table_properties_copy))
 
         if table_description:
             properties.append(
@@ -845,12 +900,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     def _build_view_properties_exp(
         self,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         table_description: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
         """Creates a SQLGlot table properties expression for view"""
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         view_properties_copy = view_properties.copy() if view_properties else {}
 
@@ -858,9 +913,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             properties.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
 
         if view_properties_copy:
-            properties.extend(
-                [self._build_settings_property(k, v) for k, v in view_properties_copy.items()]
-            )
+            properties.append(self._build_settings_property(view_properties_copy))
 
         if table_description:
             properties.append(

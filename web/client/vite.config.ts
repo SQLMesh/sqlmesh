@@ -68,5 +68,6 @@ export default defineConfig({
         },
   preview: {
     port: 8005,
+    host: '127.0.0.1',
   },
 })

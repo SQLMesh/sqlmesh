@@ -246,9 +246,7 @@ def ttl_cache(ttl: int = 60, maxsize: int = 128000) -> t.Callable:
 
 
 class classproperty(property):
-    """
-    Similar to a normal property but works for class methods
-    """
+    """Similar to a normal property but works for class methods"""
 
     def __get__(self, obj: t.Any, owner: t.Any = None) -> t.Any:
         return classmethod(self.fget).__get__(None, owner)()  # type: ignore

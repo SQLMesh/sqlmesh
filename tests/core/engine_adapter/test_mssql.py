@@ -833,7 +833,7 @@ def test_create_table_from_query(make_mocked_engine_adapter: t.Callable, mocker:
     columns_mock.assert_called_once_with(exp.table_("__temp_ctas_test_random_id", quoted=True))
 
     # We don't want to drop anything other than LIMIT 0
-    # See https://github.com/TobikoData/sqlmesh/issues/4048
+    # See https://github.com/SQLMesh/sqlmesh/issues/4048
     adapter.ctas(
         table_name="test_schema.test_table",
         query_or_df=parse_one(
@@ -848,7 +848,7 @@ def test_create_table_from_query(make_mocked_engine_adapter: t.Callable, mocker:
 
 
 def test_replace_query_strategy(adapter: MSSQLEngineAdapter, mocker: MockerFixture):
-    # ref issue 4472: https://github.com/TobikoData/sqlmesh/issues/4472
+    # ref issue 4472: https://github.com/SQLMesh/sqlmesh/issues/4472
     # The FULL strategy calls EngineAdapter.replace_query() which calls _insert_overwrite_by_condition() should use DELETE+INSERT and not MERGE
     expressions = d.parse(
         f"""

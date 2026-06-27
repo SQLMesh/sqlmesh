@@ -308,7 +308,6 @@ class ModelTest(unittest.TestCase):
                 expected,
                 actual,
                 check_dtype=False,
-                check_datetimelike_compat=True,
                 check_like=True,  # Ignore column order
             )
         except AssertionError as e:
@@ -612,20 +611,27 @@ class ModelTest(unittest.TestCase):
         - Globally patch the SQLGlot dialect so that any date/time nodes are evaluated at the `execution_time` during generation
         """
         import time_machine
+        from sqlglot.generator import _DISPATCH_CACHE
 
         lock_ctx: AbstractContextManager = (
             self.CONCURRENT_RENDER_LOCK if self.concurrency else nullcontext()
         )
         time_ctx: AbstractContextManager = nullcontext()
         dialect_patch_ctx: AbstractContextManager = nullcontext()
+        dispatch_patch_ctx: AbstractContextManager = nullcontext()
 
         if self._execution_time:
+            generator_class = self._test_adapter_dialect.generator_class
             time_ctx = time_machine.travel(self._execution_time, tick=False)
-            dialect_patch_ctx = patch.dict(
-                self._test_adapter_dialect.generator_class.TRANSFORMS, self._transforms
-            )
+            dialect_patch_ctx = patch.dict(generator_class.TRANSFORMS, self._transforms)
 
-        with lock_ctx, time_ctx, dialect_patch_ctx:
+            # sqlglot caches a dispatch table per generator class, so we need to patch
+            # it as well to ensure the overridden transforms are actually used
+            dispatch = _DISPATCH_CACHE.get(generator_class)
+            if dispatch is not None:
+                dispatch_patch_ctx = patch.dict(dispatch, self._transforms)
+
+        with lock_ctx, time_ctx, dialect_patch_ctx, dispatch_patch_ctx:
             yield
 
     def _execute(self, query: exp.Query | str) -> pd.DataFrame:
@@ -674,7 +680,7 @@ class ModelTest(unittest.TestCase):
 
 
 class SqlModelTest(ModelTest):
-    def test_ctes(self, ctes: t.Dict[str, exp.Expression], recursive: bool = False) -> None:
+    def test_ctes(self, ctes: t.Dict[str, exp.Expr], recursive: bool = False) -> None:
         """Run CTE queries and compare output to expected output"""
         for cte_name, values in self.body["outputs"].get("ctes", {}).items():
             with self.subTest(cte=cte_name):
@@ -819,7 +825,7 @@ class PythonModelTest(ModelTest):
             time_kwargs = {key: variables.pop(key) for key in TIME_KWARG_KEYS if key in variables}
             df = next(self.model.render(context=self.context, variables=variables, **time_kwargs))
 
-        assert not isinstance(df, exp.Expression)
+        assert not isinstance(df, exp.Expr)
         return df if isinstance(df, pd.DataFrame) else df.toPandas()
 
 

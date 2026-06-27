@@ -12,6 +12,7 @@ import { isNil, isStringEmptyOrNil, isTrue } from '~/utils'
 
 interface ContextStore {
   version?: string
+  nodeColors: Record<string, string>
   showConfirmation: boolean
   confirmations: Confirmation[]
   environment: ModelEnvironment
@@ -23,6 +24,7 @@ interface ContextStore {
   setLastSelectedModel: (model?: ModelSQLMeshModel) => void
   setSplitPaneSizes: (splitPaneSizes: number[]) => void
   setModules: (modules: ModelModuleController) => void
+  setNodeColors: (nodeColors: Record<string, string>) => void
   setVersion: (version?: string) => void
   setShowConfirmation: (showConfirmation: boolean) => void
   addConfirmation: (confirmation: Confirmation) => void
@@ -55,6 +57,7 @@ const environment =
 
 export const useStoreContext = create<ContextStore>((set, get) => ({
   version: undefined,
+  nodeColors: {},
   modules: new ModelModuleController(),
   splitPaneSizes: [20, 80],
   showConfirmation: false,
@@ -81,6 +84,11 @@ export const useStoreContext = create<ContextStore>((set, get) => ({
   setSplitPaneSizes(splitPaneSizes) {
     set(() => ({
       splitPaneSizes,
+    }))
+  },
+  setNodeColors(nodeColors) {
+    set(() => ({
+      nodeColors,
     }))
   },
   setVersion(version) {

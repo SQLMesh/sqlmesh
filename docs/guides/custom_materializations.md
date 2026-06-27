@@ -24,13 +24,13 @@ A custom materialization must:
 
 - Be written in Python code
 - Be a Python class that inherits the SQLMesh `CustomMaterialization` base class
-- Use or override the `insert` method from the SQLMesh [`MaterializableStrategy`](https://github.com/TobikoData/sqlmesh/blob/034476e7f64d261860fd630c3ac56d8a9c9f3e3a/sqlmesh/core/snapshot/evaluator.py#L1146) class/subclasses
+- Use or override the `insert` method from the SQLMesh [`MaterializableStrategy`](https://github.com/SQLMesh/sqlmesh/blob/034476e7f64d261860fd630c3ac56d8a9c9f3e3a/sqlmesh/core/snapshot/evaluator.py#L1146) class/subclasses
 - Be loaded or imported by SQLMesh at runtime
 
 A custom materialization may:
 
-- Use or override methods from the SQLMesh [`MaterializableStrategy`](https://github.com/TobikoData/sqlmesh/blob/034476e7f64d261860fd630c3ac56d8a9c9f3e3a/sqlmesh/core/snapshot/evaluator.py#L1146) class/subclasses
-- Use or override methods from the SQLMesh [`EngineAdapter`](https://github.com/TobikoData/sqlmesh/blob/034476e7f64d261860fd630c3ac56d8a9c9f3e3a/sqlmesh/core/engine_adapter/base.py#L67) class/subclasses
+- Use or override methods from the SQLMesh [`MaterializableStrategy`](https://github.com/SQLMesh/sqlmesh/blob/034476e7f64d261860fd630c3ac56d8a9c9f3e3a/sqlmesh/core/snapshot/evaluator.py#L1146) class/subclasses
+- Use or override methods from the SQLMesh [`EngineAdapter`](https://github.com/SQLMesh/sqlmesh/blob/034476e7f64d261860fd630c3ac56d8a9c9f3e3a/sqlmesh/core/engine_adapter/base.py#L67) class/subclasses
 - Execute arbitrary SQL code and fetch results with the engine adapter `execute` and related methods
 
 A custom materialization may perform arbitrary Python processing with Pandas or other libraries, but in most cases that logic should reside in a [Python model](../concepts/models/python_models.md) instead of the materialization.
@@ -157,7 +157,7 @@ class CustomFullMaterialization(CustomMaterialization):
     ) -> None:
         config_value = model.custom_materialization_properties["config_key"]
         # Proceed with implementing the insertion logic.
-        # Example existing materialization for look and feel: https://github.com/TobikoData/sqlmesh/blob/main/sqlmesh/core/snapshot/evaluator.py
+        # Example existing materialization for look and feel: https://github.com/SQLMesh/sqlmesh/blob/main/sqlmesh/core/snapshot/evaluator.py
 ```
 
 ## Extending `CustomKind`
@@ -292,4 +292,4 @@ setup(
 )
 ```
 
-Refer to the SQLMesh Github [custom_materializations](https://github.com/TobikoData/sqlmesh/tree/main/examples/custom_materializations) example for more details on Python packaging.
+Refer to the SQLMesh Github [custom_materializations](https://github.com/SQLMesh/sqlmesh/tree/main/examples/custom_materializations) example for more details on Python packaging.

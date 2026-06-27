@@ -29,7 +29,7 @@ if __name__ == "__main__":
         opts.logo_link = "https://tobikodata.com"
         opts.footer_text = "Copyright Tobiko Data Inc. 2022"
         opts.template_directory = Path(__file__).parent.joinpath("templates").absolute()
-        opts.edit_url = ["sqlmesh=https://github.com/TobikoData/sqlmesh/tree/main/sqlmesh/"]
+        opts.edit_url = ["sqlmesh=https://github.com/SQLMesh/sqlmesh/tree/main/sqlmesh/"]
 
         with mock.patch("pdoc.__main__.parser", **{"parse_args.return_value": opts}):
             cli()

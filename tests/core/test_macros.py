@@ -98,7 +98,7 @@ def macro_evaluator() -> MacroEvaluator:
 
     @macro()
     def test_literal_type(evaluator, a: t.Literal["test_literal_a", "test_literal_b", 1, True]):
-        if isinstance(a, exp.Expression):
+        if isinstance(a, exp.Expr):
             raise SQLMeshError("Coercion failed")
         return f"'{a}'"
 
@@ -618,6 +618,20 @@ def test_ast_correctness(macro_evaluator):
             "SELECT * FROM (VALUES ((1, 2), (2, 3), (3, 4))) AS v",
             {},
         ),
+        # Lambda parameter name matches the column identifier inside a Column expression
+        # (e.g. schema.product where 'product' is both the lambda arg and the column name).
+        # Lambda args must take precedence over the Column-context guard so that the param
+        # is substituted correctly (regression test for GitHub issue #5582).
+        (
+            "SELECT @EACH([a, b, c], product -> schema.product)",
+            "SELECT schema.a, schema.b, schema.c",
+            {},
+        ),
+        (
+            "SELECT @EACH([x, y], col -> tbl.col)",
+            "SELECT tbl.x, tbl.y",
+            {},
+        ),
     ],
 )
 def test_macro_functions(macro_evaluator: MacroEvaluator, assert_exp_eq, sql, expected, args):
@@ -694,8 +708,8 @@ def test_macro_coercion(macro_evaluator: MacroEvaluator, assert_exp_eq):
     ) == (1, "2", (3.0,))
 
     # Using exp.Expression will always return the input expression
-    assert coerce(parse_one("order", into=exp.Column), exp.Expression) == exp.column("order")
-    assert coerce(exp.Literal.string("OK"), exp.Expression) == exp.Literal.string("OK")
+    assert coerce(parse_one("order", into=exp.Column), exp.Expr) == exp.column("order")
+    assert coerce(exp.Literal.string("OK"), exp.Expr) == exp.Literal.string("OK")
 
     # Strict flag allows raising errors and is used when recursively coercing expressions
     # otherwise, in general, we want to be lenient and just warn the user when something is not possible
@@ -930,12 +944,10 @@ def test_date_spine(assert_exp_eq, dialect, date_part):
                     FLATTEN(
                         INPUT => ARRAY_GENERATE_RANGE(
                             0,
-                            (
-                                DATEDIFF(
-                                    {date_part.upper()},
-                                    CAST('2022-01-01' AS DATE),
-                                    CAST('2024-12-31' AS DATE)
-                                ) + 1 - 1
+                            DATEDIFF(
+                                {date_part.upper()},
+                                CAST('2022-01-01' AS DATE),
+                                CAST('2024-12-31' AS DATE)
                             ) + 1
                         )
                     )

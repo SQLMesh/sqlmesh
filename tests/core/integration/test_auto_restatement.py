@@ -27,7 +27,7 @@ def test_run_auto_restatement(init_and_plan_context: t.Callable):
 
     @macro()
     def record_intervals(
-        evaluator, name: exp.Expression, start: exp.Expression, end: exp.Expression, **kwargs: t.Any
+        evaluator, name: exp.Expr, start: exp.Expr, end: exp.Expr, **kwargs: t.Any
     ) -> None:
         if evaluator.runtime_stage == "evaluating":
             evaluator.engine_adapter.insert_append(
@@ -178,7 +178,7 @@ def test_run_auto_restatement_failure(init_and_plan_context: t.Callable):
     context, _ = init_and_plan_context("examples/sushi")
 
     @macro()
-    def fail_auto_restatement(evaluator, start: exp.Expression, **kwargs: t.Any) -> None:
+    def fail_auto_restatement(evaluator, start: exp.Expr, **kwargs: t.Any) -> None:
         if evaluator.runtime_stage == "evaluating" and start.name != "2023-01-01":
             raise Exception("Failed")
 

@@ -168,7 +168,7 @@ def to_datetime(
         dt: t.Optional[datetime] = value
     elif isinstance(value, date):
         dt = datetime(value.year, value.month, value.day)
-    elif isinstance(value, exp.Expression):
+    elif isinstance(value, exp.Expr):
         return to_datetime(value.name)
     else:
         try:
@@ -401,7 +401,7 @@ def to_time_column(
     dialect: str,
     time_column_format: t.Optional[str] = None,
     nullable: bool = False,
-) -> exp.Expression:
+) -> exp.Expr:
     """Convert a TimeLike object to the same time format and type as the model's time column."""
     if dialect == "clickhouse" and time_column_type.is_type(
         *(exp.DataType.TEMPORAL_TYPES - {exp.DataType.Type.DATE, exp.DataType.Type.DATE32})

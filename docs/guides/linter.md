@@ -16,7 +16,7 @@ Some rules validate that a pattern is *not* present, such as not allowing `SELEC
 
 Rules are defined in Python. Each rule is an individual Python class that inherits from SQLMesh's `Rule` base class and defines the logic for validating a pattern.
 
-We display a portion of the `Rule` base class's code below ([full source code](https://github.com/TobikoData/sqlmesh/blob/main/sqlmesh/core/linter/rule.py)). Its methods and properties illustrate the most important components of the subclassed rules you define.
+We display a portion of the `Rule` base class's code below ([full source code](https://github.com/SQLMesh/sqlmesh/blob/main/sqlmesh/core/linter/rule.py)). Its methods and properties illustrate the most important components of the subclassed rules you define.
 
 Each rule class you create has four vital components:
 

@@ -27,16 +27,16 @@ Walkthroughs are easy to follow and provide lots of information in a self-contai
 
 ## Projects
 
-SQLMesh example projects are stored in the [sqlmesh-examples Github repository](https://github.com/TobikoData/sqlmesh-examples). The repository's front page includes additional information about how to download the files and set up the projects.
+SQLMesh example projects are stored in the [sqlmesh-examples Github repository](https://github.com/SQLMesh/sqlmesh-examples). The repository's front page includes additional information about how to download the files and set up the projects.
 
 The two most comprehensive example projects use the SQLMesh `sushi` data, based on a fictional sushi restaurant. ("Tobiko" is the Japanese word for flying fish roe, commonly used in sushi.)
 
-The `sushi` data is described in an [overview notebook](https://github.com/TobikoData/sqlmesh-examples/blob/main/001_sushi/sushi-overview.ipynb) in the repository.
+The `sushi` data is described in an [overview notebook](https://github.com/SQLMesh/sqlmesh-examples/blob/main/001_sushi/sushi-overview.ipynb) in the repository.
 
 The example repository include two versions of the `sushi` project, at different levels of complexity:
 
-- The [`simple` project](https://github.com/TobikoData/sqlmesh-examples/tree/main/001_sushi/1_simple) contains four `VIEW` and one `SEED` model
+- The [`simple` project](https://github.com/SQLMesh/sqlmesh-examples/tree/main/001_sushi/1_simple) contains four `VIEW` and one `SEED` model
     - The `VIEW` model kind refreshes every run, making it easy to reason about SQLMesh's behavior
-- The [`moderate` project](https://github.com/TobikoData/sqlmesh-examples/tree/main/001_sushi/2_moderate) contains five `INCREMENTAL_BY_TIME_RANGE`, one `FULL`, one `VIEW`, and one `SEED` model
+- The [`moderate` project](https://github.com/SQLMesh/sqlmesh-examples/tree/main/001_sushi/2_moderate) contains five `INCREMENTAL_BY_TIME_RANGE`, one `FULL`, one `VIEW`, and one `SEED` model
     - The incremental models allow you to observe how and when new data is transformed by SQLMesh
     - Some models, like `customer_revenue_lifetime`, demonstrate more advanced incremental queries like customer lifetime value calculation

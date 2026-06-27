@@ -195,7 +195,7 @@ class StateMigrator:
             raise SQLMeshError(
                 f"Number of snapshots before ({snapshot_count_before}) and after "
                 f"({snapshot_count_after}) applying migration scripts {scripts} does not match. "
-                "Please file an issue issue at https://github.com/TobikoData/sqlmesh/issues/new."
+                "Please file an issue issue at https://github.com/SQLMesh/sqlmesh/issues/new."
             )
 
         migrate_snapshots_and_environments = (

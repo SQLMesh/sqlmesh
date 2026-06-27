@@ -25,7 +25,7 @@ Both executors must be properly configured with environment variables to connect
 
 1. **Get docker-compose file**:
 
-   Download the [docker-compose.yml](https://raw.githubusercontent.com/TobikoData/sqlmesh/refs/heads/main/docs/cloud/features/scheduler/scheduler/docker-compose.yml) and [.env.example](https://raw.githubusercontent.com/TobikoData/sqlmesh/refs/heads/main/docs/cloud/features/scheduler/scheduler/.env.example) files to a local directory.
+   Download the [docker-compose.yml](https://raw.githubusercontent.com/SQLMesh/sqlmesh/refs/heads/main/docs/cloud/features/scheduler/scheduler/docker-compose.yml) and [.env.example](https://raw.githubusercontent.com/SQLMesh/sqlmesh/refs/heads/main/docs/cloud/features/scheduler/scheduler/.env.example) files to a local directory.
 
 2. **Create your environment file**:
 

@@ -295,6 +295,67 @@ def test_pr_plan_min_intervals(github_client, make_controller):
     assert controller.pr_plan.start_override_per_model
 
 
+def test_pr_plan_preview_window(github_client, make_controller, mocker: MockerFixture):
+    context = mocker.MagicMock()
+    plan_builder = mocker.MagicMock()
+    plan = mocker.MagicMock(spec=Plan)
+    plan_builder.build.return_value = plan
+    context.config.plan.forward_only = False
+    context.plan_builder.return_value = plan_builder
+    mocker.patch("sqlmesh.integrations.github.cicd.controller.Context", return_value=context)
+
+    bot_config = GithubCICDBotConfig(default_pr_start="2025-01-01")
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json",
+        github_client,
+        bot_config=bot_config,
+    )
+
+    assert controller.pr_plan is plan
+    context.plan_builder.assert_called_once_with(
+        environment="hello_world_2",
+        skip_tests=True,
+        skip_linter=True,
+        categorizer_config=bot_config.auto_categorize_changes,
+        start="2025-01-01",
+        min_intervals=None,
+        preview_start="yesterday",
+        preview_min_intervals=1,
+        skip_backfill=bot_config.skip_pr_backfill,
+        include_unmodified=False,
+        forward_only=controller.forward_only_plan,
+    )
+
+    context.plan_builder.reset_mock()
+    plan_builder.build.reset_mock()
+
+    bot_config = GithubCICDBotConfig(
+        default_pr_start="2025-01-01",
+        default_pr_preview_start="2 days ago",
+        pr_preview_min_intervals=2,
+    )
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json",
+        github_client,
+        bot_config=bot_config,
+    )
+
+    assert controller.pr_plan is plan
+    context.plan_builder.assert_called_once_with(
+        environment="hello_world_2",
+        skip_tests=True,
+        skip_linter=True,
+        categorizer_config=bot_config.auto_categorize_changes,
+        start="2025-01-01",
+        min_intervals=None,
+        preview_start="2 days ago",
+        preview_min_intervals=2,
+        skip_backfill=bot_config.skip_pr_backfill,
+        include_unmodified=False,
+        forward_only=controller.forward_only_plan,
+    )
+
+
 def test_prod_plan(github_client, make_controller):
     controller = make_controller(
         "tests/fixtures/github/pull_request_synchronized.json", github_client

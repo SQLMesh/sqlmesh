@@ -318,4 +318,5 @@ class NoAmbiguousProjections(Rule):
         return None
 
 
-BUILTIN_RULES = RuleSet(subclasses(__name__, Rule, exclude={Rule}))
+_RULE_EXCLUDE: t.Set[t.Type[Rule]] = {Rule}  # type: ignore[type-abstract]
+BUILTIN_RULES = RuleSet(subclasses(__name__, Rule, exclude=_RULE_EXCLUDE))

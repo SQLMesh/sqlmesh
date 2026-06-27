@@ -34,13 +34,13 @@ class Rewriter:
         self.join_type = join_type
         self.semantic_name = f"{semantic_schema}.{semantic_table}"
 
-    def rewrite(self, expression: exp.Expression) -> exp.Expression:
+    def rewrite(self, expression: exp.Expr) -> exp.Expr:
         for select in list(expression.find_all(exp.Select)):
             self._expand(select)
 
         return expression
 
-    def _build_sources(self, projections: t.List[exp.Expression]) -> SourceAggsAndJoins:
+    def _build_sources(self, projections: t.List[exp.Expr]) -> SourceAggsAndJoins:
         sources: SourceAggsAndJoins = {}
 
         for projection in projections:
@@ -78,7 +78,7 @@ class Rewriter:
         explicit_joins = {exp.table_name(join.this): join for join in select.args.pop("joins", [])}
 
         for i, (name, (aggs, joins)) in enumerate(sources.items()):
-            source: exp.Expression = exp.to_table(name)
+            source: exp.Expr = exp.to_table(name)
             table_name = remove_namespace(name)
 
             if not isinstance(source, exp.Select):
@@ -110,7 +110,7 @@ class Rewriter:
                     copy=False,
                 )
 
-            for node in find_all_in_scope(query, (exp.Column, exp.TableAlias)):
+            for node in find_all_in_scope(query, exp.Column, exp.TableAlias):  # type: ignore[arg-type,var-annotated]
                 if isinstance(node, exp.Column):
                     if node.table in mapping:
                         node.set("table", exp.to_identifier(mapping[node.table]))
@@ -123,7 +123,7 @@ class Rewriter:
         source: exp.Select,
         name: str,
         joins: t.Dict[str, t.Optional[exp.Join]],
-        group_by: t.List[exp.Expression],
+        group_by: t.List[exp.Expr],
         mapping: t.Dict[str, str],
     ) -> exp.Select:
         grain = [e.copy() for e in group_by]
@@ -177,7 +177,7 @@ class Rewriter:
         return source.select(*grain, copy=False).group_by(*grain, copy=False)
 
 
-def _replace_table(node: exp.Expression, table: str, base_alias: str) -> exp.Expression:
+def _replace_table(node: exp.Expr, table: str, base_alias: str) -> exp.Expr:
     for column in find_all_in_scope(node, exp.Column):
         if column.table == base_alias:
             column.args["table"] = exp.to_identifier(table)
@@ -185,11 +185,11 @@ def _replace_table(node: exp.Expression, table: str, base_alias: str) -> exp.Exp
 
 
 def rewrite(
-    sql: str | exp.Expression,
+    sql: str | exp.Expr,
     graph: ReferenceGraph,
     metrics: t.Dict[str, Metric],
     dialect: t.Optional[str] = "",
-) -> exp.Expression:
+) -> exp.Expr:
     rewriter = Rewriter(graph=graph, metrics=metrics, dialect=dialect)
 
     return optimize(

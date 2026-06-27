@@ -37,7 +37,7 @@ class TableAlterOperation(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def _alter_actions(self) -> t.List[exp.Expression]:
+    def _alter_actions(self) -> t.List[exp.Expr]:
         pass
 
     @property
@@ -104,7 +104,7 @@ class TableAlterAddColumnOperation(TableAlterTypedColumnOperation):
         return self.is_part_of_destructive_change
 
     @property
-    def _alter_actions(self) -> t.List[exp.Expression]:
+    def _alter_actions(self) -> t.List[exp.Expr]:
         column_def = exp.ColumnDef(
             this=self.column,
             kind=self.column_type,
@@ -127,7 +127,7 @@ class TableAlterDropColumnOperation(TableAlterColumnOperation):
         return True
 
     @property
-    def _alter_actions(self) -> t.List[exp.Expression]:
+    def _alter_actions(self) -> t.List[exp.Expr]:
         return [exp.Drop(this=self.column, kind="COLUMN", cascade=self.cascade)]
 
 
@@ -145,7 +145,7 @@ class TableAlterChangeColumnTypeOperation(TableAlterTypedColumnOperation):
         return self.is_part_of_destructive_change
 
     @property
-    def _alter_actions(self) -> t.List[exp.Expression]:
+    def _alter_actions(self) -> t.List[exp.Expr]:
         return [
             exp.AlterColumn(
                 this=self.column,
@@ -363,14 +363,12 @@ class SchemaDiffer(PydanticModel):
     coerceable_types_: t.Dict[exp.DataType, t.Set[exp.DataType]] = Field(
         default_factory=dict, alias="coerceable_types"
     )
-    precision_increase_allowed_types: t.Optional[t.Set[exp.DataType.Type]] = None
+    precision_increase_allowed_types: t.Optional[t.Set[exp.DType]] = None
     support_coercing_compatible_types: bool = False
     drop_cascade: bool = False
-    parameterized_type_defaults: t.Dict[
-        exp.DataType.Type, t.List[t.Tuple[t.Union[int, float], ...]]
-    ] = {}
-    max_parameter_length: t.Dict[exp.DataType.Type, t.Union[int, float]] = {}
-    types_with_unlimited_length: t.Dict[exp.DataType.Type, t.Set[exp.DataType.Type]] = {}
+    parameterized_type_defaults: t.Dict[exp.DType, t.List[t.Tuple[t.Union[int, float], ...]]] = {}
+    max_parameter_length: t.Dict[exp.DType, t.Union[int, float]] = {}
+    types_with_unlimited_length: t.Dict[exp.DType, t.Set[exp.DType]] = {}
     treat_alter_data_type_as_destructive: bool = False
 
     _coerceable_types: t.Dict[exp.DataType, t.Set[exp.DataType]] = {}

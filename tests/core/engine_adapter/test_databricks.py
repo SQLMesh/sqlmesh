@@ -10,9 +10,21 @@ from sqlmesh.core import dialect as d
 from sqlmesh.core.engine_adapter import DatabricksEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 from sqlmesh.core.node import IntervalUnit
+from sqlmesh.utils.errors import SQLMeshError
 from tests.core.engine_adapter import to_sql_calls
 
 pytestmark = [pytest.mark.databricks, pytest.mark.engine]
+
+
+def _query_tags_map(*items: t.Optional[str]) -> exp.Map:
+    return exp.Map(
+        keys=exp.Array(expressions=[exp.Literal.string(item) for item in items[::2]]),
+        values=exp.Array(
+            expressions=[
+                exp.Null() if item is None else exp.Literal.string(item) for item in items[1::2]
+            ]
+        ),
+    )
 
 
 def test_replace_query_not_exists(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
@@ -115,6 +127,120 @@ def test_set_current_catalog(mocker: MockFixture, make_mocked_engine_adapter: t.
     adapter.set_current_catalog("test_catalog2")
 
     assert to_sql_calls(adapter) == ["USE CATALOG `test_catalog2`"]
+
+
+def test_session_query_tags(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with adapter.session(
+        {
+            "query_tags": d.parse_one(
+                "MAP('team', 'data-eng', 'app', 'sqlmesh')", dialect="databricks"
+            )
+        }
+    ):
+        adapter.execute("SELECT 1")
+
+    adapter.cursor.execute.assert_called_with(
+        "SELECT 1", query_tags={"team": "data-eng", "app": "sqlmesh"}
+    )
+
+    adapter.execute("SELECT 2")
+
+    adapter.cursor.execute.assert_called_with("SELECT 2")
+
+
+def test_session_query_tags_allow_none_values(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng", "feature", None)}):
+        adapter.execute("SELECT 1")
+
+    adapter.cursor.execute.assert_called_with(
+        "SELECT 1", query_tags={"team": "data-eng", "feature": None}
+    )
+
+
+def test_session_query_tags_do_not_override_explicit_query_tags(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng")}):
+        adapter.execute("SELECT 1", query_tags={"team": "analytics"})
+
+    adapter.cursor.execute.assert_called_with("SELECT 1", query_tags={"team": "analytics"})
+
+
+def test_session_query_tags_not_applied_to_spark_session_connection(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    mocker.patch.object(
+        DatabricksEngineAdapter,
+        "is_spark_session_connection",
+        new_callable=mocker.PropertyMock,
+        return_value=True,
+    )
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng")}):
+        adapter.execute("SELECT 1")
+
+    adapter.cursor.execute.assert_called_with("SELECT 1")
+
+
+def test_session_query_tags_not_applied_to_spark_engine_adapter(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    spark_cursor = mocker.Mock()
+    adapter._spark_engine_adapter = mocker.Mock(cursor=spark_cursor)
+    adapter._connection_pool.set_attribute("use_spark_engine_adapter", True)
+
+    with adapter.session({"query_tags": _query_tags_map("team", "data-eng")}):
+        adapter._connection_pool.set_attribute("use_spark_engine_adapter", True)
+        adapter.execute("SELECT 1")
+
+    spark_cursor.execute.assert_called_with("SELECT 1")
+
+
+@pytest.mark.parametrize(
+    "query_tags",
+    [
+        "team:data-eng",
+        exp.Map(
+            keys=exp.Array(expressions=[exp.Literal.number(1)]),
+            values=exp.Array(expressions=[exp.Literal.string("data-eng")]),
+        ),
+        exp.Map(
+            keys=exp.Array(expressions=[exp.Literal.string("team")]),
+            values=exp.Array(expressions=[exp.Literal.number(1)]),
+        ),
+    ],
+)
+def test_session_query_tags_invalid(query_tags, make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    with pytest.raises(SQLMeshError, match="session_properties.query_tags"):
+        with adapter.session({"query_tags": query_tags}):
+            pass
 
 
 def test_get_current_catalog(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
@@ -525,4 +651,59 @@ def test_drop_data_object_materialized_view_calls_correct_drop(mocker: MockFixtu
     # Ensure drop_view is called with materialized=True
     drop_view_mock.assert_called_once_with(
         mv_data_object.to_table(), ignore_if_not_exists=True, materialized=True
+    )
+
+
+def test_columns(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    # Override/mock get_current_catalog to return default
+    current_catalog_mock = mocker.patch.object(
+        adapter, "get_current_catalog", return_value="test_catalog"
+    )
+    # create long struct columns datatype
+    long_struct_cols = [f"a_{i}:int" for i in range(50)]
+    adapter.cursor.fetchall.return_value = [
+        ("bigint_col", "bigint"),
+        ("binary_col", "binary"),
+        ("boolean_col", "boolean"),
+        ("date_col", "date"),
+        ("decimal_col", "decimal(38,4)"),
+        ("double_col", "double"),
+        ("float_col", "float"),
+        ("int_col", "int"),
+        ("small_int", "smallint"),
+        ("string_col", "string"),
+        ("timestamp_col", "timestamp"),
+        ("timestamp_ntz_col", "timestamp_ntz"),
+        ("tinyint_col", "tinyint"),
+        ("array_col", "array<int>"),
+        ("simple_struct_col", "struct<a:int,b:string>"),
+        ("long_struct_col", f"struct<{','.join(long_struct_cols)}>"),
+    ]
+
+    resp = adapter.columns("test_db.test_table")
+    assert resp == {
+        "bigint_col": exp.DataType.build("bigint", dialect=adapter.dialect),
+        "binary_col": exp.DataType.build("binary", dialect=adapter.dialect),
+        "boolean_col": exp.DataType.build("boolean", dialect=adapter.dialect),
+        "date_col": exp.DataType.build("date", dialect=adapter.dialect),
+        "decimal_col": exp.DataType.build("decimal(38,4)", dialect=adapter.dialect),
+        "double_col": exp.DataType.build("double", dialect=adapter.dialect),
+        "float_col": exp.DataType.build("float", dialect=adapter.dialect),
+        "int_col": exp.DataType.build("int", dialect=adapter.dialect),
+        "small_int": exp.DataType.build("smallint", dialect=adapter.dialect),
+        "string_col": exp.DataType.build("string", dialect=adapter.dialect),
+        "timestamp_col": exp.DataType.build("timestamp", dialect=adapter.dialect),
+        "timestamp_ntz_col": exp.DataType.build("timestamp_ntz", dialect=adapter.dialect),
+        "tinyint_col": exp.DataType.build("tinyint", dialect=adapter.dialect),
+        "array_col": exp.DataType.build("array<int>", dialect=adapter.dialect),
+        "simple_struct_col": exp.DataType.build("struct<a:int,b:string>", dialect=adapter.dialect),
+        "long_struct_col": exp.DataType.build(
+            f"struct<{','.join(long_struct_cols)}>", dialect=adapter.dialect
+        ),
+    }
+
+    adapter.cursor.execute.assert_called_once_with(
+        """SELECT columns.column_name, columns.full_data_type FROM system.information_schema.columns WHERE table_name = 'test_table' AND table_schema = 'test_db' AND table_catalog = 'test_catalog' ORDER BY ordinal_position ASC"""
     )

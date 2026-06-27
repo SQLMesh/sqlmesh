@@ -399,6 +399,415 @@ def test_multiple_gateways(tmp_path: Path):
     assert context.dag._sorted == ['"db"."staging"."stg_model"', '"db"."main"."final_model"']
 
 
+def test_multi_gateway_catalog_aware_and_unsupported(tmp_path: Path, mocker):
+    """ClickHouse (catalog UNSUPPORTED) alongside DuckDB (catalog FULL_SUPPORT) must not raise a
+    nesting-level SchemaError when models are loaded.
+
+    Expected behaviour after the fix:
+    - get_default_catalog_per_gateway assigns the gateway name as a virtual catalog for
+      catalog-unsupported gateways when catalog-aware gateways are present.
+    - ClickHouse models end up with a 3-level FQN so the MappingSchema nesting is uniform.
+    - The virtual catalog is stripped from DDL expressions (not raised as an error) because the
+      adapter's catalog_support flips to SINGLE_CATALOG_ONLY when _default_catalog is set.
+    """
+
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    # Build a real DuckDB adapter for the primary gateway.
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # Build a minimal ClickHouse adapter stub — no real connection needed.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    # Simulate the context's engine_adapters dict and call the scheduler directly.
+    engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": ch_adapter,
+    }
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = engine_adapters
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # DuckDB gateway must have a real catalog entry.
+    assert "duckdb_gw" in catalog_per_gw
+    # DuckDB's default catalog is the database filename without extension.
+    assert catalog_per_gw["duckdb_gw"] == "db"
+    # ClickHouse gateway must now also have a virtual catalog wrapped in double underscores.
+    assert "clickhouse_gw" in catalog_per_gw
+    assert catalog_per_gw["clickhouse_gw"] == "__clickhouse_gw__"
+
+    # The ClickHouse adapter's _default_catalog must be mutated to the synthetic virtual catalog.
+    assert ch_adapter._default_catalog == "__clickhouse_gw__"
+
+    # The adapter's catalog_support must now be SINGLE_CATALOG_ONLY (not UNSUPPORTED),
+    # so that the set_catalog decorator strips the virtual catalog instead of raising.
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+    # Loading models for both gateways must not raise a SchemaError.
+    duckdb_model = load_sql_based_model(
+        parse("MODEL(name main.duckdb_tbl, kind FULL, gateway duckdb_gw);\nSELECT 1 AS col"),
+        default_catalog="db",
+    )
+    ch_model = load_sql_based_model(
+        parse("MODEL(name mydb.ch_tbl, kind FULL, gateway clickhouse_gw);\nSELECT 1 AS col"),
+        default_catalog="__clickhouse_gw__",
+    )
+
+    # Both models must have 3-level FQNs so MappingSchema nesting is uniform.
+    # count(".") == 2 means 3 parts (catalog.db.table), i.e. a 3-level FQN.
+    assert duckdb_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for duckdb model, got: {duckdb_model.fqn}"
+    )
+    assert ch_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for ch model, got: {ch_model.fqn}"
+    )  # 3 parts = 2 dots
+
+    # Both models loaded into the same MappingSchema must not raise a nesting SchemaError.
+    from sqlglot.schema import MappingSchema
+
+    schema = MappingSchema(normalize=False)
+    schema.add_table(duckdb_model.fqn, duckdb_model.columns_to_types or {})
+    schema.add_table(ch_model.fqn, ch_model.columns_to_types or {})
+
+
+def test_single_gateway_clickhouse_no_virtual_catalog(mocker):
+    """When ClickHouse is the only gateway (no catalog-aware peer), it must NOT receive a virtual
+    catalog.  Models remain 2-level and catalog_support stays UNSUPPORTED."""
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {"clickhouse_gw": ch_adapter}
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # With only a catalog-unsupported gateway there must be no entry at all.
+    assert "clickhouse_gw" not in catalog_per_gw
+
+    # The adapter must remain unchanged — no virtual catalog injected.
+    assert ch_adapter._default_catalog is None
+    assert ch_adapter.catalog_support == CatalogSupport.UNSUPPORTED
+
+
+def test_multi_gateway_clickhouse_custom_virtual_catalog(tmp_path: Path, mocker):
+    """When virtual_catalog is configured on the ClickHouse connection, that value is used as the
+    virtual catalog instead of the synthetic __gateway_name__ default."""
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # Pass virtual_catalog via _extra_config (the same path used by ClickhouseConnectionConfig).
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+        virtual_catalog="my_custom_catalog",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {"duckdb_gw": duck_adapter, "clickhouse_gw": ch_adapter}
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # The configured virtual_catalog value must be used, not __clickhouse_gw__.
+    assert catalog_per_gw["clickhouse_gw"] == "my_custom_catalog"
+    assert ch_adapter._default_catalog == "my_custom_catalog"
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+
+def test_snapshot_evaluator_calls_ensure_virtual_catalog_injection(mocker):
+    """snapshot_evaluator must call _ensure_virtual_catalog_injection before cloning adapters.
+
+    This guards the edge case where snapshot_evaluator is the first property accessed on a fresh
+    context — before default_catalog fires during model loading — and ensures virtual catalog
+    injection still happens even in that order.
+    """
+    ctx = Context(config=Config())
+    ctx._snapshot_evaluator = None  # force re-initialization
+
+    inject_spy = mocker.patch.object(ctx, "_ensure_virtual_catalog_injection")
+
+    _ = ctx.snapshot_evaluator
+
+    inject_spy.assert_called_once()
+
+
+@pytest.mark.fast
+def test_multi_gateway_virtual_catalog_create_schema_strips_prefix(tmp_path: Path, mocker):
+    """Integration test: create_schema with a 3-level virtual-catalog FQN must strip the synthetic
+    catalog prefix before sending DDL to ClickHouse.
+
+    Flow exercised:
+    1. get_default_catalog_per_gateway detects a catalog-aware gateway (DuckDB) alongside
+       a catalog-unsupported gateway (ClickHouse) and calls inject_virtual_catalog().
+    2. The ClickHouse adapter's _default_catalog is set to ``__clickhouse_gw__``.
+    3. A ClickHouse model loaded with that virtual catalog gets a 3-level FQN.
+    4. When create_schema is called with the 3-level schema name the virtual catalog prefix
+       is stripped, so the SQL that reaches the wire uses only a 2-level name.
+    5. The DuckDB adapter's _default_catalog is NOT set to a synthetic value.
+    """
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # ClickHouse adapter with a mocked connection — no real server needed.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": ch_adapter,
+    }
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # --- Phase 1: virtual catalog injection assertions ---
+
+    # DuckDB gateway must carry a real catalog entry.
+    assert "duckdb_gw" in catalog_per_gw
+
+    # ClickHouse gateway must receive the synthetic ``__clickhouse_gw__`` virtual catalog.
+    assert catalog_per_gw["clickhouse_gw"] == "__clickhouse_gw__"
+
+    # The ClickHouse adapter's _default_catalog must be mutated.
+    assert ch_adapter._default_catalog == "__clickhouse_gw__"
+
+    # catalog_support must flip to SINGLE_CATALOG_ONLY so the set_catalog decorator strips
+    # the virtual catalog instead of raising when DDL is executed.
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+    # DuckDB adapter must be untouched — it already has real catalog support.
+    assert duck_adapter._default_catalog != "__duckdb_gw__"
+
+    # --- Phase 2: FQN uniformity ---
+
+    ch_model = load_sql_based_model(
+        parse("MODEL(name mydb.ch_tbl, kind FULL, gateway clickhouse_gw);\nSELECT 1 AS col"),
+        default_catalog="__clickhouse_gw__",
+    )
+    duckdb_model = load_sql_based_model(
+        parse("MODEL(name main.duckdb_tbl, kind FULL, gateway duckdb_gw);\nSELECT 1 AS col"),
+        default_catalog=catalog_per_gw["duckdb_gw"],
+    )
+
+    # Both models must have 3-level FQNs (catalog.db.table → 2 dots) so MappingSchema nesting
+    # is uniform and does not raise a SchemaError.
+    assert ch_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for ClickHouse model, got: {ch_model.fqn}"
+    )
+    assert duckdb_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for DuckDB model, got: {duckdb_model.fqn}"
+    )
+
+    from sqlglot.schema import MappingSchema
+
+    schema = MappingSchema(normalize=False)
+    schema.add_table(ch_model.fqn, ch_model.columns_to_types or {})
+    schema.add_table(duckdb_model.fqn, duckdb_model.columns_to_types or {})
+
+    # --- Phase 3: create_schema strips the virtual catalog prefix ---
+
+    # Spy on _create_schema to inspect what schema name is passed after stripping.
+    create_schema_calls: t.List[str] = []
+
+    def _capture_create_schema(
+        schema_name,
+        ignore_if_exists,
+        warn_on_error,
+        properties,
+        kind,
+    ):
+        create_schema_calls.append(
+            schema_name.sql(dialect="clickhouse")
+            if hasattr(schema_name, "sql")
+            else str(schema_name)
+        )
+
+    mocker.patch.object(ch_adapter, "_create_schema", side_effect=_capture_create_schema)
+
+    # Call create_schema with the 3-level virtual-catalog-prefixed schema name.
+    ch_adapter.create_schema("__clickhouse_gw__.mydb")
+
+    assert len(create_schema_calls) == 1, "Expected exactly one _create_schema call"
+    passed_schema = create_schema_calls[0]
+    # The virtual catalog prefix must NOT appear in the SQL sent to the wire.
+    assert "__clickhouse_gw__" not in passed_schema, (
+        f"Virtual catalog prefix should be stripped before reaching _create_schema, got: {passed_schema!r}"
+    )
+
+
+@pytest.mark.fast
+def test_warn_if_virtual_catalog_rematerialization_emits_warning(mocker):
+    """_warn_if_virtual_catalog_rematerialization must emit a log_warning when new snapshots have
+    3-level FQNs that map to existing 2-level FQNs in the current environment, indicating that the
+    virtual catalog prefix was added to previously-applied ClickHouse models."""
+    from unittest.mock import MagicMock
+
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.snapshot.definition import SnapshotId
+
+    # Build a minimal Context with no models.
+    ctx = Context(config=Config())
+
+    # Create a ClickHouse adapter with a virtual catalog already injected.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+    ch_adapter._default_catalog = "__ch_gw__"
+
+    # Override engine_adapters so the context sees our prepared adapter.
+    mocker.patch.object(
+        type(ctx), "engine_adapters", new_callable=PropertyMock, return_value={"ch_gw": ch_adapter}
+    )
+
+    # Build a mock snapshot with a 3-level name that has the virtual catalog prefix.
+    new_snapshot = MagicMock()
+    new_snapshot.name = "__ch_gw__.mydb.my_table"
+
+    # The old 2-level name must appear in snapshots_by_name so we detect the rename.
+    old_snapshot_id = SnapshotId(name="mydb.my_table", identifier="abc123")
+
+    context_diff = MagicMock()
+    context_diff.new_snapshots = {new_snapshot.name: new_snapshot}
+    context_diff.removed_snapshots = {}
+    context_diff.snapshots_by_name = {"mydb.my_table": MagicMock()}
+
+    plan = MagicMock()
+    plan.new_snapshots = [new_snapshot]
+    plan.context_diff = context_diff
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx._warn_if_virtual_catalog_rematerialization(plan)
+
+    warning_mock.assert_called_once()
+    warning_text = warning_mock.call_args[0][0]
+    assert "__ch_gw__" in warning_text
+    assert "mydb.my_table" in warning_text
+
+
+@pytest.mark.fast
+def test_warn_if_virtual_catalog_rematerialization_no_warning_when_genuinely_new(mocker):
+    """_warn_if_virtual_catalog_rematerialization must NOT warn when there is no matching old
+    2-level name — i.e. the model is a brand-new model, not a renamed existing one."""
+    from unittest.mock import MagicMock
+
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    ctx = Context(config=Config())
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+    ch_adapter._default_catalog = "__ch_gw__"
+
+    mocker.patch.object(
+        type(ctx), "engine_adapters", new_callable=PropertyMock, return_value={"ch_gw": ch_adapter}
+    )
+
+    new_snapshot = MagicMock()
+    new_snapshot.name = "__ch_gw__.mydb.brand_new_table"
+
+    context_diff = MagicMock()
+    context_diff.new_snapshots = {new_snapshot.name: new_snapshot}
+    context_diff.removed_snapshots = {}
+    # No matching old name.
+    context_diff.snapshots_by_name = {}
+
+    plan = MagicMock()
+    plan.new_snapshots = [new_snapshot]
+    plan.context_diff = context_diff
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx._warn_if_virtual_catalog_rematerialization(plan)
+
+    warning_mock.assert_not_called()
+
+
+@pytest.mark.fast
+def test_warn_if_virtual_catalog_rematerialization_no_warning_without_virtual_catalog(mocker):
+    """_warn_if_virtual_catalog_rematerialization must NOT warn when the ClickHouse adapter has no
+    virtual catalog injected (i.e. _default_catalog is None)."""
+    from unittest.mock import MagicMock
+
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    ctx = Context(config=Config())
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+    # No virtual catalog injected — adapter stays at 2-level mode.
+    assert ch_adapter._default_catalog is None
+
+    mocker.patch.object(
+        type(ctx), "engine_adapters", new_callable=PropertyMock, return_value={"ch_gw": ch_adapter}
+    )
+
+    new_snapshot = MagicMock()
+    new_snapshot.name = "mydb.my_table"
+
+    context_diff = MagicMock()
+    context_diff.new_snapshots = {new_snapshot.name: new_snapshot}
+    context_diff.removed_snapshots = {}
+    context_diff.snapshots_by_name = {}
+
+    plan = MagicMock()
+    plan.new_snapshots = [new_snapshot]
+    plan.context_diff = context_diff
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx._warn_if_virtual_catalog_rematerialization(plan)
+
+    warning_mock.assert_not_called()
+
+
 def test_plan_execution_time():
     context = Context(config=Config())
     context.upsert_model(
@@ -1098,6 +1507,111 @@ def test_janitor(sushi_context, mocker: MockerFixture) -> None:
 
 
 @pytest.mark.slow
+def test_janitor_environment_filter(sushi_context, mocker: MockerFixture) -> None:
+    """Janitor with --environment only cleans up the named environment."""
+    env_target = Environment(
+        name="target_env",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[x.table_info for x in sushi_context.snapshots.values()],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+    )
+    env_other = Environment(
+        name="other_env",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[x.table_info for x in sushi_context.snapshots.values()],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+    )
+
+    all_envs = [env_target, env_other]
+
+    # Patch the state_sync property on the context so we can assert on calls without
+    # touching private attributes (_engine_adapter, _state_sync).
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+
+    def get_expired(current_ts: int, name: t.Optional[str] = None) -> t.List:
+        if name is not None:
+            return [e.summary for e in all_envs if e.name == name]
+        return [e.summary for e in all_envs]
+
+    state_sync_mock.get_expired_environments.side_effect = get_expired
+    state_sync_mock.get_environment.side_effect = lambda name: next(
+        (e for e in all_envs if e.name == name), None
+    )
+
+    sushi_context._run_janitor(environment="target_env")
+
+    # get_expired_environments must be called with name="target_env"
+    state_sync_mock.get_expired_environments.assert_called_once()
+    _, kwargs = state_sync_mock.get_expired_environments.call_args
+    assert kwargs.get("name") == "target_env"
+
+    # delete_expired_environments must also be called with name="target_env"
+    state_sync_mock.delete_expired_environments.assert_called_once()
+    _, del_kwargs = state_sync_mock.delete_expired_environments.call_args
+    assert del_kwargs.get("name") == "target_env"
+
+    # Global operations (snapshots + compaction) are skipped when targeting a specific environment
+    state_sync_mock.get_expired_snapshots.assert_not_called()
+    state_sync_mock.compact_intervals.assert_not_called()
+
+
+@pytest.mark.slow
+def test_janitor_environment_not_expired_warning(sushi_context, mocker: MockerFixture) -> None:
+    """Janitor with --environment emits a warning when the named environment is not expired."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_expired_environments.return_value = []
+
+    warning_mock = mocker.patch.object(sushi_context.console, "log_warning")
+
+    sushi_context._run_janitor(environment="nonexistent_env")
+
+    warning_mock.assert_called_once()
+    assert "nonexistent_env" in warning_mock.call_args[0][0]
+
+
+@pytest.mark.slow
+def test_invalidate_environment_sync_calls_cleanup_with_name(
+    sushi_context, mocker: MockerFixture
+) -> None:
+    """invalidate_environment(..., sync=True) must pass name= to _cleanup_environments so only the
+    target environment is deleted, not all expired environments."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_expired_environments.return_value = []
+
+    sushi_context.invalidate_environment("dev", sync=True)
+
+    state_sync_mock.invalidate_environment.assert_called_once_with("dev")
+    state_sync_mock.delete_expired_environments.assert_called_once()
+    _, kwargs = state_sync_mock.delete_expired_environments.call_args
+    assert kwargs.get("name") == "dev"
+
+
+@pytest.mark.slow
+def test_invalidate_environment_no_sync_skips_cleanup(sushi_context, mocker: MockerFixture) -> None:
+    """invalidate_environment(..., sync=False) should not trigger _cleanup_environments at all."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+
+    sushi_context.invalidate_environment("dev", sync=False)
+
+    state_sync_mock.invalidate_environment.assert_called_once_with("dev")
+    state_sync_mock.delete_expired_environments.assert_not_called()
+
+
+@pytest.mark.slow
 def test_plan_default_end(sushi_context_pre_scheduling: Context):
     prod_plan_builder = sushi_context_pre_scheduling.plan_builder("prod")
     # Simulate that the prod is 3 days behind.
@@ -1154,6 +1668,72 @@ def test_plan_start_ahead_of_end(copy_to_temp_path):
             for i in context.state_sync.max_interval_end_per_model("prod").values()
         )
         assert context.engine_adapter.fetchone("SELECT COUNT(*) FROM sushi.hourly")[0] == 0
+        context.close()
+
+
+@pytest.mark.slow
+def test_plan_seed_model_excluded_from_default_end(copy_to_temp_path: t.Callable):
+    path = copy_to_temp_path("examples/sushi")
+    with time_machine.travel("2024-06-01 00:00:00 UTC"):
+        context = Context(paths=path, gateway="duckdb_persistent")
+        context.plan("prod", no_prompts=True, auto_apply=True)
+        max_ends = context.state_sync.max_interval_end_per_model("prod")
+        seed_fqns = [k for k in max_ends if "waiter_names" in k]
+        assert len(seed_fqns) == 1
+        assert max_ends[seed_fqns[0]] == to_timestamp("2024-06-01")
+        context.close()
+
+    with time_machine.travel("2026-03-01 00:00:00 UTC"):
+        context = Context(paths=path, gateway="duckdb_persistent")
+
+        # a model that depends on this seed but has no interval in prod yet so only the seed would contribute to max_interval_end_per_model
+        context.upsert_model(
+            load_sql_based_model(
+                parse(
+                    """
+                    MODEL(
+                        name sushi.waiter_summary,
+                        kind INCREMENTAL_BY_TIME_RANGE (
+                            time_column ds
+                        ),
+                        start '2025-01-01',
+                        cron '@daily'
+                    );
+
+                    SELECT
+                        id,
+                        name,
+                        @start_ds AS ds
+                    FROM
+                        sushi.waiter_names
+                    WHERE
+                        @start_ds BETWEEN @start_ds AND @end_ds
+                    """
+                ),
+                default_catalog=context.default_catalog,
+            )
+        )
+
+        # the seed's interval end would still be 2024-06-01
+        max_ends = context.state_sync.max_interval_end_per_model("prod")
+        seed_fqns = [k for k in max_ends if "waiter_names" in k]
+        assert len(seed_fqns) == 1
+        assert max_ends[seed_fqns[0]] == to_timestamp("2024-06-01")
+
+        # the plan start date 2025-01-01 is after the seeds end date but shouldnt cause the plan to fail
+        plan = context.plan(
+            "dev", start="2025-01-01", no_prompts=True, select_models=["*waiter_summary"]
+        )
+
+        # the end should fall back to execution_time rather than seeds end
+        assert plan.models_to_backfill == {
+            '"duckdb"."sushi"."waiter_names"',
+            '"duckdb"."sushi"."waiter_summary"',
+        }
+        assert plan.provided_end is None
+        assert plan.provided_start == "2025-01-01"
+        assert to_timestamp(plan.end) == to_timestamp("2026-03-01")
+        assert to_timestamp(plan.start) == to_timestamp("2025-01-01")
         context.close()
 
 
@@ -1506,6 +2086,8 @@ def test_requirements(copy_to_temp_path: t.Callable):
         "dev", no_prompts=True, skip_tests=True, skip_backfill=True, auto_apply=True
     ).environment
     requirements = {"ipywidgets", "numpy", "pandas", "test_package"}
+    if IS_WINDOWS:
+        requirements.add("pendulum")
     assert environment.requirements["pandas"] == "2.2.2"
     assert set(environment.requirements) == requirements
 
@@ -1513,7 +2095,10 @@ def test_requirements(copy_to_temp_path: t.Callable):
     context._excluded_requirements = {"ipywidgets", "ruamel.yaml", "ruamel.yaml.clib"}
     diff = context.plan_builder("dev", skip_tests=True, skip_backfill=True).build().context_diff
     assert set(diff.previous_requirements) == requirements
-    assert set(diff.requirements) == {"numpy", "pandas"}
+    reqs = {"numpy", "pandas"}
+    if IS_WINDOWS:
+        reqs.add("pendulum")
+    assert set(diff.requirements) == reqs
 
 
 def test_deactivate_automatic_requirement_inference(copy_to_temp_path: t.Callable):
@@ -2200,6 +2785,44 @@ def test_plan_selector_expression_no_match(sushi_context: Context) -> None:
         match="Selector did not return any models. Please check your model selection and try again.",
     ):
         sushi_context.plan("prod", restate_models=["*missing*"])
+
+
+def test_plan_select_model_deleted_model(sushi_context: Context) -> None:
+    """Selecting a model that has been deleted locally but still exists in the deployed
+    environment should produce a valid plan with the deletion, not raise PlanError."""
+    # Pick a leaf model that can be safely deleted without breaking other models' rendering.
+    model_name = "sushi.top_waiters"
+    snapshot = sushi_context.get_snapshot(model_name)
+    assert snapshot is not None
+
+    # Delete the model file from disk.
+    model = sushi_context.get_model(model_name)
+    assert model._path is not None and model._path.exists()
+    model._path.unlink()
+
+    # Reload the context so it no longer knows about the deleted model.
+    sushi_context.load()
+    assert model_name not in [m for m in sushi_context.models]
+
+    # Planning with select_models for the deleted model should succeed (not raise PlanError).
+    plan = sushi_context.plan("prod", select_models=[model_name], no_prompts=True)
+    assert plan is not None
+
+    # The deleted model should appear in removed_snapshots.
+    removed_names = {s.name for s in plan.context_diff.removed_snapshots.values()}
+    assert snapshot.name in removed_names
+
+
+def test_plan_select_model_deleted_model_still_rejects_nonexistent(
+    sushi_context: Context,
+) -> None:
+    """A model that neither exists locally nor in the deployed environment should still
+    raise PlanError."""
+    with pytest.raises(
+        PlanError,
+        match="Selector did not return any models. Please check your model selection and try again.",
+    ):
+        sushi_context.plan("prod", select_models=["sushi.completely_nonexistent"])
 
 
 def test_plan_on_virtual_update_this_model_in_macro(tmp_path: pathlib.Path):

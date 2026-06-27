@@ -90,4 +90,5 @@ default_gateway: local_db
 * [Redshift](../integrations/engines/redshift.md)
 * [Snowflake](../integrations/engines/snowflake.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)

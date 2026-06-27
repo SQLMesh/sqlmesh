@@ -34,7 +34,7 @@ class LinterConfig(BaseConfig):
             v = v.unnest().name
         elif isinstance(v, (exp.Tuple, exp.Array)):
             v = [e.name for e in v.expressions]
-        elif isinstance(v, exp.Expression):
+        elif isinstance(v, exp.Expr):
             v = v.name
 
         return {name.lower() for name in ensure_collection(v)}

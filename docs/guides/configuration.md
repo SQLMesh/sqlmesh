@@ -269,7 +269,7 @@ gateways:
 We can override the `dummy_pw` value with the true password `real_pw` by creating the environment variable. This example demonstrates creating the variable with the bash `export` function:
 
 ```bash
-$ export SQLMESH__GATEWAYS__MY_GATEWAY__CONNECTION__PASSWORD="real_pw"
+export SQLMESH__GATEWAYS__MY_GATEWAY__CONNECTION__PASSWORD="real_pw"
 ```
 
 After the initial string `SQLMESH__`, the environment variable name components move down the key hierarchy in the YAML specification: `GATEWAYS` --> `MY_GATEWAY` --> `CONNECTION` --> `PASSWORD`.
@@ -920,6 +920,7 @@ These pages describe the connection configuration options for each execution eng
 * [GCP Postgres](../integrations/engines/gcp-postgres.md)
 * [Redshift](../integrations/engines/redshift.md)
 * [Snowflake](../integrations/engines/snowflake.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Spark](../integrations/engines/spark.md)
 * [Trino](../integrations/engines/trino.md)
 
@@ -952,6 +953,7 @@ Unsupported state engines, even for development:
 
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 This example gateway configuration uses Snowflake for the data warehouse connection and Postgres for the state backend connection:
@@ -1492,7 +1494,7 @@ Example enabling debug mode for the CLI command `sqlmesh plan`:
 === "Bash"
 
     ```bash
-    $ SQLMESH_DEBUG=1 sqlmesh plan
+    SQLMESH_DEBUG=1 sqlmesh plan
     ```
 
 === "MS Powershell"

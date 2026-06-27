@@ -692,8 +692,8 @@ def test_build_plan_stages_restatement_prod_identifies_dev_intervals(
         finalized_ts=to_timestamp("2023-01-02"),
     )
 
-    state_reader.get_environment.side_effect = (
-        lambda name: existing_dev_environment if name == "dev" else existing_prod_environment
+    state_reader.get_environment.side_effect = lambda name: (
+        existing_dev_environment if name == "dev" else existing_prod_environment
     )
     state_reader.get_environments_summary.return_value = [
         existing_prod_environment.summary,
@@ -857,8 +857,8 @@ def test_build_plan_stages_restatement_dev_does_not_clear_intervals(
         finalized_ts=to_timestamp("2023-01-02"),
     )
 
-    state_reader.get_environment.side_effect = (
-        lambda name: existing_dev_environment if name == "dev" else existing_prod_environment
+    state_reader.get_environment.side_effect = lambda name: (
+        existing_dev_environment if name == "dev" else existing_prod_environment
     )
     state_reader.get_environments_summary.return_value = [
         existing_prod_environment.summary,

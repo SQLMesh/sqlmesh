@@ -23,6 +23,7 @@ from sqlmesh.utils.metaprogramming import (
     Executable,
     ExecutableKind,
     _dict_sort,
+    _resolve_import_module,
     build_env,
     func_globals,
     normalize_source,
@@ -49,7 +50,7 @@ def test_print_exception(mocker: MockerFixture):
     except Exception as ex:
         print_exception(ex, test_env, out_mock)
 
-    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 48, in test_print_exception
+    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 49, in test_print_exception
     eval\("test_fun\(\)", env\).*
 
   File '/test/path.py' \(or imported file\), line 2, in test_fun
@@ -83,7 +84,18 @@ class DataClass:
     x: int
 
 
+class ReferencedClass:
+    def __init__(self, value: int):
+        self.value = value
+
+    def get_value(self) -> int:
+        return self.value
+
+
 class MyClass:
+    def __init__(self, x: int):
+        self.helper = ReferencedClass(x * 2)
+
     @staticmethod
     def foo():
         return KLASS_X
@@ -95,6 +107,13 @@ class MyClass:
     def baz(self):
         return KLASS_Z
 
+    def use_referenced(self, value: int) -> int:
+        ref = ReferencedClass(value)
+        return ref.get_value()
+
+    def compute_with_reference(self) -> int:
+        return self.helper.get_value() + 10
+
 
 def other_func(a: int) -> int:
     import sqlglot
@@ -103,7 +122,8 @@ def other_func(a: int) -> int:
     pd.DataFrame([{"x": 1}])
     to_table("y")
     my_lambda()  # type: ignore
-    return X + a + W
+    obj = MyClass(a)
+    return X + a + W + obj.compute_with_reference()
 
 
 @contextmanager
@@ -131,7 +151,7 @@ def function_with_custom_decorator():
 def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2) -> int:
     """DOC STRING"""
     sqlglot.parse_one("1")
-    MyClass()
+    MyClass(47)
     DataClass(x=y)
     normalize_model_name("test" + SQLGLOT_META)
     fetch_data()
@@ -177,6 +197,7 @@ def test_func_globals() -> None:
     assert func_globals(other_func) == {
         "X": 1,
         "W": 0,
+        "MyClass": MyClass,
         "my_lambda": my_lambda,
         "pd": pd,
         "to_table": to_table,
@@ -202,7 +223,7 @@ def test_normalize_source() -> None:
         == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
     ):
     sqlglot.parse_one('1')
-    MyClass()
+    MyClass(47)
     DataClass(x=y)
     normalize_model_name('test' + SQLGLOT_META)
     fetch_data()
@@ -223,7 +244,8 @@ def test_normalize_source() -> None:
     pd.DataFrame([{'x': 1}])
     to_table('y')
     my_lambda()
-    return X + a + W"""
+    obj = MyClass(a)
+    return X + a + W + obj.compute_with_reference()"""
     )
 
 
@@ -252,7 +274,7 @@ def test_serialize_env() -> None:
             payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
     ):
     sqlglot.parse_one('1')
-    MyClass()
+    MyClass(47)
     DataClass(x=y)
     normalize_model_name('test' + SQLGLOT_META)
     fetch_data()
@@ -295,6 +317,9 @@ class DataClass:
             path="test_metaprogramming.py",
             payload="""class MyClass:
 
+    def __init__(self, x: int):
+        self.helper = ReferencedClass(x * 2)
+
     @staticmethod
     def foo():
         return KLASS_X
@@ -304,7 +329,26 @@ class DataClass:
         return KLASS_Y
 
     def baz(self):
-        return KLASS_Z""",
+        return KLASS_Z
+
+    def use_referenced(self, value: int):
+        ref = ReferencedClass(value)
+        return ref.get_value()
+
+    def compute_with_reference(self):
+        return self.helper.get_value() + 10""",
+        ),
+        "ReferencedClass": Executable(
+            kind=ExecutableKind.DEFINITION,
+            name="ReferencedClass",
+            path="test_metaprogramming.py",
+            payload="""class ReferencedClass:
+
+    def __init__(self, value: int):
+        self.value = value
+
+    def get_value(self):
+        return self.value""",
         ),
         "dataclass": Executable(
             payload="from dataclasses import dataclass", kind=ExecutableKind.IMPORT
@@ -341,7 +385,8 @@ def sample_context_manager():
     pd.DataFrame([{'x': 1}])
     to_table('y')
     my_lambda()
-    return X + a + W""",
+    obj = MyClass(a)
+    return X + a + W + obj.compute_with_reference()""",
         ),
         "sample_context_manager": Executable(
             payload="""@contextmanager
@@ -423,6 +468,21 @@ def function_with_custom_decorator():
     # Every object is treated as "metadata only", transitively
     assert all(is_metadata for (_, is_metadata) in env.values())
     assert serialized_env == expected_env
+
+    # Check that class references inside init are captured
+    init_globals = func_globals(MyClass.__init__)
+    assert "ReferencedClass" in init_globals
+
+    env = {}
+    build_env(other_func, env=env, name="other_func_test", path=path)
+    serialized_env = serialize_env(env, path=path)
+
+    assert "MyClass" in serialized_env
+    assert "ReferencedClass" in serialized_env
+
+    prepared_env = prepare_env(serialized_env)
+    result = eval("other_func_test(2)", prepared_env)
+    assert result == 17
 
 
 def test_serialize_env_with_enum_import_appearing_in_two_functions() -> None:
@@ -579,3 +639,18 @@ def test_dict_sort_executable_integration():
     # non-deterministic repr should not change the payload
     exec3 = Executable.value(variables1)
     assert exec3.payload == "{'env': 'dev', 'debug': True, 'timeout': 30}"
+
+
+def test_resolve_import_module():
+    """Test that _resolve_import_module finds the shallowest public re-exporting module."""
+    # to_table lives in sqlglot.expressions.builders but is re-exported from sqlglot.expressions
+    assert _resolve_import_module(to_table, "to_table") == "sqlglot.expressions"
+
+    # Objects whose __module__ is already the public module should be returned as-is
+    assert _resolve_import_module(exp.Column, "Column") == "sqlglot.expressions"
+
+    # Objects not re-exported by any parent should return the original module
+    class _Local:
+        __module__ = "some.deep.internal.module"
+
+    assert _resolve_import_module(_Local, "_Local") == "some.deep.internal.module"

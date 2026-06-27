@@ -329,7 +329,7 @@ def test_load_with_dictionary_defaults():
     audit = load_audit(expressions, dialect="spark")
     assert audit.defaults.keys() == {"field1", "field2"}
     for value in audit.defaults.values():
-        assert isinstance(value, exp.Expression)
+        assert isinstance(value, exp.Expr)
 
 
 def test_load_with_single_defaults():
@@ -350,7 +350,7 @@ def test_load_with_single_defaults():
     audit = load_audit(expressions, dialect="duckdb")
     assert audit.defaults.keys() == {"field1"}
     for value in audit.defaults.values():
-        assert isinstance(value, exp.Expression)
+        assert isinstance(value, exp.Expr)
 
 
 def test_no_audit_statement():

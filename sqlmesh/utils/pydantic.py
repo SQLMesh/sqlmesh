@@ -41,6 +41,19 @@ def field_serializer(*args: t.Any, **kwargs: t.Any) -> t.Callable[[t.Any], t.Any
     return pydantic.field_serializer(*args, **kwargs)
 
 
+def validation_data(info_or_data: t.Any) -> t.Dict[str, t.Any]:
+    """Safely extract the validated-data dict from a ValidationInfo, dict, or None.
+
+    Pydantic 2.13+ sets ValidationInfo.data to None during model_validate_json().
+    This normalizes all inputs to a dict, returning an empty dict when data is unavailable.
+    """
+    if isinstance(info_or_data, dict):
+        return info_or_data
+    if info_or_data is not None:
+        return info_or_data.data or {}
+    return {}
+
+
 def get_dialect(values: t.Any) -> str:
     """Extracts dialect from a dict or pydantic obj, defaulting to the globally set dialect.
 
@@ -52,11 +65,11 @@ def get_dialect(values: t.Any) -> str:
 
     from sqlmesh.core.model import model
 
-    dialect = (values if isinstance(values, dict) else values.data).get("dialect")
+    dialect = validation_data(values).get("dialect")
     return model._dialect if dialect is None else dialect  # type: ignore
 
 
-def _expression_encoder(e: exp.Expression) -> str:
+def _expression_encoder(e: exp.Expr) -> str:
     return e.meta.get("sql") or e.sql(dialect=e.meta.get("dialect"))
 
 
@@ -70,7 +83,7 @@ class PydanticModel(pydantic.BaseModel):
         # crippled badly. Here we need to enumerate all different ways of how sqlglot expressions
         # show up in pydantic models.
         json_encoders={
-            exp.Expression: _expression_encoder,
+            exp.Expr: _expression_encoder,
             exp.DataType: _expression_encoder,
             exp.Tuple: _expression_encoder,
             AuditQueryTypes: _expression_encoder,  # type: ignore
@@ -190,7 +203,7 @@ def validate_list_of_strings(v: t.Any) -> t.List[str]:
 
 
 def validate_string(v: t.Any) -> str:
-    if isinstance(v, exp.Expression):
+    if isinstance(v, exp.Expr):
         return v.name
     return str(v)
 
@@ -204,13 +217,13 @@ def validate_expression(expression: E, dialect: str) -> E:
 def bool_validator(v: t.Any) -> bool:
     if isinstance(v, exp.Boolean):
         return v.this
-    if isinstance(v, exp.Expression):
+    if isinstance(v, exp.Expr):
         return str_to_bool(v.name)
     return str_to_bool(str(v or ""))
 
 
 def positive_int_validator(v: t.Any) -> int:
-    if isinstance(v, exp.Expression) and v.is_int:
+    if isinstance(v, exp.Expr) and v.is_int:
         v = int(v.name)
     if not isinstance(v, int):
         raise ValueError(f"Invalid num {v}. Value must be an integer value")
@@ -237,10 +250,10 @@ def _formatted_validation_errors(error: pydantic.ValidationError) -> t.List[str]
 def _get_field(
     v: t.Any,
     values: t.Any,
-) -> exp.Expression:
+) -> exp.Expr:
     dialect = get_dialect(values)
 
-    if isinstance(v, exp.Expression):
+    if isinstance(v, exp.Expr):
         expression = v
     else:
         expression = parse_one(v, dialect=dialect)
@@ -257,17 +270,18 @@ def _get_field(
 def _get_fields(
     v: t.Any,
     values: t.Any,
-) -> t.List[exp.Expression]:
+) -> t.List[exp.Expr]:
     dialect = get_dialect(values)
 
     if isinstance(v, (exp.Tuple, exp.Array)):
-        expressions: t.List[exp.Expression] = v.expressions
-    elif isinstance(v, exp.Expression):
+        expressions: t.List[exp.Expr] = v.expressions
+    elif isinstance(v, exp.Expr):
         expressions = [v]
     else:
+        items: t.List[t.Any] = ensure_list(v)
         expressions = [
-            parse_one(entry, dialect=dialect) if isinstance(entry, str) else entry
-            for entry in ensure_list(v)
+            parse_one(entry, dialect=dialect) if isinstance(entry, str) else entry  # type: ignore[misc]
+            for entry in items
         ]
 
     results = []
@@ -278,7 +292,7 @@ def _get_fields(
     return results
 
 
-def list_of_fields_validator(v: t.Any, values: t.Any) -> t.List[exp.Expression]:
+def list_of_fields_validator(v: t.Any, values: t.Any) -> t.List[exp.Expr]:
     return _get_fields(v, values)
 
 
@@ -291,15 +305,15 @@ def column_validator(v: t.Any, values: t.Any) -> exp.Column:
 
 def list_of_fields_or_star_validator(
     v: t.Any, values: t.Any
-) -> t.Union[exp.Star, t.List[exp.Expression]]:
+) -> t.Union[exp.Star, t.List[exp.Expr]]:
     expressions = _get_fields(v, values)
     if len(expressions) == 1 and isinstance(expressions[0], exp.Star):
         return t.cast(exp.Star, expressions[0])
-    return t.cast(t.List[exp.Expression], expressions)
+    return t.cast(t.List[exp.Expr], expressions)
 
 
 def cron_validator(v: t.Any) -> str:
-    if isinstance(v, exp.Expression):
+    if isinstance(v, exp.Expr):
         v = v.name
 
     from croniter import CroniterBadCronError, croniter
@@ -338,7 +352,7 @@ if t.TYPE_CHECKING:
     SQLGlotBool = bool
     SQLGlotPositiveInt = int
     SQLGlotColumn = exp.Column
-    SQLGlotListOfFields = t.List[exp.Expression]
+    SQLGlotListOfFields = t.List[exp.Expr]
     SQLGlotListOfFieldsOrStar = t.Union[SQLGlotListOfFields, exp.Star]
     SQLGlotCron = str
 else:
@@ -348,10 +362,8 @@ else:
     SQLGlotString = t.Annotated[str, BeforeValidator(validate_string)]
     SQLGlotBool = t.Annotated[bool, BeforeValidator(bool_validator)]
     SQLGlotPositiveInt = t.Annotated[int, BeforeValidator(positive_int_validator)]
-    SQLGlotColumn = t.Annotated[exp.Expression, BeforeValidator(column_validator)]
-    SQLGlotListOfFields = t.Annotated[
-        t.List[exp.Expression], BeforeValidator(list_of_fields_validator)
-    ]
+    SQLGlotColumn = t.Annotated[exp.Expr, BeforeValidator(column_validator)]
+    SQLGlotListOfFields = t.Annotated[t.List[exp.Expr], BeforeValidator(list_of_fields_validator)]
     SQLGlotListOfFieldsOrStar = t.Annotated[
         t.Union[SQLGlotListOfFields, exp.Star], BeforeValidator(list_of_fields_or_star_validator)
     ]

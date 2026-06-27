@@ -160,7 +160,7 @@ https://sqlmesh.readthedocs.io/en/stable/quickstart/cli/
 Need help?
 - Docs:   https://sqlmesh.readthedocs.io
 - Slack:  https://www.tobikodata.com/slack
-- GitHub: https://github.com/TobikoData/sqlmesh/issues
+- GitHub: https://github.com/SQLMesh/sqlmesh/issues
 ```
 
 ??? info "Learn more about the project's configuration: `config.yaml`"

@@ -8,7 +8,7 @@ In this post, I'm going to explain why existing approaches to managing developme
 
 I'll introduce [Virtual Data Environments](#virtual-data-environments-1) - a novel approach that provides low-cost, efficient, scalable, and safe data environments that are easy to use and manage. They significantly boost the productivity of anyone who has to create or maintain data pipelines.
 
-Finally, I’m going to explain how **Virtual Data Environments** are implemented in [SQLMesh](https://github.com/TobikoData/sqlmesh) and share details on each core component involved:
+Finally, I’m going to explain how **Virtual Data Environments** are implemented in [SQLMesh](https://github.com/SQLMesh/sqlmesh) and share details on each core component involved:
 - Data [fingerprinting](#fingerprinting)
 - [Automatic change categorization](#automatic-change-categorization)
 - Decoupling of [physical](#physical-layer) and [virtual](#virtual-layer) layers
@@ -156,6 +156,6 @@ With **Virtual Data Environments**, SQLMesh is able to provide fully **isolated*
 - Rolling back a change happens almost instantaneously since no data movement is involved and only views that are part of the **virtual layer** get updated.
 - Deploying changes to production is a **virtual layer** operation, which ensures that results observed during development are exactly the same in production and that data and code are always in sync.
 
-To streamline deploying changes to production, our team is about to release the SQLMesh [CI/CD bot](https://github.com/TobikoData/sqlmesh/blob/main/docs/integrations/github.md), which will help automate this process.
+To streamline deploying changes to production, our team is about to release the SQLMesh [CI/CD bot](https://github.com/SQLMesh/sqlmesh/blob/main/docs/integrations/github.md), which will help automate this process.
 
 Don't miss out - join our [Slack channel](https://tobikodata.com/slack) and stay tuned!

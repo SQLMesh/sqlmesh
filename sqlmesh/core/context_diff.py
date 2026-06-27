@@ -36,7 +36,7 @@ if t.TYPE_CHECKING:
 from sqlmesh.utils.metaprogramming import Executable  # noqa
 from sqlmesh.core.environment import EnvironmentStatements
 
-IGNORED_PACKAGES = {"sqlmesh", "sqlglot"}
+IGNORED_PACKAGES = {"sqlmesh", "sqlglot", "sqlglotc"}
 
 
 class ContextDiff(PydanticModel):

@@ -101,7 +101,7 @@
     "tailwindcss": "3.4.17"
   },
   "private": false,
-  "repository": "TobikoData/sqlmesh",
+  "repository": "SQLMesh/sqlmesh",
   "scripts": {
     "build": "tsc -p tsconfig.build.json && vite build --base './' && pnpm run build:css",
     "build-storybook": "storybook build",

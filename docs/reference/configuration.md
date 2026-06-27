@@ -277,33 +277,33 @@ Example enabling debug mode for the CLI command `sqlmesh plan`:
 === "Bash"
 
     ```bash
-    $ sqlmesh --debug plan
+    sqlmesh --debug plan
     ```
 
     ```bash
-    $ SQLMESH_DEBUG=1 sqlmesh plan
+    SQLMESH_DEBUG=1 sqlmesh plan
     ```
 
 === "MS Powershell"
 
     ```powershell
-    PS> sqlmesh --debug plan
+    sqlmesh --debug plan
     ```
 
     ```powershell
-    PS> $env:SQLMESH_DEBUG=1
-    PS> sqlmesh plan
+    $env:SQLMESH_DEBUG=1
+    sqlmesh plan
     ```
 
 === "MS CMD"
 
     ```cmd
-    C:\> sqlmesh --debug plan
+    sqlmesh --debug plan
     ```
 
     ```cmd
-    C:\> set SQLMESH_DEBUG=1
-    C:\> sqlmesh plan
+    set SQLMESH_DEBUG=1
+    sqlmesh plan
     ```
 
 ## Runtime Environment

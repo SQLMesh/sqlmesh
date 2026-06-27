@@ -234,7 +234,7 @@ class BaseContext(abc.ABC):
         )
 
     def fetchdf(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> pd.DataFrame:
         """Fetches a dataframe given a sql string or sqlglot expression.
 
@@ -248,7 +248,7 @@ class BaseContext(abc.ABC):
         return self.engine_adapter.fetchdf(query, quote_identifiers=quote_identifiers)
 
     def fetch_pyspark_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> PySparkDataFrame:
         """Fetches a PySpark dataframe given a sql string or sqlglot expression.
 
@@ -363,6 +363,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             connection as it appears in configuration will be used.
         concurrent_tasks: The maximum number of tasks that can use the connection concurrently.
         load: Whether or not to automatically load all models and macros (default True).
+        load_state: Whether to merge remote state into the local project during load (default True).
+            Only intended for local-only operations like format; plan/apply in multi-repo projects
+            require it to see models owned by other projects.
         console: The rich instance used for printing out CLI command results.
         users: A list of users to make known to SQLMesh.
     """
@@ -386,6 +389,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         users: t.Optional[t.List[User]] = None,
         config_loader_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
         selector: t.Optional[t.Type[Selector]] = None,
+        load_state: bool = True,
     ):
         self.configs = (
             config
@@ -413,6 +417,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        self._load_state: bool = load_state
         self._selector_cls = selector or NativeSelector
 
         self.path, self.config = t.cast(t.Tuple[Path, C], next(iter(self.configs.items())))
@@ -487,6 +492,7 @@ class GenericContext(BaseContext, t.Generic[C]):
     @property
     def snapshot_evaluator(self) -> SnapshotEvaluator:
         if not self._snapshot_evaluator:
+            self._ensure_virtual_catalog_injection()
             self._snapshot_evaluator = SnapshotEvaluator(
                 {
                     gateway: adapter.with_settings(execute_log_level=logging.INFO)
@@ -496,6 +502,15 @@ class GenericContext(BaseContext, t.Generic[C]):
                 selected_gateway=self.selected_gateway,
             )
         return self._snapshot_evaluator
+
+    def _ensure_virtual_catalog_injection(self) -> None:
+        """Ensure virtual catalog injection has run before adapters are cloned for SnapshotEvaluator.
+
+        Injection is a side effect of get_default_catalog_per_gateway. In normal usage it fires
+        earlier (default_catalog is accessed during model loading), but this guard covers the edge
+        case where snapshot_evaluator is accessed directly on a fresh context before any model ops.
+        """
+        _ = self.default_catalog_per_gateway
 
     def execution_context(
         self,
@@ -674,7 +689,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
 
         # Load environment statements from state for projects not in current load
-        if any(self._projects):
+        if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
             if prod:
                 existing_statements = self.state_reader.get_environment_statements(c.PROD)
@@ -684,7 +699,7 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         uncached = set()
 
-        if any(self._projects):
+        if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:
@@ -692,8 +707,11 @@ class GenericContext(BaseContext, t.Generic[C]):
                     if snapshot.node.project in self._projects:
                         uncached.add(snapshot.name)
                     else:
-                        store = self._standalone_audits if snapshot.is_audit else self._models
-                        store[snapshot.name] = snapshot.node  # type: ignore
+                        local_store = self._standalone_audits if snapshot.is_audit else self._models
+                        if snapshot.name in local_store:
+                            uncached.add(snapshot.name)
+                        else:
+                            local_store[snapshot.name] = snapshot.node  # type: ignore
 
         for model in self._models.values():
             self.dag.add(model.fqn, model.depends_on)
@@ -884,12 +902,20 @@ class GenericContext(BaseContext, t.Generic[C]):
         return completion_status
 
     @python_api_analytics
-    def run_janitor(self, ignore_ttl: bool) -> bool:
+    def run_janitor(
+        self,
+        ignore_ttl: bool,
+        force_delete: bool = False,
+        environment: t.Optional[str] = None,
+    ) -> bool:
+        if environment is not None:
+            environment = Environment.sanitize_name(environment)
+
         success = False
 
         if self.console.start_cleanup(ignore_ttl):
             try:
-                self._run_janitor(ignore_ttl)
+                self._run_janitor(ignore_ttl, force_delete=force_delete, environment=environment)
                 success = True
             finally:
                 self.console.stop_cleanup(success=success)
@@ -1102,7 +1128,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         execution_time: t.Optional[TimeLike] = None,
         expand: t.Union[bool, t.Iterable[str]] = False,
         **kwargs: t.Any,
-    ) -> exp.Expression:
+    ) -> exp.Expr:
         """Renders a model's query, expanding macros with provided kwargs, and optionally expanding referenced models.
 
         Args:
@@ -1424,6 +1450,8 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         plan = plan_builder.build()
 
+        self._warn_if_virtual_catalog_rematerialization(plan)
+
         if no_auto_categorization or plan.uncategorized:
             # Prompts are required if the auto categorization is disabled
             # or if there are any uncategorized snapshots in the plan
@@ -1466,6 +1494,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         backfill_models: t.Optional[t.Collection[str]] = None,
         categorizer_config: t.Optional[CategorizerConfig] = None,
         enable_preview: t.Optional[bool] = None,
+        preview_start: t.Optional[TimeLike] = None,
+        preview_min_intervals: t.Optional[int] = None,
         run: t.Optional[bool] = None,
         diff_rendered: t.Optional[bool] = None,
         skip_linter: t.Optional[bool] = None,
@@ -1507,6 +1537,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             select_models: A list of model selection strings to filter the models that should be included into this plan.
             backfill_models: A list of model selection strings to filter the models for which the data should be backfilled.
             enable_preview: Indicates whether to enable preview for forward-only models in development environments.
+            preview_start: The start date for forward-only previews.
+            preview_min_intervals: The minimum number of intervals to preview for each forward-only preview snapshot.
             run: Whether to run latest intervals as part of the plan application.
             diff_rendered: Whether the diff should compare raw vs rendered models
             min_intervals: Adjust the plan start date on a per-model basis in order to ensure at least this many intervals are covered
@@ -1540,6 +1572,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             "select_models": list(select_models) if select_models is not None else None,
             "backfill_models": list(backfill_models) if backfill_models is not None else None,
             "enable_preview": enable_preview,
+            "preview_start": preview_start,
+            "preview_min_intervals": preview_min_intervals,
             "run": run,
             "diff_rendered": diff_rendered,
             "skip_linter": skip_linter,
@@ -1556,6 +1590,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         run = run or False
         diff_rendered = diff_rendered or False
         skip_linter = skip_linter or False
+        min_intervals = min_intervals or 0
 
         environment = environment or self.config.default_target_environment
         environment = Environment.sanitize_name(environment)
@@ -1601,9 +1636,11 @@ class GenericContext(BaseContext, t.Generic[C]):
             backfill_models = None
 
         models_override: t.Optional[UniqueKeyDict[str, Model]] = None
+        selected_fqns: t.Set[str] = set()
+        selected_deletion_fqns: t.Set[str] = set()
         if select_models:
             try:
-                models_override = model_selector.select_models(
+                models_override, selected_fqns = model_selector.select_models(
                     select_models,
                     environment,
                     fallback_env_name=create_from or c.PROD,
@@ -1618,12 +1655,17 @@ class GenericContext(BaseContext, t.Generic[C]):
                 # Only backfill selected models unless explicitly specified.
                 backfill_models = model_selector.expand_model_selections(select_models)
 
+            if not backfill_models:
+                # The selection matched nothing locally. Check whether it matched models
+                # in the deployed environment that were deleted locally.
+                selected_deletion_fqns = selected_fqns - set(self._models)
+
         expanded_restate_models = None
         if restate_models is not None:
             expanded_restate_models = model_selector.expand_model_selections(restate_models)
 
         if (restate_models is not None and not expanded_restate_models) or (
-            backfill_models is not None and not backfill_models
+            backfill_models is not None and not backfill_models and not selected_deletion_fqns
         ):
             raise PlanError(
                 "Selector did not return any models. Please check your model selection and try again."
@@ -1632,7 +1674,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         if always_include_local_changes is None:
             # default behaviour - if restatements are detected; we operate entirely out of state and ignore local changes
             force_no_diff = restate_models is not None or (
-                backfill_models is not None and not backfill_models
+                backfill_models is not None and not backfill_models and not selected_deletion_fqns
             )
         else:
             force_no_diff = not always_include_local_changes
@@ -1733,6 +1775,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             enable_preview=(
                 enable_preview if enable_preview is not None else self._plan_preview_enabled
             ),
+            preview_start=preview_start,
+            preview_min_intervals=preview_min_intervals or 0,
             end_bounded=not run,
             ensure_finalized_snapshots=self.config.plan.use_finalized_state,
             start_override_per_model=start_override_per_model,
@@ -1814,7 +1858,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         name = Environment.sanitize_name(name)
         self.state_sync.invalidate_environment(name)
         if sync:
-            self._cleanup_environments()
+            self._cleanup_environments(name=name)
             self.console.log_success(f"Environment '{name}' deleted.")
         else:
             self.console.log_success(f"Environment '{name}' invalidated.")
@@ -1856,10 +1900,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         self,
         source: str,
         target: str,
-        on: t.Optional[t.List[str] | exp.Condition] = None,
+        on: t.Optional[t.List[str] | exp.Expr] = None,
         skip_columns: t.Optional[t.List[str]] = None,
         select_models: t.Optional[t.Collection[str]] = None,
-        where: t.Optional[str | exp.Condition] = None,
+        where: t.Optional[str | exp.Expr] = None,
         limit: int = 20,
         show: bool = True,
         show_sample: bool = True,
@@ -1918,7 +1962,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 raise SQLMeshError(e)
 
             models_to_diff: t.List[
-                t.Tuple[Model, EngineAdapter, str, str, t.Optional[t.List[str] | exp.Condition]]
+                t.Tuple[Model, EngineAdapter, str, str, t.Optional[t.List[str] | exp.Expr]]
             ] = []
             models_without_grain: t.List[Model] = []
             source_snapshots_to_name = {
@@ -2037,9 +2081,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         target_alias: str,
         limit: int,
         decimals: int,
-        on: t.Optional[t.List[str] | exp.Condition] = None,
+        on: t.Optional[t.List[str] | exp.Expr] = None,
         skip_columns: t.Optional[t.List[str]] = None,
-        where: t.Optional[str | exp.Condition] = None,
+        where: t.Optional[str | exp.Expr] = None,
         show: bool = True,
         temp_schema: t.Optional[str] = None,
         skip_grain_check: bool = False,
@@ -2079,10 +2123,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         limit: int,
         decimals: int,
         adapter: EngineAdapter,
-        on: t.Optional[t.List[str] | exp.Condition] = None,
+        on: t.Optional[t.List[str] | exp.Expr] = None,
         model: t.Optional[Model] = None,
         skip_columns: t.Optional[t.List[str]] = None,
-        where: t.Optional[str | exp.Condition] = None,
+        where: t.Optional[str | exp.Expr] = None,
         schema_diff_ignore_case: bool = False,
     ) -> TableDiff:
         if not on:
@@ -2340,7 +2384,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         return not errors
 
     @python_api_analytics
-    def rewrite(self, sql: str, dialect: str = "") -> exp.Expression:
+    def rewrite(self, sql: str, dialect: str = "") -> exp.Expr:
         """Rewrite a sql expression with semantic references into an executable query.
 
         https://sqlmesh.readthedocs.io/en/latest/concepts/metrics/overview/
@@ -2484,6 +2528,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 gateway=external_models_gateway,
                 max_workers=self.concurrent_tasks,
                 strict=strict,
+                all_models=self._models,
             )
 
     @python_api_analytics
@@ -2713,6 +2758,61 @@ class GenericContext(BaseContext, t.Generic[C]):
             return result
         return None
 
+    def _warn_if_virtual_catalog_rematerialization(self, plan: "Plan") -> None:
+        """Warn when ClickHouse models appear as new snapshots solely because a virtual catalog
+        prefix was added to their FQNs after a catalog-aware gateway joined the project.
+
+        This situation causes every previously-applied ClickHouse model to be treated as brand-new
+        by SQLMesh, triggering full re-materialization and historical backfills. Emitting a warning
+        before the plan is displayed gives users a chance to understand the cost before applying.
+        """
+        from sqlglot import exp
+
+        # Collect the set of old 2-level snapshot names from the current environment so we can
+        # detect which new 3-level names are renames rather than genuinely new models.
+        old_names: t.Set[str] = set()
+        for s_id in plan.context_diff.removed_snapshots:
+            old_names.add(s_id.name)
+        for name in plan.context_diff.snapshots_by_name:
+            old_names.add(name)
+
+        affected: t.List[t.Tuple[str, str]] = []  # (new_3level_name, old_2level_name)
+
+        for gateway, adapter in self.engine_adapters.items():
+            if not adapter.supports_virtual_catalog() or not adapter._default_catalog:
+                continue
+            virtual_catalog = adapter._default_catalog
+
+            for snapshot in plan.new_snapshots:
+                table = exp.to_table(snapshot.name)
+                if table.catalog != virtual_catalog:
+                    continue
+                # Reconstruct the 2-level name that would have been used before injection.
+                old_name = f"{table.db}.{table.name}"
+                if old_name in old_names:
+                    affected.append((snapshot.name, old_name))
+
+        if not affected:
+            return
+
+        max_display = 10
+        model_lines = "\n".join(
+            f"  - {new_name}  (was: {old_name})" for new_name, old_name in affected[:max_display]
+        )
+        if len(affected) > max_display:
+            model_lines += f"\n  ... and {len(affected) - max_display} more"
+
+        self.console.log_warning(
+            "ClickHouse models are being re-materialized due to virtual catalog FQN change.\n\n"
+            "The following ClickHouse models appear as new because their fully-qualified\n"
+            "names changed from 2-level (db.table) to 3-level (__gateway__.db.table):\n\n"
+            f"{model_lines}\n\n"
+            "FULL models will be recreated once. INCREMENTAL_BY_TIME_RANGE models will\n"
+            "require a full historical backfill from their configured start date.\n\n"
+            "This is a one-time cost when first adding a catalog-aware gateway to an\n"
+            "existing ClickHouse project. To proceed, run `sqlmesh apply`."
+        )
+
     @property
     def _model_tables(self) -> t.Dict[str, str]:
         """Mapping of model name to physical table name.
@@ -2884,42 +2984,82 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         return True
 
-    def _run_janitor(self, ignore_ttl: bool = False) -> None:
+    def _run_janitor(
+        self,
+        ignore_ttl: bool = False,
+        force_delete: bool = False,
+        environment: t.Optional[str] = None,
+    ) -> None:
         current_ts = now_timestamp()
+        failures: t.List[str] = []
 
         # Clean up expired environments by removing their views and schemas
-        self._cleanup_environments(current_ts=current_ts)
-
-        delete_expired_snapshots(
-            self.state_sync,
-            self.snapshot_evaluator,
-            current_ts=current_ts,
-            ignore_ttl=ignore_ttl,
-            console=self.console,
-            batch_size=self.config.janitor.expired_snapshots_batch_size,
+        failures.extend(
+            self._cleanup_environments(
+                current_ts=current_ts, force_delete=force_delete, name=environment
+            )
         )
-        self.state_sync.compact_intervals()
 
-    def _cleanup_environments(self, current_ts: t.Optional[int] = None) -> None:
+        if environment is None:
+            failures.extend(
+                delete_expired_snapshots(
+                    self.state_sync,
+                    self.snapshot_evaluator,
+                    current_ts=current_ts,
+                    ignore_ttl=ignore_ttl,
+                    force_delete=force_delete,
+                    console=self.console,
+                    batch_size=self.config.janitor.expired_snapshots_batch_size,
+                )
+            )
+            self.state_sync.compact_intervals()
+
+        if failures:
+            failure_string = "\n  - ".join(failures)
+            summary = f"Janitor completed with failures:\n  {failure_string}"
+            if force_delete:
+                summary += "\nState records have been deleted, but the underlying objects may still exist in the database.\nPlease investigate and clean up manually the above if necessary."
+            if self.config.janitor.warn_on_delete_failure:
+                self.console.log_warning(summary)
+            else:
+                raise SQLMeshError(summary)
+
+    def _cleanup_environments(
+        self,
+        current_ts: t.Optional[int] = None,
+        force_delete: bool = False,
+        name: t.Optional[str] = None,
+    ) -> t.List[str]:
         current_ts = current_ts or now_timestamp()
+        failures: t.List[str] = []
 
         expired_environments_summaries = self.state_sync.get_expired_environments(
-            current_ts=current_ts
+            current_ts=current_ts, name=name
         )
+
+        if name is not None and not expired_environments_summaries:
+            self.console.log_warning(
+                f"Environment '{name}' is not expired or does not exist. Nothing to clean up."
+            )
 
         for expired_env_summary in expired_environments_summaries:
             expired_env = self.state_reader.get_environment(expired_env_summary.name)
 
             if expired_env:
-                cleanup_expired_views(
-                    default_adapter=self.engine_adapter,
-                    engine_adapters=self.engine_adapters,
-                    environments=[expired_env],
-                    warn_on_delete_failure=self.config.janitor.warn_on_delete_failure,
-                    console=self.console,
+                failures.extend(
+                    cleanup_expired_views(
+                        default_adapter=self.engine_adapter,
+                        engine_adapters=self.engine_adapters,
+                        environments=[expired_env],
+                        console=self.console,
+                    )
                 )
 
-        self.state_sync.delete_expired_environments(current_ts=current_ts)
+        # we want to retry on the next janitor pass if drops failed, unless
+        # force_delete is set in which case we purge state records regardless
+        if not failures or force_delete:
+            self.state_sync.delete_expired_environments(current_ts=current_ts, name=name)
+        return failures
 
     def _try_connection(self, connection_name: str, validator: t.Callable[[], None]) -> None:
         connection_name = connection_name.capitalize()
@@ -3042,10 +3182,17 @@ class GenericContext(BaseContext, t.Generic[C]):
         modified_model_names: t.Set[str],
         execution_time: t.Optional[TimeLike] = None,
     ) -> t.Tuple[t.Optional[int], t.Optional[int]]:
-        if not max_interval_end_per_model:
+        # exclude seeds so their stale interval ends does not become the default plan end date
+        # when they're the only ones that contain intervals in this plan
+        non_seed_interval_ends = {
+            model_fqn: end
+            for model_fqn, end in max_interval_end_per_model.items()
+            if model_fqn not in snapshots or not snapshots[model_fqn].is_seed
+        }
+        if not non_seed_interval_ends:
             return None, None
 
-        default_end = to_timestamp(max(max_interval_end_per_model.values()))
+        default_end = to_timestamp(max(non_seed_interval_ends.values()))
         default_start: t.Optional[int] = None
         # Infer the default start by finding the smallest interval start that corresponds to the default end.
         for model_name in backfill_models or modified_model_names or max_interval_end_per_model:

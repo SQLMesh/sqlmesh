@@ -210,6 +210,29 @@ SELECT
     x = format_model_expressions(
         parse(
             """
+            MODEL(name a.b, kind FULL, dialect clickhouse);
+            SELECT data.:String AS foo, CAST(1 AS INT) AS bar
+            """
+        ),
+        dialect="clickhouse",
+    )
+    # JSONCast (e.g. `.:` syntax in ClickHouse) must not be written to `::`
+    assert (
+        x
+        == """MODEL (
+  name a.b,
+  kind FULL,
+  dialect clickhouse
+);
+
+SELECT
+  data.:String AS foo,
+  1::Int32 AS bar"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
             MODEL(name foo);
             SELECT CAST(1 AS INT) AS bla
             """
@@ -268,6 +291,8 @@ def test_macro_format():
     assert parse_one("@EACH(ARRAY(1,2), x -> x)").sql() == "@EACH(ARRAY(1, 2), x -> x)"
     assert parse_one("INTERVAL @x DAY").sql() == "INTERVAL @x DAY"
     assert parse_one("INTERVAL @'@{bar}' DAY").sql() == "INTERVAL @'@{bar}' DAY"
+    assert parse_one("INTERVAL @x @y").sql() == "INTERVAL @x @y"
+    assert parse_one("INTERVAL 1 @y").sql() == "INTERVAL '1' @y"
 
 
 def test_format_body_macros():
@@ -683,6 +708,20 @@ def test_conditional_statement():
 
     q = parse_one("@IF(cond, VACUUM ANALYZE);", read="postgres")
     assert q.sql(dialect="postgres") == "@IF(cond, VACUUM ANALYZE)"
+
+    # Verify that the original error case from issue #5823 (Required keyword: 'true' missing) is resolved.
+    # It must be parsed as a macro function containing an Anonymous expression rather than exp.If.
+    q = parse_one("@IF(1 = 1, ALTER TABLE x ADD y INT);", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(1 = 1, ALTER TABLE x ADD y INTEGER)"
+    assert isinstance(q.this, exp.Anonymous)
+    assert q.this.name == "IF"
+
+    # Note: SQLGlot's fallback Command parser strips quotes from string literal tokens when parsing unparsed commands
+    q = parse_one("@IF(cond, PRINT 'hello');", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(cond, PRINT hello)"
+
+    q = parse_one("@IF(@runtime_stage = 'evaluating', SELECT 1);", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(@runtime_stage = 'evaluating', SELECT 1)"
 
 
 def test_model_name_cannot_be_string():

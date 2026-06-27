@@ -279,7 +279,7 @@ class _ModelKind(PydanticModel, ModelKindMixin):
         return self.name
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         kwargs["expressions"] = expressions
         return d.ModelKind(this=self.name.value.upper(), **kwargs)
@@ -294,7 +294,7 @@ class _ModelKind(PydanticModel, ModelKindMixin):
 
 
 class TimeColumn(PydanticModel):
-    column: exp.Expression
+    column: exp.Expr
     format: t.Optional[str] = None
 
     @classmethod
@@ -306,7 +306,7 @@ class TimeColumn(PydanticModel):
 
     @field_validator("column", mode="before")
     @classmethod
-    def _column_validator(cls, v: t.Union[str, exp.Expression]) -> exp.Expression:
+    def _column_validator(cls, v: t.Union[str, exp.Expr]) -> exp.Expr:
         if not v:
             raise ConfigError("Time Column cannot be empty.")
         if isinstance(v, str):
@@ -314,14 +314,14 @@ class TimeColumn(PydanticModel):
         return v
 
     @property
-    def expression(self) -> exp.Expression:
+    def expression(self) -> exp.Expr:
         """Convert this pydantic model into a time_column SQLGlot expression."""
         if not self.format:
             return self.column
 
         return exp.Tuple(expressions=[self.column, exp.Literal.string(self.format)])
 
-    def to_expression(self, dialect: str) -> exp.Expression:
+    def to_expression(self, dialect: str) -> exp.Expr:
         """Convert this pydantic model into a time_column SQLGlot expression."""
         if not self.format:
             return self.column
@@ -346,7 +346,7 @@ class TimeColumn(PydanticModel):
                 exp.column(column_expr) if isinstance(column_expr, exp.Identifier) else column_expr
             )
             format = v.expressions[1].name if len(v.expressions) > 1 else None
-        elif isinstance(v, exp.Expression):
+        elif isinstance(v, exp.Expr):
             column = exp.column(v) if isinstance(v, exp.Identifier) else v
             format = None
         elif isinstance(v, str):
@@ -400,7 +400,7 @@ class _Incremental(_ModelKind):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -444,7 +444,7 @@ class _IncrementalBy(_Incremental):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -473,7 +473,7 @@ class IncrementalByTimeRangeKind(_IncrementalBy):
     _time_column_validator = TimeColumn.validator()
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -513,7 +513,7 @@ class IncrementalByUniqueKeyKind(_IncrementalBy):
     )
     unique_key: SQLGlotListOfFields
     when_matched: t.Optional[exp.Whens] = None
-    merge_filter: t.Optional[exp.Expression] = None
+    merge_filter: t.Optional[exp.Expr] = None
     batch_concurrency: t.Literal[1] = 1
 
     @field_validator("when_matched", mode="before")
@@ -543,9 +543,9 @@ class IncrementalByUniqueKeyKind(_IncrementalBy):
     @field_validator("merge_filter", mode="before")
     def _merge_filter_validator(
         cls,
-        v: t.Optional[exp.Expression],
+        v: t.Optional[exp.Expr],
         info: ValidationInfo,
-    ) -> t.Optional[exp.Expression]:
+    ) -> t.Optional[exp.Expr]:
         if v is None:
             return v
 
@@ -568,7 +568,7 @@ class IncrementalByUniqueKeyKind(_IncrementalBy):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -590,7 +590,7 @@ class IncrementalByPartitionKind(_Incremental):
     disable_restatement: SQLGlotBool = False
 
     @field_validator("forward_only", mode="before")
-    def _forward_only_validator(cls, v: t.Union[bool, exp.Expression]) -> t.Literal[True]:
+    def _forward_only_validator(cls, v: t.Union[bool, exp.Expr]) -> t.Literal[True]:
         if v is not True:
             raise ConfigError(
                 "Do not specify the `forward_only` configuration key - INCREMENTAL_BY_PARTITION models are always forward_only."
@@ -606,7 +606,7 @@ class IncrementalByPartitionKind(_Incremental):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -640,7 +640,7 @@ class IncrementalUnmanagedKind(_Incremental):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -669,7 +669,7 @@ class ViewKind(_ModelKind):
         return False
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -690,7 +690,7 @@ class SeedKind(_ModelKind):
     def _parse_csv_settings(cls, v: t.Any) -> t.Optional[CsvSettings]:
         if v is None or isinstance(v, CsvSettings):
             return v
-        if isinstance(v, exp.Expression):
+        if isinstance(v, exp.Expr):
             tuple_exp = parse_properties(cls, v, None)
             if not tuple_exp:
                 return None
@@ -700,7 +700,7 @@ class SeedKind(_ModelKind):
         return v
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         """Convert the seed kind into a SQLGlot expression."""
         return super().to_expression(
@@ -756,13 +756,16 @@ class _SCDType2Kind(_Incremental):
 
     @field_validator("time_data_type", mode="before")
     @classmethod
-    def _time_data_type_validator(
-        cls, v: t.Union[str, exp.Expression], values: t.Any
-    ) -> exp.Expression:
-        if isinstance(v, exp.Expression) and not isinstance(v, exp.DataType):
+    def _time_data_type_validator(cls, v: t.Union[str, exp.Expr], values: t.Any) -> exp.Expr:
+        if isinstance(v, exp.Expr) and not isinstance(v, exp.DataType):
             v = v.name
         dialect = get_dialect(values)
         data_type = exp.DataType.build(v, dialect=dialect)
+        # Clear meta["sql"] (set by our parser extension) so the pydantic encoder
+        # uses dialect-aware rendering: e.sql(dialect=meta["dialect"]). Without this,
+        # the raw SQL text takes priority, which can be wrong for dialect-normalized
+        # types (e.g., default "TIMESTAMP" should render as "DATETIME" in BigQuery).
+        data_type.meta.pop("sql", None)
         data_type.meta["dialect"] = dialect
         return data_type
 
@@ -783,7 +786,7 @@ class _SCDType2Kind(_Incremental):
             gen(self.valid_to_name),
             str(self.invalidate_hard_deletes),
             self.time_data_type.sql(self.dialect),
-            gen(self.batch_size) if self.batch_size is not None else None,
+            str(self.batch_size) if self.batch_size is not None else None,
         ]
 
     @property
@@ -795,7 +798,7 @@ class _SCDType2Kind(_Incremental):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -835,7 +838,7 @@ class SCDType2ByTimeKind(_SCDType2Kind):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -871,7 +874,7 @@ class SCDType2ByColumnKind(_SCDType2Kind):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -922,7 +925,7 @@ class DbtCustomKind(_ModelKind):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -1005,7 +1008,7 @@ class CustomKind(_ModelKind):
         ]
 
     def to_expression(
-        self, expressions: t.Optional[t.List[exp.Expression]] = None, **kwargs: t.Any
+        self, expressions: t.Optional[t.List[exp.Expr]] = None, **kwargs: t.Any
     ) -> d.ModelKind:
         return super().to_expression(
             expressions=[
@@ -1142,7 +1145,7 @@ def create_model_kind(v: t.Any, dialect: str, defaults: t.Dict[str, t.Any]) -> M
         )
         return kind_type(**props)
 
-    name = (v.name if isinstance(v, exp.Expression) else str(v)).upper()
+    name = (v.name if isinstance(v, exp.Expr) else str(v)).upper()
     return model_kind_type_from_name(name)(name=name)  # type: ignore
 
 

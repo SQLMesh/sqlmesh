@@ -30,12 +30,14 @@ cp -r "$EXAMPLE_DIR" "$TEST_DIR"
 git checkout $LAST_TAG
 
 # Install dependencies from the previous release.
+uv venv .venv --clear
+source .venv/bin/activate
 make install-dev
 
 # this is only needed temporarily until the released tag for $LAST_TAG includes this config
 if [ "$EXAMPLE_NAME" == "sushi_dbt" ]; then
     echo 'migration_test_config = sqlmesh_config(Path(__file__).parent, dbt_target_name="duckdb")' >> $TEST_DIR/config.py
-fi    
+fi
 
 # Run initial plan
 pushd $TEST_DIR
@@ -44,10 +46,12 @@ sqlmesh $SQLMESH_OPTS plan --no-prompts --auto-apply
 rm -rf .cache
 popd
 
-# Switch back to the starting state of the repository    
+# Switch back to the starting state of the repository
 git checkout -
 
 # Install updated dependencies.
+uv venv .venv --clear
+source .venv/bin/activate
 make install-dev
 
 # Migrate and make sure the diff is empty

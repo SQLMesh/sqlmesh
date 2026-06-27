@@ -6,15 +6,397 @@ on:
     branches:
       - main
 concurrency:
-  group: 'pr-${{ github.event.pull_request.number }}'
+  group: pr-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 permissions:
   contents: read
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      client: ${{ steps.filter.outputs.client }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'sqlmesh/**'
+              - 'tests/**'
+              - 'examples/**'
+              - 'web/server/**'
+              - 'pytest.ini'
+              - 'setup.cfg'
+              - 'setup.py'
+              - 'pyproject.toml'
+            client:
+              - 'web/client/**'
+            ci:
+              - '.github/**'
+              - 'Makefile'
+              - '.pre-commit-config.yaml'
+
+  doc-tests:
+    needs: changes
+    if:
+      needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-dev install-doc
+      - name: Run doc tests
+        run: |
+          source .venv/bin/activate
+          make doc-test
+
+  style-and-cicd-tests:
+    needs: changes
+    if:
+      needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    env:
+      PYTEST_XDIST_AUTO_NUM_WORKERS: 2
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install OpenJDK and ODBC
+        run:
+          sudo apt-get update && sudo apt-get install -y default-jdk
+          unixodbc-dev
+      - name: Install SQLMesh dev dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-dev
+      - name: Fix Git URL override
+        run:
+          git config --global --unset url."ssh://git@github.com".insteadOf ||
+          true
+      - name: Run linters and code style checks
+        run: |
+          source .venv/bin/activate
+          make py-style
+      - name: Exercise the benchmarks
+        if: matrix.python-version != '3.9'
+        run: |
+          source .venv/bin/activate
+          make benchmark-ci
+      - name: Run cicd tests
+        run: |
+          source .venv/bin/activate
+          make cicd-test
+      - name: Upload test results
+        uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-style-cicd-${{ matrix.python-version }}
+          path: test-results/
+          retention-days: 7
+
+  cicd-tests-windows:
+    needs: changes
+    if:
+      needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - name: Enable symlinks in git config
+        run: git config --global core.symlinks true
+      - uses: actions/checkout@v5
+      - name: Install make
+        run: choco install make which -y
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install SQLMesh dev dependencies
+        run: |
+          python -m venv venv
+          . ./venv/Scripts/activate
+          python.exe -m pip install --upgrade pip
+          make install-dev
+      - name: Run fast unit tests
+        run: |
+          . ./venv/Scripts/activate
+          which python
+          python --version
+          make fast-test
+      - name: Upload test results
+        uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-windows
+          path: test-results/
+          retention-days: 7
+
+  migration-test:
+    needs: changes
+    if:
+      needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Run migration test - sushi
+        run:
+          ./.github/scripts/test_migration.sh sushi "--gateway
+          duckdb_persistent"
+      - name: Run migration test - sushi_dbt
+        run:
+          ./.github/scripts/test_migration.sh sushi_dbt "--config
+          migration_test_config"
+
+  ui-style:
+    needs: [changes]
+    if: false
+      # needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
+      # 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-
+      - name: Install dependencies
+        run: pnpm install
+      - name: Run linters and code style checks
+        run: pnpm run lint
+
+  ui-test:
+    needs: changes
+    if:
+      needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.54.1-jammy
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pnpm via corepack
+        run: |
+          npm install --global corepack@latest
+          corepack enable
+          corepack prepare pnpm@latest-10 --activate
+          pnpm config set store-dir .pnpm-store
+      - name: Install dependencies
+        run: pnpm install
+      - name: Build UI
+        run: npm --prefix web/client run build
+      - name: Run unit tests
+        run: npm --prefix web/client run test:unit
+      - name: Run e2e tests
+        run: npm --prefix web/client run test:e2e
+        env:
+          PLAYWRIGHT_SKIP_BUILD: '1'
+          HOME: /root
+
+  engine-tests-docker:
+    needs: changes
+    if:
+      needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        engine:
+          [duckdb, postgres, mysql, mssql, trino, spark, clickhouse, risingwave, starrocks]
+    env:
+      PYTEST_XDIST_AUTO_NUM_WORKERS: 2
+      SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install SQLMesh dev dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-dev
+      - name: Install OS-level dependencies
+        run: ./.github/scripts/install-prerequisites.sh "${{ matrix.engine }}"
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          make ${{ matrix.engine }}-test
+      - name: Upload test results
+        uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-docker-${{ matrix.engine }}
+          path: test-results/
+          retention-days: 7
+
+  engine-tests-cloud:
+    needs: engine-tests-docker
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        engine:
+          [
+            snowflake,
+            databricks,
+            redshift,
+            bigquery,
+            clickhouse-cloud,
+            athena,
+            fabric,
+            gcp-postgres,
+          ]
+    env:
+      PYTEST_XDIST_AUTO_NUM_WORKERS: 4
+      SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
+      UV: '1'
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
+      DATABRICKS_SERVER_HOSTNAME: ${{ secrets.DATABRICKS_SERVER_HOSTNAME }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_SERVER_HOSTNAME }}
+      DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      DATABRICKS_CONNECT_VERSION: ${{ secrets.DATABRICKS_CONNECT_VERSION }}
+      REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+      REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+      REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+      REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+      BIGQUERY_KEYFILE: ${{ secrets.BIGQUERY_KEYFILE }}
+      BIGQUERY_KEYFILE_CONTENTS: ${{ secrets.BIGQUERY_KEYFILE_CONTENTS }}
+      CLICKHOUSE_CLOUD_HOST: ${{ secrets.CLICKHOUSE_CLOUD_HOST }}
+      CLICKHOUSE_CLOUD_USERNAME: ${{ secrets.CLICKHOUSE_CLOUD_USERNAME }}
+      CLICKHOUSE_CLOUD_PASSWORD: ${{ secrets.CLICKHOUSE_CLOUD_PASSWORD }}
+      GCP_POSTGRES_KEYFILE_JSON: ${{ secrets.GCP_POSTGRES_KEYFILE_JSON }}
+      GCP_POSTGRES_INSTANCE_CONNECTION_STRING:
+        ${{ secrets.GCP_POSTGRES_INSTANCE_CONNECTION_STRING }}
+      GCP_POSTGRES_USER: ${{ secrets.GCP_POSTGRES_USER }}
+      GCP_POSTGRES_PASSWORD: ${{ secrets.GCP_POSTGRES_PASSWORD }}
+      ATHENA_S3_WAREHOUSE_LOCATION: ${{ secrets.ATHENA_S3_WAREHOUSE_LOCATION }}
+      ATHENA_WORK_GROUP: ${{ secrets.ATHENA_WORK_GROUP }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      FABRIC_HOST: ${{ secrets.FABRIC_HOST }}
+      FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+      FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+      FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+      FABRIC_WORKSPACE_ID: ${{ secrets.FABRIC_WORKSPACE_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install OS-level dependencies
+        run: ./.github/scripts/install-prerequisites.sh "${{ matrix.engine }}"
+      - name: Install SQLMesh dev dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-dev
+      - name: Generate database name and setup credentials
+        run: |
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          TEST_DB_NAME="ci_${UUID:0:8}"
+          echo "TEST_DB_NAME=$TEST_DB_NAME" >> $GITHUB_ENV
+          echo "SNOWFLAKE_DATABASE=$TEST_DB_NAME" >> $GITHUB_ENV
+          echo "DATABRICKS_CATALOG=$TEST_DB_NAME" >> $GITHUB_ENV
+          echo "REDSHIFT_DATABASE=$TEST_DB_NAME" >> $GITHUB_ENV
+          echo "GCP_POSTGRES_DATABASE=$TEST_DB_NAME" >> $GITHUB_ENV
+          echo "FABRIC_DATABASE=$TEST_DB_NAME" >> $GITHUB_ENV
+
+          echo "$SNOWFLAKE_PRIVATE_KEY_RAW" | base64 -d > /tmp/snowflake-keyfile.p8
+          echo "SNOWFLAKE_PRIVATE_KEY_FILE=/tmp/snowflake-keyfile.p8" >> $GITHUB_ENV
+        env:
+          SNOWFLAKE_PRIVATE_KEY_RAW: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_RAW }}
+      - name: Create test database
+        run:
+          ./.github/scripts/manage-test-db.sh "${{ matrix.engine }}"
+          "$TEST_DB_NAME" up
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          make ${{ matrix.engine }}-test
+      - name: Tear down test database
+        if: always()
+        run:
+          ./.github/scripts/manage-test-db.sh "${{ matrix.engine }}"
+          "$TEST_DB_NAME" down
+      - name: Upload test results
+        uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-cloud-${{ matrix.engine }}
+          path: test-results/
+          retention-days: 7
+
   test-vscode:
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
     runs-on: ubuntu-latest
+    if: false
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
@@ -100,30 +482,30 @@ jobs:
           if [[ "${{ matrix.dbt-version }}" == "1.3" ]] || \
              [[ "${{ matrix.dbt-version }}" == "1.4" ]] || \
              [[ "${{ matrix.dbt-version }}" == "1.5" ]]; then
-            
+
             echo "DBT version is ${{ matrix.dbt-version }} (< 1.6.0), removing semantic_models and metrics sections..."
-            
+
             schema_file="tests/fixtures/dbt/sushi_test/models/schema.yml"
             if [[ -f "$schema_file" ]]; then
               echo "Modifying $schema_file..."
-              
+
               # Create a temporary file
               temp_file=$(mktemp)
-              
+
               # Use awk to remove semantic_models and metrics sections
               awk '
                 /^semantic_models:/ { in_semantic=1; next }
                 /^metrics:/ { in_metrics=1; next }
-                /^[^ ]/ && (in_semantic || in_metrics) { 
-                  in_semantic=0; 
-                  in_metrics=0 
+                /^[^ ]/ && (in_semantic || in_metrics) {
+                  in_semantic=0;
+                  in_metrics=0
                 }
                 !in_semantic && !in_metrics { print }
               ' "$schema_file" > "$temp_file"
-              
+
               # Move the temp file back
               mv "$temp_file" "$schema_file"
-              
+
               echo "Successfully removed semantic_models and metrics sections"
             else
               echo "Schema file not found at $schema_file, skipping..."

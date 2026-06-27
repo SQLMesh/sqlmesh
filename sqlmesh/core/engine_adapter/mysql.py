@@ -73,7 +73,7 @@ class MySQLEngineAdapter(
         schema_name: SchemaName,
         ignore_if_not_exists: bool = True,
         cascade: bool = False,
-        **drop_args: t.Dict[str, exp.Expression],
+        **drop_args: t.Dict[str, exp.Expr],
     ) -> None:
         # MySQL doesn't support CASCADE clause and drops schemas unconditionally.
         super().drop_schema(schema_name, ignore_if_not_exists=ignore_if_not_exists, cascade=False)
