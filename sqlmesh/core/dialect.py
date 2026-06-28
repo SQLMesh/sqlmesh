@@ -783,7 +783,10 @@ def format_model_expressions(
         A string representing the formatted model.
     """
     if len(expressions) == 1 and is_meta_expression(expressions[0]):
-        return expressions[0].sql(pretty=True, dialect=dialect)
+        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
+        # so they must never be transpiled to the target dialect (e.g. tsql would
+        # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
+        return expressions[0].sql(pretty=True, dialect=None)
 
     if rewrite_casts:
 
@@ -815,7 +818,14 @@ def format_model_expressions(
         expressions = new_expressions
 
     return ";\n\n".join(
-        expression.sql(pretty=True, dialect=dialect, **kwargs) for expression in expressions
+        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL and must stay
+        # dialect-agnostic; only the actual query/statement expressions transpile.
+        expression.sql(
+            pretty=True,
+            dialect=None if is_meta_expression(expression) else dialect,
+            **kwargs,
+        )
+        for expression in expressions
     ).strip()
 
 
