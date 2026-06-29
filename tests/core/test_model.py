@@ -4215,7 +4215,7 @@ def test_clustered_by_quoted_keyword_column():
 @pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
 def test_clustered_by_keyword_non_databricks_dialect(keyword: str):
     """AUTO/NONE should be rejected for non-Databricks dialects as they are meaningless there."""
-    with pytest.raises((ConfigError, Exception)):
+    with pytest.raises(ConfigError):
         model = load_sql_based_model(
             d.parse(
                 f"""
