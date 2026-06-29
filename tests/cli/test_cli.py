@@ -921,7 +921,7 @@ SELECT
 FROM
   filesystem_pipeline_dataset.equipment as c
 WHERE
-  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(equipment_model_path) as file:
@@ -1064,7 +1064,7 @@ SELECT
 FROM
   sushi_dataset.sushi_types as c
 WHERE
-  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     dlt_sushi_types_model_path = tmp_path / "models/incremental_sushi_types.sql"
@@ -1095,7 +1095,7 @@ SELECT
 FROM
   sushi_dataset._dlt_loads as c
 WHERE
-  TO_TIMESTAMP(CAST(c.load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c.load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(dlt_loads_model_path) as file:
@@ -1122,7 +1122,7 @@ JOIN
 ON
   c._dlt_parent_id = p._dlt_id
 WHERE
-  TO_TIMESTAMP(CAST(p._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(p._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(dlt_sushi_fillings_model_path) as file:

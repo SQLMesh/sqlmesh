@@ -208,7 +208,7 @@ SELECT
 FROM
   {from_clause}
 WHERE
-  {time_column} BETWEEN @start_ds AND @end_ds
+  {time_column} BETWEEN @start_ts AND @end_ts
 """
 
 
