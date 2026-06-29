@@ -68,4 +68,4 @@ SQLMesh automatically runs audits when you apply a `plan` to an environment, or 
 ## Infrastructure and orchestration
 Every company's data infrastructure is different. SQLMesh is flexible with regard to which engines and orchestration frameworks you use &mdash; its only requirement is access to the target SQL/analytics engine.
 
-SQLMesh keeps track of model versions and processed data intervals using your existing infrastructure. SQLMesh it automatically creates a `sqlmesh` schema in your data warehouse for its internal metadata.
+SQLMesh keeps track of model versions and processed data intervals using your existing infrastructure. It automatically creates a `sqlmesh` schema in your data warehouse for its internal metadata.
