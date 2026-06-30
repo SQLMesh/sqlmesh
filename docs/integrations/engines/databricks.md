@@ -300,7 +300,9 @@ MODEL (
     clustered_by AUTO
 )
 ```
+
 To cluster by a column called `auto` or `none`, use parentheses and backticks
+
 ```sql
 MODEL (
     name sqlmesh_example.new_model,
