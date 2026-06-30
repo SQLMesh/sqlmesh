@@ -122,6 +122,44 @@ def test_clone_table(mocker: MockFixture, make_mocked_engine_adapter: t.Callable
     )
 
 
+def test_merge_orders_not_matched_by_source_after_insert(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    adapter.merge(
+        target_table="target",
+        source_table=parse_one("SELECT id, val FROM source"),
+        target_columns_to_types={
+            "id": exp.DataType.build("int"),
+            "val": exp.DataType.build("int"),
+        },
+        unique_key=[exp.column("id")],
+        when_matched=exp.Whens(
+            expressions=[
+                exp.When(
+                    matched=True,
+                    then=exp.Update(
+                        expressions=[
+                            exp.column("val", "__MERGE_TARGET__").eq(
+                                exp.column("val", "__MERGE_SOURCE__")
+                            ),
+                        ],
+                    ),
+                ),
+                exp.When(matched=False, source=True, then=exp.Delete()),
+            ],
+        ),
+    )
+
+    assert to_sql_calls(adapter) == [
+        "MERGE INTO `target` AS `__MERGE_TARGET__` USING (SELECT `id`, `val` FROM `source`) AS `__MERGE_SOURCE__` ON `__MERGE_TARGET__`.`id` = `__MERGE_SOURCE__`.`id` "
+        "WHEN MATCHED THEN UPDATE SET `__MERGE_TARGET__`.`val` = `__MERGE_SOURCE__`.`val` "
+        "WHEN NOT MATCHED THEN INSERT (`id`, `val`) VALUES (`__MERGE_SOURCE__`.`id`, `__MERGE_SOURCE__`.`val`) "
+        "WHEN NOT MATCHED BY SOURCE THEN DELETE"
+    ]
+
+
 def test_set_current_catalog(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
     adapter.set_current_catalog("test_catalog2")

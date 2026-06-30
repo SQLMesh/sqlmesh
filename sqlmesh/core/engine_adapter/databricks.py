@@ -90,6 +90,31 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         super().__init__(*args, **kwargs)
         self._set_spark_engine_adapter_if_needed()
 
+    def _merge(
+        self,
+        target_table: TableName,
+        query: Query,
+        on: exp.Expr,
+        whens: exp.Whens,
+    ) -> None:
+        super()._merge(
+            target_table=target_table,
+            query=query,
+            on=on,
+            whens=exp.Whens(expressions=self._order_merge_when_clauses(whens.expressions)),
+        )
+
+    @staticmethod
+    def _order_merge_when_clauses(expressions: t.List[exp.Expression]) -> t.List[exp.Expression]:
+        def order(expression: exp.Expression) -> int:
+            if expression.args.get("matched"):
+                return 0
+            if expression.args.get("source"):
+                return 2
+            return 1
+
+        return sorted(expressions, key=order)
+
     @classmethod
     def can_access_spark_session(cls, disable_spark_session: bool) -> bool:
         from sqlmesh import RuntimeEnv
