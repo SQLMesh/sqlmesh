@@ -363,8 +363,6 @@ Learn more about these properties and their default values in the [model configu
 ### clustered_by
 :   Clustered by is an optional property for engines such as Bigquery that support clustering.
 
-    Note: Databricks supports the liquid clustering keywords AUTO and NONE, e.g. (`clustered_by AUTO`). To cluster by a column called `auto` or `none`, use parentheses and backticks, e.g. ``clustered_by (`auto`)``.
-
 ### columns
 :   By default, SQLMesh [infers a model's column names and types](#conventions) from its SQL query. Disable that behavior by manually specifying all column names and data types in the model's `columns` property.
 
