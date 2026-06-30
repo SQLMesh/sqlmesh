@@ -5413,6 +5413,90 @@ def test_session_properties_authorization_validation():
         )
 
 
+def test_session_properties_query_tags_validation():
+    model = load_sql_based_model(
+        d.parse(
+            """
+        MODEL (
+            name test_schema.test_model,
+            dialect databricks,
+            session_properties (
+                query_tags = MAP('team', 'data-eng', 'app', 'sqlmesh', 'feature', NULL)
+            )
+        );
+        SELECT a FROM tbl;
+        """,
+            default_dialect="databricks",
+        )
+    )
+    assert model.session_properties == {
+        "query_tags": parse_one(
+            "MAP('team', 'data-eng', 'app', 'sqlmesh', 'feature', NULL)",
+            dialect="databricks",
+        )
+    }
+
+    with pytest.raises(
+        ConfigError,
+        match=r"Invalid value for `session_properties.query_tags`. Must be a map.",
+    ):
+        load_sql_based_model(
+            d.parse(
+                """
+            MODEL (
+                name test_schema.test_model,
+                dialect databricks,
+                session_properties (
+                    query_tags = 'invalid value'
+                )
+            );
+            SELECT a FROM tbl;
+            """,
+                default_dialect="databricks",
+            )
+        )
+
+    with pytest.raises(
+        ConfigError,
+        match=r"Invalid key in `session_properties.query_tags`. Keys must be string literals.",
+    ):
+        load_sql_based_model(
+            d.parse(
+                """
+            MODEL (
+                name test_schema.test_model,
+                dialect databricks,
+                session_properties (
+                    query_tags = MAP(1, 'data-eng')
+                )
+            );
+            SELECT a FROM tbl;
+            """,
+                default_dialect="databricks",
+            )
+        )
+
+    with pytest.raises(
+        ConfigError,
+        match=r"Invalid value in `session_properties.query_tags`. Values must be string literals or NULL.",
+    ):
+        load_sql_based_model(
+            d.parse(
+                """
+            MODEL (
+                name test_schema.test_model,
+                dialect databricks,
+                session_properties (
+                    query_tags = MAP('team', 1)
+                )
+            );
+            SELECT a FROM tbl;
+            """,
+                default_dialect="databricks",
+            )
+        )
+
+
 def test_model_jinja_macro_rendering():
     expressions = d.parse(
         """
@@ -10580,6 +10664,94 @@ def entrypoint(context, *args, **kwargs):
     assert ctx.fetchdf("SELECT * FROM test_schema2.foo").to_dict() == {"id": {0: 1}}
 
 
+def test_python_model_blueprint_column_names(tmp_path: Path) -> None:
+    """Blueprint variables can be used as column names and types in Python model definitions."""
+    py_model = tmp_path / "models" / "blueprint_col_names.py"
+    py_model.parent.mkdir(parents=True, exist_ok=True)
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model
+
+@model(
+    "test_schema.@model_name",
+    blueprints=[
+        {"model_name": "hotel_revenue", "col_a": "revenue", "type_a": "int",    "col_b": "cost",   "type_b": "double"},
+        {"model_name": "coffee_sales", "col_a": "sales",   "type_a": "bigint", "col_b": "profit", "type_b": "text"},
+    ],
+    kind="FULL",
+    columns={
+        "@{col_a}": "@{type_a}",
+        "@{col_b}": "@{type_b}",
+    },
+)
+def entrypoint(context, *args, **kwargs):
+    return pd.DataFrame({
+        context.blueprint_var("col_a"): [1],
+        context.blueprint_var("col_b"): [1.5],
+    })
+        """
+    )
+
+    ctx = Context(
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+        paths=tmp_path,
+    )
+    assert len(ctx.models) == 2
+
+    model1 = ctx.get_model("test_schema.hotel_revenue", raise_if_missing=True)
+    model2 = ctx.get_model("test_schema.coffee_sales", raise_if_missing=True)
+
+    assert model1.columns_to_types_ is not None
+    assert set(model1.columns_to_types_.keys()) == {"revenue", "cost"}
+    assert model1.columns_to_types_["revenue"] == exp.DataType.build("int")
+    assert model1.columns_to_types_["cost"] == exp.DataType.build("double")
+
+    assert model2.columns_to_types_ is not None
+    assert set(model2.columns_to_types_.keys()) == {"sales", "profit"}
+    assert model2.columns_to_types_["sales"] == exp.DataType.build("bigint")
+    assert model2.columns_to_types_["profit"] == exp.DataType.build("text")
+
+
+def test_python_model_variable_column_names(tmp_path: Path) -> None:
+    """Global variables can be used as column names in Python model definitions."""
+    py_model = tmp_path / "models" / "var_col_names.py"
+    py_model.parent.mkdir(parents=True, exist_ok=True)
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model
+
+@model(
+    "test_schema.model",
+    kind="FULL",
+    columns={
+        "@{metric_col}": "int",
+        "static_col": "text",
+    },
+)
+def entrypoint(context, *args, **kwargs):
+    return pd.DataFrame({"revenue": [1], "static_col": ["x"]})
+        """
+    )
+
+    ctx = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            variables={"metric_col": "revenue"},
+        ),
+        paths=tmp_path,
+    )
+    assert len(ctx.models) == 1
+
+    model = ctx.get_model("test_schema.model", raise_if_missing=True)
+
+    assert model.columns_to_types_ is not None
+    assert set(model.columns_to_types_.keys()) == {"revenue", "static_col"}
+    assert model.columns_to_types_["revenue"] == exp.DataType.build("int")
+    assert model.columns_to_types_["static_col"] == exp.DataType.build("text")
+
+
 @time_machine.travel("2020-01-01 00:00:00 UTC")
 def test_dynamic_date_spine_model(assert_exp_eq):
     @macro()
@@ -11851,6 +12023,35 @@ def test_query_label_and_authorization_macro() -> None:
     assert model.render_session_properties() == {
         "query_label": d.parse_one("[('key', 'value')]"),
         "authorization": d.parse_one("'test_authorization'"),
+    }
+
+
+def test_query_tags_macro() -> None:
+    @macro()
+    def test_query_tags_macro(evaluator):
+        return "MAP('team', 'data-eng')"
+
+    expressions = d.parse(
+        """
+        MODEL (
+           name db.table,
+           dialect databricks,
+           session_properties (
+            query_tags = @test_query_tags_macro()
+           )
+        );
+
+        SELECT 1 AS c;
+        """
+    )
+
+    model = load_sql_based_model(expressions)
+    assert model.session_properties == {
+        "query_tags": d.parse_one("@test_query_tags_macro()"),
+    }
+
+    assert model.render_session_properties() == {
+        "query_tags": d.parse_one("MAP('team', 'data-eng')", dialect="databricks"),
     }
 
 

@@ -399,6 +399,415 @@ def test_multiple_gateways(tmp_path: Path):
     assert context.dag._sorted == ['"db"."staging"."stg_model"', '"db"."main"."final_model"']
 
 
+def test_multi_gateway_catalog_aware_and_unsupported(tmp_path: Path, mocker):
+    """ClickHouse (catalog UNSUPPORTED) alongside DuckDB (catalog FULL_SUPPORT) must not raise a
+    nesting-level SchemaError when models are loaded.
+
+    Expected behaviour after the fix:
+    - get_default_catalog_per_gateway assigns the gateway name as a virtual catalog for
+      catalog-unsupported gateways when catalog-aware gateways are present.
+    - ClickHouse models end up with a 3-level FQN so the MappingSchema nesting is uniform.
+    - The virtual catalog is stripped from DDL expressions (not raised as an error) because the
+      adapter's catalog_support flips to SINGLE_CATALOG_ONLY when _default_catalog is set.
+    """
+
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    # Build a real DuckDB adapter for the primary gateway.
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # Build a minimal ClickHouse adapter stub — no real connection needed.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    # Simulate the context's engine_adapters dict and call the scheduler directly.
+    engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": ch_adapter,
+    }
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = engine_adapters
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # DuckDB gateway must have a real catalog entry.
+    assert "duckdb_gw" in catalog_per_gw
+    # DuckDB's default catalog is the database filename without extension.
+    assert catalog_per_gw["duckdb_gw"] == "db"
+    # ClickHouse gateway must now also have a virtual catalog wrapped in double underscores.
+    assert "clickhouse_gw" in catalog_per_gw
+    assert catalog_per_gw["clickhouse_gw"] == "__clickhouse_gw__"
+
+    # The ClickHouse adapter's _default_catalog must be mutated to the synthetic virtual catalog.
+    assert ch_adapter._default_catalog == "__clickhouse_gw__"
+
+    # The adapter's catalog_support must now be SINGLE_CATALOG_ONLY (not UNSUPPORTED),
+    # so that the set_catalog decorator strips the virtual catalog instead of raising.
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+    # Loading models for both gateways must not raise a SchemaError.
+    duckdb_model = load_sql_based_model(
+        parse("MODEL(name main.duckdb_tbl, kind FULL, gateway duckdb_gw);\nSELECT 1 AS col"),
+        default_catalog="db",
+    )
+    ch_model = load_sql_based_model(
+        parse("MODEL(name mydb.ch_tbl, kind FULL, gateway clickhouse_gw);\nSELECT 1 AS col"),
+        default_catalog="__clickhouse_gw__",
+    )
+
+    # Both models must have 3-level FQNs so MappingSchema nesting is uniform.
+    # count(".") == 2 means 3 parts (catalog.db.table), i.e. a 3-level FQN.
+    assert duckdb_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for duckdb model, got: {duckdb_model.fqn}"
+    )
+    assert ch_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for ch model, got: {ch_model.fqn}"
+    )  # 3 parts = 2 dots
+
+    # Both models loaded into the same MappingSchema must not raise a nesting SchemaError.
+    from sqlglot.schema import MappingSchema
+
+    schema = MappingSchema(normalize=False)
+    schema.add_table(duckdb_model.fqn, duckdb_model.columns_to_types or {})
+    schema.add_table(ch_model.fqn, ch_model.columns_to_types or {})
+
+
+def test_single_gateway_clickhouse_no_virtual_catalog(mocker):
+    """When ClickHouse is the only gateway (no catalog-aware peer), it must NOT receive a virtual
+    catalog.  Models remain 2-level and catalog_support stays UNSUPPORTED."""
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {"clickhouse_gw": ch_adapter}
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # With only a catalog-unsupported gateway there must be no entry at all.
+    assert "clickhouse_gw" not in catalog_per_gw
+
+    # The adapter must remain unchanged — no virtual catalog injected.
+    assert ch_adapter._default_catalog is None
+    assert ch_adapter.catalog_support == CatalogSupport.UNSUPPORTED
+
+
+def test_multi_gateway_clickhouse_custom_virtual_catalog(tmp_path: Path, mocker):
+    """When virtual_catalog is configured on the ClickHouse connection, that value is used as the
+    virtual catalog instead of the synthetic __gateway_name__ default."""
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # Pass virtual_catalog via _extra_config (the same path used by ClickhouseConnectionConfig).
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+        virtual_catalog="my_custom_catalog",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {"duckdb_gw": duck_adapter, "clickhouse_gw": ch_adapter}
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # The configured virtual_catalog value must be used, not __clickhouse_gw__.
+    assert catalog_per_gw["clickhouse_gw"] == "my_custom_catalog"
+    assert ch_adapter._default_catalog == "my_custom_catalog"
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+
+def test_snapshot_evaluator_calls_ensure_virtual_catalog_injection(mocker):
+    """snapshot_evaluator must call _ensure_virtual_catalog_injection before cloning adapters.
+
+    This guards the edge case where snapshot_evaluator is the first property accessed on a fresh
+    context — before default_catalog fires during model loading — and ensures virtual catalog
+    injection still happens even in that order.
+    """
+    ctx = Context(config=Config())
+    ctx._snapshot_evaluator = None  # force re-initialization
+
+    inject_spy = mocker.patch.object(ctx, "_ensure_virtual_catalog_injection")
+
+    _ = ctx.snapshot_evaluator
+
+    inject_spy.assert_called_once()
+
+
+@pytest.mark.fast
+def test_multi_gateway_virtual_catalog_create_schema_strips_prefix(tmp_path: Path, mocker):
+    """Integration test: create_schema with a 3-level virtual-catalog FQN must strip the synthetic
+    catalog prefix before sending DDL to ClickHouse.
+
+    Flow exercised:
+    1. get_default_catalog_per_gateway detects a catalog-aware gateway (DuckDB) alongside
+       a catalog-unsupported gateway (ClickHouse) and calls inject_virtual_catalog().
+    2. The ClickHouse adapter's _default_catalog is set to ``__clickhouse_gw__``.
+    3. A ClickHouse model loaded with that virtual catalog gets a 3-level FQN.
+    4. When create_schema is called with the 3-level schema name the virtual catalog prefix
+       is stripped, so the SQL that reaches the wire uses only a 2-level name.
+    5. The DuckDB adapter's _default_catalog is NOT set to a synthetic value.
+    """
+    from sqlmesh.core.config.scheduler import BuiltInSchedulerConfig
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    db_path = str(tmp_path / "db.db")
+
+    duck_adapter = DuckDBEngineAdapter(
+        lambda *a, **k: __import__("duckdb").connect(db_path),
+        dialect="duckdb",
+    )
+
+    # ClickHouse adapter with a mocked connection — no real server needed.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+
+    ctx_mock = mocker.MagicMock()
+    ctx_mock.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": ch_adapter,
+    }
+
+    scheduler = BuiltInSchedulerConfig()
+    catalog_per_gw = scheduler.get_default_catalog_per_gateway(ctx_mock)
+
+    # --- Phase 1: virtual catalog injection assertions ---
+
+    # DuckDB gateway must carry a real catalog entry.
+    assert "duckdb_gw" in catalog_per_gw
+
+    # ClickHouse gateway must receive the synthetic ``__clickhouse_gw__`` virtual catalog.
+    assert catalog_per_gw["clickhouse_gw"] == "__clickhouse_gw__"
+
+    # The ClickHouse adapter's _default_catalog must be mutated.
+    assert ch_adapter._default_catalog == "__clickhouse_gw__"
+
+    # catalog_support must flip to SINGLE_CATALOG_ONLY so the set_catalog decorator strips
+    # the virtual catalog instead of raising when DDL is executed.
+    assert ch_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+
+    # DuckDB adapter must be untouched — it already has real catalog support.
+    assert duck_adapter._default_catalog != "__duckdb_gw__"
+
+    # --- Phase 2: FQN uniformity ---
+
+    ch_model = load_sql_based_model(
+        parse("MODEL(name mydb.ch_tbl, kind FULL, gateway clickhouse_gw);\nSELECT 1 AS col"),
+        default_catalog="__clickhouse_gw__",
+    )
+    duckdb_model = load_sql_based_model(
+        parse("MODEL(name main.duckdb_tbl, kind FULL, gateway duckdb_gw);\nSELECT 1 AS col"),
+        default_catalog=catalog_per_gw["duckdb_gw"],
+    )
+
+    # Both models must have 3-level FQNs (catalog.db.table → 2 dots) so MappingSchema nesting
+    # is uniform and does not raise a SchemaError.
+    assert ch_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for ClickHouse model, got: {ch_model.fqn}"
+    )
+    assert duckdb_model.fqn.count(".") == 2, (
+        f"Expected 3-level FQN for DuckDB model, got: {duckdb_model.fqn}"
+    )
+
+    from sqlglot.schema import MappingSchema
+
+    schema = MappingSchema(normalize=False)
+    schema.add_table(ch_model.fqn, ch_model.columns_to_types or {})
+    schema.add_table(duckdb_model.fqn, duckdb_model.columns_to_types or {})
+
+    # --- Phase 3: create_schema strips the virtual catalog prefix ---
+
+    # Spy on _create_schema to inspect what schema name is passed after stripping.
+    create_schema_calls: t.List[str] = []
+
+    def _capture_create_schema(
+        schema_name,
+        ignore_if_exists,
+        warn_on_error,
+        properties,
+        kind,
+    ):
+        create_schema_calls.append(
+            schema_name.sql(dialect="clickhouse")
+            if hasattr(schema_name, "sql")
+            else str(schema_name)
+        )
+
+    mocker.patch.object(ch_adapter, "_create_schema", side_effect=_capture_create_schema)
+
+    # Call create_schema with the 3-level virtual-catalog-prefixed schema name.
+    ch_adapter.create_schema("__clickhouse_gw__.mydb")
+
+    assert len(create_schema_calls) == 1, "Expected exactly one _create_schema call"
+    passed_schema = create_schema_calls[0]
+    # The virtual catalog prefix must NOT appear in the SQL sent to the wire.
+    assert "__clickhouse_gw__" not in passed_schema, (
+        f"Virtual catalog prefix should be stripped before reaching _create_schema, got: {passed_schema!r}"
+    )
+
+
+@pytest.mark.fast
+def test_warn_if_virtual_catalog_rematerialization_emits_warning(mocker):
+    """_warn_if_virtual_catalog_rematerialization must emit a log_warning when new snapshots have
+    3-level FQNs that map to existing 2-level FQNs in the current environment, indicating that the
+    virtual catalog prefix was added to previously-applied ClickHouse models."""
+    from unittest.mock import MagicMock
+
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.snapshot.definition import SnapshotId
+
+    # Build a minimal Context with no models.
+    ctx = Context(config=Config())
+
+    # Create a ClickHouse adapter with a virtual catalog already injected.
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+    ch_adapter._default_catalog = "__ch_gw__"
+
+    # Override engine_adapters so the context sees our prepared adapter.
+    mocker.patch.object(
+        type(ctx), "engine_adapters", new_callable=PropertyMock, return_value={"ch_gw": ch_adapter}
+    )
+
+    # Build a mock snapshot with a 3-level name that has the virtual catalog prefix.
+    new_snapshot = MagicMock()
+    new_snapshot.name = "__ch_gw__.mydb.my_table"
+
+    # The old 2-level name must appear in snapshots_by_name so we detect the rename.
+    old_snapshot_id = SnapshotId(name="mydb.my_table", identifier="abc123")
+
+    context_diff = MagicMock()
+    context_diff.new_snapshots = {new_snapshot.name: new_snapshot}
+    context_diff.removed_snapshots = {}
+    context_diff.snapshots_by_name = {"mydb.my_table": MagicMock()}
+
+    plan = MagicMock()
+    plan.new_snapshots = [new_snapshot]
+    plan.context_diff = context_diff
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx._warn_if_virtual_catalog_rematerialization(plan)
+
+    warning_mock.assert_called_once()
+    warning_text = warning_mock.call_args[0][0]
+    assert "__ch_gw__" in warning_text
+    assert "mydb.my_table" in warning_text
+
+
+@pytest.mark.fast
+def test_warn_if_virtual_catalog_rematerialization_no_warning_when_genuinely_new(mocker):
+    """_warn_if_virtual_catalog_rematerialization must NOT warn when there is no matching old
+    2-level name — i.e. the model is a brand-new model, not a renamed existing one."""
+    from unittest.mock import MagicMock
+
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    ctx = Context(config=Config())
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+    ch_adapter._default_catalog = "__ch_gw__"
+
+    mocker.patch.object(
+        type(ctx), "engine_adapters", new_callable=PropertyMock, return_value={"ch_gw": ch_adapter}
+    )
+
+    new_snapshot = MagicMock()
+    new_snapshot.name = "__ch_gw__.mydb.brand_new_table"
+
+    context_diff = MagicMock()
+    context_diff.new_snapshots = {new_snapshot.name: new_snapshot}
+    context_diff.removed_snapshots = {}
+    # No matching old name.
+    context_diff.snapshots_by_name = {}
+
+    plan = MagicMock()
+    plan.new_snapshots = [new_snapshot]
+    plan.context_diff = context_diff
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx._warn_if_virtual_catalog_rematerialization(plan)
+
+    warning_mock.assert_not_called()
+
+
+@pytest.mark.fast
+def test_warn_if_virtual_catalog_rematerialization_no_warning_without_virtual_catalog(mocker):
+    """_warn_if_virtual_catalog_rematerialization must NOT warn when the ClickHouse adapter has no
+    virtual catalog injected (i.e. _default_catalog is None)."""
+    from unittest.mock import MagicMock
+
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    ctx = Context(config=Config())
+
+    ch_adapter = ClickhouseEngineAdapter(
+        lambda *a, **k: mocker.NonCallableMock(),
+        dialect="clickhouse",
+    )
+    # No virtual catalog injected — adapter stays at 2-level mode.
+    assert ch_adapter._default_catalog is None
+
+    mocker.patch.object(
+        type(ctx), "engine_adapters", new_callable=PropertyMock, return_value={"ch_gw": ch_adapter}
+    )
+
+    new_snapshot = MagicMock()
+    new_snapshot.name = "mydb.my_table"
+
+    context_diff = MagicMock()
+    context_diff.new_snapshots = {new_snapshot.name: new_snapshot}
+    context_diff.removed_snapshots = {}
+    context_diff.snapshots_by_name = {}
+
+    plan = MagicMock()
+    plan.new_snapshots = [new_snapshot]
+    plan.context_diff = context_diff
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx._warn_if_virtual_catalog_rematerialization(plan)
+
+    warning_mock.assert_not_called()
+
+
 def test_plan_execution_time():
     context = Context(config=Config())
     context.upsert_model(

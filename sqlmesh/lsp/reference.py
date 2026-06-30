@@ -332,8 +332,9 @@ def get_model_find_all_references(
     # Find the model reference at the cursor position
     model_at_position = next(
         filter(
-            lambda ref: isinstance(ref, ModelReference)
-            and _position_within_range(position, ref.range),
+            lambda ref: (
+                isinstance(ref, ModelReference) and _position_within_range(position, ref.range)
+            ),
             get_model_definitions_for_a_path(lint_context, document_uri),
         ),
         None,
@@ -486,8 +487,9 @@ def get_macro_find_all_references(
     # Find the macro reference at the cursor position
     macro_at_position = next(
         filter(
-            lambda ref: isinstance(ref, MacroReference)
-            and _position_within_range(position, ref.range),
+            lambda ref: (
+                isinstance(ref, MacroReference) and _position_within_range(position, ref.range)
+            ),
             get_macro_definitions_for_a_path(lsp_context, document_uri),
         ),
         None,
@@ -517,9 +519,11 @@ def get_macro_find_all_references(
 
         # Get macro references that point to the same macro definition
         matching_refs = filter(
-            lambda ref: isinstance(ref, MacroReference)
-            and ref.path == target_macro_path
-            and ref.target_range == target_macro_target_range,
+            lambda ref: (
+                isinstance(ref, MacroReference)
+                and ref.path == target_macro_path
+                and ref.target_range == target_macro_target_range
+            ),
             get_macro_definitions_for_a_path(lsp_context, file_uri),
         )
 

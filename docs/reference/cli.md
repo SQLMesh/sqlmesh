@@ -279,7 +279,8 @@ Options:
                        empty.
   --dlt-pipeline TEXT  DLT pipeline for which to generate a SQLMesh project.
                        Use alongside template: dlt
-  --dlt-path TEXT      The directory where the DLT pipeline resides. Use
+  --dlt-path TEXT      The DLT pipelines working directory, where DLT stores
+                       pipeline state (by default ~/.dlt/pipelines). Use
                        alongside template: dlt
   --help               Show this message and exit.
 ```

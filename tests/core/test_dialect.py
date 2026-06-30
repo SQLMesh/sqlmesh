@@ -233,6 +233,60 @@ SELECT
     x = format_model_expressions(
         parse(
             """
+            MODEL(name a.b, kind FULL, dialect tsql, allow_partials true);
+            SELECT TRUE AS col, CAST(x AS INT) AS y FROM t
+            """
+        ),
+        dialect="tsql",
+    )
+    # The MODEL header is SQLMesh DDL and must not be transpiled: a boolean property
+    # such as `allow_partials true` must stay `TRUE`, not become tsql's `(1 = 1)`.
+    # The query body must still transpile to the target dialect.
+    assert (
+        x
+        == """MODEL (
+  name a.b,
+  kind FULL,
+  dialect tsql,
+  allow_partials TRUE
+);
+
+SELECT
+  1 AS col,
+  x::INTEGER AS y
+FROM t"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
+            AUDIT(name my_audit, dialect tsql, blocking false);
+            SELECT TRUE AS col, CAST(x AS INT) AS y FROM t WHERE x > 0
+            """
+        ),
+        dialect="tsql",
+    )
+    # AUDIT headers are SQLMesh DDL too: a `false` boolean property must stay
+    # `FALSE`, not become tsql's `(1 = 0)`, while the query body still transpiles.
+    assert (
+        x
+        == """AUDIT (
+  name my_audit,
+  dialect tsql,
+  blocking FALSE
+);
+
+SELECT
+  1 AS col,
+  x::INTEGER AS y
+FROM t
+WHERE
+  x > 0"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
             MODEL(name foo);
             SELECT CAST(1 AS INT) AS bla
             """
