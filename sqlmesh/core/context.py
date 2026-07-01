@@ -3034,8 +3034,10 @@ class GenericContext(BaseContext, t.Generic[C]):
                 )
             )
             self.state_sync.compact_intervals()
-        elif ignore_ttl and target_snapshot_ids and not self.state_reader.get_environment(
-            environment
+        elif (
+            ignore_ttl
+            and target_snapshot_ids
+            and not self.state_reader.get_environment(environment)
         ):
             self.console.log_warning(
                 "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot "

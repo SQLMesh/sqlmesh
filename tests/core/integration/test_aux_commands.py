@@ -554,7 +554,9 @@ def test_invalidate_environment_cleanup_snapshots_warns_and_drops_physical_table
     )
     assert ctx.state_sync.get_environment("dev") is None
     assert not ctx.state_sync.get_snapshots(snapshot_ids)
-    assert not any(ctx.engine_adapter.table_exists(table_name) for table_name in physical_table_names)
+    assert not any(
+        ctx.engine_adapter.table_exists(table_name) for table_name in physical_table_names
+    )
 
 
 def test_janitor_environment_ignore_ttl_cleans_only_scoped_snapshots(
