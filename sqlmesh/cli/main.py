@@ -1199,6 +1199,7 @@ def environments(obj: Context) -> None:
 @click.option(
     "--local",
     is_flag=True,
+    expose_value=False,
     help="Lint using only locally loaded project files without loading state.",
 )
 @click.pass_obj
@@ -1207,7 +1208,6 @@ def environments(obj: Context) -> None:
 def lint(
     obj: Context,
     models: t.Iterator[str],
-    local: bool,
 ) -> None:
     """Run the linter for the target model(s)."""
     obj.lint_models(models)
