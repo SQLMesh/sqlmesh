@@ -231,8 +231,8 @@ def test_select_models_expired_environment(mocker: MockerFixture, make_snapshot)
     )
 
     state_reader_mock = mocker.Mock()
-    state_reader_mock.get_environment.side_effect = (
-        lambda name: prod_env if name == "prod" else dev_env
+    state_reader_mock.get_environment.side_effect = lambda name: (
+        prod_env if name == "prod" else dev_env
     )
 
     all_snapshots = {
@@ -875,8 +875,8 @@ def test_select_models_selected_fqns_fallback(mocker: MockerFixture, make_snapsh
     )
 
     state_reader_mock = mocker.Mock()
-    state_reader_mock.get_environment.side_effect = (
-        lambda name: fallback_env if name == "prod" else None
+    state_reader_mock.get_environment.side_effect = lambda name: (
+        fallback_env if name == "prod" else None
     )
     state_reader_mock.get_snapshots.return_value = {
         deleted_model_snapshot.snapshot_id: deleted_model_snapshot,

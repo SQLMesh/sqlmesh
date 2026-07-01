@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textwrap import dedent
 import typing as t
 import logging
 
@@ -53,8 +54,8 @@ class MSSQLEngineAdapter(
     SUPPORTS_TUPLE_IN = False
     SUPPORTS_MATERIALIZED_VIEWS = False
     CURRENT_CATALOG_EXPRESSION = exp.func("db_name")
-    COMMENT_CREATION_TABLE = CommentCreationTable.UNSUPPORTED
-    COMMENT_CREATION_VIEW = CommentCreationView.UNSUPPORTED
+    COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
+    COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_REPLACE_TABLE = False
     MAX_IDENTIFIER_LENGTH = 128
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
@@ -457,3 +458,83 @@ class MSSQLEngineAdapter(
             )
 
         return super().delete_from(table_name, where)
+
+    def _build_create_comment_table_exp(
+        self, table: exp.Table, table_comment: str, table_kind: str = "TABLE"
+    ) -> exp.Comment | str:
+        template = dedent("""
+            DECLARE @comment sql_variant = {comment};
+            DECLARE @property_name VARCHAR(128) = 'MS_Description';
+            DECLARE @schema_name VARCHAR(128) = {schema_name};
+            DECLARE @object_name VARCHAR(128) = {object_name};
+            DECLARE @object_kind VARCHAR(128) = '{object_kind}';
+            DECLARE @existing sql_variant;
+
+            SELECT TOP 1 @existing = CAST(VALUE AS NVARCHAR) FROM fn_listextendedproperty(@property_name, 'schema', @schema_name, @object_kind, @object_name, DEFAULT, DEFAULT);
+
+            IF @comment IS NULL
+                BEGIN
+                    IF @existing IS NOT NULL
+                        EXEC sp_dropextendedproperty @property_name, 'schema', @schema_name, @object_kind, @object_name;
+                END
+            ELSE
+                BEGIN
+                    IF @existing IS NULL
+                        EXEC sp_addextendedproperty @property_name,@comment, 'schema', @schema_name, @object_kind, @object_name;
+                    ELSE IF @existing != @comment
+                        EXEC sp_updateextendedproperty @property_name, @comment, 'schema', @schema_name, @object_kind, @object_name;
+                END
+        """)
+        tsql_text = template.format(
+            comment=exp.Literal.string(table_comment or "NULL").sql(
+                dialect=self.dialect, identify=False
+            ),
+            schema_name=exp.Literal.string(table.db or "dbo").sql(
+                dialect=self.dialect, identify=False
+            ),
+            object_name=exp.Literal.string(table.name).sql(dialect=self.dialect, identify=False),
+            object_kind=table_kind,
+        )
+        return tsql_text
+
+    def _build_create_comment_column_exp(
+        self, table: exp.Table, column_name: str, column_comment: str, table_kind: str = "TABLE"
+    ) -> exp.Comment | str:
+        template = dedent("""
+            DECLARE @comment sql_variant = {comment};
+            DECLARE @property_name VARCHAR(128) = 'MS_Description';
+            DECLARE @schema_name VARCHAR(128) = {schema_name};
+            DECLARE @object_name VARCHAR(128) = {object_name};
+            DECLARE @object_kind VARCHAR(128) = '{object_kind}';
+            DECLARE @column_name VARCHAR(128) = {column_name};
+            DECLARE @existing sql_variant;
+
+            SELECT TOP 1 @existing = CAST(VALUE AS NVARCHAR) FROM fn_listextendedproperty(@property_name, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name);
+
+            IF @comment IS NULL
+                BEGIN
+                    IF @existing IS NOT NULL
+                        EXEC sp_dropextendedproperty @property_name, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name;
+                END
+            ELSE
+                BEGIN
+                    IF @existing IS NULL
+                        EXEC sp_addextendedproperty @property_name,@comment, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name;
+                    ELSE IF @existing != @comment
+                        EXEC sp_updateextendedproperty @property_name, @comment, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name;
+                END
+        """)
+
+        tsql_text = template.format(
+            comment=exp.Literal.string(column_comment or "NULL").sql(
+                dialect=self.dialect, identify=False
+            ),
+            schema_name=exp.Literal.string(table.db or "dbo").sql(
+                dialect=self.dialect, identify=False
+            ),
+            object_name=exp.Literal.string(table.name).sql(dialect=self.dialect, identify=False),
+            object_kind=table_kind,
+            column_name=exp.Literal.string(column_name).sql(dialect=self.dialect, identify=False),
+        )
+
+        return tsql_text

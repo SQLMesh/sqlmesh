@@ -921,7 +921,7 @@ SELECT
 FROM
   filesystem_pipeline_dataset.equipment as c
 WHERE
-  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(equipment_model_path) as file:
@@ -995,7 +995,7 @@ def test_dlt_pipeline(runner, tmp_path):
         exec(file.read())
 
     # This should fail since it won't be able to locate the pipeline in this path
-    with pytest.raises(ClickException, match=r".*Could not attach to pipeline*"):
+    with pytest.raises(ClickException, match=r".*Could not attach to pipeline*") as excinfo:
         init_example_project(
             tmp_path,
             "duckdb",
@@ -1003,6 +1003,12 @@ def test_dlt_pipeline(runner, tmp_path):
             pipeline="sushi",
             dlt_path="./dlt2/pipelines",
         )
+
+    # The error should surface where the pipeline was searched for and, since the
+    # pipeline exists in the default working directory, a hint about --dlt-path
+    error_message = str(excinfo.value)
+    assert "Searched in: ./dlt2/pipelines" in error_message
+    assert "Try omitting --dlt-path" in error_message
 
     # By setting the pipelines path where the pipeline directory is located, it should work
     dlt_path = get_dlt_pipelines_dir()
@@ -1058,7 +1064,7 @@ SELECT
 FROM
   sushi_dataset.sushi_types as c
 WHERE
-  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     dlt_sushi_types_model_path = tmp_path / "models/incremental_sushi_types.sql"
@@ -1089,7 +1095,7 @@ SELECT
 FROM
   sushi_dataset._dlt_loads as c
 WHERE
-  TO_TIMESTAMP(CAST(c.load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c.load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(dlt_loads_model_path) as file:
@@ -1116,7 +1122,7 @@ JOIN
 ON
   c._dlt_parent_id = p._dlt_id
 WHERE
-  TO_TIMESTAMP(CAST(p._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(p._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(dlt_sushi_fillings_model_path) as file:

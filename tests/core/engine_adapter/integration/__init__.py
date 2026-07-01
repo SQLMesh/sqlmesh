@@ -526,6 +526,14 @@ class TestContext:
                     AND c.relkind = '{"v" if table_kind == "VIEW" else "r"}'
                 ;
             """
+        elif self.dialect == "tsql":
+            kind = "table" if table_kind == "BASE TABLE" else "view"
+            query = f"""
+                SELECT 
+                	ep.name,
+                    CAST(ep.value AS NVARCHAR(MAX)) comment 
+                FROM fn_listextendedproperty('MS_Description', 'schema', '{schema_name}', '{kind}', '{table_name}', DEFAULT, DEFAULT) ep
+            """
 
         result = self.engine_adapter.fetchall(query)
 
@@ -635,6 +643,16 @@ class TestContext:
                     AND c.relname = '{table_name}'
                     AND c.relkind = '{"v" if table_kind == "VIEW" else "r"}'
                 ;
+            """
+        elif self.dialect == "tsql":
+            kind = "table" if table_kind == "BASE TABLE" else "view"
+            query = f"""
+                SELECT
+                    col.COLUMN_NAME column_name,
+                    CAST(ep.value AS NVARCHAR(MAX)) comment 
+                FROM INFORMATION_SCHEMA.COLUMNS col
+                CROSS APPLY fn_listextendedproperty('MS_Description', 'schema', col.TABLE_SCHEMA, '{kind}', col.TABLE_NAME, 'column', col.COLUMN_NAME) ep
+                WHERE col.TABLE_SCHEMA = '{schema_name}' AND col.TABLE_NAME = '{table_name}'
             """
 
         result = self.engine_adapter.fetchall(query)

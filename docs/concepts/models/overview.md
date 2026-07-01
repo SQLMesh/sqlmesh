@@ -184,7 +184,7 @@ This table lists each engine's support for `TABLE` and `VIEW` object comments:
 | DuckDB <=0.9  | N                | N               |
 | DuckDB >=0.10 | Y                | Y               |
 | MySQL         | Y                | Y               |
-| MSSQL         | N                | N               |
+| MSSQL         | Y                | Y               |
 | Postgres      | Y                | Y               |
 | GCP Postgres  | Y                | Y               |
 | Redshift      | Y                | N               |

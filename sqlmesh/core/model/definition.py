@@ -992,6 +992,12 @@ class _Model(ModelMeta, frozen=True):
                 values = [
                     col.name
                     for expr in values
+                    if not (
+                        field == "clustered_by"
+                        and (self.dialect or "").lower() == "databricks"
+                        and isinstance(expr, exp.Var)
+                        and expr.name.upper() in c.LIQUID_CLUSTERING_KEYWORDS
+                    )
                     for col in t.cast(
                         exp.Expr, exp.maybe_parse(expr, dialect=self.dialect)
                     ).find_all(exp.Column)
@@ -2977,7 +2983,15 @@ def render_meta_fields(
         if isinstance(field_value, dict):
             rendered_dict = {}
             for key, value in field_value.items():
-                if key in RUNTIME_RENDERED_MODEL_FIELDS:
+                if field == "columns":
+                    column_name = render_field_value(key)
+                    column_type = render_field_value(value)
+                    # If column_type is an Expr (from rendering macros), convert to string.
+                    # Otherwise, leave it as-is (string) for the validator to parse with the correct dialect.
+                    if isinstance(column_type, exp.Expr):
+                        column_type = column_type.sql(dialect=dialect)
+                    rendered_dict[column_name] = column_type
+                elif key in RUNTIME_RENDERED_MODEL_FIELDS:
                     rendered_dict[key] = parse_strings_with_macro_refs(value, dialect)
                 elif (
                     # don't parse kind auto_restatement_cron="@..." kwargs (e.g. @daily) into MacroVar

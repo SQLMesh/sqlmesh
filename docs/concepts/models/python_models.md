@@ -369,6 +369,33 @@ def entrypoint(
     )
 ```
 
+Blueprint variables can also be used as **column names and column types** in the `columns` dictionary. For example, if each blueprint produces a model with a different set of column names and types, both can be parameterized using the same `@{variable}` syntax:
+
+```python linenums="1"
+import pandas as pd
+from sqlmesh import ExecutionContext, model
+
+@model(
+    "@{customer}.metrics",
+    kind="FULL",
+    blueprints=[
+        {"customer": "customer1", "primary_metric": "revenue", "primary_type": "int",  "secondary_metric": "cost",   "secondary_type": "double"},
+        {"customer": "customer2", "primary_metric": "sales",   "primary_type": "text", "secondary_metric": "profit", "secondary_type": "double"},
+    ],
+    columns={
+        "@{primary_metric}": "@{primary_type}",
+        "@{secondary_metric}": "@{secondary_type}",
+    },
+)
+def entrypoint(context: ExecutionContext, **kwargs) -> pd.DataFrame:
+    return pd.DataFrame({
+        context.blueprint_var("primary_metric"): [1],
+        context.blueprint_var("secondary_metric"): [1.5],
+    })
+```
+
+Global variables (defined in the project config) can also be used as column names and types in the same way.
+
 Note the use of curly brace syntax `@{customer}` in the model name above. It is used to ensure SQLMesh can combine the macro variable into the model name identifier correctly - learn more [here](../../concepts/macros/sqlmesh_macros.md#embedding-variables-in-strings).
 
 Blueprint variable mappings can also be constructed dynamically, e.g., by using a macro: `blueprints="@gen_blueprints()"`. This is useful in cases where the `blueprints` list needs to be sourced from external sources, such as CSV files.

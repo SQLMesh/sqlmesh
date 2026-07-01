@@ -492,6 +492,7 @@ class GenericContext(BaseContext, t.Generic[C]):
     @property
     def snapshot_evaluator(self) -> SnapshotEvaluator:
         if not self._snapshot_evaluator:
+            self._ensure_virtual_catalog_injection()
             self._snapshot_evaluator = SnapshotEvaluator(
                 {
                     gateway: adapter.with_settings(execute_log_level=logging.INFO)
@@ -501,6 +502,15 @@ class GenericContext(BaseContext, t.Generic[C]):
                 selected_gateway=self.selected_gateway,
             )
         return self._snapshot_evaluator
+
+    def _ensure_virtual_catalog_injection(self) -> None:
+        """Ensure virtual catalog injection has run before adapters are cloned for SnapshotEvaluator.
+
+        Injection is a side effect of get_default_catalog_per_gateway. In normal usage it fires
+        earlier (default_catalog is accessed during model loading), but this guard covers the edge
+        case where snapshot_evaluator is accessed directly on a fresh context before any model ops.
+        """
+        _ = self.default_catalog_per_gateway
 
     def execution_context(
         self,
@@ -1440,6 +1450,8 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         plan = plan_builder.build()
 
+        self._warn_if_virtual_catalog_rematerialization(plan)
+
         if no_auto_categorization or plan.uncategorized:
             # Prompts are required if the auto categorization is disabled
             # or if there are any uncategorized snapshots in the plan
@@ -1482,6 +1494,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         backfill_models: t.Optional[t.Collection[str]] = None,
         categorizer_config: t.Optional[CategorizerConfig] = None,
         enable_preview: t.Optional[bool] = None,
+        preview_start: t.Optional[TimeLike] = None,
+        preview_min_intervals: t.Optional[int] = None,
         run: t.Optional[bool] = None,
         diff_rendered: t.Optional[bool] = None,
         skip_linter: t.Optional[bool] = None,
@@ -1523,6 +1537,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             select_models: A list of model selection strings to filter the models that should be included into this plan.
             backfill_models: A list of model selection strings to filter the models for which the data should be backfilled.
             enable_preview: Indicates whether to enable preview for forward-only models in development environments.
+            preview_start: The start date for forward-only previews.
+            preview_min_intervals: The minimum number of intervals to preview for each forward-only preview snapshot.
             run: Whether to run latest intervals as part of the plan application.
             diff_rendered: Whether the diff should compare raw vs rendered models
             min_intervals: Adjust the plan start date on a per-model basis in order to ensure at least this many intervals are covered
@@ -1556,6 +1572,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             "select_models": list(select_models) if select_models is not None else None,
             "backfill_models": list(backfill_models) if backfill_models is not None else None,
             "enable_preview": enable_preview,
+            "preview_start": preview_start,
+            "preview_min_intervals": preview_min_intervals,
             "run": run,
             "diff_rendered": diff_rendered,
             "skip_linter": skip_linter,
@@ -1757,6 +1775,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             enable_preview=(
                 enable_preview if enable_preview is not None else self._plan_preview_enabled
             ),
+            preview_start=preview_start,
+            preview_min_intervals=preview_min_intervals or 0,
             end_bounded=not run,
             ensure_finalized_snapshots=self.config.plan.use_finalized_state,
             start_override_per_model=start_override_per_model,
@@ -2737,6 +2757,61 @@ class GenericContext(BaseContext, t.Generic[C]):
                 )
             return result
         return None
+
+    def _warn_if_virtual_catalog_rematerialization(self, plan: "Plan") -> None:
+        """Warn when ClickHouse models appear as new snapshots solely because a virtual catalog
+        prefix was added to their FQNs after a catalog-aware gateway joined the project.
+
+        This situation causes every previously-applied ClickHouse model to be treated as brand-new
+        by SQLMesh, triggering full re-materialization and historical backfills. Emitting a warning
+        before the plan is displayed gives users a chance to understand the cost before applying.
+        """
+        from sqlglot import exp
+
+        # Collect the set of old 2-level snapshot names from the current environment so we can
+        # detect which new 3-level names are renames rather than genuinely new models.
+        old_names: t.Set[str] = set()
+        for s_id in plan.context_diff.removed_snapshots:
+            old_names.add(s_id.name)
+        for name in plan.context_diff.snapshots_by_name:
+            old_names.add(name)
+
+        affected: t.List[t.Tuple[str, str]] = []  # (new_3level_name, old_2level_name)
+
+        for gateway, adapter in self.engine_adapters.items():
+            if not adapter.supports_virtual_catalog() or not adapter._default_catalog:
+                continue
+            virtual_catalog = adapter._default_catalog
+
+            for snapshot in plan.new_snapshots:
+                table = exp.to_table(snapshot.name)
+                if table.catalog != virtual_catalog:
+                    continue
+                # Reconstruct the 2-level name that would have been used before injection.
+                old_name = f"{table.db}.{table.name}"
+                if old_name in old_names:
+                    affected.append((snapshot.name, old_name))
+
+        if not affected:
+            return
+
+        max_display = 10
+        model_lines = "\n".join(
+            f"  - {new_name}  (was: {old_name})" for new_name, old_name in affected[:max_display]
+        )
+        if len(affected) > max_display:
+            model_lines += f"\n  ... and {len(affected) - max_display} more"
+
+        self.console.log_warning(
+            "ClickHouse models are being re-materialized due to virtual catalog FQN change.\n\n"
+            "The following ClickHouse models appear as new because their fully-qualified\n"
+            "names changed from 2-level (db.table) to 3-level (__gateway__.db.table):\n\n"
+            f"{model_lines}\n\n"
+            "FULL models will be recreated once. INCREMENTAL_BY_TIME_RANGE models will\n"
+            "require a full historical backfill from their configured start date.\n\n"
+            "This is a one-time cost when first adding a catalog-aware gateway to an\n"
+            "existing ClickHouse project. To proceed, run `sqlmesh apply`."
+        )
 
     @property
     def _model_tables(self) -> t.Dict[str, str]:

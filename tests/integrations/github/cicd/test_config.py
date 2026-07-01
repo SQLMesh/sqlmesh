@@ -36,12 +36,14 @@ model_defaults:
     assert config.cicd_bot.command_namespace is None
     assert config.cicd_bot.auto_categorize_changes == config.plan.auto_categorize_changes
     assert config.cicd_bot.default_pr_start is None
+    assert config.cicd_bot.default_pr_preview_start == "yesterday"
     assert not config.cicd_bot.enable_deploy_command
     assert config.cicd_bot.skip_pr_backfill
     assert not config.cicd_bot.pr_include_unmodified
     assert config.cicd_bot.pr_environment_name is None
     assert config.cicd_bot.prod_branch_names == ["main", "master"]
     assert not config.cicd_bot.pr_min_intervals
+    assert config.cicd_bot.pr_preview_min_intervals == 1
 
 
 def test_load_yaml_config(tmp_path):
@@ -60,12 +62,14 @@ cicd_bot:
       sql: full
       seed: full
     default_pr_start: 
+    default_pr_preview_start: 2 days ago
     enable_deploy_command: true
     skip_pr_backfill: false
     pr_include_unmodified: true
     pr_environment_name: "MyOverride"
     prod_branch_name: testing
     pr_min_intervals: 1
+    pr_preview_min_intervals: 2
 model_defaults:
     dialect: duckdb
 """,
@@ -85,12 +89,14 @@ model_defaults:
         seed=AutoCategorizationMode.FULL,
     )
     assert config.cicd_bot.default_pr_start is None
+    assert config.cicd_bot.default_pr_preview_start == "2 days ago"
     assert config.cicd_bot.enable_deploy_command
     assert not config.cicd_bot.skip_pr_backfill
     assert config.cicd_bot.pr_include_unmodified
     assert config.cicd_bot.pr_environment_name == "MyOverride"
     assert config.cicd_bot.prod_branch_names == ["testing"]
     assert config.cicd_bot.pr_min_intervals == 1
+    assert config.cicd_bot.pr_preview_min_intervals == 2
 
 
 def test_load_python_config_defaults(tmp_path):
@@ -117,12 +123,14 @@ config = Config(
     assert config.cicd_bot.command_namespace is None
     assert config.cicd_bot.auto_categorize_changes == config.plan.auto_categorize_changes
     assert config.cicd_bot.default_pr_start is None
+    assert config.cicd_bot.default_pr_preview_start == "yesterday"
     assert not config.cicd_bot.enable_deploy_command
     assert config.cicd_bot.skip_pr_backfill
     assert not config.cicd_bot.pr_include_unmodified
     assert config.cicd_bot.pr_environment_name is None
     assert config.cicd_bot.prod_branch_names == ["main", "master"]
     assert not config.cicd_bot.pr_min_intervals
+    assert config.cicd_bot.pr_preview_min_intervals == 1
 
 
 def test_load_python_config(tmp_path):
@@ -145,7 +153,9 @@ config = Config(
             seed=AutoCategorizationMode.FULL,
         ),
         default_pr_start="1 week ago",
+        default_pr_preview_start="2 days ago",
         pr_min_intervals=1,
+        pr_preview_min_intervals=2,
         enable_deploy_command=True,
         skip_pr_backfill=False,
         pr_include_unmodified=True,
@@ -172,12 +182,14 @@ config = Config(
         seed=AutoCategorizationMode.FULL,
     )
     assert config.cicd_bot.default_pr_start == "1 week ago"
+    assert config.cicd_bot.default_pr_preview_start == "2 days ago"
     assert config.cicd_bot.enable_deploy_command
     assert not config.cicd_bot.skip_pr_backfill
     assert config.cicd_bot.pr_include_unmodified
     assert config.cicd_bot.pr_environment_name == "MyOverride"
     assert config.cicd_bot.prod_branch_names == ["testing"]
     assert config.cicd_bot.pr_min_intervals == 1
+    assert config.cicd_bot.pr_preview_min_intervals == 2
 
 
 def test_validation(tmp_path):

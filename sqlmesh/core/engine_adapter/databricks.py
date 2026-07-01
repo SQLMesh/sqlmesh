@@ -6,6 +6,7 @@ from functools import partial
 
 from sqlglot import exp
 
+from sqlmesh.core.constants import LIQUID_CLUSTERING_KEYWORDS
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import GrantsFromInfoSchemaMixin
 from sqlmesh.core.engine_adapter.shared import (
@@ -28,6 +29,43 @@ if t.TYPE_CHECKING:
     from sqlmesh.core.engine_adapter._typing import DF, PySparkSession, Query
 
 logger = logging.getLogger(__name__)
+
+
+def _query_tags(
+    query_tags: t.Optional[t.Union[exp.Expr, str, int, float, bool]],
+) -> t.Optional[t.Dict[str, t.Optional[str]]]:
+    if not query_tags:
+        return None
+
+    if not isinstance(query_tags, (exp.Map, exp.VarMap)):
+        raise SQLMeshError("Invalid value for `session_properties.query_tags`. Must be a map.")
+
+    keys = query_tags.args.get("keys")
+    values = query_tags.args.get("values")
+    if not isinstance(keys, exp.Array) or not isinstance(values, exp.Array):
+        raise SQLMeshError(
+            "Invalid value for `session_properties.query_tags`. Must be a map with array "
+            "keys and array values."
+        )
+
+    tags: t.Dict[str, t.Optional[str]] = {}
+    for key, value in zip(keys.expressions, values.expressions):
+        if not isinstance(key, exp.Literal) or not key.is_string:
+            raise SQLMeshError(
+                "Invalid key in `session_properties.query_tags`. Keys must be string literals."
+            )
+
+        if isinstance(value, exp.Null):
+            tags[key.this] = None
+        elif isinstance(value, exp.Literal) and value.is_string:
+            tags[key.this] = value.this
+        else:
+            raise SQLMeshError(
+                "Invalid value in `session_properties.query_tags`. Values must be string "
+                "literals or NULL."
+            )
+
+    return tags
 
 
 class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
@@ -97,6 +135,12 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
     @property
     def is_spark_session_connection(self) -> bool:
         return isinstance(self.connection, SparkSessionConnection)
+
+    @property
+    def _is_databricks_sql_connector_connection(self) -> bool:
+        return not self.is_spark_session_connection and not self._connection_pool.get_attribute(
+            "use_spark_engine_adapter"
+        )
 
     def _set_spark_engine_adapter_if_needed(self) -> None:
         self._spark_engine_adapter = None
@@ -181,9 +225,22 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         """Begin a new session."""
         # Align the different possible connectors to a single catalog
         self.set_current_catalog(self.default_catalog)  # type: ignore
+        self._connection_pool.set_attribute("query_tags", _query_tags(properties.get("query_tags")))
 
     def _end_session(self) -> None:
+        self._connection_pool.set_attribute("query_tags", None)
         self._connection_pool.set_attribute("use_spark_engine_adapter", False)
+
+    def _execute(self, sql: str, track_rows_processed: bool = False, **kwargs: t.Any) -> None:
+        query_tags = self._connection_pool.get_attribute("query_tags")
+        if (
+            query_tags
+            and "query_tags" not in kwargs
+            and self._is_databricks_sql_connector_connection
+        ):
+            kwargs["query_tags"] = query_tags
+
+        return super()._execute(sql, track_rows_processed, **kwargs)
 
     def _df_to_source_queries(
         self,
@@ -386,10 +443,16 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             table_kind=table_kind,
         )
         if clustered_by:
-            # Databricks expects wrapped CLUSTER BY expressions
-            clustered_by_exp = exp.Cluster(
-                expressions=[exp.Tuple(expressions=[c.copy() for c in clustered_by])]
-            )
+            if len(clustered_by) == 1 and isinstance(clustered_by[0], exp.Var):
+                if clustered_by[0].name.upper() not in LIQUID_CLUSTERING_KEYWORDS:
+                    raise ValueError(f"Unexpected bare Var in clustered_by: {clustered_by[0]!r}")
+                # exp.Cluster with a bare Var generates: CLUSTER BY AUTO (no parens)
+                clustered_by_exp = exp.Cluster(expressions=[clustered_by[0].copy()])
+            else:
+                # Databricks expects column expressions wrapped in a tuple
+                clustered_by_exp = exp.Cluster(
+                    expressions=[exp.Tuple(expressions=[c.copy() for c in clustered_by])]
+                )
             expressions = properties.expressions if properties else []
             expressions.append(clustered_by_exp)
             properties = exp.Properties(expressions=expressions)
@@ -431,7 +494,7 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             .order_by("ordinal_position ASC")
         )
 
-        self.cursor.execute(query)
+        self.execute(query.sql(dialect=self.dialect))
         result = self.cursor.fetchall()
 
         return {row[0]: exp.DataType.build(row[1], dialect=self.dialect) for row in result}
