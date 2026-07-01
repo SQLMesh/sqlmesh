@@ -126,6 +126,14 @@ Error: Linter detected errors in the code. Please fix them before proceeding.
 
 Use `sqlmesh lint --help` for more information.
 
+You can pass `--local` to run lint without loading state from the configured state connection:
+
+``` bash
+$ sqlmesh lint --local
+```
+
+This can make linting faster in repositories where all referenced models are loaded from local files. In multi-repository setups, or when linting only a subset of projects, `--local` may cause additional linting errors because SQLMesh will not resolve references or schemas from models that exist only in remote state.
+
 
 ## Applying linting rules
 

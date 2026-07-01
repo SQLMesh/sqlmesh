@@ -118,6 +118,8 @@ def cli(
     load = True
     # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
+    if ctx.invoked_subcommand == "lint" and "--local" in sys.argv:
+        load_state = False
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -1194,12 +1196,18 @@ def environments(obj: Context) -> None:
     multiple=True,
     help="A model to lint. Multiple models can be linted. If no models are specified, every model will be linted.",
 )
+@click.option(
+    "--local",
+    is_flag=True,
+    help="Lint using only locally loaded project files without loading state.",
+)
 @click.pass_obj
 @error_handler
 @cli_analytics
 def lint(
     obj: Context,
     models: t.Iterator[str],
+    local: bool,
 ) -> None:
     """Run the linter for the target model(s)."""
     obj.lint_models(models)
