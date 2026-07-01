@@ -170,6 +170,16 @@ The examples specify a Snowflake connection whose password is stored in an envir
           account: <account>
     ```
 
+    !!! tip "Base64-encoded secrets"
+
+        If a secret is distributed base64-encoded in a single environment variable (for example a BigQuery service-account key), pipe the variable through the built-in `b64decode` filter to decode it to text inline:
+
+        ```yaml
+        keyfile_json: {{ env_var('BIGQUERY_KEY_B64') | b64decode }}
+        ```
+
+        A matching `b64encode` filter is also available. Both return UTF-8 text, so they are intended for string/JSON secrets rather than arbitrary binary data.
+
 === "Python"
 
     Python accesses environment variables via the `os` library's `environ` dictionary.

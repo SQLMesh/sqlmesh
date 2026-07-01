@@ -24,7 +24,7 @@ from sqlglot.optimizer.scope import traverse_scope
 from sqlglot.schema import MappingSchema
 from sqlglot.tokens import Token
 
-from sqlmesh.core.constants import MAX_MODEL_DEFINITION_SIZE
+from sqlmesh.core.constants import LIQUID_CLUSTERING_KEYWORDS, MAX_MODEL_DEFINITION_SIZE
 from sqlmesh.utils import get_source_columns_to_types
 from sqlmesh.utils.errors import SQLMeshError, ConfigError
 from sqlmesh.utils.pandas import columns_to_types_from_df
@@ -663,6 +663,27 @@ def _create_parser(expression_type: t.Type[exp.Expr], table_keys: t.List[str]) -
                     value = exp.tuple_(*partitioned_by.this.expressions)
                 else:
                     value = partitioned_by.this
+            elif key == "clustered_by":
+                # Bare AUTO / NONE are Databricks liquid clustering keywords, not column refs.
+                # Detect keywords by token type: unquoted bare identifiers arrive as VAR tokens.
+                # Backtick-quoted identifiers (e.g. `auto`) have IDENTIFIER token type and are
+                # treated as real column names.
+                if (
+                    self._curr is not None
+                    and self._curr.token_type == TokenType.VAR
+                    and self._curr.text.upper() in LIQUID_CLUSTERING_KEYWORDS
+                ):
+                    value = exp.Var(this=self._curr.text.upper())
+                    self._advance()
+                else:
+                    parsed = self._parse_bracket(self._parse_field(any_token=True))
+                    # Unwrap Paren wrapping a bare column to match partitioned_by normalisation:
+                    # clustered_by (a) → stored as Column(a), not Paren(Column(a)).
+                    # Preserve parens around function expressions: (TO_DATE(col)) stays as-is.
+                    if isinstance(parsed, exp.Paren) and isinstance(parsed.this, exp.Column):
+                        value = parsed.unnest()
+                    else:
+                        value = parsed
             else:
                 value = self._parse_bracket(self._parse_field(any_token=True))
 
@@ -783,7 +804,10 @@ def format_model_expressions(
         A string representing the formatted model.
     """
     if len(expressions) == 1 and is_meta_expression(expressions[0]):
-        return expressions[0].sql(pretty=True, dialect=dialect)
+        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
+        # so they must never be transpiled to the target dialect (e.g. tsql would
+        # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
+        return expressions[0].sql(pretty=True, dialect=None)
 
     if rewrite_casts:
 
@@ -815,7 +839,14 @@ def format_model_expressions(
         expressions = new_expressions
 
     return ";\n\n".join(
-        expression.sql(pretty=True, dialect=dialect, **kwargs) for expression in expressions
+        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL and must stay
+        # dialect-agnostic; only the actual query/statement expressions transpile.
+        expression.sql(
+            pretty=True,
+            dialect=None if is_meta_expression(expression) else dialect,
+            **kwargs,
+        )
+        for expression in expressions
     ).strip()
 
 

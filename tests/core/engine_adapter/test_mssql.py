@@ -1002,3 +1002,24 @@ def test_python_scd2_model_preserves_physical_properties(make_snapshot):
     snapshot: Snapshot = make_snapshot(m)
     assert snapshot.node.physical_properties == m.physical_properties
     assert snapshot.node.physical_properties.get("mssql_merge_exists")
+
+
+def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
+    adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
+    table = exp.to_table("test_table")
+    comment = "\\"
+
+    mocker.patch.object(adapter, "_create_table")
+
+    adapter.create_table(
+        "test_table",
+        {"a": exp.DataType.build("INT"), "b": exp.DataType.build("INT")},
+        table_description=comment,
+        column_descriptions={"a": comment},
+    )
+
+    sql_calls = to_sql_calls(adapter)
+    assert sql_calls == [
+        adapter._build_create_comment_table_exp(table, comment),
+        adapter._build_create_comment_column_exp(table, "a", comment),
+    ]

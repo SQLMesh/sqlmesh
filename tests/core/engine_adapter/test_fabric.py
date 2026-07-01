@@ -286,3 +286,23 @@ def test_merge_exists(
         f"MERGE INTO [target] AS [__MERGE_TARGET__] USING (SELECT CAST([id] AS INT) AS [id], CAST([ts] AS DATETIME2(6)) AS [ts] FROM [__temp_target_{temp_table_id}]) AS [__MERGE_SOURCE__] ON [__MERGE_TARGET__].[id] = [__MERGE_SOURCE__].[id] AND [__MERGE_TARGET__].[ts] = [__MERGE_SOURCE__].[ts] WHEN NOT MATCHED THEN INSERT ([id], [ts]) VALUES ([__MERGE_SOURCE__].[id], [__MERGE_SOURCE__].[ts]);",
         f"DROP TABLE IF EXISTS [__temp_target_{temp_table_id}];",
     ]
+
+
+def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
+    adapter = make_mocked_engine_adapter(FabricEngineAdapter)
+    comment = "\\"
+
+    create_table_comment_mock = mocker.patch.object(adapter, "_create_table_comment")
+    create_column_comments_mock = mocker.patch.object(adapter, "_create_column_comments")
+    mocker.patch.object(adapter, "_create_table")
+
+    adapter.create_table(
+        "test_table",
+        {"a": exp.DataType.build("INT"), "b": exp.DataType.build("INT")},
+        table_description=comment,
+        column_descriptions={"a": comment},
+    )
+
+    create_table_comment_mock.assert_not_called()
+    create_column_comments_mock.assert_not_called()
+    assert to_sql_calls(adapter) == []

@@ -1,32 +1,33 @@
 import base64
 import re
 import typing as t
+from unittest.mock import MagicMock, patch
 
 import pytest
 from _pytest.fixtures import FixtureRequest
 from sqlglot import exp
-from unittest.mock import patch, MagicMock
 
 from sqlmesh.core.config.connection import (
+    INIT_DISPLAY_INFO_TO_TYPE,
+    SUPPORTS_MSSQL_PYTHON_DRIVER,
+    AthenaConnectionConfig,
     BigQueryConnectionConfig,
     ClickhouseConnectionConfig,
     ConnectionConfig,
     DatabricksConnectionConfig,
     DuckDBAttachOptions,
-    FabricConnectionConfig,
     DuckDBConnectionConfig,
+    FabricConnectionConfig,
     GCPPostgresConnectionConfig,
     MotherDuckConnectionConfig,
+    MSSQLConnectionConfig,
     MySQLConnectionConfig,
     PostgresConnectionConfig,
     SnowflakeConnectionConfig,
     StarRocksConnectionConfig,
     TrinoAuthenticationMethod,
-    AthenaConnectionConfig,
-    MSSQLConnectionConfig,
     _connection_config_validator,
     _get_engine_import_validator,
-    INIT_DISPLAY_INFO_TO_TYPE,
 )
 from sqlmesh.utils.errors import ConfigError
 from sqlmesh.utils.pydantic import PydanticModel
@@ -970,9 +971,10 @@ def test_motherduck_attach_options():
 
 
 def test_duckdb_multithreaded_connection_factory(make_config):
+    from threading import Thread
+
     from sqlmesh.core.engine_adapter import DuckDBEngineAdapter
     from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
-    from threading import Thread
 
     config = make_config(type="duckdb")
 
@@ -1514,6 +1516,13 @@ def test_mssql_engine_import_validator():
             mock_import.side_effect = ImportError("No module named 'pyodbc'")
             MSSQLConnectionConfig(host="localhost", driver="pyodbc")
 
+    # Test MSSQL Python driver suggests mssql-python extra when import fails
+    if SUPPORTS_MSSQL_PYTHON_DRIVER:
+        with pytest.raises(ConfigError, match=r"pip install \"sqlmesh\[mssql-python\]\""):
+            with patch("importlib.import_module") as mock_import:
+                mock_import.side_effect = ImportError("No module named 'mssql_python'")
+                MSSQLConnectionConfig(host="localhost", driver="mssql-python")
+
     # Test PyMSSQL driver suggests mssql extra when import fails
     with pytest.raises(ConfigError, match=r"pip install \"sqlmesh\[mssql\]\""):
         with patch("importlib.import_module") as mock_import:
@@ -1545,6 +1554,14 @@ def test_mssql_connection_config_parameter_validation(make_config):
     assert isinstance(config, MSSQLConnectionConfig)
     assert config.driver == "pyodbc"
 
+    # Test explicit mssql-python driver
+    if SUPPORTS_MSSQL_PYTHON_DRIVER:
+        config = make_config(
+            type="mssql", host="localhost", driver="mssql-python", check_import=False
+        )
+        assert isinstance(config, MSSQLConnectionConfig)
+        assert config.driver == "mssql-python"
+
     # Test explicit pymssql driver
     config = make_config(type="mssql", host="localhost", driver="pymssql", check_import=False)
     assert isinstance(config, MSSQLConnectionConfig)
@@ -1566,6 +1583,22 @@ def test_mssql_connection_config_parameter_validation(make_config):
     assert config.trust_server_certificate is True
     assert config.encrypt is False
     assert config.odbc_properties == {"Authentication": "ActiveDirectoryServicePrincipal"}
+
+    # Test mssql-python specific parameters
+    if SUPPORTS_MSSQL_PYTHON_DRIVER:
+        config = make_config(
+            type="mssql",
+            host="localhost",
+            driver="mssql-python",
+            trust_server_certificate=True,
+            encrypt=False,
+            odbc_properties={"Authentication": "ActiveDirectoryServicePrincipal"},
+            check_import=False,
+        )
+        assert isinstance(config, MSSQLConnectionConfig)
+        assert config.trust_server_certificate is True
+        assert config.encrypt is False
+        assert config.odbc_properties == {"Authentication": "ActiveDirectoryServicePrincipal"}
 
     # Test pymssql specific parameters
     config = make_config(
@@ -1626,6 +1659,32 @@ def test_mssql_connection_kwargs_keys():
     # Verify pyodbc keys don't include pymssql-specific parameters
     assert "tds_version" not in pyodbc_keys
     assert "conn_properties" not in pyodbc_keys
+
+    # Test mssql-python driver keys
+    if SUPPORTS_MSSQL_PYTHON_DRIVER:
+        config = MSSQLConnectionConfig(host="localhost", driver="mssql-python", check_import=False)
+        mssql_python_keys = config._connection_kwargs_keys
+        expected_mssql_python_keys = {
+            "password",
+            "user",
+            "database",
+            "host",
+            "timeout",
+            "login_timeout",
+            "login_attempts",
+            "charset",
+            "appname",
+            "port",
+            "autocommit",
+            "trust_server_certificate",
+            "encrypt",
+            "odbc_properties",
+        }
+        assert mssql_python_keys == expected_mssql_python_keys
+
+        # Verify mssql-python keys don't include pymssql-specific parameters
+        assert "tds_version" not in mssql_python_keys
+        assert "conn_properties" not in mssql_python_keys
 
 
 def test_mssql_pyodbc_connection_string_generation():
@@ -1741,6 +1800,131 @@ def test_mssql_pyodbc_connection_string_minimal():
         assert mock_pyodbc_connect.call_args[1]["autocommit"] is True
 
 
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_mssql_mssql_python_connection_string_generation():
+    """Test mssql_python.connect gets invoked with the correct ODBC connection string."""
+    with patch("mssql_python.connect") as mock_mssql_python_connect:
+        # Mock the return value to have the methods we need
+        mock_connection = mock_mssql_python_connect.return_value
+
+        # Create a mssql-python config
+        config = MSSQLConnectionConfig(
+            host="testserver.database.windows.net",
+            port=1433,
+            database="testdb",
+            user="testuser",
+            password="testpass",
+            driver="mssql-python",
+            trust_server_certificate=True,
+            encrypt=True,
+            login_timeout=30,
+            check_import=False,
+        )
+
+        # Get the connection factory with kwargs and call it
+        factory_with_kwargs = config._connection_factory_with_kwargs
+        connection = factory_with_kwargs()
+
+        # Verify mssql_python.connect was called with the correct connection string
+        mock_mssql_python_connect.assert_called_once()
+        call_args = mock_mssql_python_connect.call_args
+
+        # Check the connection string (first argument)
+        conn_str = call_args[0][0]
+        expected_parts = [
+            "Server=testserver.database.windows.net,1433",
+            "Database=testdb",
+            "Encrypt=yes",
+            "TrustServerCertificate=yes",
+            "ConnectRetryCount=1",
+            "ConnectRetryInterval=30",
+            "UID=testuser",
+            "PWD=testpass",
+        ]
+
+        for part in expected_parts:
+            assert part in conn_str
+
+        # Check autocommit parameter
+        assert call_args[1]["autocommit"] is False
+
+
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_mssql_mssql_python_connection_string_with_odbc_properties():
+    """Test mssql-python connection string includes custom ODBC properties."""
+    with patch("mssql_python.connect") as mock_mssql_python_connect:
+        # Create a mssql-python config with custom ODBC properties
+        config = MSSQLConnectionConfig(
+            host="testserver.database.windows.net",
+            database="testdb",
+            user="client-id",
+            password="client-secret",
+            driver="mssql-python",
+            odbc_properties={
+                "Authentication": "ActiveDirectoryServicePrincipal",
+                "ClientCertificate": "/path/to/cert.pem",
+                # These should be ignored since we set them explicitly:
+                "TrustServerCertificate": "NO",
+                "ConnectRetryCount": 3,
+                "ConnectRetryInterval": 15,
+            },
+            check_import=False,
+            # These should take precedence:
+            trust_server_certificate=True,
+            login_timeout=10,
+            login_attempts=2,
+        )
+
+        # Get the connection factory with kwargs and call it
+        factory_with_kwargs = config._connection_factory_with_kwargs
+        connection = factory_with_kwargs()
+
+        # Verify mssql_python.connect was called
+        mock_mssql_python_connect.assert_called_once()
+        conn_str = mock_mssql_python_connect.call_args[0][0]
+
+        # Check that custom ODBC properties are included
+        assert "Authentication=ActiveDirectoryServicePrincipal" in conn_str
+        assert "ClientCertificate=/path/to/cert.pem" in conn_str
+
+        # Verify that explicit kwargs take precedence over odbc_properties
+        assert "TrustServerCertificate=yes" in conn_str
+        assert "ConnectRetryCount=2" in conn_str
+        assert "ConnectRetryInterval=10" in conn_str
+
+        # Should not have conflicting properties from odbc_properties
+        assert conn_str.count("TrustServerCertificate") == 1
+        assert conn_str.count("ConnectRetryCount") == 1
+        assert conn_str.count("ConnectRetryInterval") == 1
+
+
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_mssql_mssql_python_connection_string_minimal():
+    """Test mssql-python connection string with minimal configuration."""
+    with patch("mssql_python.connect") as mock_mssql_python_connect:
+        config = MSSQLConnectionConfig(
+            host="localhost",
+            driver="mssql-python",
+            autocommit=True,
+            check_import=False,
+        )
+
+        factory_with_kwargs = config._connection_factory_with_kwargs
+        connection = factory_with_kwargs()
+
+        mock_mssql_python_connect.assert_called_once()
+        conn_str = mock_mssql_python_connect.call_args[0][0]
+
+        # Check basic required parts
+        assert "Server=localhost,1433" in conn_str
+        assert "Encrypt=yes" in conn_str  # Default encrypt=True
+        assert "ConnectRetryCount=1" in conn_str  # Default timeout
+        assert "ConnectRetryInterval=60" in conn_str  # Default timeout
+
+        # Check autocommit parameter
+        assert mock_mssql_python_connect.call_args[1]["autocommit"] is True
+
+
 def test_mssql_pymssql_connection_factory():
     """Test pymssql connection factory returns correct function."""
     # Mock the import of pymssql at the module level
@@ -1770,8 +1954,8 @@ def test_mssql_pymssql_connection_factory():
 
 def test_mssql_pyodbc_connection_datetimeoffset_handling():
     """Test that the MSSQL pyodbc connection properly handles DATETIMEOFFSET conversion."""
-    from datetime import datetime, timezone, timedelta
     import struct
+    from datetime import datetime, timedelta, timezone
     from unittest.mock import Mock, patch
 
     with patch("pyodbc.connect") as mock_pyodbc_connect:
@@ -1842,8 +2026,8 @@ def test_mssql_pyodbc_connection_datetimeoffset_handling():
 
 def test_mssql_pyodbc_connection_negative_timezone_offset():
     """Test DATETIMEOFFSET handling with negative timezone offset at connection level."""
-    from datetime import datetime, timezone, timedelta
     import struct
+    from datetime import datetime, timedelta, timezone
     from unittest.mock import Mock, patch
 
     with patch("pyodbc.connect") as mock_pyodbc_connect:
@@ -1859,6 +2043,134 @@ def test_mssql_pyodbc_connection_negative_timezone_offset():
         config = MSSQLConnectionConfig(
             host="localhost",
             driver="pyodbc",  # DATETIMEOFFSET handling is pyodbc-specific
+            check_import=False,
+        )
+
+        factory_with_kwargs = config._connection_factory_with_kwargs
+        connection = factory_with_kwargs()
+
+        # Get the converter function
+        _, converter_func = converter_calls[0]
+
+        # Test with negative timezone offset: 2023-01-01 12:00:00.0 -08:00
+        year, month, day = 2023, 1, 1
+        hour, minute, second = 12, 0, 0
+        nanoseconds = 0
+        tz_hour_offset, tz_minute_offset = -8, 0
+
+        binary_data = struct.pack(
+            "<6hI2h",
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanoseconds,
+            tz_hour_offset,
+            tz_minute_offset,
+        )
+
+        result = converter_func(binary_data)
+
+        expected_dt = datetime(2023, 1, 1, 12, 0, 0, 0, timezone(timedelta(hours=-8, minutes=0)))
+        assert result == expected_dt
+        assert result.tzinfo == timezone(timedelta(hours=-8))
+
+
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_mssql_mssql_python_connection_datetimeoffset_handling():
+    """Test that the MSSQL mssql-python connection properly handles DATETIMEOFFSET conversion."""
+    import struct
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import Mock, patch
+
+    with patch("mssql_python.connect") as mock_mssql_python_connect:
+        # Track calls to add_output_converter
+        converter_calls = []
+
+        def mock_add_output_converter(sql_type, converter_func):
+            converter_calls.append((sql_type, converter_func))
+
+        # Create a mock connection that will be returned by mssql_python.connect
+        mock_connection = Mock()
+        mock_connection.add_output_converter = mock_add_output_converter
+        mock_mssql_python_connect.return_value = mock_connection
+
+        config = MSSQLConnectionConfig(
+            host="localhost",
+            driver="mssql-python",  # DATETIMEOFFSET handling is mssql-python-specific
+            check_import=False,
+        )
+
+        # Get the connection factory and call it
+        factory_with_kwargs = config._connection_factory_with_kwargs
+        connection = factory_with_kwargs()
+
+        # Verify that add_output_converter was called for SQL type -155 (DATETIMEOFFSET)
+        assert len(converter_calls) == 1
+        sql_type, converter_func = converter_calls[0]
+        assert sql_type == -155
+
+        # Test the converter function with actual DATETIMEOFFSET binary data
+        # Create a test DATETIMEOFFSET value: 2023-12-25 15:30:45.123456789 +05:30
+        year, month, day = 2023, 12, 25
+        hour, minute, second = 15, 30, 45
+        nanoseconds = 123456789
+        tz_hour_offset, tz_minute_offset = 5, 30
+
+        # Pack the binary data according to the DATETIMEOFFSET format
+        binary_data = struct.pack(
+            "<6hI2h",
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanoseconds,
+            tz_hour_offset,
+            tz_minute_offset,
+        )
+
+        # Convert using the registered converter
+        result = converter_func(binary_data)
+
+        # Verify the result
+        expected_dt = datetime(
+            2023,
+            12,
+            25,
+            15,
+            30,
+            45,
+            123456,  # microseconds = nanoseconds // 1000
+            timezone(timedelta(hours=5, minutes=30)),
+        )
+        assert result == expected_dt
+        assert result.tzinfo == timezone(timedelta(hours=5, minutes=30))
+
+
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_mssql_mssql_python_connection_negative_timezone_offset():
+    """Test DATETIMEOFFSET handling with negative timezone offset at connection level."""
+    import struct
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import Mock, patch
+
+    with patch("mssql_python.connect") as mock_mssql_python_connect:
+        converter_calls = []
+
+        def mock_add_output_converter(sql_type, converter_func):
+            converter_calls.append((sql_type, converter_func))
+
+        mock_connection = Mock()
+        mock_connection.add_output_converter = mock_add_output_converter
+        mock_mssql_python_connect.return_value = mock_connection
+
+        config = MSSQLConnectionConfig(
+            host="localhost",
+            driver="mssql-python",  # DATETIMEOFFSET handling is mssql-python-specific
             check_import=False,
         )
 
@@ -1913,8 +2225,8 @@ def test_fabric_connection_config_defaults(make_config):
     assert isinstance(config.create_engine_adapter(), FabricEngineAdapter)
 
 
-def test_fabric_connection_config_parameter_validation(make_config):
-    """Test Fabric connection config parameter validation."""
+def test_fabric_pyodbc_connection_config_parameter_validation(make_config):
+    """Test Fabric pyodbc connection config parameter validation."""
     # Test that FabricConnectionConfig correctly handles pyodbc-specific parameters.
     config = make_config(
         type="fabric",
@@ -1935,7 +2247,33 @@ def test_fabric_connection_config_parameter_validation(make_config):
     assert config.odbc_properties == {"Authentication": "ActiveDirectoryServicePrincipal"}
 
     # Test that specifying a different driver for Fabric raises an error
-    with pytest.raises(ConfigError, match=r"Input should be 'pyodbc'"):
+    with pytest.raises(ConfigError, match=r"Input should be 'pyodbc' or 'mssql-python'"):
+        make_config(type="fabric", host="localhost", driver="pymssql", check_import=False)
+
+
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_fabric_mssql_python_connection_config_parameter_validation(make_config):
+    """Test Fabric mssql-python connection config parameter validation."""
+    # Test that FabricConnectionConfig correctly handles mssql-python-specific parameters.
+    config = make_config(
+        type="fabric",
+        host="localhost",
+        driver="mssql-python",
+        trust_server_certificate=True,
+        encrypt=False,
+        odbc_properties={"Authentication": "ActiveDirectoryServicePrincipal"},
+        workspace_id="test-workspace-id",
+        tenant_id="test-tenant-id",
+        check_import=False,
+    )
+    assert isinstance(config, FabricConnectionConfig)
+    assert config.driver == "mssql-python"  # Driver is fixed to mssql-python
+    assert config.trust_server_certificate is True
+    assert config.encrypt is False
+    assert config.odbc_properties == {"Authentication": "ActiveDirectoryServicePrincipal"}
+
+    # Test that specifying a different driver for Fabric raises an error
+    with pytest.raises(ConfigError, match=r"Input should be 'pyodbc' or 'mssql-python'"):
         make_config(type="fabric", host="localhost", driver="pymssql", check_import=False)
 
 
@@ -1975,6 +2313,54 @@ def test_fabric_pyodbc_connection_string_generation():
             "Encrypt=YES",
             "TrustServerCertificate=YES",
             "Connection Timeout=30",
+            "UID=testuser",
+            "PWD=testpass",
+        ]
+
+        for part in expected_parts:
+            assert part in conn_str
+
+        # Check autocommit parameter, should default to True for Fabric
+        assert call_args[1]["autocommit"] is True
+
+
+@pytest.mark.xfail(not SUPPORTS_MSSQL_PYTHON_DRIVER, reason="mssql-python driver not supported")
+def test_fabric_mssql_python_connection_string_generation():
+    """Test that the Fabric mssql-python connection gets invoked with the correct connection string."""
+    with patch("mssql_python.connect") as mock_mssql_python_connect:
+        # Create a Fabric config
+        config = FabricConnectionConfig(
+            driver="mssql-python",
+            host="testserver.datawarehouse.fabric.microsoft.com",
+            port=1433,
+            database="testdb",
+            user="testuser",
+            password="testpass",
+            trust_server_certificate=True,
+            encrypt=True,
+            login_timeout=30,
+            workspace_id="test-workspace-id",
+            tenant_id="test-tenant-id",
+            check_import=False,
+        )
+
+        # Get the connection factory with kwargs and call it
+        factory_with_kwargs = config._connection_factory_with_kwargs
+        connection = factory_with_kwargs()
+
+        # Verify mssql_python.connect was called with the correct connection string
+        mock_mssql_python_connect.assert_called_once()
+        call_args = mock_mssql_python_connect.call_args
+
+        # Check the connection string (first argument)
+        conn_str = call_args[0][0]
+        expected_parts = [
+            "Server=testserver.datawarehouse.fabric.microsoft.com,1433",
+            "Database=testdb",
+            "Encrypt=yes",
+            "TrustServerCertificate=yes",
+            "ConnectRetryCount=1",
+            "ConnectRetryInterval=30",
             "UID=testuser",
             "PWD=testpass",
         ]

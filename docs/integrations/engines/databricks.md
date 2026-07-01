@@ -271,6 +271,28 @@ The only relevant SQLMesh configuration parameter is the optional `catalog` para
 | `disable_databricks_connect`         | When running locally, disable the use of Databricks Connect for all model operations (so use SQL Connector for all models)                                                                                                                          |  bool  |    N     |
 | `disable_spark_session`              | Do not use SparkSession if it is available (like when running in a notebook).                                                                                                                                                                       |  bool  |    N     |
 
+### Query tags
+
+Databricks SQL Connector supports per-query tags through the `query_tags` model session property. Specify tags as a `MAP(...)` of string keys to string or `NULL` values:
+
+```sql
+MODEL (
+    name sqlmesh_example.tagged_model,
+    dialect databricks,
+    session_properties (
+        query_tags = MAP(
+            'team', 'data-eng',
+            'app', 'sqlmesh',
+            'feature', NULL
+        )
+    )
+);
+
+SELECT 1 AS id;
+```
+
+Query tags are only applied when SQLMesh executes SQL through the Databricks SQL Connector. They are not applied when SQLMesh routes execution through Databricks Connect, a Databricks notebook SparkSession, or the Spark engine adapter.
+
 ## Model table properties to support altering tables
 
 If you are making a change to the structure of a table that is [forward only](../../guides/incremental_time.md#forward-only-models), then you may need to add the following to your model's `physical_properties`:
@@ -288,3 +310,25 @@ MODEL (
 
 If you attempt to alter without having this property set, you will get an error similar to `databricks.sql.exc.ServerOperationError: [DELTA_UNSUPPORTED_DROP_COLUMN] DROP COLUMN is not supported for your Delta table.`.
 [Databricks Documentation for more details](https://docs.databricks.com/en/delta/column-mapping.html#requirements).
+
+## Liquid Clustering
+
+SQLMesh supports the liquid clustering keywords AUTO and NONE
+
+```sql
+MODEL (
+    name sqlmesh_example.new_model,
+    ...
+    clustered_by AUTO
+)
+```
+
+To cluster by a column called `auto` or `none`, use parentheses and backticks
+
+```sql
+MODEL (
+    name sqlmesh_example.new_model,
+    ...
+    clustered_by (`auto`)
+)
+```

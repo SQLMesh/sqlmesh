@@ -1633,6 +1633,183 @@ def test_categorize_change_sql(make_snapshot):
     )
 
 
+def test_categorize_change_sql_redundant_cast(make_snapshot):
+    # Adding a column with a redundant CAST above an existing same-type cast makes SQLGlot's tree
+    # diff emit spurious Move/Update edits (interchangeable DataType leaves get cross-matched),
+    # even though the change is purely an added projection. These must remain NON_BREAKING.
+    config = CategorizerConfig(sql=AutoCategorizationMode.SEMI)
+
+    old_snapshot = make_snapshot(
+        SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t"))
+    )
+
+    # A same-type cast column has been inserted mid-list, above the existing one.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # Multiple same-type cast columns have been inserted mid-list.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a", query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT, y::INT FROM t")
+                )
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # The type of an existing projection has changed (in addition to a new column): undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::INT, x::TEXT, s::TEXT FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        is None
+    )
+
+    # Existing projections have been reordered: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT s::TEXT, a::DATE FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        is None
+    )
+
+    # An existing projection has been removed: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(SqlModel(name="a", query=parse_one("SELECT s::TEXT FROM t"))),
+            old=old_snapshot,
+            config=config,
+        )
+        is None
+    )
+
+    # A WHERE clause changed alongside the added cast column: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t WHERE a = 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t WHERE a = 1"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Mid-list insert with ORDER BY ordinal shifts the referenced projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t ORDER BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t ORDER BY 2"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Append at end with ORDER BY ordinal leaves existing ordinal bindings unchanged.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, s::TEXT, x::TEXT FROM t ORDER BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t ORDER BY 2"))
+            ),
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # Mid-list insert with GROUP BY ordinal shifts the referenced projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t GROUP BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t GROUP BY 2"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Aliased UDTF projection via fallback path: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one(
+                        "SELECT a::DATE AS a, x::TEXT AS x, EXPLODE(y) AS y, s::TEXT AS s FROM t"
+                    ),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE AS a, s::TEXT AS s FROM t"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # UDTF inside aliased scalar subquery remains non-breaking.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one(
+                        "SELECT a::DATE AS a, (SELECT x FROM unnest(b) x) AS sub, s::TEXT AS s FROM t"
+                    ),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE AS a, s::TEXT AS s FROM t"))
+            ),
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+
 def test_categorize_change_seed(make_snapshot, tmp_path):
     config = CategorizerConfig(seed=AutoCategorizationMode.SEMI)
     model_name = "test_db.test_seed_model"

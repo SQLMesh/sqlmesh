@@ -992,6 +992,12 @@ class _Model(ModelMeta, frozen=True):
                 values = [
                     col.name
                     for expr in values
+                    if not (
+                        field == "clustered_by"
+                        and (self.dialect or "").lower() == "databricks"
+                        and isinstance(expr, exp.Var)
+                        and expr.name.upper() in c.LIQUID_CLUSTERING_KEYWORDS
+                    )
                     for col in t.cast(
                         exp.Expr, exp.maybe_parse(expr, dialect=self.dialect)
                     ).find_all(exp.Column)
@@ -1588,7 +1594,7 @@ class SqlModel(_Model):
 
         for edit in edits:
             if not isinstance(edit, Insert):
-                return None
+                return _additive_projection_change(previous_query, this_query, self.dialect)
 
             expr = edit.expression
             if isinstance(expr, exp.UDTF):
@@ -1602,7 +1608,7 @@ class SqlModel(_Model):
                 expr = parent
 
             if not _is_projection(expr) and expr.parent not in inserted_expressions:
-                return None
+                return _additive_projection_change(previous_query, this_query, self.dialect)
 
         return False
 
@@ -2905,6 +2911,98 @@ def _list_of_calls_to_exp(value: t.List[t.Tuple[str, t.Dict[str, t.Any]]]) -> ex
 def _is_projection(expr: exp.Expr) -> bool:
     parent = expr.parent
     return isinstance(parent, exp.Select) and expr.arg_key == "expressions"
+
+
+def _has_ordinal_references(query: exp.Select) -> bool:
+    order = query.args.get("order")
+    if order and any(
+        isinstance(ob.this, exp.Literal) and ob.this.is_number for ob in order.expressions
+    ):
+        return True
+    group = query.args.get("group")
+    return bool(
+        group and any(isinstance(gb, exp.Literal) and gb.is_number for gb in group.expressions)
+    )
+
+
+def _additive_projection_change(
+    previous_query: exp.Query,
+    this_query: exp.Query,
+    dialect: DialectType,
+) -> t.Optional[bool]:
+    """Fallback for when SQLGlot's tree diff can't express an additive projection change.
+
+    SQLGlot's diff matches nodes by structural similarity, so interchangeable leaves (e.g. two
+    identical ``CAST(... AS T)`` target types) can be cross-matched. Inserting a same-type cast
+    above an existing one therefore yields spurious ``Move`` / ``Update`` edits even though a
+    column was simply added to the SELECT list. In that case the edit-based check above is
+    inconclusive, so we verify additivity directly against the output projections.
+
+    Returns ``False`` (non-breaking) only when the change is provably additive:
+      * both queries are simple ``SELECT`` statements,
+      * everything other than the projection list is structurally identical,
+      * no added projection is a (potentially cardinality-changing) ``UDTF``,
+      * every previous projection is preserved, in order, within the new projection list, and
+      * no mid-list insert shifts ordinal ``ORDER BY`` / ``GROUP BY`` references.
+
+    Otherwise returns ``None`` (undetermined), preserving the conservative default.
+    """
+    # UNIONs or other query expressions, are left to the caller's conservative diff result.
+    if not isinstance(previous_query, exp.Select) or not isinstance(this_query, exp.Select):
+        return None
+
+    previous_projections = previous_query.expressions
+    this_projections = this_query.expressions
+    # If the new query has not gained any projections, this cannot be an additive projection-only
+    # change, so there is nothing for this fallback to prove.
+    if len(this_projections) <= len(previous_projections):
+        return None
+
+    # Adding a UDTF projection (e.g. EXPLODE / UNNEST) can change row cardinality, so such a
+    # change is not safely non-breaking even when it appears as an extra SELECT item.
+    for projection in this_projections:
+        bare = projection.this if isinstance(projection, exp.Alias) else projection
+        if isinstance(bare, exp.UDTF):
+            return None
+
+    # Everything other than the projection list must be structurally identical. Replacing each
+    # SELECT list with the same dummy literal lets the expression equality check focus on the
+    # FROM / WHERE / GROUP BY / ORDER BY / etc. parts of the query.
+    previous_skeleton = previous_query.copy()
+    this_skeleton = this_query.copy()
+    previous_skeleton.set("expressions", [exp.Literal.number(1)])
+    this_skeleton.set("expressions", [exp.Literal.number(1)])
+    if previous_skeleton != this_skeleton:
+        return None
+
+    # Every previous projection must appear, in order, within the new projection list. Comparing
+    # dialect-normalized SQL makes semantically equivalent projection nodes match even when the
+    # parser built distinct object identities.
+    this_projection_sql = [p.sql(dialect=dialect, comments=False) for p in this_projections]
+    search_start = 0
+    matched_at: list[int] = []
+    for projection in previous_projections:
+        target_sql = projection.sql(dialect=dialect, comments=False)
+        # Continue after the previous match so added columns can appear before, between, or after
+        # the original projections, but existing projections cannot be reordered or rewritten.
+        for index in range(search_start, len(this_projection_sql)):
+            if this_projection_sql[index] == target_sql:
+                matched_at.append(index)
+                search_start = index + 1
+                break
+        else:
+            return None
+
+    # Mid-list inserts shift ordinal references in ORDER BY / GROUP BY clauses.
+    if _has_ordinal_references(this_query):
+        matched_set = set(matched_at)
+        last_matched = matched_at[-1]
+        if any(i < last_matched for i in range(len(this_projections)) if i not in matched_set):
+            return None
+
+    # At this point the query shape is unchanged and all prior outputs are preserved, so the only
+    # remaining difference is one or more additional, non-UDTF projections.
+    return False
 
 
 def _single_expr_or_tuple(values: t.Sequence[exp.Expr]) -> exp.Expr | exp.Tuple:
