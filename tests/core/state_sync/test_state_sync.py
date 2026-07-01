@@ -59,10 +59,12 @@ def _get_cleanup_tasks(
     *,
     limit: int = 1000,
     ignore_ttl: bool = False,
+    target_snapshot_ids: t.Optional[t.Collection[SnapshotId]] = None,
 ) -> t.List[SnapshotTableCleanupTask]:
     batch = state_sync.get_expired_snapshots(
         ignore_ttl=ignore_ttl,
         batch_range=ExpiredBatchRange.init_batch_range(batch_size=limit),
+        target_snapshot_ids=target_snapshot_ids,
     )
     return [] if batch is None else batch.cleanup_tasks
 
@@ -1349,6 +1351,105 @@ def test_delete_expired_snapshots(state_sync: EngineAdapterStateSync, make_snaps
     state_sync.delete_expired_snapshots(batch_range=ExpiredBatchRange.all_batch_range())
 
     assert not state_sync.get_snapshots(all_snapshots)
+
+
+def test_delete_expired_snapshots_scoped_to_target_ids(
+    state_sync: EngineAdapterStateSync,
+    make_snapshot: t.Callable,
+    get_snapshot_intervals: t.Callable,
+):
+    now_ts = now_timestamp()
+
+    snapshot_a = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select a, ds"),
+        ),
+    )
+    snapshot_a.ttl = "in 10 seconds"
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_a.updated_ts = now_ts - 15000
+
+    snapshot_b = make_snapshot(
+        SqlModel(
+            name="b",
+            query=parse_one("select b, ds"),
+        ),
+    )
+    snapshot_b.ttl = "in 10 seconds"
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.updated_ts = now_ts - 15000
+
+    state_sync.push_snapshots([snapshot_a, snapshot_b])
+    state_sync.add_interval(snapshot_a, "2023-01-01", "2023-01-03")
+    state_sync.add_interval(snapshot_b, "2023-01-01", "2023-01-03")
+
+    assert _get_cleanup_tasks(
+        state_sync,
+        ignore_ttl=True,
+        target_snapshot_ids=[snapshot_a.snapshot_id],
+    ) == [SnapshotTableCleanupTask(snapshot=snapshot_a.table_info, dev_table_only=False)]
+
+    state_sync.delete_expired_snapshots(
+        batch_range=ExpiredBatchRange.all_batch_range(),
+        ignore_ttl=True,
+        target_snapshot_ids=[snapshot_a.snapshot_id],
+    )
+
+    assert not state_sync.get_snapshots([snapshot_a])
+    assert state_sync.get_snapshots([snapshot_b])
+    assert not get_snapshot_intervals(snapshot_a)
+    assert get_snapshot_intervals(snapshot_b)
+
+
+def test_get_expired_snapshots_scoped_excludes_referenced_snapshots(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    now_ts = now_timestamp()
+
+    snapshot_a = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select a, ds"),
+        ),
+    )
+    snapshot_a.ttl = "in 10 seconds"
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_a.updated_ts = now_ts - 15000
+
+    snapshot_b = make_snapshot(
+        SqlModel(
+            name="b",
+            query=parse_one("select b, ds"),
+        ),
+    )
+    snapshot_b.ttl = "in 10 seconds"
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.updated_ts = now_ts - 15000
+
+    state_sync.push_snapshots([snapshot_a, snapshot_b])
+    prod_env = Environment(
+        name="prod",
+        snapshots=[snapshot_b.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+    )
+    state_sync.promote(prod_env)
+    state_sync.finalize(prod_env)
+
+    batch = state_sync.get_expired_snapshots(
+        ignore_ttl=True,
+        batch_range=ExpiredBatchRange.all_batch_range(),
+        target_snapshot_ids=[snapshot_a.snapshot_id, snapshot_b.snapshot_id],
+    )
+
+    assert batch is not None
+    assert batch.expired_snapshot_ids == {snapshot_a.snapshot_id}
+    assert batch.cleanup_tasks == [
+        SnapshotTableCleanupTask(snapshot=snapshot_a.table_info, dev_table_only=False)
+    ]
 
 
 def test_get_expired_snapshot_batch(state_sync: EngineAdapterStateSync, make_snapshot: t.Callable):

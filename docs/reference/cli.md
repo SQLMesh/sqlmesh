@@ -294,11 +294,15 @@ Usage: sqlmesh invalidate [OPTIONS] ENVIRONMENT
   of the janitor process.
 
 Options:
-  -s, --sync  Wait for the environment to be deleted before returning. If not
-              specified, the environment will be deleted asynchronously by the
-              janitor process. This option requires a connection to the data
-              warehouse.
-  --help      Show this message and exit.
+  -s, --sync          Wait for the environment to be deleted before returning.
+                      If not specified, the environment will be deleted
+                      asynchronously by the janitor process. This option
+                      requires a connection to the data warehouse.
+  --cleanup-snapshots
+                      After invalidating, synchronously delete unreferenced
+                      physical snapshot tables formerly referenced by this
+                      environment.
+  --help              Show this message and exit.
 ```
 
 ## janitor
@@ -313,14 +317,16 @@ Usage: sqlmesh janitor [OPTIONS]
 Options:
   --ignore-ttl      Cleanup snapshots that are not referenced in any
                     environment, regardless of when they're set to expire. Has
-                    no effect when --environment is specified.
+                    When --environment is specified, cleanup is scoped to
+                    snapshots formerly referenced by that environment.
   --force-delete    Delete expired environment and snapshot state records even
                     when the physical table or view drops fail. Any objects
                     that could not be dropped become orphaned and must be
                     removed manually.
   -e, --environment TEXT
-                    Scope cleanup to a single expired environment. Global
-                    snapshot and interval compaction are skipped.
+                    Scope cleanup to a single expired environment. With
+                    --ignore-ttl, snapshot cleanup is scoped to snapshots
+                    formerly referenced by this environment.
   --help            Show this message and exit.
 ```
 

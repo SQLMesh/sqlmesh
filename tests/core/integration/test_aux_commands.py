@@ -482,7 +482,7 @@ def test_invalidating_environment(sushi_context: Context):
 
 
 def test_invalidate_environment_cleanup_snapshots_scoped(tmp_path: Path):
-    """Test that --cleanup-snapshots only deletes snapshots exclusively owned by the invalidated env."""
+    """Test that --cleanup-snapshots only deletes unreferenced snapshots from the invalidated env."""
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     (models_dir / "model1.sql").write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
@@ -522,8 +522,9 @@ def test_invalidate_environment_cleanup_snapshots_scoped(tmp_path: Path):
     assert ctx.state_sync.get_environment("prod") is not None
 
 
-def test_invalidate_environment_cleanup_snapshots_exclusive(tmp_path: Path):
-    """Test that --cleanup-snapshots deletes snapshots exclusively owned by the invalidated env."""
+def test_invalidate_environment_cleanup_snapshots_warns_and_drops_physical_tables(
+    tmp_path: Path, mocker: MockerFixture
+):
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     (models_dir / "model1.sql").write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
@@ -533,22 +534,67 @@ def test_invalidate_environment_cleanup_snapshots_exclusive(tmp_path: Path):
         config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
     )
 
-    # Apply model1 to dev only (not prod). These snapshots will be exclusively owned by dev.
     ctx.plan("dev", no_prompts=True, auto_apply=True)
+    snapshot = ctx.get_snapshot("test.model1")
+    assert snapshot is not None
+    snapshot_ids = [snapshot.snapshot_id]
+    physical_table_names = [
+        snapshot.table_name(is_deployable=False),
+        snapshot.table_name(is_deployable=True),
+    ]
+    assert any(ctx.engine_adapter.table_exists(table_name) for table_name in physical_table_names)
 
-    dev_env = ctx.state_sync.get_environment("dev")
-    assert dev_env is not None
-    dev_snapshot_ids = {s.snapshot_id for s in dev_env.snapshots}
-    assert dev_snapshot_ids
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
 
     ctx.invalidate_environment("dev", cleanup_snapshots=True)
 
-    # The dev environment record should be gone.
+    warning_mock.assert_any_call(
+        "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot tables "
+        "formerly referenced by environment 'dev'."
+    )
     assert ctx.state_sync.get_environment("dev") is None
+    assert not ctx.state_sync.get_snapshots(snapshot_ids)
+    assert not any(ctx.engine_adapter.table_exists(table_name) for table_name in physical_table_names)
 
-    # All dev-exclusive snapshots should have been deleted.
-    remaining_snapshots = ctx.state_sync.get_snapshots(list(dev_snapshot_ids))
-    assert not remaining_snapshots
+
+def test_janitor_environment_ignore_ttl_cleans_only_scoped_snapshots(
+    tmp_path: Path, mocker: MockerFixture
+):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    model_path = models_dir / "model1.sql"
+    model_path.write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+    )
+
+    ctx.plan("dev_a", no_prompts=True, auto_apply=True)
+    dev_a_snapshot = ctx.get_snapshot("test.model1")
+    assert dev_a_snapshot is not None
+
+    model_path.write_text("MODEL(name test.model1, kind FULL); SELECT 2 AS col")
+    ctx.load()
+    ctx.plan("dev_b", no_prompts=True, auto_apply=True)
+    dev_b_snapshot = ctx.get_snapshot("test.model1")
+    assert dev_b_snapshot is not None
+    assert dev_a_snapshot.snapshot_id != dev_b_snapshot.snapshot_id
+
+    ctx.invalidate_environment("dev_a")
+    ctx.invalidate_environment("dev_b")
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx.run_janitor(ignore_ttl=True, environment="dev_a")
+
+    warning_mock.assert_any_call(
+        "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot tables "
+        "formerly referenced by environment 'dev_a'."
+    )
+    assert ctx.state_sync.get_environment("dev_a") is None
+    assert ctx.state_sync.get_environment("dev_b") is not None
+    assert not ctx.state_sync.get_snapshots([dev_a_snapshot.snapshot_id])
+    assert ctx.state_sync.get_snapshots([dev_b_snapshot.snapshot_id])
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")

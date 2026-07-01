@@ -112,7 +112,6 @@ from sqlmesh.core.state_sync import (
 from sqlmesh.core.janitor import (
     cleanup_expired_views,
     delete_expired_snapshots,
-    delete_snapshots_for_environment,
 )
 from sqlmesh.core.table_diff import TableDiff
 from sqlmesh.core.test import (
@@ -1861,41 +1860,16 @@ class GenericContext(BaseContext, t.Generic[C]):
             name: The name of the environment to invalidate.
             sync: If True, the call blocks until the environment is deleted. Otherwise, the environment will
                 be deleted asynchronously by the janitor process.
-            cleanup_snapshots: If True, immediately deletes physical snapshot tables that are exclusively
-                owned by this environment (not referenced by any other environment). Cleanup runs
-                synchronously regardless of --sync.
+            cleanup_snapshots: If True, immediately deletes unreferenced physical snapshot tables that were
+                formerly referenced by this environment. Cleanup runs synchronously regardless of sync.
         """
         name = Environment.sanitize_name(name)
-        sync = sync or cleanup_snapshots
-
-        target_snapshot_ids: t.Set[SnapshotId] = set()
-        if cleanup_snapshots:
-            # Capture snapshot IDs before invalidation so we can scope the cleanup afterwards.
-            env = self.state_sync.get_environment(name)
-            if env is None:
-                logger.warning("Environment '%s' does not exist; skipping snapshot cleanup.", name)
-                return
-            target_snapshot_ids = {s.snapshot_id for s in env.snapshots}
-
         self.state_sync.invalidate_environment(name)
-
-        if sync:
+        if cleanup_snapshots:
+            self._run_janitor(ignore_ttl=True, environment=name)
+            self.console.log_success(f"Environment '{name}' deleted.")
+        elif sync:
             self._cleanup_environments(name=name)
-            if cleanup_snapshots and target_snapshot_ids:
-                failures = delete_snapshots_for_environment(
-                    self.state_sync,
-                    self.snapshot_evaluator,
-                    target_snapshot_ids,
-                    console=self.console,
-                )
-                if failures:
-                    summary = "\n".join(failures)
-                    if self.config.janitor.warn_on_delete_failure:
-                        self.console.log_warning(
-                            f"Snapshot cleanup completed with failures:\n{summary}"
-                        )
-                    else:
-                        raise SQLMeshError(f"Snapshot cleanup completed with failures:\n{summary}")
             self.console.log_success(f"Environment '{name}' deleted.")
         else:
             self.console.log_success(f"Environment '{name}' invalidated.")
@@ -3030,6 +3004,16 @@ class GenericContext(BaseContext, t.Generic[C]):
         current_ts = now_timestamp()
         failures: t.List[str] = []
 
+        target_snapshot_ids: t.Set[SnapshotId] = set()
+        if environment is not None and ignore_ttl:
+            expired_environments = self.state_sync.get_expired_environments(
+                current_ts=current_ts, name=environment
+            )
+            if expired_environments:
+                expired_env = self.state_reader.get_environment(expired_environments[0].name)
+                if expired_env:
+                    target_snapshot_ids = {s.snapshot_id for s in expired_env.snapshots}
+
         # Clean up expired environments by removing their views and schemas
         failures.extend(
             self._cleanup_environments(
@@ -3050,6 +3034,25 @@ class GenericContext(BaseContext, t.Generic[C]):
                 )
             )
             self.state_sync.compact_intervals()
+        elif ignore_ttl and target_snapshot_ids and not self.state_reader.get_environment(
+            environment
+        ):
+            self.console.log_warning(
+                "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot "
+                f"tables formerly referenced by environment '{environment}'."
+            )
+            failures.extend(
+                delete_expired_snapshots(
+                    self.state_sync,
+                    self.snapshot_evaluator,
+                    current_ts=current_ts,
+                    ignore_ttl=ignore_ttl,
+                    force_delete=force_delete,
+                    console=self.console,
+                    batch_size=self.config.janitor.expired_snapshots_batch_size,
+                    target_snapshot_ids=target_snapshot_ids,
+                )
+            )
 
         if failures:
             failure_string = "\n  - ".join(failures)

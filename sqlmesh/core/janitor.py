@@ -8,7 +8,7 @@ from sqlmesh.core.engine_adapter import EngineAdapter
 from sqlmesh.core.console import Console
 from sqlmesh.core.dialect import schema_
 from sqlmesh.core.environment import Environment
-from sqlmesh.core.snapshot import SnapshotEvaluator, SnapshotId
+from sqlmesh.core.snapshot import SnapshotEvaluator, SnapshotIdLike
 from sqlmesh.core.state_sync import StateSync
 from sqlmesh.core.state_sync.common import (
     logger,
@@ -127,6 +127,7 @@ def delete_expired_snapshots(
     ignore_ttl: bool = False,
     force_delete: bool = False,
     batch_size: t.Optional[int] = None,
+    target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     console: t.Optional[Console] = None,
 ) -> t.List[str]:
     """Delete all expired snapshots in batches.
@@ -153,6 +154,7 @@ def delete_expired_snapshots(
         current_ts=current_ts,
         ignore_ttl=ignore_ttl,
         batch_size=batch_size,
+        target_snapshot_ids=target_snapshot_ids,
     ):
         end_info = (
             f"updated_ts={batch.batch_range.end.updated_ts}"
@@ -184,6 +186,7 @@ def delete_expired_snapshots(
                         end=batch.batch_range.end,
                     ),
                     ignore_ttl=ignore_ttl,
+                    target_snapshot_ids=target_snapshot_ids,
                 )
                 logger.info("Cleaned up expired snapshots batch")
                 num_expired_snapshots += len(batch.expired_snapshot_ids)
@@ -192,73 +195,4 @@ def delete_expired_snapshots(
                 logger.warning(message)
                 failures.append(message)
     logger.info("Cleaned up %s expired snapshots", num_expired_snapshots)
-    return failures
-
-
-def delete_snapshots_for_environment(
-    state_sync: StateSync,
-    snapshot_evaluator: SnapshotEvaluator,
-    target_snapshot_ids: t.Collection[SnapshotId],
-    *,
-    force_delete: bool = False,
-    console: t.Optional[Console] = None,
-) -> t.List[str]:
-    """Delete snapshots that are exclusively owned by a specific (now-deleted) environment.
-
-    This performs a scoped cleanup: only the provided snapshot IDs are considered for deletion,
-    and only those that are not referenced by any remaining active environment will be removed.
-
-    Args:
-        state_sync: StateSync instance to query and delete snapshot state from.
-        snapshot_evaluator: SnapshotEvaluator instance to clean up physical tables.
-        target_snapshot_ids: The snapshot IDs to consider for deletion (typically from the
-            environment that was just invalidated/deleted).
-        force_delete: If True, delete snapshot state records even when physical table cleanup fails.
-        console: Optional console for reporting progress.
-
-    Returns:
-        List of failure messages encountered during cleanup.
-    """
-    if not target_snapshot_ids:
-        return []
-
-    failures: t.List[str] = []
-    batch = state_sync.get_expired_snapshots(
-        ignore_ttl=True,
-        batch_range=ExpiredBatchRange.all_batch_range(),
-        target_snapshot_ids=target_snapshot_ids,
-    )
-    if batch is None:
-        return failures
-
-    logger.info(
-        "Cleaning up %s snapshots exclusively owned by invalidated environment",
-        len(batch.expired_snapshot_ids),
-    )
-
-    cleanup_succeeded = True
-    if batch.cleanup_tasks:
-        try:
-            snapshot_evaluator.cleanup(
-                target_snapshots=batch.cleanup_tasks,
-                on_complete=console.update_cleanup_progress if console else None,
-            )
-        except Exception as failed_drops:
-            message = f"Failed to clean up: {failed_drops}"
-            logger.warning(message)
-            failures.append(message)
-            cleanup_succeeded = False
-
-    if cleanup_succeeded or force_delete:
-        try:
-            state_sync.delete_snapshots(batch.expired_snapshot_ids)
-            logger.info(
-                "Cleaned up %s snapshots from invalidated environment",
-                len(batch.expired_snapshot_ids),
-            )
-        except Exception as e:
-            message = f"Failed to delete snapshot state records: {e}"
-            logger.warning(message)
-            failures.append(message)
-
     return failures
