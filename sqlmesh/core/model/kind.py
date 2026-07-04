@@ -341,6 +341,8 @@ class TimeColumn(PydanticModel):
     @classmethod
     def create(cls, v: t.Any, dialect: str) -> Self:
         if isinstance(v, exp.Tuple):
+            if not v.expressions:
+                raise ConfigError("Time Column cannot be empty.")
             column_expr = v.expressions[0]
             column = (
                 exp.column(column_expr) if isinstance(column_expr, exp.Identifier) else column_expr
