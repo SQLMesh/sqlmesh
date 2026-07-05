@@ -9,11 +9,15 @@ from sqlglot import exp, parse_one
 
 from sqlmesh.core import constants as c
 from sqlmesh.core.config import Config, DuckDBConnectionConfig, GatewayConfig
+from sqlmesh.core.console import get_console
 from sqlmesh.core.context import Context
 from sqlmesh.core.dialect import parse
 from sqlmesh.core.model import SqlModel, create_external_model, load_sql_based_model
 from sqlmesh.core.model.definition import ExternalModel
-from sqlmesh.core.schema_loader import create_external_models_file
+from sqlmesh.core.schema_loader import (
+    CreateExternalModelsMode,
+    create_external_models_file,
+)
 from sqlmesh.core.snapshot import SnapshotChangeCategory
 from sqlmesh.utils import yaml
 from sqlmesh.utils.errors import SQLMeshError
@@ -340,6 +344,230 @@ def test_no_internal_model_conversion(tmp_path: Path, mocker: MockerFixture):
 
     for row in schema:
         create_external_model(**row, dialect="bigquery")
+
+
+def test_create_external_models_sync_preserves_metadata(tmp_path: Path, mocker: MockerFixture):
+    initial_entries = [
+        {
+            "name": '"schema"."existing_table"',
+            "description": "A table with customer data",
+            "dialect": "duckdb",
+            "start": "1 week ago",
+            "audits": [
+                {"name": "not_null", "columns": "[customer_id]"},
+            ],
+            "columns": {"a": "int"},
+        },
+        {
+            "name": '"schema"."other_table"',
+            "description": "Another table",
+            "columns": {"x": "text"},
+        },
+    ]
+    with open(tmp_path / c.EXTERNAL_MODELS_YAML, "w", encoding="utf-8") as fd:
+        yaml.dump(initial_entries, fd)
+
+    engine_adapter_mock = mocker.Mock()
+    engine_adapter_mock.columns.return_value = {
+        "id": exp.DataType.build("bigint"),
+        "name": exp.DataType.build("text"),
+    }
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.nodes_exist.return_value = set()
+
+    model = SqlModel(
+        name="a",
+        query=parse_one("select * FROM schema.existing_table, schema.new_table"),
+    )
+
+    filename = tmp_path / c.EXTERNAL_MODELS_YAML
+
+    with patch.object(get_console(), "log_warning") as mock_warning:
+        create_external_models_file(
+            filename,
+            {"a": model},  # type: ignore
+            engine_adapter_mock,
+            state_reader_mock,
+            "",
+            mode=CreateExternalModelsMode.SYNC,
+        )
+
+    schema = yaml.load(filename)
+
+    assert len(schema) == 3
+
+    existing_entry = [e for e in schema if e["name"] == '"schema"."existing_table"'][0]
+    assert existing_entry["description"] == "A table with customer data"
+    assert existing_entry["dialect"] == "duckdb"
+    assert existing_entry["start"] == "1 week ago"
+    assert len(existing_entry["audits"]) == 1
+    assert existing_entry["audits"][0]["name"] == "not_null"
+    assert existing_entry["columns"] == {"id": "BIGINT", "name": "TEXT"}
+
+    other_entry = [e for e in schema if e["name"] == '"schema"."other_table"'][0]
+    assert other_entry["description"] == "Another table"
+    assert other_entry["columns"] == {"x": "text"}
+
+    new_entry = [e for e in schema if e["name"] == '"schema"."new_table"'][0]
+    assert new_entry["columns"] == {"id": "BIGINT", "name": "TEXT"}
+
+    assert any(
+        "other_table" in str(call) and "no longer referenced" in str(call)
+        for call in mock_warning.call_args_list
+    )
+
+
+def test_create_external_models_sync_appends_new_entries(tmp_path: Path, mocker: MockerFixture):
+    initial_entries = [
+        {
+            "name": '"schema"."existing_table"',
+            "columns": {"a": "int"},
+        },
+    ]
+    with open(tmp_path / c.EXTERNAL_MODELS_YAML, "w", encoding="utf-8") as fd:
+        yaml.dump(initial_entries, fd)
+
+    engine_adapter_mock = mocker.Mock()
+    engine_adapter_mock.columns.return_value = {
+        "id": exp.DataType.build("bigint"),
+    }
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.nodes_exist.return_value = set()
+
+    model = SqlModel(
+        name="b",
+        query=parse_one("select * FROM schema.new_table"),
+    )
+
+    filename = tmp_path / c.EXTERNAL_MODELS_YAML
+
+    with patch.object(get_console(), "log_warning"):
+        create_external_models_file(
+            filename,
+            {"b": model},  # type: ignore
+            engine_adapter_mock,
+            state_reader_mock,
+            "",
+            mode=CreateExternalModelsMode.SYNC,
+        )
+
+    schema = yaml.load(filename)
+
+    assert len(schema) == 2
+    names = {e["name"] for e in schema}
+    assert names == {'"schema"."existing_table"', '"schema"."new_table"'}
+
+
+def test_create_external_models_sync_prune_removes_stale(tmp_path: Path, mocker: MockerFixture):
+    initial_entries = [
+        {
+            "name": '"schema"."stale_table"',
+            "description": "This table no longer exists in the project",
+            "columns": {"a": "int"},
+        },
+        {
+            "name": '"schema"."active_table"',
+            "description": "Still in use",
+            "columns": {"b": "text"},
+        },
+    ]
+    with open(tmp_path / c.EXTERNAL_MODELS_YAML, "w", encoding="utf-8") as fd:
+        yaml.dump(initial_entries, fd)
+
+    engine_adapter_mock = mocker.Mock()
+    engine_adapter_mock.columns.return_value = {
+        "b": exp.DataType.build("varchar"),
+        "c": exp.DataType.build("bigint"),
+    }
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.nodes_exist.return_value = set()
+
+    model = SqlModel(
+        name="x",
+        query=parse_one("select * FROM schema.active_table"),
+    )
+
+    filename = tmp_path / c.EXTERNAL_MODELS_YAML
+
+    with patch.object(get_console(), "log_warning") as mock_warning:
+        create_external_models_file(
+            filename,
+            {"x": model},  # type: ignore
+            engine_adapter_mock,
+            state_reader_mock,
+            "",
+            mode=CreateExternalModelsMode.SYNC_PRUNE,
+        )
+
+    schema = yaml.load(filename)
+
+    assert len(schema) == 1
+    assert schema[0]["name"] == '"schema"."active_table"'
+    assert schema[0]["description"] == "Still in use"
+    assert schema[0]["columns"] == {"b": "VARCHAR", "c": "BIGINT"}
+    assert any("Removed 1 stale" in str(call) for call in mock_warning.call_args_list)
+
+
+def test_create_external_models_sync_preserves_other_gateways(
+    tmp_path: Path, mocker: MockerFixture
+):
+    initial_entries = [
+        {
+            "name": '"schema"."my_table"',
+            "gateway": "dev",
+            "description": "Dev-specific config",
+            "columns": {"a": "int"},
+        },
+        {
+            "name": '"schema"."my_table"',
+            "gateway": "prod",
+            "description": "Prod-specific config",
+            "columns": {"a": "int"},
+        },
+    ]
+    with open(tmp_path / c.EXTERNAL_MODELS_YAML, "w", encoding="utf-8") as fd:
+        yaml.dump(initial_entries, fd)
+
+    engine_adapter_mock = mocker.Mock()
+    engine_adapter_mock.columns.return_value = {
+        "x": exp.DataType.build("int"),
+    }
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.nodes_exist.return_value = set()
+
+    model = SqlModel(
+        name="m",
+        query=parse_one("select * FROM schema.my_table"),
+    )
+
+    filename = tmp_path / c.EXTERNAL_MODELS_YAML
+
+    with patch.object(get_console(), "log_warning"):
+        create_external_models_file(
+            filename,
+            {"m": model},  # type: ignore
+            engine_adapter_mock,
+            state_reader_mock,
+            "",
+            gateway="dev",
+            mode=CreateExternalModelsMode.SYNC_PRUNE,
+        )
+
+    schema = yaml.load(filename)
+
+    assert len(schema) == 2
+
+    dev_entry = [e for e in schema if e.get("gateway") == "dev"][0]
+    prod_entry = [e for e in schema if e.get("gateway") == "prod"][0]
+
+    assert dev_entry["description"] == "Dev-specific config"
+    assert dev_entry["columns"] == {"x": "INT"}
+    assert prod_entry["description"] == "Prod-specific config"
+    assert prod_entry["columns"] == {"a": "int"}
 
 
 def test_missing_table(tmp_path: Path):

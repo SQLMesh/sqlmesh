@@ -92,7 +92,10 @@ from sqlmesh.core.plan import Plan, PlanBuilder, SnapshotIntervals, PlanExplaine
 from sqlmesh.core.plan.definition import UserProvidedFlags
 from sqlmesh.core.reference import ReferenceGraph
 from sqlmesh.core.scheduler import Scheduler, CompletionStatus
-from sqlmesh.core.schema_loader import create_external_models_file
+from sqlmesh.core.schema_loader import (
+    CreateExternalModelsMode,
+    create_external_models_file,
+)
 from sqlmesh.core.selector import Selector, NativeSelector
 from sqlmesh.core.snapshot import (
     DeployabilityIndex,
@@ -2486,7 +2489,11 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._new_state_sync().rollback()
 
     @python_api_analytics
-    def create_external_models(self, strict: bool = False) -> None:
+    def create_external_models(
+        self,
+        strict: bool = False,
+        mode: t.Union[CreateExternalModelsMode, str] = CreateExternalModelsMode.default,
+    ) -> None:
         """Create a file to document the schema of external models.
 
         The external models file contains all columns and types of external models, allowing for more
@@ -2494,7 +2501,12 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         Args:
             strict: If True, raise an error if the external model is missing in the database.
+            mode: The mode for updating external models. "overwrite" replaces all entries (default),
+                "sync" syncs columns while preserving metadata and warns on stale entries,
+                "sync_prune" also removes stale entries.
         """
+        if isinstance(mode, str):
+            mode = CreateExternalModelsMode(mode)
         if not self._models:
             self.load(update_schemas=False)
 
@@ -2529,6 +2541,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 max_workers=self.concurrent_tasks,
                 strict=strict,
                 all_models=self._models,
+                mode=mode,
             )
 
     @python_api_analytics

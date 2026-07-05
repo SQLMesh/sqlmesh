@@ -738,12 +738,20 @@ class SQLMeshMagics(Magics):
         action="store_true",
         help="Raise an error if the external model is missing in the database",
     )
+    @argument(
+        "--mode",
+        choices=["overwrite", "sync", "sync_prune"],
+        default="overwrite",
+        help="The mode for updating external models. overwrite replaces all entries (default), "
+        "sync syncs columns while preserving metadata and warns on stale entries, "
+        "sync_prune also removes stale entries.",
+    )
     @line_magic
     @pass_sqlmesh_context
     def create_external_models(self, context: Context, line: str) -> None:
         """Create a schema file containing external model schemas."""
         args = parse_argstring(self.create_external_models, line)
-        context.create_external_models(strict=args.strict)
+        context.create_external_models(strict=args.strict, mode=args.mode)
 
     @magic_arguments()
     @argument(

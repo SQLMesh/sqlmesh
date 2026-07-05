@@ -977,6 +977,14 @@ def rollback(obj: Context) -> None:
     is_flag=True,
     help="Raise an error if the external model is missing in the database",
 )
+@click.option(
+    "--mode",
+    type=click.Choice(["overwrite", "sync", "sync_prune"], case_sensitive=False),
+    default="overwrite",
+    help="The mode for updating external models. overwrite replaces all entries (default), "
+    "sync syncs columns while preserving metadata and warns on stale entries, "
+    "sync_prune also removes stale entries.",
+)
 @click.pass_obj
 @error_handler
 @cli_analytics

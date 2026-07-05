@@ -304,7 +304,7 @@ Migrate SQLMesh to the current running version
 
 #### create_external_models
 ```
-%create_external_models
+%create_external_models [--strict] [--mode {overwrite,sync,sync_prune}]
 
 Create a schema file containing external model schemas.
 ```

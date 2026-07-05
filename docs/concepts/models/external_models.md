@@ -52,6 +52,8 @@ If SQLMesh does not have access to an external table's metadata, the table will 
 
 `create_external_models` solely queries SQL engine metadata and does not query external tables themselves.
 
+By default, the command overwrites same-gateway entries with freshly fetched columns and types. Use `--mode sync` to preserve any hand-edited metadata (such as descriptions, audits, or start dates) while only updating columns from the database. Use `--mode sync_prune` to additionally remove entries that are no longer referenced by any model.
+
 ### Gateway-specific external models
 
 In some use-cases such as [isolated systems with multiple gateways](../../guides/isolated_systems.md#multiple-gateways), there are external models that only exist on a certain gateway.
@@ -116,9 +118,9 @@ The file can be constructed by hand using a standard text editor or IDE.
 
 Sometimes, SQLMesh cannot infer the structure of a model and you need to add it manually.
 
-However, since `sqlmesh create_external_models` replaces the `external_models.yaml` file, any manual changes you made to that file will be overwritten.
+By default, running `sqlmesh create_external_models` replaces the entries in `external_models.yaml` — any manual changes to that file may be lost. To preserve hand-edited metadata such as descriptions and audits, pass `--mode sync`, which only updates columns from the database while keeping all other fields.
 
-The solution is to create the manual model definition files in the `external_models/` directory, like so:
+Alternatively, you can place manual model definitions in the `external_models/` directory, like so:
 
 ```
 external_models.yaml

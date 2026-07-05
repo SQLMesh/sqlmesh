@@ -106,7 +106,15 @@ Usage: sqlmesh create_external_models [OPTIONS]
   Create a schema file containing external model schemas.
 
 Options:
-  --help  Show this message and exit.
+  --strict                        Raise an error if the external model is
+                                  missing in the database
+  --mode [overwrite|sync|sync_prune]
+                                  The mode for updating external models.
+                                  overwrite replaces all entries (default), sync
+                                  syncs columns while preserving metadata and
+                                  warns on stale entries, sync_prune also
+                                  removes stale entries.
+  --help                          Show this message and exit.
 ```
 
 ## create_test
