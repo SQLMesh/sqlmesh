@@ -1879,6 +1879,8 @@ class GenericContext(BaseContext, t.Generic[C]):
                 be deleted asynchronously by the janitor process.
         """
         name = Environment.sanitize_name(name)
+        if self.state_sync.get_environment(name) is None:
+            raise SQLMeshError(f"Environment '{name}' does not exist.")
         self.state_sync.invalidate_environment(name)
         if sync:
             self._cleanup_environments(name=name)
