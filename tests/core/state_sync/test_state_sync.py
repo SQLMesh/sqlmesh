@@ -2937,6 +2937,141 @@ def test_migrate_rows(state_sync: EngineAdapterStateSync, mocker: MockerFixture)
     )
 
 
+def test_migrate_v0071_keeps_still_live_dev_intervals() -> None:
+    from sqlmesh.migrations import v0071_add_dev_version_to_intervals as migration
+
+    engine_adapter = create_engine_adapter(duckdb.connect, "duckdb")
+    engine_adapter.create_schema(c.SQLMESH)
+
+    engine_adapter.create_table(
+        "sqlmesh._snapshots",
+        {
+            "name": exp.DataType.build("text"),
+            "identifier": exp.DataType.build("text"),
+            "version": exp.DataType.build("text"),
+            "snapshot": exp.DataType.build("text"),
+            "kind_name": exp.DataType.build("text"),
+            "updated_ts": exp.DataType.build("bigint"),
+            "unpaused_ts": exp.DataType.build("bigint"),
+            "ttl_ms": exp.DataType.build("bigint"),
+            "unrestorable": exp.DataType.build("boolean"),
+        },
+    )
+    # The intervals table at schema version 70, before v0071 adds the dev_version column.
+    engine_adapter.create_table(
+        "sqlmesh._intervals",
+        {
+            "id": exp.DataType.build("text"),
+            "created_ts": exp.DataType.build("bigint"),
+            "name": exp.DataType.build("text"),
+            "identifier": exp.DataType.build("text"),
+            "version": exp.DataType.build("text"),
+            "start_ts": exp.DataType.build("bigint"),
+            "end_ts": exp.DataType.build("bigint"),
+            "is_dev": exp.DataType.build("boolean"),
+            "is_removed": exp.DataType.build("boolean"),
+            "is_compacted": exp.DataType.build("boolean"),
+            "is_pending_restatement": exp.DataType.build("boolean"),
+        },
+    )
+
+    def snapshot_blob(name: str, identifier: str, version: str, dev_version: str) -> str:
+        return json.dumps(
+            {
+                "name": name,
+                "identifier": identifier,
+                "version": version,
+                "dev_version": dev_version,
+                "fingerprint": {
+                    "data_hash": "data",
+                    "metadata_hash": "metadata",
+                    "parent_data_hash": "parent_data",
+                    "parent_metadata_hash": "parent_metadata",
+                },
+                "previous_versions": [],
+            }
+        )
+
+    engine_adapter.insert_append(
+        "sqlmesh._snapshots",
+        pd.DataFrame(
+            [
+                {
+                    "name": '"db"."prod_model"',
+                    "identifier": "prod_ident",
+                    "version": "prod_ver",
+                    "snapshot": snapshot_blob(
+                        '"db"."prod_model"', "prod_ident", "prod_ver", "prod_dev"
+                    ),
+                    "kind_name": "FULL",
+                    "updated_ts": 1,
+                    "unpaused_ts": None,
+                    "ttl_ms": None,
+                    "unrestorable": False,
+                },
+                {
+                    "name": '"db"."dev_model"',
+                    "identifier": "dev_ident",
+                    "version": "dev_ver",
+                    "snapshot": snapshot_blob(
+                        '"db"."dev_model"', "dev_ident", "dev_ver", "dev_dev"
+                    ),
+                    "kind_name": "FULL",
+                    "updated_ts": 1,
+                    "unpaused_ts": None,
+                    "ttl_ms": None,
+                    "unrestorable": False,
+                },
+            ]
+        ),
+    )
+
+    engine_adapter.insert_append(
+        "sqlmesh._intervals",
+        pd.DataFrame(
+            [
+                # A non-dev interval that is always kept; it forces the migration to
+                # rewrite the intervals table so a wrongly-dropped dev interval is
+                # actually deleted rather than left behind by the empty-result guard.
+                {
+                    "id": "prod_int",
+                    "created_ts": 1,
+                    "name": '"db"."prod_model"',
+                    "identifier": "prod_ident",
+                    "version": "prod_ver",
+                    "start_ts": 100,
+                    "end_ts": 200,
+                    "is_dev": False,
+                    "is_removed": False,
+                    "is_compacted": False,
+                    "is_pending_restatement": False,
+                },
+                # A dev interval whose version and dev version are both still live.
+                # It must be preserved by the migration.
+                {
+                    "id": "dev_int",
+                    "created_ts": 1,
+                    "name": '"db"."dev_model"',
+                    "identifier": "dev_ident",
+                    "version": "dev_ver",
+                    "start_ts": 100,
+                    "end_ts": 200,
+                    "is_dev": True,
+                    "is_removed": False,
+                    "is_compacted": False,
+                    "is_pending_restatement": False,
+                },
+            ]
+        ),
+    )
+
+    migration.migrate_schemas(engine_adapter, c.SQLMESH)
+    migration.migrate_rows(engine_adapter, c.SQLMESH)
+
+    surviving_ids = {row[0] for row in engine_adapter.fetchall("SELECT id FROM sqlmesh._intervals")}
+    assert surviving_ids == {"prod_int", "dev_int"}
+
+
 def test_backup_state(state_sync: EngineAdapterStateSync, mocker: MockerFixture) -> None:
     state_sync.engine_adapter.replace_query(
         "sqlmesh._snapshots",
