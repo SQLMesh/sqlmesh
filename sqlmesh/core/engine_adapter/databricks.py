@@ -154,7 +154,7 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             host=self._extra_config["databricks_connect_server_hostname"],
             token=self._extra_config.get("databricks_connect_access_token"),
         )
-        if "databricks_connect_use_serverless" in self._extra_config:
+        if self._extra_config.get("databricks_connect_use_serverless"):
             connect_kwargs["serverless"] = True
         else:
             connect_kwargs["cluster_id"] = self._extra_config["databricks_connect_cluster_id"]
