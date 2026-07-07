@@ -965,13 +965,22 @@ def generate_surrogate_key(
             )
         )
 
+    concat = exp.func("CONCAT", *string_fields)
+    # The argument is always a string; annotating it here lets generators that
+    # split string/binary hash semantics (Presto, Trino) wrap the encode.
+    concat.type = exp.DataType.build("text")
+
     func = exp.func(
         hash_function.name,
-        exp.func("CONCAT", *string_fields),
+        concat,
         dialect=evaluator.dialect,
     )
     if isinstance(func, exp.MD5Digest):
         func = exp.MD5(this=func.this)
+    elif isinstance(func, exp.SHA2Digest):
+        # Same split as MD5/MD5Digest: the surrogate key must be a hex string,
+        # not a binary digest, on every dialect.
+        func = exp.SHA2(this=func.this, length=func.args.get("length"))
 
     return func
 

@@ -1178,3 +1178,54 @@ def test_macro_coerce_literal_type(macro_evaluator):
     expression = d.parse_one("@TEST_LITERAL_TYPE(1.0)")
     with pytest.raises(MacroEvalError, match=".*Coercion failed"):
         macro_evaluator.transform(expression)
+
+
+def test_generate_surrogate_key_hash_semantics() -> None:
+    from sqlmesh.core.macros import generate_surrogate_key
+
+    surrogate_key = (
+        generate_surrogate_key.func
+        if hasattr(generate_surrogate_key, "func")
+        else generate_surrogate_key
+    )
+
+    # The macro must always build the string-semantics hash expression, never
+    # a binary digest, so dialects that model the two separately (Presto and
+    # Trino after tobymao/sqlglot#7824) can render the hex-string form.
+    # BigQuery's parser maps SHA256 to SHA2Digest, which exercises the
+    # conversion on every supported sqlglot version.
+    func = surrogate_key(
+        MacroEvaluator(dialect="bigquery"),
+        exp.column("a"),
+        hash_function=exp.Literal.string("SHA256"),
+    )
+    assert isinstance(func, exp.SHA2)
+
+    # The hash argument is annotated as text so generators that wrap an
+    # encode around string inputs (TO_UTF8 on Presto/Trino) can do so without
+    # a separate annotation pass.
+    assert func.this.is_type("text")
+
+    def render(dialect: str, hash_function: str) -> str:
+        sql = f"SELECT @GENERATE_SURROGATE_KEY(a, hash_function := '{hash_function}') FROM foo"
+        return (
+            MacroEvaluator(dialect=dialect).transform(parse_one(sql, dialect=dialect)).sql(dialect)
+        )
+
+    # Rendered SQL, stable across supported sqlglot versions.
+    assert (
+        render("bigquery", "SHA256")
+        == "SELECT SHA256(CONCAT(COALESCE(CAST(a AS STRING), '_sqlmesh_surrogate_key_null_'))) FROM foo"
+    )
+    assert (
+        render("duckdb", "SHA256")
+        == "SELECT SHA256(COALESCE(CAST(a AS TEXT), '_sqlmesh_surrogate_key_null_')) FROM foo"
+    )
+    assert (
+        render("trino", "MD5")
+        == "SELECT LOWER(TO_HEX(MD5(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
+    )
+    # Trino/Presto render SHA256/SHA512 surrogate keys as
+    # LOWER(TO_HEX(SHA256(TO_UTF8(...)))) once sqlglot ships
+    # tobymao/sqlglot#7824; the string assertions for that belong with the
+    # sqlglot version bump.
