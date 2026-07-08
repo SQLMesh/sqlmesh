@@ -1721,6 +1721,35 @@ class GenericContext(BaseContext, t.Generic[C]):
                 execution_time or now(),
             )
 
+            execution_time_ts = to_timestamp(execution_time) if execution_time is not None else None
+            if (
+                execution_time_ts is not None
+                and end is None
+                and default_end is not None
+                and execution_time_ts > default_end
+            ):
+                # An explicitly provided execution time acts as the plan's effective "now", so the
+                # default end is allowed to extend past the recorded prod frontier instead of being
+                # capped by it. This mirrors how an explicit `end` causes the per-model interval end
+                # caps to be dropped entirely in PlanBuilder.build() (see `self.override_end`,
+                # sqlmesh/core/plan/builder.py line 206). Raising (rather than dropping) the caps is
+                # safe here because `plan --run` already runs with no caps at all.
+                #
+                # Note this raises every entry already present in max_interval_end_per_model (i.e.
+                # every model in this dict, which _get_max_interval_end_per_model above has already
+                # scoped down to backfill_models/its ancestors when a selection is in effect) - not
+                # just modified or explicitly selected models within that scope. That's intentional,
+                # not an oversight. It's what makes a plain, unscoped `sqlmesh plan --execution-time X`
+                # in prod report the same missing intervals as `sqlmesh plan --run --execution-time X`
+                # would at the same simulated time. Narrowing this further would reintroduce a `plan`
+                # vs `plan --run` mismatch for models within that scope.
+                default_end = execution_time_ts
+                execution_time_dt = to_datetime(execution_time_ts)
+                max_interval_end_per_model = {
+                    model_fqn: max(interval_end, execution_time_dt)
+                    for model_fqn, interval_end in max_interval_end_per_model.items()
+                }
+
             # Refresh snapshot intervals to ensure that they are up to date with values reflected in the max_interval_end_per_model.
             self.state_sync.refresh_snapshot_intervals(context_diff.snapshots.values())
 
