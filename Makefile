@@ -63,7 +63,8 @@ install-dev-dbt-%:
 	fi; \
 	if [ "$$version" = "1.3.0" ]; then \
 		echo "Applying overrides for dbt $$version - upgrading google-cloud-bigquery"; \
-		$(PIP) install 'google-cloud-bigquery>=3.0.0' --upgrade; \
+		$(PIP) install 'google-cloud-bigquery>=3.0.0' \
+			'pyOpenSSL>=24.0.0' --upgrade; \
 	fi; \
 	mv pyproject.toml.backup pyproject.toml; \
 	echo "Restored original pyproject.toml"
