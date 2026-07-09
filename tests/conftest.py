@@ -652,3 +652,13 @@ def set_default_connection(request):
 
     with ctx:
         yield
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    if "pyspark" not in item.keywords:
+        return
+
+    from sqlmesh.utils.java import is_spark_java_supported
+
+    if not is_spark_java_supported():
+        pytest.skip("Spark is not supported on Java 24+ with bundled Hadoop dependencies.")

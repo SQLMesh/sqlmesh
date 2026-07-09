@@ -55,9 +55,13 @@ SQLMesh uses the python [datetime module](https://docs.python.org/3/library/date
 
 !!! tip "Important"
 
-    Predefined variables with a time component always use the [UTC time zone](https://en.wikipedia.org/wiki/Coordinated_Universal_Time).
+    Macro instants such as `@start_dt`, `@end_dt`, `@start_tstz`, and `@end_tstz` are always stored and rendered as [UTC](https://en.wikipedia.org/wiki/Coordinated_Universal_Time) timestamps. During incremental backfill, `@start_ds` and `@end_ds` also use UTC calendar dates derived from those interval boundaries.
 
     Learn more about timezones and incremental models [here](../models/model_kinds.md#timezones).
+
+Relative CLI and API inputs such as `--start "2 weeks ago"` are interpreted using UTC calendar-day boundaries by default. To anchor relative start, end, and execution-time values to a specific timezone (for example, midnight in `America/Los_Angeles`), pass `--time-zone` on supported commands (`plan`, `render`, `evaluate`, `run`, `audit`, `check_intervals`) or set the project-level `time_zone` config. The CLI flag overrides the config value.
+
+When a **day-or-larger** relative start or end (for example, `"1 week ago"`, `"today"`, `"yesterday"`) is parsed with a configured timezone, `@start_tstz` and `@end_tstz` reflect the correct UTC instant and `@start_ds` / `@end_ds` use that timezone's local calendar date in `render`, `evaluate`, and `audit`. Sub-day relatives such as `"2 hours ago"` ignore `--time-zone` and continue to use UTC-relative parsing. Absolute date strings and `@execution_ds` always use UTC calendar dates.
 
 Prefixes:
 

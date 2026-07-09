@@ -931,6 +931,188 @@ def test_plan_execution_time_start_end():
     assert to_datetime(dev_plan.end) == to_datetime("2020-01-04")  # end relative to execution_time
 
 
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_plan_relative_start_with_config_time_zone():
+    context = Context(config=Config(time_zone="America/Los_Angeles"))
+    context.upsert_model(
+        load_sql_based_model(
+            parse(
+                """
+                MODEL(
+                    name db.x,
+                    start '2020-01-01',
+                    kind INCREMENTAL_BY_TIME_RANGE (
+                        time_column ds
+                    ),
+                    cron '@daily'
+                );
+
+                SELECT id, ds FROM (VALUES ('1', '2020-01-01')) data(id, ds)
+                WHERE ds BETWEEN @start_ds AND @end_ds
+                """
+            )
+        )
+    )
+
+    dev_plan = context.plan(
+        "dev", start="1 week ago", execution_time="2023-01-20 12:30:30", skip_tests=True
+    )
+
+    assert to_datetime(dev_plan.start) == to_datetime("2023-01-13 08:00:00")
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_plan_relative_start_with_time_zone_override():
+    context = Context(config=Config(time_zone="America/Los_Angeles"))
+    context.upsert_model(
+        load_sql_based_model(
+            parse(
+                """
+                MODEL(
+                    name db.x,
+                    start '2020-01-01',
+                    kind INCREMENTAL_BY_TIME_RANGE (
+                        time_column ds
+                    ),
+                    cron '@daily'
+                );
+
+                SELECT id, ds FROM (VALUES ('1', '2020-01-01')) data(id, ds)
+                WHERE ds BETWEEN @start_ds AND @end_ds
+                """
+            )
+        )
+    )
+
+    dev_plan = context.plan(
+        "dev",
+        start="1 week ago",
+        execution_time="2023-01-20 12:30:30",
+        skip_tests=True,
+        time_zone="UTC",
+    )
+
+    assert to_datetime(dev_plan.start) == to_datetime("2023-01-13")
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_render_relative_start_uses_local_ds_with_time_zone():
+    context = Context(config=Config(time_zone="America/Los_Angeles"))
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL(
+                name db.x,
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds
+                ),
+                cron '@daily',
+                start '2020-01-01'
+            );
+
+            SELECT @start_ds AS start_ds, CAST('2020-01-01' AS DATE) AS ds
+            """
+        )
+    )
+    context.upsert_model(model)
+
+    rendered = context.render(
+        model,
+        start="1 week ago",
+        end="2023-01-20",
+        execution_time="2023-01-20 12:30:30",
+    )
+    assert "'2023-01-13'" in rendered.sql()
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_render_absolute_start_uses_utc_ds_with_time_zone():
+    context = Context(config=Config(time_zone="America/Los_Angeles"))
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL(
+                name db.x,
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds
+                ),
+                cron '@daily',
+                start '2020-01-01'
+            );
+
+            SELECT @start_ds AS start_ds, CAST('2020-01-01' AS DATE) AS ds
+            """
+        )
+    )
+    context.upsert_model(model)
+
+    rendered = context.render(
+        model,
+        start="2023-01-13",
+        end="2023-01-20",
+        execution_time="2023-01-20 12:30:30",
+    )
+    assert "'2023-01-13'" in rendered.sql()
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_backfill_uses_utc_start_ds_with_config_time_zone():
+    context = Context(config=Config(time_zone="America/Los_Angeles"))
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL(
+                name db.x,
+                start '2023-01-01',
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds
+                ),
+                cron '@daily'
+            );
+
+            SELECT @start_ds AS interval_start_ds, CAST(@start_ds AS DATE) AS ds
+            """
+        )
+    )
+    context.upsert_model(model)
+
+    context.plan(
+        "dev",
+        start="2023-01-19",
+        end="2023-01-19",
+        execution_time="2023-01-20 12:30:30",
+        auto_apply=True,
+        no_prompts=True,
+        skip_tests=True,
+    )
+
+    df = context.fetchdf("SELECT interval_start_ds FROM db__dev.x")
+    assert list(df["interval_start_ds"]) == ["2023-01-19"]
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_plan_rejects_invalid_time_zone():
+    context = Context(config=Config())
+    context.upsert_model(
+        load_sql_based_model(
+            parse(
+                """
+                MODEL(
+                    name db.x,
+                    start '2020-01-01',
+                    kind FULL
+                );
+
+                SELECT 1
+                """
+            )
+        )
+    )
+
+    with pytest.raises(ConfigError, match="valid IANA timezone"):
+        context.plan("dev", start="1 week ago", time_zone="Not/A_Timezone", skip_tests=True)
+
+
 def test_override_builtin_audit_blocking_mode():
     context = Context(config=Config())
     context.upsert_model(

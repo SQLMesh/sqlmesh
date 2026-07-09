@@ -6,6 +6,7 @@ import time_machine
 from sqlglot import exp
 import pandas as pd  # noqa: TID253
 
+from sqlmesh.utils.errors import ConfigError
 from sqlmesh.utils.date import (
     UTC,
     TimeLike,
@@ -14,6 +15,7 @@ from sqlmesh.utils.date import (
     is_categorical_relative_expression,
     is_relative,
     make_inclusive,
+    parse_time_zone,
     to_datetime,
     to_time_column,
     to_timestamp,
@@ -64,8 +66,100 @@ def test_to_datetime_with_expressions(expression, result) -> None:
         assert to_datetime(expression) == result
 
 
-def test_to_timestamp() -> None:
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_to_datetime_with_relative_tz() -> None:
+    la_tz = parse_time_zone("America/Los_Angeles")
+    assert to_datetime("1 week ago") == datetime(2023, 1, 13, 0, 0, 0, tzinfo=UTC)
+    assert to_datetime("1 week ago", relative_tz=la_tz) == datetime(
+        2023, 1, 13, 8, 0, 0, tzinfo=UTC
+    )
+    assert to_datetime("2020-01-01", relative_tz=la_tz) == datetime(2020, 1, 1, tzinfo=UTC)
+
+
+@time_machine.travel("2023-01-20 15:00:00 UTC", tick=False)
+def test_to_datetime_with_relative_tz_tokyo() -> None:
+    tokyo_tz = parse_time_zone("Asia/Tokyo")
+    assert to_datetime("1 day ago", relative_tz=tokyo_tz) == datetime(
+        2023, 1, 19, 15, 0, 0, tzinfo=UTC
+    )
+
+
+@time_machine.travel("2023-01-20 15:00:00 UTC", tick=False)
+def test_date_dict_with_relative_tz() -> None:
+    tokyo_tz = parse_time_zone("Asia/Tokyo")
+    resp = date_dict(
+        "2023-01-20 15:00:00",
+        "1 day ago",
+        "2023-01-20",
+        relative_tz=tokyo_tz,
+    )
+    assert resp["start_dt"] == datetime(2023, 1, 19, 15, 0, 0, tzinfo=UTC)
+    assert resp["start_ds"] == "2023-01-20"
+    assert resp["start_date"] == date(2023, 1, 20)
+    assert resp["execution_ds"] == "2023-01-20"
+    assert resp["end_ds"] == "2023-01-20"
+
+
+def test_parse_time_zone() -> None:
+    assert parse_time_zone(None) is None
+    assert parse_time_zone("UTC") is None
+    la_tz = parse_time_zone("America/Los_Angeles")
+    assert la_tz is not None
+    assert la_tz.key == "America/Los_Angeles"
+
+    with pytest.raises(ConfigError, match="valid IANA timezone"):
+        parse_time_zone("Not/A_Timezone")
+
+
+def test_date_dict_interval_bounds_use_utc_ds_with_relative_tz() -> None:
+    tokyo_tz = parse_time_zone("Asia/Tokyo")
+    interval_start = to_datetime("2023-01-20 00:00:00")
+    resp = date_dict(
+        "2023-01-20 15:00:00",
+        interval_start,
+        interval_start,
+        relative_tz=tokyo_tz,
+    )
+    assert resp["start_ds"] == "2023-01-20"
+    assert resp["start_dt"] == interval_start
+
+
+def test_date_dict_absolute_start_uses_utc_ds_with_relative_tz() -> None:
+    la_tz = parse_time_zone("America/Los_Angeles")
+    resp = date_dict(
+        "2023-01-20 12:00:00",
+        "2023-01-13",
+        "2023-01-20",
+        relative_tz=la_tz,
+    )
+    assert resp["start_ds"] == "2023-01-13"
+    assert resp["end_ds"] == "2023-01-20"
+
+
+def test_to_timestamp_from_date_string() -> None:
     assert to_timestamp("2020-01-01") == 1577836800000
+
+
+@time_machine.travel("2023-03-13 12:00:00 UTC", tick=False)
+def test_to_datetime_relative_tz_spring_forward_dst() -> None:
+    la_tz = parse_time_zone("America/Los_Angeles")
+    assert to_datetime("1 day ago", relative_tz=la_tz) == datetime(2023, 3, 12, 8, 0, 0, tzinfo=UTC)
+
+
+@time_machine.travel("2023-11-06 12:00:00 UTC", tick=False)
+def test_to_datetime_relative_tz_fall_back_dst() -> None:
+    la_tz = parse_time_zone("America/Los_Angeles")
+    assert to_datetime("1 day ago", relative_tz=la_tz) == datetime(2023, 11, 5, 7, 0, 0, tzinfo=UTC)
+
+
+@time_machine.travel("2023-01-20 12:30:00 UTC", tick=False)
+def test_to_datetime_hour_relative_ignores_time_zone() -> None:
+    la_tz = parse_time_zone("America/Los_Angeles")
+    relative_base = to_datetime("2023-01-20 12:30:00")
+    without_tz = to_datetime("2 hours ago", relative_base=relative_base)
+    with_tz = to_datetime("2 hours ago", relative_base=relative_base, relative_tz=la_tz)
+    assert with_tz == without_tz
+    assert with_tz == datetime(2023, 1, 20, 10, 30, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(

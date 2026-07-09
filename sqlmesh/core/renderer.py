@@ -138,6 +138,9 @@ class BaseExpressionRenderer:
                     kwargs["views"] = views
 
         this_model = kwargs.pop("this_model", None)
+        relative_tz = kwargs.pop("relative_tz", None)
+        localize_start_ds = kwargs.pop("localize_start_ds", None)
+        localize_end_ds = kwargs.pop("localize_end_ds", None)
 
         this_snapshot = (snapshots or {}).get(self._model_fqn) if self._model_fqn else None
         if not this_model and self._model_fqn:
@@ -182,16 +185,19 @@ class BaseExpressionRenderer:
         )
 
         start_time, end_time = (
-            make_inclusive(start or c.EPOCH, end or c.EPOCH, self._dialect)
+            make_inclusive(start or c.EPOCH, end or c.EPOCH, self._dialect, relative_tz=relative_tz)
             if not self._only_execution_time
             else (None, None)
         )
 
         render_kwargs = {
             **date_dict(
-                to_datetime(execution_time or c.EPOCH),
+                to_datetime(execution_time or c.EPOCH, relative_tz=relative_tz),
                 start_time,
                 end_time,
+                relative_tz=relative_tz,
+                localize_start_ds=localize_start_ds,
+                localize_end_ds=localize_end_ds,
             ),
             **kwargs,
         }

@@ -259,6 +259,7 @@ Need help?
 @opt.start_time
 @opt.end_time
 @opt.execution_time
+@opt.time_zone
 @opt.expand
 @click.option(
     "--dialect",
@@ -276,6 +277,7 @@ def render(
     start: TimeLike,
     end: TimeLike,
     execution_time: t.Optional[TimeLike] = None,
+    time_zone: t.Optional[str] = None,
     expand: t.Optional[t.Union[bool, t.Iterable[str]]] = None,
     dialect: t.Optional[str] = None,
     no_format: bool = False,
@@ -289,6 +291,7 @@ def render(
         start=start,
         end=end,
         execution_time=execution_time,
+        time_zone=time_zone,
         expand=expand,
     )
 
@@ -314,6 +317,7 @@ def render(
 @opt.start_time
 @opt.end_time
 @opt.execution_time
+@opt.time_zone
 @click.option(
     "--limit",
     type=int,
@@ -328,6 +332,7 @@ def evaluate(
     start: TimeLike,
     end: TimeLike,
     execution_time: t.Optional[TimeLike] = None,
+    time_zone: t.Optional[str] = None,
     limit: t.Optional[int] = None,
 ) -> None:
     """Evaluate a model and return a dataframe with a default limit of 1000."""
@@ -336,6 +341,7 @@ def evaluate(
         start=start,
         end=end,
         execution_time=execution_time,
+        time_zone=time_zone,
         limit=limit,
     )
     if hasattr(df, "show"):
@@ -398,6 +404,7 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
 @opt.start_time
 @opt.end_time
 @opt.execution_time
+@opt.time_zone
 @click.option(
     "--create-from",
     type=str,
@@ -578,6 +585,7 @@ def plan(
 @click.argument("environment", required=False)
 @opt.start_time
 @opt.end_time
+@opt.time_zone
 @click.option("--skip-janitor", is_flag=True, help="Skip the janitor task.")
 @click.option(
     "--ignore-cron",
@@ -812,6 +820,7 @@ def test(
 @opt.start_time
 @opt.end_time
 @opt.execution_time
+@opt.time_zone
 @click.pass_obj
 @error_handler
 @cli_analytics
@@ -821,9 +830,12 @@ def audit(
     start: TimeLike,
     end: TimeLike,
     execution_time: t.Optional[TimeLike] = None,
+    time_zone: t.Optional[str] = None,
 ) -> None:
     """Run audits for the target model(s)."""
-    if not obj.audit(models=models, start=start, end=end, execution_time=execution_time):
+    if not obj.audit(
+        models=models, start=start, end=end, execution_time=execution_time, time_zone=time_zone
+    ):
         exit(1)
 
 
@@ -843,6 +855,7 @@ def audit(
 )
 @opt.start_time
 @opt.end_time
+@opt.time_zone
 @click.pass_context
 @error_handler
 @cli_analytics
@@ -853,6 +866,7 @@ def check_intervals(
     select_model: t.List[str],
     start: TimeLike,
     end: TimeLike,
+    time_zone: t.Optional[str] = None,
 ) -> None:
     """Show missing intervals in an environment, respecting signals."""
     context = ctx.obj
@@ -863,6 +877,7 @@ def check_intervals(
             select_models=select_model,
             start=start,
             end=end,
+            time_zone=time_zone,
         )
     )
 

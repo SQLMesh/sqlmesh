@@ -323,6 +323,17 @@ def test_load_config_from_env_no_config_vars():
         assert load_config_from_env() == {}
 
 
+def test_config_time_zone():
+    config = Config(time_zone="America/Los_Angeles")
+    assert config.time_zone == "America/Los_Angeles"
+
+    config = Config(time_zone="UTC")
+    assert config.time_zone is None
+
+    with pytest.raises(ConfigError, match="valid IANA timezone"):
+        Config(time_zone="Not/A_Timezone")
+
+
 def test_load_config_from_env_invalid_variable_name():
     with mock.patch.dict(
         os.environ,

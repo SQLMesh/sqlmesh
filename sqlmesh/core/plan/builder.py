@@ -5,7 +5,7 @@ import re
 import typing as t
 from collections import defaultdict
 from functools import cached_property
-from datetime import datetime
+from datetime import datetime, tzinfo
 
 
 from sqlmesh.core.console import PlanBuilderConsole, get_console
@@ -138,6 +138,8 @@ class PlanBuilder:
         console: t.Optional[PlanBuilderConsole] = None,
         user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None,
         selected_models: t.Optional[t.Set[str]] = None,
+        relative_tz: t.Optional[tzinfo] = None,
+        time_zone: t.Optional[str] = None,
     ):
         self._context_diff = context_diff
         self._no_gaps = no_gaps
@@ -184,6 +186,8 @@ class PlanBuilder:
         self._user_provided_flags = user_provided_flags
         self._selected_models = selected_models
         self._explain = explain
+        self._relative_tz = relative_tz
+        self._time_zone = time_zone
 
         self._start = start
         if not self._start and self._forward_only_preview_needed:
@@ -223,14 +227,22 @@ class PlanBuilder:
     def start(self) -> t.Optional[TimeLike]:
         if self._start and is_relative(self._start):
             # only do this for relative expressions otherwise inclusive date strings like '2020-01-01' can be turned into exclusive timestamps eg '2020-01-01 00:00:00'
-            return to_datetime(self._start, relative_base=to_datetime(self.execution_time))
+            return to_datetime(
+                self._start,
+                relative_base=to_datetime(self.execution_time, relative_tz=self._relative_tz),
+                relative_tz=self._relative_tz,
+            )
         return self._start
 
     @property
     def end(self) -> t.Optional[TimeLike]:
         if self._end and is_relative(self._end):
             # only do this for relative expressions otherwise inclusive date strings like '2020-01-01' can be turned into exclusive timestamps eg '2020-01-01 00:00:00'
-            return to_datetime(self._end, relative_base=to_datetime(self.execution_time))
+            return to_datetime(
+                self._end,
+                relative_base=to_datetime(self.execution_time, relative_tz=self._relative_tz),
+                relative_tz=self._relative_tz,
+            )
         return self._end
 
     @cached_property
@@ -375,6 +387,7 @@ class PlanBuilder:
             ignore_cron=self._ignore_cron,
             user_provided_flags=self._user_provided_flags,
             selected_models=self._selected_models,
+            time_zone=self._time_zone,
         )
         self._latest_plan = plan
         return plan

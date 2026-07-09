@@ -1958,10 +1958,27 @@ class SparkConnectionConfig(ConnectionConfig):
         from pyspark.conf import SparkConf
         from pyspark.sql import SparkSession
 
+        from sqlmesh.utils.errors import ConfigError
+        from sqlmesh.utils.java import (
+            is_spark_java_supported,
+            java_major_version,
+            spark_java_options,
+        )
+
+        if not is_spark_java_supported():
+            raise ConfigError(
+                f"Spark is not supported on Java {java_major_version() or 'unknown'}. "
+                "Use Java 17 through 23 when running Spark locally."
+            )
+
         spark_config = SparkConf()
-        if self.config:
-            for k, v in self.config.items():
-                spark_config.set(k, v)
+        config = dict(self.config or {})
+        java_options = spark_java_options(config.pop("spark.driver.extraJavaOptions", ""))
+        if java_options:
+            config["spark.driver.extraJavaOptions"] = java_options
+
+        for k, v in config.items():
+            spark_config.set(k, v)
 
         if self.config_dir:
             os.environ["SPARK_CONF_DIR"] = self.config_dir

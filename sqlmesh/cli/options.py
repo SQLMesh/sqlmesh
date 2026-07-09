@@ -37,6 +37,11 @@ execution_time = click.option(
     help="The execution time (defaults to now).",
 )
 
+time_zone = click.option(
+    "--time-zone",
+    help="IANA timezone for interpreting relative --start, --end, and --execution-time values (e.g. America/Los_Angeles). Defaults to UTC.",
+)
+
 expand = click.option(
     "--expand",
     multiple=True,
