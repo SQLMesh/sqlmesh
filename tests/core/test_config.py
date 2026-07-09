@@ -702,7 +702,7 @@ model_defaults:
         """
         )
 
-    with pytest.raises(TypeError, match=r"expected str instance, int found"):
+    with pytest.raises(ConfigError, match=r"Invalid field 'model_defaults\.pre_statements\.0"):
         config = load_config_from_paths(
             Config,
             project_paths=[config_path],
