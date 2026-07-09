@@ -2680,6 +2680,21 @@ def test_time_column():
     assert model.time_column.format == "%Y-%m"
     assert model.time_column.expression == d.parse_one("(\"ds\", '%Y-%m')")
 
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind INCREMENTAL_BY_TIME_RANGE(
+                time_column ()
+            )
+        );
+
+        SELECT col::text, ds::text
+    """
+    )
+    with pytest.raises(ConfigError, match="Time Column cannot be empty."):
+        load_sql_based_model(expressions)
+
 
 def test_default_time_column():
     expressions = d.parse(
