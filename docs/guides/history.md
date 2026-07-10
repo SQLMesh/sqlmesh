@@ -11,7 +11,7 @@ The `sqlmesh history` command does that correlation for you. Give it a plan id a
 
 ## How it works
 
-Every query SQLMesh runs for a plan is tagged with that plan's correlation id &mdash; a BigQuery job label on the query job itself. `sqlmesh history` looks up the plan (either the one you specify or one you pick from a menu), then queries BigQuery's job history for every job carrying that label and renders the results chronologically.
+Every job SQLMesh runs for a plan &mdash; both query jobs and the load jobs used to ingest Python-model dataframes and seeds &mdash; is tagged with that plan's correlation id as a BigQuery job label. `sqlmesh history` looks up the plan (either the one you specify or one you pick from a menu), then queries BigQuery's job history for every job carrying that label and renders the results chronologically.
 
 Because it's driven by the query engine's job history rather than SQLMesh state, it only shows what actually executed against the warehouse. It's the fastest way to answer "did this step run, how long did it take, and if it failed, why?" without leaving your terminal.
 
@@ -55,28 +55,32 @@ You only need to type enough of the plan id to uniquely identify it &mdash; the 
 ```bash linenums="1"
 $ sqlmesh history 3f9a2c1e
 
-                    History · plan 3f9a2c1e · 41 queries · 38 ✓  2 ✗  1 running
-┏━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃ Time     ┃ Status ┃ Operation      ┃ Duration ┃   Bytes/Rows ┃
-┡━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━┩
-│ 14:03:11 │ ✓      │ CREATE TABLE   │ 1200 ms  │  1,048,576 bytes │
-│ 14:03:14 │ ✓      │ INSERT         │ 14800 ms │  8,912,441 bytes │
-│ 14:03:29 │ ✗      │ INSERT         │ 420 ms   │            - │
-│          │        │ Syntax error: unexpected identifier 'PRICE' at [1:34] │       │              │
-│ 14:04:02 │ …      │ MERGE          │ -        │            - │
-└──────────┴────────┴────────────────┴──────────┴──────────────┘
-2 failed · re-run with `-o failures.sql` to export the SQL.
+History · plan 3f9a2c1e · prod · 9 queries · 7 ✓  1 ✗  1 running
+
+Time      Status  Operation      Target                            Duration   Bytes/Rows
+────────  ──────  ─────────────  ────────────────────────────────  ────────   ───────────────
+14:03:11  ✓       CREATE TABLE   sqlmesh__sushi.orders__2837a1c     1200 ms                  -
+14:03:14  ✓       INSERT         sqlmesh__sushi.orders__2837a1c     14800 ms   8,912,441 bytes
+14:03:22  ✓       LOAD           sqlmesh__sushi.customers__4b90fc   640 ms        12,004 bytes
+14:03:29  ✗       INSERT         sqlmesh__sushi.items__9f01b2d      420 ms                   -
+                  └─ Column not found: name PRICE cannot be resolved in sushi.items [at 1:34]
+14:03:31  …       MERGE          sqlmesh__sushi.order_items__7c3a   -                        -
+
+1 failed · re-run with `-o failures.sql` to export the SQL.
 ```
 
-The header line summarizes the plan: the short plan id, total query count, and a breakdown of how many queries succeeded (`✓`), failed (`✗`), or are still running (`…`).
+(In your terminal this is rendered as a bordered table.) The header line summarizes the plan: the short plan id, environment, total job count, and a breakdown of how many succeeded (`✓`), failed (`✗`), or are still running (`…`).
 
-- **Time** &mdash; when the query started.
+- **Time** &mdash; when the job started.
 - **Status** &mdash; `✓` succeeded, `✗` failed, `…` still running.
-- **Operation** &mdash; the leading SQL keyword (`CREATE TABLE`, `INSERT`, `MERGE`, `CREATE VIEW`, `ALTER TABLE`, etc.), so you can scan for the kind of work each query did without reading the full statement.
-- **Duration** &mdash; wall-clock time the query took. Shown as `-` for queries that haven't finished.
+- **Operation** &mdash; the leading SQL keyword (`CREATE TABLE`, `INSERT`, `MERGE`, `CREATE VIEW`, `ALTER TABLE`, `LOAD`, etc.), so you can scan the kind of work each job did without reading the full statement.
+- **Target** &mdash; the physical table the job wrote to, so you can tell which model (and which step) each row belongs to. This is how you follow a Python model whose steps are interleaved with SQL models, or attribute a `LOAD`/`INSERT`/`MERGE` to the right table. Shown as `-` for jobs with no destination (for example a standalone audit `SELECT`).
+- **Duration** &mdash; wall-clock time the job took. Shown as `-` for jobs that haven't finished.
 - **Bytes/Rows** &mdash; bytes processed if BigQuery reported them, otherwise rows affected, otherwise `-`.
 
-A failed query is followed by an indented line with the error message BigQuery returned, so you can see why it failed without opening the warehouse UI.
+A failed job is followed by an indented line with the error message BigQuery returned, so you can see why it failed without opening the warehouse UI.
+
+Because the rows are ordered by execution time, the steps of a **Python model** (its physical `CREATE TABLE`, the `LOAD` of its dataframe, and the `INSERT`/`MERGE` that publishes it) slot chronologically in between the SQL models' steps, and **hooks** &mdash; model pre/post-statements and environment `before_all`/`after_all` statements &mdash; appear as their own rows in position. Use the **Target** column to tell them apart.
 
 ## Exporting the SQL
 
@@ -110,7 +114,7 @@ The file is one statement per entry, in execution order, so it can be read top t
     ```
 
 - **Ingestion latency and retention.** BigQuery's job history views have some delay before a query appears and don't retain jobs forever, so a plan applied moments ago or a very old plan may show no rows.
-- **Labeled query jobs only.** SQLMesh labels the query jobs it runs, but some operations &mdash; like loading a seed model's dataframe into BigQuery &mdash; use a load job rather than a labeled query job, so they won't appear in the history.
+- **Signals and pure-Python logic aren't shown.** Signals are Python readiness checks that gate whether a model runs; they execute no SQL, so they don't appear as rows. Their effect shows up as an *absence* &mdash; a signal-blocked model simply has no `INSERT` for that interval. To inspect what a signal is holding back, use [`sqlmesh check_intervals`](../reference/cli.md#check_intervals), which reports pending intervals while respecting signals. Likewise, any purely in-memory work inside a Python model (API calls, dataframe transforms) runs no SQL and won't appear &mdash; only the jobs that touch the warehouse do.
 - **Plans only.** Scheduled `sqlmesh run` executions aren't included, only `sqlmesh plan` applications.
 
 ## See also

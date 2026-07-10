@@ -1397,7 +1397,9 @@ def test_query_history_builds_labels_filter_sql(
     executed_sql = executed_query.sql(dialect="bigquery")
     expected_sql = (
         "SELECT start_time, end_time, query, state, error_result.message AS error_message, "
-        "total_bytes_processed, job_id FROM `project`.`region-us-central1`.`INFORMATION_SCHEMA.JOBS` AS JOBS "
+        "total_bytes_processed, job_id, destination_table.dataset_id AS dest_dataset, "
+        "destination_table.table_id AS dest_table "
+        "FROM `project`.`region-us-central1`.`INFORMATION_SCHEMA.JOBS` AS JOBS "
         "WHERE EXISTS(SELECT 1 FROM UNNEST(labels) AS l WHERE l.key = 'sqlmesh_plan' AND l.value = 'abc123') "
         "ORDER BY COALESCE(start_time, creation_time)"
     )
@@ -1427,7 +1429,17 @@ def test_query_history_maps_job_status(
         adapter,
         "fetchall",
         return_value=[
-            (start_time, end_time, "SELECT 1", state, error_message, 1024, "job-1"),
+            (
+                start_time,
+                end_time,
+                "SELECT 1",
+                state,
+                error_message,
+                1024,
+                "job-1",
+                "sushi",
+                "orders__abc",
+            ),
         ],
     )
     mocker.patch.object(adapter, "get_current_catalog", return_value="project")
@@ -1445,6 +1457,33 @@ def test_query_history_maps_job_status(
     assert record.bytes_processed == 1024
     assert record.query_id == "job-1"
     assert record.sql == "SELECT 1"
+    assert record.target == "sushi.orders__abc"
+
+
+def test_query_history_captures_load_jobs_and_skips_anon(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    start_time = datetime(2024, 1, 1, 10, 0, 0)
+    end_time = datetime(2024, 1, 1, 10, 0, 3)
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    mocker.patch.object(
+        adapter,
+        "fetchall",
+        return_value=[
+            # load job: no SQL text, real destination -> becomes a LOAD row with a target
+            (start_time, end_time, None, "DONE", None, 4096, "job-load", "sushi", "seed_data__v1"),
+            # plain SELECT routed to an anonymous result table -> no target surfaced
+            (start_time, end_time, "SELECT 1", "DONE", None, 10, "job-anon", "_scratch", "anon9f8"),
+        ],
+    )
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", "us-central1")
+
+    records = adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+    assert records[0].sql == "LOAD INTO sushi.seed_data__v1"
+    assert records[0].target == "sushi.seed_data__v1"
+    assert records[1].target is None
 
 
 def test_query_history_forbidden_raises_permission_error(

@@ -316,6 +316,7 @@ class QueryHistoryRecord:
     rows: t.Optional[int] = None
     error: t.Optional[str] = None
     query_id: t.Optional[str] = None
+    target: t.Optional[str] = None  # physical table the statement wrote to, if any
 
 
 def set_catalog(override_mapping: t.Optional[t.Dict[str, CatalogSupport]] = None) -> t.Callable:

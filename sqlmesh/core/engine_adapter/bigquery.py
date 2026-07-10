@@ -132,6 +132,16 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             return bigframes.connect(context=options)
         return None
 
+    def _correlation_labels(self) -> t.Dict[str, str]:
+        """BigQuery job labels tagging a job with the current correlation id (keys must be lowercase).
+
+        Used for both query jobs (`_job_params`) and dataframe/seed load jobs so that everything
+        SQLMesh runs for a plan is discoverable via `query_history`.
+        """
+        if self.correlation_id:
+            return {self.correlation_id.job_type.value.lower(): self.correlation_id.job_id}
+        return {}
+
     @property
     def _job_params(self) -> t.Dict[str, t.Any]:
         from sqlmesh.core.config.connection import BigQueryPriority
@@ -146,10 +156,9 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             params["maximum_bytes_billed"] = self._extra_config.get("maximum_bytes_billed")
         if self._extra_config.get("reservation") is not None:
             params["reservation"] = self._extra_config.get("reservation")
-        if self.correlation_id:
-            # BigQuery label keys must be lowercase
-            key = self.correlation_id.job_type.value.lower()
-            params["labels"] = {key: self.correlation_id.job_id}
+        labels = self._correlation_labels()
+        if labels:
+            params["labels"] = labels
         return params
 
     @property
@@ -485,11 +494,12 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
     def query_history(self, correlation_id: CorrelationId) -> t.List[QueryHistoryRecord]:
         """Return the queries executed under `correlation_id` from BigQuery's INFORMATION_SCHEMA.JOBS.
 
-        Jobs are matched on the label SQLMesh attaches to every query it runs (see `_job_params`).
-        Reading project-wide job history requires the `bigquery.jobs.listAll` permission.
+        Jobs are matched on the label SQLMesh attaches to every job it runs (see `_correlation_labels`).
+        Both query jobs and dataframe/seed load jobs are captured. Reading project-wide job history
+        requires the `bigquery.jobs.listAll` permission.
 
-        Note: only labeled query jobs are captured. Dataframe/seed load jobs
-        (`load_table_from_dataframe`) are not labeled, so they do not appear here.
+        Note: signals (Python readiness checks) and pure-Python model logic execute no SQL, so they
+        do not appear here.
         """
         from google.api_core.exceptions import Forbidden
 
@@ -532,6 +542,8 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
                 exp.column("message", table="error_result").as_("error_message"),
                 exp.column("total_bytes_processed"),
                 exp.column("job_id"),
+                exp.column("dataset_id", table="destination_table").as_("dest_dataset"),
+                exp.column("table_id", table="destination_table").as_("dest_table"),
             )
             .from_(jobs_table)
             .where(label_match)
@@ -553,7 +565,30 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             ) from e
 
         records: t.List[QueryHistoryRecord] = []
-        for start_time, end_time, sql, state, error_message, total_bytes, job_id in rows:
+        for (
+            start_time,
+            end_time,
+            sql,
+            state,
+            error_message,
+            total_bytes,
+            job_id,
+            dest_dataset,
+            dest_table,
+        ) in rows:
+            # BigQuery routes SELECTs to anonymous result tables (dataset "_...", table "anon...");
+            # only surface a real destination the statement actually wrote to.
+            target = None
+            if (
+                dest_table
+                and dest_dataset
+                and not dest_dataset.startswith("_")
+                and not dest_table.startswith("anon")
+            ):
+                target = f"{dest_dataset}.{dest_table}"
+            if not sql:
+                # Load jobs (dataframe/seed loads) carry no SQL text.
+                sql = f"LOAD INTO {target}" if target else "LOAD"
             if error_message:
                 status = "failed"
             elif state in ("RUNNING", "PENDING"):
@@ -574,6 +609,7 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
                     bytes_processed=int(total_bytes) if total_bytes is not None else None,
                     error=error_message,
                     query_id=job_id,
+                    target=target,
                 )
             )
         return records
@@ -690,6 +726,10 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
         from google.cloud import bigquery
 
         job_config = bigquery.job.LoadJobConfig(schema=self.__get_bq_schema(columns_to_types))
+        labels = self._correlation_labels()
+        if labels:
+            # Label load jobs too, so Python-model dataframe loads and seeds show up in query_history.
+            job_config.labels = labels
         if replace:
             job_config.write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
         logger.info(f"Loading dataframe to BigQuery. Table Path: {table.path}")

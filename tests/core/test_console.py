@@ -11,10 +11,10 @@ from sqlmesh.core.environment import Environment
 from sqlmesh.utils.errors import SQLMeshError
 
 
-def _create_test_console() -> t.Tuple[StringIO, TerminalConsole]:
+def _create_test_console(width: t.Optional[int] = None) -> t.Tuple[StringIO, TerminalConsole]:
     """Creates a console and buffer for validating console output."""
     console_output = StringIO()
-    console = RichConsole(file=console_output, force_terminal=True)
+    console = RichConsole(file=console_output, force_terminal=True, width=width)
     return console_output, TerminalConsole(console=console)
 
 
@@ -149,7 +149,7 @@ def test_markdown_console_error_block():
 
 
 def test_show_history():
-    output, console = _create_test_console()
+    output, console = _create_test_console(width=200)
     plan_id = "plan-id-123"
     records = [
         QueryHistoryRecord(
@@ -158,12 +158,14 @@ def test_show_history():
             status="success",
             duration_ms=1500,
             bytes_processed=2048,
+            target="sushi.orders__2837",
         ),
         QueryHistoryRecord(
             started_at=datetime(2024, 1, 1, 10, 0, 5),
             sql="INSERT INTO foo VALUES (1)",
             status="failed",
             error="Column mismatch",
+            target="sushi.items__9f01",
         ),
         QueryHistoryRecord(
             started_at=None,
@@ -182,6 +184,9 @@ def test_show_history():
     assert "MERGE" in printed
     assert "Column mismatch" in printed
     assert "re-run with" in printed
+    # target column attributes each step to its physical table
+    assert "Target" in printed
+    assert "sushi.orders__2837" in printed
 
 
 def test_show_history_empty():

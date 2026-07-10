@@ -960,6 +960,7 @@ _SQL_OPERATION_KEYWORDS = (
     "ALTER",
     "DROP",
     "SELECT",
+    "LOAD",
 )
 
 
@@ -2840,6 +2841,7 @@ class TerminalConsole(Console):
         table.add_column("Time", no_wrap=True)
         table.add_column("Status", no_wrap=True)
         table.add_column("Operation", no_wrap=True)
+        table.add_column("Target")
         table.add_column("Duration", justify="right", no_wrap=True)
         table.add_column("Bytes/Rows", justify="right", no_wrap=True)
 
@@ -2856,11 +2858,12 @@ class TerminalConsole(Console):
                 started,
                 glyph.get(record.status, record.status),
                 _sql_operation(record.sql),
+                record.target or "-",
                 duration,
                 size,
             )
             if record.error:
-                table.add_row("", "", f"[red]{record.error}[/red]", "", "")
+                table.add_row("", "", f"[red]{record.error}[/red]", "", "", "")
 
         self._print(table)
         if failed:
