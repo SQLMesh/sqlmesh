@@ -251,6 +251,27 @@ Options:
   --help                      Show this message and exit.
 ```
 
+## history
+
+```
+Usage: sqlmesh history [OPTIONS] [PLAN_ID]
+
+  Show the query engine history of everything SQLMesh ran for a plan.
+
+  Scheduled `sqlmesh run` executions are not included; only plans are shown.
+
+Options:
+  --environment, --env TEXT  Restrict the plan menu to this environment.
+  -o, --output-file FILE     Export the executed SQL to a file instead of
+                             printing.
+  --help                     Show this message and exit.
+```
+
+`history` is a read-only debugging command: it doesn't touch your state or your data, it only reads the query engine's own query history for the queries SQLMesh ran under a plan. See the [plan history guide](../guides/history.md) for a walkthrough with example output, or `sqlmesh history --help` for the full option list above.
+
+!!! note
+    Only available for BigQuery in this version. Other engines print a message that they're not yet supported.
+
 ## info
 
 ```

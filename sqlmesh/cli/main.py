@@ -33,6 +33,7 @@ SKIP_LOAD_COMMANDS = (
     "create_external_models",
     "destroy",
     "environments",
+    "history",
     "invalidate",
     "janitor",
     "migrate",
@@ -1185,6 +1186,35 @@ def dlt_refresh(
 def environments(obj: Context) -> None:
     """Prints the list of SQLMesh environments with its expiry datetime."""
     obj.print_environment_names()
+
+
+@cli.command("history")
+@click.argument("plan_id", required=False)
+@click.option(
+    "--environment",
+    "--env",
+    help="Restrict the plan menu to this environment.",
+)
+@click.option(
+    "-o",
+    "--output-file",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    help="Export the executed SQL to a file instead of printing.",
+)
+@click.pass_obj
+@error_handler
+@cli_analytics
+def history(
+    obj: Context,
+    plan_id: t.Optional[str],
+    environment: t.Optional[str],
+    output_file: t.Optional[Path],
+) -> None:
+    """Show the query engine history of everything SQLMesh ran for a plan.
+
+    Scheduled `sqlmesh run` executions are not included; only plans are shown.
+    """
+    obj.plan_history(plan_id=plan_id, environment=environment, output_file=output_file)
 
 
 @cli.command("lint")

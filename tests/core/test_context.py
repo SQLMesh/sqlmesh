@@ -35,6 +35,7 @@ from sqlmesh.core.context import Context
 from sqlmesh.core.console import create_console, get_console
 from sqlmesh.core.dialect import parse, schema_
 from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+from sqlmesh.core.engine_adapter.shared import QueryHistoryRecord
 from sqlmesh.core.environment import Environment, EnvironmentNamingInfo, EnvironmentStatements
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
@@ -469,12 +470,12 @@ def test_multi_gateway_catalog_aware_and_unsupported(tmp_path: Path, mocker):
 
     # Both models must have 3-level FQNs so MappingSchema nesting is uniform.
     # count(".") == 2 means 3 parts (catalog.db.table), i.e. a 3-level FQN.
-    assert duckdb_model.fqn.count(".") == 2, (
-        f"Expected 3-level FQN for duckdb model, got: {duckdb_model.fqn}"
-    )
-    assert ch_model.fqn.count(".") == 2, (
-        f"Expected 3-level FQN for ch model, got: {ch_model.fqn}"
-    )  # 3 parts = 2 dots
+    assert (
+        duckdb_model.fqn.count(".") == 2
+    ), f"Expected 3-level FQN for duckdb model, got: {duckdb_model.fqn}"
+    assert (
+        ch_model.fqn.count(".") == 2
+    ), f"Expected 3-level FQN for ch model, got: {ch_model.fqn}"  # 3 parts = 2 dots
 
     # Both models loaded into the same MappingSchema must not raise a nesting SchemaError.
     from sqlglot.schema import MappingSchema
@@ -633,12 +634,12 @@ def test_multi_gateway_virtual_catalog_create_schema_strips_prefix(tmp_path: Pat
 
     # Both models must have 3-level FQNs (catalog.db.table → 2 dots) so MappingSchema nesting
     # is uniform and does not raise a SchemaError.
-    assert ch_model.fqn.count(".") == 2, (
-        f"Expected 3-level FQN for ClickHouse model, got: {ch_model.fqn}"
-    )
-    assert duckdb_model.fqn.count(".") == 2, (
-        f"Expected 3-level FQN for DuckDB model, got: {duckdb_model.fqn}"
-    )
+    assert (
+        ch_model.fqn.count(".") == 2
+    ), f"Expected 3-level FQN for ClickHouse model, got: {ch_model.fqn}"
+    assert (
+        duckdb_model.fqn.count(".") == 2
+    ), f"Expected 3-level FQN for DuckDB model, got: {duckdb_model.fqn}"
 
     from sqlglot.schema import MappingSchema
 
@@ -672,9 +673,9 @@ def test_multi_gateway_virtual_catalog_create_schema_strips_prefix(tmp_path: Pat
     assert len(create_schema_calls) == 1, "Expected exactly one _create_schema call"
     passed_schema = create_schema_calls[0]
     # The virtual catalog prefix must NOT appear in the SQL sent to the wire.
-    assert "__clickhouse_gw__" not in passed_schema, (
-        f"Virtual catalog prefix should be stripped before reaching _create_schema, got: {passed_schema!r}"
-    )
+    assert (
+        "__clickhouse_gw__" not in passed_schema
+    ), f"Virtual catalog prefix should be stripped before reaching _create_schema, got: {passed_schema!r}"
 
 
 @pytest.mark.fast
@@ -3004,6 +3005,72 @@ def test_check_intervals(sushi_context, mocker):
     assert tuple(intervals.values())[0].intervals
 
 
+def test_plan_history_environment_not_found(sushi_context):
+    with pytest.raises(SQLMeshError, match="Environment 'dev' was not found"):
+        sushi_context.plan_history(environment="dev")
+
+
+def test_plan_history_with_explicit_plan_id(sushi_context, mocker):
+    prod_env = sushi_context.state_reader.get_environment("prod")
+    records = [QueryHistoryRecord(started_at=None, sql="SELECT 1", status="success")]
+    query_history_mock = mocker.patch.object(
+        sushi_context.engine_adapter, "query_history", return_value=records
+    )
+    show_history_mock = mocker.patch.object(sushi_context.console, "show_history")
+
+    sushi_context.plan_history(plan_id=prod_env.plan_id)
+
+    query_history_mock.assert_called_once()
+    assert query_history_mock.call_args[0][0].job_id == prod_env.plan_id
+    show_history_mock.assert_called_once_with(records, prod_env.plan_id, prod_env)
+
+
+def test_plan_history_prompts_when_plan_id_missing(sushi_context, mocker):
+    prod_env = sushi_context.state_reader.get_environment("prod")
+    mocker.patch.object(sushi_context.engine_adapter, "query_history", return_value=[])
+    select_plan_mock = mocker.patch.object(
+        sushi_context.console, "select_plan", return_value=(prod_env.plan_id, prod_env)
+    )
+    show_history_mock = mocker.patch.object(sushi_context.console, "show_history")
+
+    sushi_context.plan_history()
+
+    select_plan_mock.assert_called_once()
+    show_history_mock.assert_called_once_with([], prod_env.plan_id, prod_env)
+
+
+def test_plan_history_output_file(sushi_context, mocker, tmp_path):
+    prod_env = sushi_context.state_reader.get_environment("prod")
+    records = [
+        QueryHistoryRecord(
+            started_at=datetime(2024, 1, 1, 10, 0, 0),
+            sql="SELECT 1;",
+            status="success",
+            duration_ms=10,
+        ),
+        QueryHistoryRecord(started_at=None, sql="SELECT 2", status="failed", error="boom"),
+    ]
+    mocker.patch.object(sushi_context.engine_adapter, "query_history", return_value=records)
+    log_success_mock = mocker.patch.object(sushi_context.console, "log_success")
+
+    output_file = tmp_path / "history.sql"
+    sushi_context.plan_history(plan_id=prod_env.plan_id, output_file=output_file)
+
+    content = output_file.read_text()
+    assert "SELECT 1;" in content
+    assert "SELECT 2;" in content
+    assert "boom" in content
+    log_success_mock.assert_called_once()
+
+
+def test_plan_history_not_supported_by_engine(sushi_context):
+    prod_env = sushi_context.state_reader.get_environment("prod")
+    with pytest.raises(
+        SQLMeshError, match="Query history is not supported for the 'duckdb' engine."
+    ):
+        sushi_context.plan_history(plan_id=prod_env.plan_id)
+
+
 def test_audit():
     context = Context(config=Config())
 
@@ -3696,9 +3763,9 @@ SELECT * FROM test_db.uppercase_gateway_table;
         for model in context_uppercase.models.values()
         if model.name == "test_db.uppercase_gateway_table"
     ]
-    assert len(gateway_specific_models) == 1, (
-        f"External model with lowercase gateway name should be found with uppercase gateway. Found {len(gateway_specific_models)} models"
-    )
+    assert (
+        len(gateway_specific_models) == 1
+    ), f"External model with lowercase gateway name should be found with uppercase gateway. Found {len(gateway_specific_models)} models"
 
     # Verify external model without gateway is also found
     no_gateway_models = [
@@ -3706,9 +3773,9 @@ SELECT * FROM test_db.uppercase_gateway_table;
         for model in context_uppercase.models.values()
         if model.name == "test_db.no_gateway_table"
     ]
-    assert len(no_gateway_models) == 1, (
-        f"External model without gateway should be found. Found {len(no_gateway_models)} models"
-    )
+    assert (
+        len(no_gateway_models) == 1
+    ), f"External model without gateway should be found. Found {len(no_gateway_models)} models"
 
     # Check that the column types are properly loaded (not UNKNOWN)
     external_model = gateway_specific_models[0]
@@ -3729,9 +3796,9 @@ SELECT * FROM test_db.uppercase_gateway_table;
         if model.name == "test_db.uppercase_gateway_table"
     ]
     # This should work but might fail if case sensitivity is not handled correctly
-    assert len(gateway_specific_models_mixed) == 1, (
-        f"External model should be found regardless of gateway parameter case. Found {len(gateway_specific_models_mixed)} models"
-    )
+    assert (
+        len(gateway_specific_models_mixed) == 1
+    ), f"External model should be found regardless of gateway parameter case. Found {len(gateway_specific_models_mixed)} models"
 
     # Test a case that should demonstrate the potential issue:
     # Create another external model file with uppercase gateway name in the YAML
@@ -3765,9 +3832,9 @@ SELECT * FROM test_db.uppercase_gateway_table;
         for model in context_reloaded.models.values()
         if model.name == "test_db.uppercase_in_yaml"
     ]
-    assert len(uppercase_in_yaml_models) == 1, (
-        f"External model with uppercase gateway in YAML should be found. Found {len(uppercase_in_yaml_models)} models"
-    )
+    assert (
+        len(uppercase_in_yaml_models) == 1
+    ), f"External model with uppercase gateway in YAML should be found. Found {len(uppercase_in_yaml_models)} models"
 
 
 def test_plan_no_start_configured():

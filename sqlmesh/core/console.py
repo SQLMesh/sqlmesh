@@ -49,6 +49,7 @@ from sqlmesh.utils.date import time_like_to_str, to_date, yesterday_ds, to_ds, m
 from sqlmesh.utils.errors import (
     PythonModelEvalError,
     NodeAuditsErrors,
+    SQLMeshError,
     format_destructive_change_msg,
     format_additive_change_msg,
 )
@@ -64,6 +65,8 @@ if t.TYPE_CHECKING:
     from sqlmesh.core.table_diff import TableDiff, RowDiff, SchemaDiff
     from sqlmesh.core.config.connection import ConnectionConfig
     from sqlmesh.core.state_sync import Versions
+    from sqlmesh.core.engine_adapter.shared import QueryHistoryRecord
+    from sqlmesh.core.environment import Environment
 
     LayoutWidget = t.TypeVar("LayoutWidget", bound=t.Union[widgets.VBox, widgets.HBox])
 
@@ -226,6 +229,19 @@ class EnvironmentsConsole(abc.ABC):
     @abc.abstractmethod
     def show_intervals(self, snapshot_intervals: t.Dict[Snapshot, SnapshotIntervals]) -> None:
         """Show ready intervals"""
+
+    @abc.abstractmethod
+    def select_plan(self, environments: t.List[Environment]) -> t.Tuple[str, Environment]:
+        """Prompts the user to select a plan to inspect from the given environments."""
+
+    @abc.abstractmethod
+    def show_history(
+        self,
+        records: t.List[QueryHistoryRecord],
+        plan_id: str,
+        environment: t.Optional[Environment] = None,
+    ) -> None:
+        """Show the query engine's history of everything SQLMesh ran for a plan."""
 
 
 class DifferenceConsole(abc.ABC):
@@ -879,6 +895,19 @@ class NoopConsole(Console):
     def show_intervals(self, snapshot_intervals: t.Dict[Snapshot, SnapshotIntervals]) -> None:
         pass
 
+    def select_plan(self, environments: t.List[Environment]) -> t.Tuple[str, Environment]:
+        raise SQLMeshError(
+            "Cannot select a plan interactively with this console; pass plan_id explicitly."
+        )
+
+    def show_history(
+        self,
+        records: t.List[QueryHistoryRecord],
+        plan_id: str,
+        environment: t.Optional[Environment] = None,
+    ) -> None:
+        pass
+
     def show_linter_violations(
         self, violations: t.List[RuleViolation], model: Model, is_error: bool = False
     ) -> None:
@@ -916,6 +945,40 @@ def make_progress_bar(
         TimeElapsedColumn(),
         console=console,
     )
+
+
+_SQL_OPERATION_KEYWORDS = (
+    "CREATE OR REPLACE TABLE",
+    "CREATE OR REPLACE VIEW",
+    "CREATE TABLE",
+    "CREATE VIEW",
+    "CREATE SCHEMA",
+    "INSERT",
+    "MERGE",
+    "UPDATE",
+    "DELETE",
+    "ALTER",
+    "DROP",
+    "SELECT",
+)
+
+
+def _sql_operation(sql: str) -> str:
+    """Best-effort extraction of the leading SQL keyword(s) for display, e.g. "CREATE TABLE".
+
+    Strips SQLMesh's leading correlation id comment first. This is a simple prefix match, not a
+    real SQL parser - good enough for a debugging table, not for anything that needs to be exact.
+    """
+    text = " ".join(sql.strip().split())
+    if text.startswith("/*"):
+        end = text.find("*/")
+        if end != -1:
+            text = text[end + 2 :].strip()
+    upper = text.upper()
+    for keyword in _SQL_OPERATION_KEYWORDS:
+        if upper.startswith(keyword):
+            return keyword
+    return upper.split(" ", 1)[0] if upper else "UNKNOWN"
 
 
 class TerminalConsole(Console):
@@ -2721,6 +2784,89 @@ class TerminalConsole(Console):
 
         if incomplete.children:
             self._print(incomplete)
+
+    def select_plan(self, environments: t.List[Environment]) -> t.Tuple[str, Environment]:
+        if not environments:
+            raise SQLMeshError("No environments found in state to inspect.")
+
+        ordered = sorted(environments, key=lambda e: e.finalized_ts or 0, reverse=True)
+
+        labels = []
+        for env in ordered:
+            applied = time_like_to_str(env.finalized_ts) if env.finalized_ts else "in progress"
+            labels.append(
+                f"{env.name}  plan {env.plan_id[:8]}  applied {applied}  "
+                f"({len(env.snapshots)} models)"
+            )
+
+        response = self._prompt(
+            "\n".join([f"[{i + 1}] {label}" for i, label in enumerate(labels)]),
+            show_choices=False,
+            choices=[f"{i + 1}" for i in range(len(ordered))],
+        )
+        chosen = ordered[int(response) - 1]
+        return chosen.plan_id, chosen
+
+    def show_history(
+        self,
+        records: t.List[QueryHistoryRecord],
+        plan_id: str,
+        environment: t.Optional[Environment] = None,
+    ) -> None:
+        succeeded = sum(1 for r in records if r.status == "success")
+        failed = sum(1 for r in records if r.status == "failed")
+        running = sum(1 for r in records if r.status == "running")
+
+        env_label = f" · {environment.name}" if environment is not None else ""
+        header = (
+            f"[b]History · plan {plan_id[:8]}{env_label}[/b] · "
+            f"{len(records)} queries · {succeeded} ✓  {failed} ✗  {running} running"
+        )
+
+        if not records:
+            self.log_status_update(
+                f"{header}\n[yellow]No queries found for this plan in the engine's history "
+                "(the plan id may be incorrect, it may have aged out of the history window, "
+                "or nothing ran).[/yellow]"
+            )
+            return
+
+        glyph = {
+            "success": "[green]✓[/green]",
+            "failed": "[red]✗[/red]",
+            "running": "[yellow]…[/yellow]",
+        }
+        table = Table(title=header)
+        table.add_column("Time", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Operation", no_wrap=True)
+        table.add_column("Duration", justify="right", no_wrap=True)
+        table.add_column("Bytes/Rows", justify="right", no_wrap=True)
+
+        for record in records:
+            started = record.started_at.strftime("%H:%M:%S") if record.started_at else "-"
+            duration = f"{record.duration_ms} ms" if record.duration_ms is not None else "-"
+            if record.bytes_processed is not None:
+                size = f"{record.bytes_processed:,} bytes"
+            elif record.rows is not None:
+                size = f"{record.rows:,} rows"
+            else:
+                size = "-"
+            table.add_row(
+                started,
+                glyph.get(record.status, record.status),
+                _sql_operation(record.sql),
+                duration,
+                size,
+            )
+            if record.error:
+                table.add_row("", "", f"[red]{record.error}[/red]", "", "")
+
+        self._print(table)
+        if failed:
+            self.log_status_update(
+                f"[red]{failed} failed[/red] · re-run with `-o failures.sql` to export the SQL."
+            )
 
     def print_connection_config(self, config: ConnectionConfig, title: str = "Connection") -> None:
         tree = Tree(f"[b]{title}:[/b]")

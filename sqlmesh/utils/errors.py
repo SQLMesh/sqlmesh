@@ -190,6 +190,27 @@ class EngineAdapterError(SQLMeshError):
     pass
 
 
+class QueryHistoryPermissionError(EngineAdapterError):
+    def __init__(
+        self,
+        message: str,
+        remediation: t.Optional[str] = None,
+        docs_url: t.Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.remediation = remediation
+        self.docs_url = docs_url
+
+    def __str__(self) -> str:
+        # The CLI only surfaces str(exc), so fold the remediation and docs into the message.
+        parts = [super().__str__()]
+        if self.remediation:
+            parts.append(f"\n\nTo grant access, run:\n  {self.remediation}")
+        if self.docs_url:
+            parts.append(f"\n\nDocs: {self.docs_url}")
+        return "".join(parts)
+
+
 class UnsupportedCatalogOperationError(EngineAdapterError):
     pass
 

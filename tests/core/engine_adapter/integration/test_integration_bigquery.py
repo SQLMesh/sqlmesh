@@ -469,3 +469,38 @@ def test_correlation_id_in_job_labels(ctx: TestContext):
     labels = adapter._job_params.get("labels")
     correlation_id = CorrelationId.from_plan_id(plan.plan_id)
     assert labels == {correlation_id.job_type.value.lower(): correlation_id.job_id}
+
+
+def test_query_history(ctx: TestContext):
+    from sqlmesh.utils.errors import QueryHistoryPermissionError
+
+    model_name = ctx.table("test")
+
+    sqlmesh = ctx.create_context()
+    sqlmesh.upsert_model(
+        load_sql_based_model(d.parse(f"MODEL (name {model_name}, kind FULL); SELECT 1 AS col"))
+    )
+
+    plan_evaluator = BuiltInPlanEvaluator(
+        sqlmesh.state_sync,
+        sqlmesh.snapshot_evaluator,
+        sqlmesh.create_scheduler,
+        sqlmesh.default_catalog,
+    )
+    plan: Plan = sqlmesh.plan_builder("prod", skip_tests=True).build()
+    plan_evaluator.evaluate(plan.to_evaluatable())
+    adapter = t.cast(BigQueryEngineAdapter, plan_evaluator.snapshot_evaluator.adapter)
+
+    correlation_id = CorrelationId.from_plan_id(plan.plan_id)
+    try:
+        # Exercises region resolution, the INFORMATION_SCHEMA.JOBS query, and read permissions
+        # against a real project. Empty-tolerant: JOBS has ingestion latency, so the jobs from the
+        # plan we just evaluated may not be queryable yet.
+        records = adapter.query_history(correlation_id)
+    except QueryHistoryPermissionError as e:
+        pytest.skip(f"Service account lacks BigQuery job-history access: {e}")
+
+    assert isinstance(records, list)
+    for record in records:
+        assert record.status in ("success", "failed", "running")
+        assert record.sql

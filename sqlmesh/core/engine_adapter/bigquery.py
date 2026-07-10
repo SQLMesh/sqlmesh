@@ -19,15 +19,16 @@ from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
     DataObject,
     DataObjectType,
+    QueryHistoryRecord,
     SourceQuery,
     set_catalog,
     InsertOverwriteStrategy,
 )
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.schema_diff import TableAlterOperation, NestedSupport
-from sqlmesh.utils import optional_import, get_source_columns_to_types
+from sqlmesh.utils import optional_import, get_source_columns_to_types, CorrelationId
 from sqlmesh.utils.date import to_datetime
-from sqlmesh.utils.errors import SQLMeshError
+from sqlmesh.utils.errors import SQLMeshError, QueryHistoryPermissionError
 from sqlmesh.utils.pandas import columns_to_types_from_dtypes
 
 if t.TYPE_CHECKING:
@@ -74,6 +75,7 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
     MAX_TABLE_COMMENT_LENGTH = 1024
     MAX_COLUMN_COMMENT_LENGTH = 1024
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
+    SUPPORTS_QUERY_HISTORY = True
     SUPPORTED_DROP_CASCADE_OBJECT_KINDS = ["SCHEMA"]
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.MERGE
 
@@ -469,6 +471,112 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             quote_identifiers=quote_identifiers,
         )
         return list(self._query_data)
+
+    def _query_history_location(self, project: str) -> t.Optional[str]:
+        """Best-effort BigQuery region for INFORMATION_SCHEMA.JOBS: the connection's configured
+        location, falling back to the location of the first dataset in the project."""
+        if self.client.location:
+            return self.client.location
+        datasets = list(self._db_call(self.client.list_datasets, project=project, max_results=1))
+        if datasets:
+            return self._get_bq_dataset_location(project, datasets[0].dataset_id)
+        return None
+
+    def query_history(self, correlation_id: CorrelationId) -> t.List[QueryHistoryRecord]:
+        """Return the queries executed under `correlation_id` from BigQuery's INFORMATION_SCHEMA.JOBS.
+
+        Jobs are matched on the label SQLMesh attaches to every query it runs (see `_job_params`).
+        Reading project-wide job history requires the `bigquery.jobs.listAll` permission.
+
+        Note: only labeled query jobs are captured. Dataframe/seed load jobs
+        (`load_table_from_dataframe`) are not labeled, so they do not appear here.
+        """
+        from google.api_core.exceptions import Forbidden
+
+        project = self.get_current_catalog()
+        location = self._query_history_location(project) if project else None
+        if not project or not location:
+            raise SQLMeshError(
+                "Cannot read BigQuery query history: could not determine the project or its "
+                "region. Set the 'location' field on the BigQuery gateway connection and retry."
+            )
+
+        # https://cloud.google.com/bigquery/docs/information-schema-jobs
+        jobs_table = exp.to_table(
+            f"`{project}`.`region-{location.lower()}`.INFORMATION_SCHEMA.JOBS",
+            dialect=self.dialect,
+        )
+        # BigQuery label keys must be lowercase, matching how `_job_params` sets them.
+        label_key = correlation_id.job_type.value.lower()
+        label_match = exp.Exists(
+            this=exp.select(exp.Literal.number(1))
+            .from_(
+                exp.Unnest(
+                    expressions=[exp.column("labels")],
+                    alias=exp.TableAlias(columns=[exp.to_identifier("l")]),
+                )
+            )
+            .where(
+                exp.and_(
+                    exp.column("key", table="l").eq(exp.Literal.string(label_key)),
+                    exp.column("value", table="l").eq(exp.Literal.string(correlation_id.job_id)),
+                )
+            )
+        )
+        query = (
+            exp.select(
+                exp.column("start_time"),
+                exp.column("end_time"),
+                exp.column("query"),
+                exp.column("state"),
+                exp.column("message", table="error_result").as_("error_message"),
+                exp.column("total_bytes_processed"),
+                exp.column("job_id"),
+            )
+            .from_(jobs_table)
+            .where(label_match)
+            # COALESCE so queued jobs (NULL start_time) sort chronologically, not first.
+            .order_by(exp.func("COALESCE", exp.column("start_time"), exp.column("creation_time")))
+        )
+
+        try:
+            rows = self.fetchall(query)
+        except Forbidden as e:
+            raise QueryHistoryPermissionError(
+                f"Permission denied reading BigQuery job history for project '{project}'. "
+                "Reading all jobs in the project requires the 'bigquery.jobs.listAll' permission.",
+                remediation=(
+                    f"gcloud projects add-iam-policy-binding {project} "
+                    "--member='user:YOUR_EMAIL' --role='roles/bigquery.resourceViewer'"
+                ),
+                docs_url="https://cloud.google.com/bigquery/docs/information-schema-jobs#required_permissions",
+            ) from e
+
+        records: t.List[QueryHistoryRecord] = []
+        for start_time, end_time, sql, state, error_message, total_bytes, job_id in rows:
+            if error_message:
+                status = "failed"
+            elif state in ("RUNNING", "PENDING"):
+                status = "running"
+            else:
+                status = "success"
+            duration_ms = (
+                int((end_time - start_time).total_seconds() * 1000)
+                if start_time and end_time
+                else None
+            )
+            records.append(
+                QueryHistoryRecord(
+                    started_at=start_time,
+                    sql=sql,
+                    status=status,
+                    duration_ms=duration_ms,
+                    bytes_processed=int(total_bytes) if total_bytes is not None else None,
+                    error=error_message,
+                    query_id=job_id,
+                )
+            )
+        return records
 
     def _split_alter_expressions(
         self,

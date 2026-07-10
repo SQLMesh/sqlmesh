@@ -35,6 +35,7 @@ from sqlmesh.core.engine_adapter.shared import (
     DataObjectType,
     EngineRunMode,
     InsertOverwriteStrategy,
+    QueryHistoryRecord,
     SourceQuery,
     set_catalog,
 )
@@ -122,6 +123,7 @@ class EngineAdapter:
     MAX_IDENTIFIER_LENGTH: t.Optional[int] = None
     ATTACH_CORRELATION_ID = True
     SUPPORTS_QUERY_EXECUTION_TRACKING = False
+    SUPPORTS_QUERY_HISTORY = False
     SUPPORTS_METADATA_TABLE_LAST_MODIFIED_TS = False
     RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES: t.FrozenSet[str] = frozenset()
     """Physical property keys whose values may contain logical model references that
@@ -2634,6 +2636,13 @@ class EngineAdapter:
         if self.ATTACH_CORRELATION_ID and self.correlation_id:
             return f"/* {self.correlation_id} */ {sql}"
         return sql
+
+    def query_history(self, correlation_id: CorrelationId) -> t.List[QueryHistoryRecord]:
+        """Return the queries executed under the given correlation id from the engine's history.
+
+        Only supported on engines that expose a queryable query history (SUPPORTS_QUERY_HISTORY).
+        """
+        raise SQLMeshError(f"Query history is not supported for the '{self.dialect}' engine.")
 
     def _log_sql(
         self,

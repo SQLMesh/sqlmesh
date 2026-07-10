@@ -1,4 +1,21 @@
-from sqlmesh.core.console import MarkdownConsole
+import typing as t
+from datetime import datetime
+from io import StringIO
+
+import pytest
+from rich.console import Console as RichConsole
+
+from sqlmesh.core.console import MarkdownConsole, TerminalConsole
+from sqlmesh.core.engine_adapter.shared import QueryHistoryRecord
+from sqlmesh.core.environment import Environment
+from sqlmesh.utils.errors import SQLMeshError
+
+
+def _create_test_console() -> t.Tuple[StringIO, TerminalConsole]:
+    """Creates a console and buffer for validating console output."""
+    console_output = StringIO()
+    console = RichConsole(file=console_output, force_terminal=True)
+    return console_output, TerminalConsole(console=console)
 
 
 def test_markdown_console_warning_block():
@@ -129,3 +146,67 @@ def test_markdown_console_error_block():
     )
 
     assert console.consume_captured_errors() == ""
+
+
+def test_show_history():
+    output, console = _create_test_console()
+    plan_id = "plan-id-123"
+    records = [
+        QueryHistoryRecord(
+            started_at=datetime(2024, 1, 1, 10, 0, 0),
+            sql="CREATE TABLE foo AS SELECT 1",
+            status="success",
+            duration_ms=1500,
+            bytes_processed=2048,
+        ),
+        QueryHistoryRecord(
+            started_at=datetime(2024, 1, 1, 10, 0, 5),
+            sql="INSERT INTO foo VALUES (1)",
+            status="failed",
+            error="Column mismatch",
+        ),
+        QueryHistoryRecord(
+            started_at=None,
+            sql="MERGE INTO foo USING bar ON foo.id = bar.id",
+            status="running",
+        ),
+    ]
+
+    console.show_history(records, plan_id, environment=None)
+
+    printed = output.getvalue()
+    assert plan_id[:8] in printed
+    assert "3 queries" in printed
+    assert "CREATE TABLE" in printed
+    assert "INSERT" in printed
+    assert "MERGE" in printed
+    assert "Column mismatch" in printed
+    assert "re-run with" in printed
+
+
+def test_show_history_empty():
+    output, console = _create_test_console()
+    console.show_history([], "plan-id-123", environment=None)
+    assert "No queries found" in output.getvalue()
+    # hints that a wrong plan id is a possible cause (debugging aid)
+    assert "incorrect" in output.getvalue()
+
+
+def test_select_plan(mocker):
+    _, console = _create_test_console()
+    environments = [
+        Environment(name="dev", start_at="2023-01-01", plan_id="plan-a", snapshots=[]),
+        Environment(name="prod", start_at="2023-01-01", plan_id="plan-b", snapshots=[]),
+    ]
+    mocker.patch.object(console, "_prompt", return_value="2")
+
+    plan_id, env = console.select_plan(environments)
+
+    assert plan_id == "plan-b"
+    assert env is environments[1]
+
+
+def test_select_plan_empty_raises():
+    _, console = _create_test_console()
+    with pytest.raises(SQLMeshError, match="No environments found"):
+        console.select_plan([])
