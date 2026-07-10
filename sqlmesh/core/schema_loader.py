@@ -45,7 +45,7 @@ def create_external_models_file(
     external_model_fqns = set()
 
     for fqn, model in models.items():
-        if model.kind.is_external:
+        if model.kind.is_external and getattr(model, "_path", None) == path:
             external_model_fqns.add(fqn)
         for dep in model.depends_on:
             if dep not in known_models:
