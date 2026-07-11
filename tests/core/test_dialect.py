@@ -814,6 +814,149 @@ def test_sqlglot_extended_correctly(dialect: str) -> None:
     assert ast.sql(dialect=dialect) == "MODEL (\nname foo\n)"
 
 
+def test_format_model_expressions_clustered_by():
+    # Unquoted AUTO / NONE → formatted without backticks or parens
+    for keyword in ("AUTO", "NONE"):
+        assert format_model_expressions(
+            parse(
+                f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by {keyword}
+            );
+            SELECT 1 AS a
+            """
+            )
+        ) == (
+            f"MODEL (\n"
+            f"  name db.test,\n"
+            f"  kind FULL,\n"
+            f"  dialect databricks,\n"
+            f"  clustered_by {keyword}\n"
+            f");\n\nSELECT\n  1 AS a"
+        )
+
+    # Backtick-quoted `auto` / `none` → treated as a column, rendered quoted
+    for name in ("auto", "none"):
+        assert format_model_expressions(
+            parse(
+                f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by `{name}`
+            );
+            SELECT 1 AS `{name}`
+            """
+            )
+        ) == (
+            f"MODEL (\n"
+            f"  name db.test,\n"
+            f"  kind FULL,\n"
+            f"  dialect databricks,\n"
+            f'  clustered_by "{name}"\n'
+            f');\n\nSELECT\n  1 AS "{name}"'
+        )
+
+    # Parens-wrapped (auto) → treated as a column, parens stripped for single column
+    # (same normalisation as partitioned_by (a) → a); quoting happens at model-load time
+    assert format_model_expressions(
+        parse(
+            """
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (auto)
+        );
+        SELECT 1 AS auto
+        """
+        )
+    ) == (
+        "MODEL (\n"
+        "  name db.test,\n"
+        "  kind FULL,\n"
+        "  dialect databricks,\n"
+        "  clustered_by auto\n"
+        ");\n\nSELECT\n  1 AS auto"
+    )
+
+    # Multi-column → parens preserved, identifiers as-written
+    # (quoting happens when the model is loaded, not at format time)
+    assert format_model_expressions(
+        parse(
+            """
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (a, b)
+        );
+        SELECT 1 AS a, 2 AS b
+        """
+        )
+    ) == (
+        "MODEL (\n"
+        "  name db.test,\n"
+        "  kind FULL,\n"
+        "  dialect databricks,\n"
+        "  clustered_by (a, b)\n"
+        ");\n\nSELECT\n  1 AS a,\n  2 AS b"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_format_model_expressions_clustered_by_non_databricks(keyword: str):
+    """AUTO/NONE without dialect or with a non-Databricks dialect is parsed as a bare identifier."""
+    # Without dialect — AUTO/NONE parsed as a plain column name (no special keyword handling)
+    assert format_model_expressions(
+        parse(
+            f"""
+        MODEL (
+            name db.test,
+            kind FULL,
+            clustered_by {keyword}
+        );
+        SELECT 1 AS {keyword.lower()}
+        """
+        )
+    ) == (
+        f"MODEL (\n"
+        f"  name db.test,\n"
+        f"  kind FULL,\n"
+        f"  clustered_by {keyword}\n"
+        f");\n\nSELECT\n  1 AS {keyword.lower()}"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_format_model_expressions_clustered_by_mixed_list(keyword: str):
+    """AUTO/NONE inside a parenthesised list is treated as a regular column name."""
+    assert format_model_expressions(
+        parse(
+            f"""
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (a, {keyword})
+        );
+        SELECT 1 AS a, 2 AS {keyword.lower()}
+        """
+        )
+    ) == (
+        f"MODEL (\n"
+        f"  name db.test,\n"
+        f"  kind FULL,\n"
+        f"  dialect databricks,\n"
+        f"  clustered_by (a, {keyword})\n"
+        f");\n\nSELECT\n  1 AS a,\n  2 AS {keyword.lower()}"
+    )
+
+
 def test_connected_identifier():
     ast = d.parse_one("""SELECT ("x"at time zone 'utc')::timestamp as x""", "redshift")
     assert ast.sql("redshift") == """SELECT CAST(("x" AT TIME ZONE 'utc') AS TIMESTAMP) AS x"""

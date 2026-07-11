@@ -17,8 +17,6 @@ from enum import Enum
 from numbers import Number
 from pathlib import Path
 
-from astor import to_source
-
 from sqlmesh.core import constants as c
 from sqlmesh.utils import format_exception, unique
 from sqlmesh.utils.errors import SQLMeshError
@@ -267,14 +265,19 @@ def normalize_source(obj: t.Any) -> str:
 
             # remove docstrings
             body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Str):
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
                 node.body = body[1:]
 
             # remove function return type annotation
             if isinstance(node, ast.FunctionDef):
                 node.returns = None
 
-    return to_source(root_node).strip()
+    return ast.unparse(root_node).strip()
 
 
 def build_env(

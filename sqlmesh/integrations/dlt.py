@@ -63,10 +63,7 @@ def generate_dlt_models_and_settings(
     if db_type == "filesystem":
         connection_config = None
     else:
-        if dlt.__version__ >= "1.10.0":
-            client = pipeline.destination_client()
-        else:
-            client = pipeline._sql_job_client(schema)  # type: ignore
+        client = pipeline.destination_client()
         config = client.config
         credentials = config.credentials
         configs = {
@@ -208,7 +205,7 @@ SELECT
 FROM
   {from_clause}
 WHERE
-  {time_column} BETWEEN @start_ds AND @end_ds
+  {time_column} BETWEEN @start_ts AND @end_ts
 """
 
 

@@ -344,6 +344,8 @@ def make_exclusive(time: TimeLike) -> datetime:
 
 
 def make_ts_exclusive(time: TimeLike, dialect: DialectType) -> datetime:
+    import pandas as pd
+
     ts = to_datetime(time)
     if dialect == "tsql":
         return to_utc_timestamp(ts) - pd.Timedelta(1, unit="ns")

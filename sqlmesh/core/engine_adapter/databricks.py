@@ -6,6 +6,7 @@ from functools import partial
 
 from sqlglot import exp
 
+from sqlmesh.core.constants import LIQUID_CLUSTERING_KEYWORDS
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import GrantsFromInfoSchemaMixin
 from sqlmesh.core.engine_adapter.shared import (
@@ -153,7 +154,7 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             host=self._extra_config["databricks_connect_server_hostname"],
             token=self._extra_config.get("databricks_connect_access_token"),
         )
-        if "databricks_connect_use_serverless" in self._extra_config:
+        if self._extra_config.get("databricks_connect_use_serverless"):
             connect_kwargs["serverless"] = True
         else:
             connect_kwargs["cluster_id"] = self._extra_config["databricks_connect_cluster_id"]
@@ -442,10 +443,16 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             table_kind=table_kind,
         )
         if clustered_by:
-            # Databricks expects wrapped CLUSTER BY expressions
-            clustered_by_exp = exp.Cluster(
-                expressions=[exp.Tuple(expressions=[c.copy() for c in clustered_by])]
-            )
+            if len(clustered_by) == 1 and isinstance(clustered_by[0], exp.Var):
+                if clustered_by[0].name.upper() not in LIQUID_CLUSTERING_KEYWORDS:
+                    raise ValueError(f"Unexpected bare Var in clustered_by: {clustered_by[0]!r}")
+                # exp.Cluster with a bare Var generates: CLUSTER BY AUTO (no parens)
+                clustered_by_exp = exp.Cluster(expressions=[clustered_by[0].copy()])
+            else:
+                # Databricks expects column expressions wrapped in a tuple
+                clustered_by_exp = exp.Cluster(
+                    expressions=[exp.Tuple(expressions=[c.copy() for c in clustered_by])]
+                )
             expressions = properties.expressions if properties else []
             expressions.append(clustered_by_exp)
             properties = exp.Properties(expressions=expressions)

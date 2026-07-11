@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import re
@@ -28,11 +29,40 @@ if t.TYPE_CHECKING:
 SQLMESH_JINJA_PACKAGE = "sqlmesh.utils.jinja"
 
 
+def b64decode(value: t.Union[str, bytes]) -> str:
+    """Decode a base64-encoded value and return it as UTF-8 text.
+
+    Intended for base64-encoded string/JSON secrets (for example a service-account
+    key stored in an environment variable), not arbitrary binary payloads.
+    """
+    decoded = value.encode("utf-8") if isinstance(value, str) else value
+    return base64.b64decode(decoded).decode("utf-8")
+
+
+def b64encode(value: t.Union[str, bytes]) -> str:
+    """Base64-encode a value and return the encoding as UTF-8 text.
+
+    The input is treated as UTF-8 text, mirroring ``b64decode``; it is intended for
+    string/JSON secrets rather than arbitrary binary payloads.
+    """
+    encoded = value.encode("utf-8") if isinstance(value, str) else value
+    return base64.b64encode(encoded).decode("utf-8")
+
+
+def create_builtin_filters() -> t.Dict[str, t.Callable]:
+    return {
+        "b64decode": b64decode,
+        "b64encode": b64encode,
+    }
+
+
 def environment(**kwargs: t.Any) -> Environment:
     extensions = kwargs.pop("extensions", [])
     extensions.append("jinja2.ext.do")
     extensions.append("jinja2.ext.loopcontrols")
-    return Environment(extensions=extensions, **kwargs)
+    env = Environment(extensions=extensions, **kwargs)
+    env.filters.update(create_builtin_filters())
+    return env
 
 
 ENVIRONMENT = environment()

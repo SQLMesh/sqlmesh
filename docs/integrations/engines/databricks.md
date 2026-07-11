@@ -310,3 +310,25 @@ MODEL (
 
 If you attempt to alter without having this property set, you will get an error similar to `databricks.sql.exc.ServerOperationError: [DELTA_UNSUPPORTED_DROP_COLUMN] DROP COLUMN is not supported for your Delta table.`.
 [Databricks Documentation for more details](https://docs.databricks.com/en/delta/column-mapping.html#requirements).
+
+## Liquid Clustering
+
+SQLMesh supports the liquid clustering keywords AUTO and NONE
+
+```sql
+MODEL (
+    name sqlmesh_example.new_model,
+    ...
+    clustered_by AUTO
+)
+```
+
+To cluster by a column called `auto` or `none`, use parentheses and backticks
+
+```sql
+MODEL (
+    name sqlmesh_example.new_model,
+    ...
+    clustered_by (`auto`)
+)
+```

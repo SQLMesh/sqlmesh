@@ -7,7 +7,6 @@ authors = [{ name = "SQLMesh Contributors" }]
 license = { file = "LICENSE" }
 requires-python = ">= 3.9"
 dependencies = [
-    "astor",
     "click",
     "croniter",
     "duckdb>=0.10.0,!=0.10.3",
@@ -202,7 +201,6 @@ disable_error_code = "annotation-unchecked"
 [[tool.mypy.overrides]]
 module = [
     "api.*",
-    "astor.*",
     "IPython.*",
     "hyperscript.*",
     "py.*",
