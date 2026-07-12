@@ -170,9 +170,15 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
             https://learn.microsoft.com/en-us/fabric/data-warehouse/sql-query-editor#limitations
         """
         target_catalog = self._normalize_catalog(catalog_name)
+        explicit_default_catalog = catalog_name is not None and target_catalog is None
+        connected_catalog = self._normalize_catalog(self._connected_catalog)
 
-        # No-op: the logical catalog state already matches.
-        if self.get_current_catalog() == target_catalog:
+        # An explicit request for the default catalog must also match the catalog
+        # used by the open connection. A lazy restore with None only updates the
+        # logical target and intentionally leaves that connection in place.
+        if self.get_current_catalog() == target_catalog and (
+            not explicit_default_catalog or connected_catalog is None
+        ):
             logger.debug("Already using requested Fabric catalog state, no action needed")
             return
 
@@ -192,8 +198,9 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         #    open connection is already on a different catalog.  If a previous
         #    restore-to-neutral left the connection on the right catalog, we
         #    skip the close entirely.
-        connected_catalog = self._normalize_catalog(self._connected_catalog)
-        needs_reconnect = target_catalog is not None and connected_catalog != target_catalog
+        needs_reconnect = (target_catalog is not None or explicit_default_catalog) and (
+            connected_catalog != target_catalog
+        )
 
         if needs_reconnect:
             logger.info(

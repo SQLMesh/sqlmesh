@@ -101,6 +101,26 @@ def test_catalog_scoped_call_restores_to_neutral_without_close(
     assert adapter.get_current_catalog() is None
 
 
+def test_default_catalog_after_non_default_catalog_reconnects(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("planning.db.table")
+    adapter.table_exists("core.db.table")
+
+    assert close_spy.call_count == 2
+    assert adapter._connected_catalog is None
+    assert adapter.get_current_catalog() is None
+
+
 def test_repeated_same_catalog_reuses_connection(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,
