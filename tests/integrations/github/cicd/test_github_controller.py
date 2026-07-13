@@ -572,7 +572,7 @@ def test_try_invalidate_pr_environment(github_client, make_controller, mocker: M
         invalidate_controller._context, "invalidate_environment"
     )
     invalidate_controller.try_invalidate_pr_environment()
-    invalidate_environment.assert_called_once_with("hello_world_2", cleanup_snapshots=True)
+    invalidate_environment.assert_called_once_with("hello_world_2")
 
     no_invalidate_controller = make_controller(
         "tests/fixtures/github/pull_request_synchronized.json",
