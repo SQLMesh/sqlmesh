@@ -807,7 +807,7 @@ class GithubController:
         Marks the PR environment for garbage collection.
         """
         if self.bot_config.invalidate_environment_after_deploy:
-            self._context.invalidate_environment(self.pr_environment_name)
+            self._context.invalidate_environment(self.pr_environment_name, cleanup_snapshots=True)
 
     def _update_check(
         self,
