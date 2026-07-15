@@ -1712,6 +1712,7 @@ class SeedModel(_Model):
 
     def render_seed(self) -> t.Iterator[QueryOrDF]:
         import numpy as np
+        import pandas as pd
 
         self._ensure_hydrated()
 
@@ -1752,8 +1753,6 @@ class SeedModel(_Model):
 
             # convert all date/time types to native pandas timestamp
             for column in [*date_columns, *datetime_columns]:
-                import pandas as pd
-
                 df[column] = pd.to_datetime(df[column], infer_datetime_format=True, errors="ignore")  # type: ignore
 
             # extract datetime.date from pandas timestamp for DATE columns
@@ -1769,7 +1768,7 @@ class SeedModel(_Model):
                     )
 
             for column in bool_columns:
-                df[column] = df[column].apply(lambda i: str_to_bool(str(i)))
+                df[column] = df[column].apply(lambda i: None if pd.isna(i) else str_to_bool(str(i)))
 
             df.loc[:, string_columns] = df[string_columns].mask(
                 cond=lambda x: x.notna(),  # type: ignore
