@@ -982,7 +982,38 @@ def generate_surrogate_key(
         # not a binary digest, on every dialect.
         func = exp.SHA2(this=func.this, length=func.args.get("length"))
 
+    if isinstance(func, exp.SHA2) and _sha2_renders_binary(evaluator.dialect):
+        # Presto/Trino render a bare SHA256(varchar) for exp.SHA2 on sqlglot
+        # versions without tobymao/sqlglot#7824: a type error on Trino, and
+        # binary rather than string semantics where it runs. Build the
+        # hex-string form explicitly, mirroring what those generators do for
+        # MD5: LOWER(TO_HEX(SHA256(TO_UTF8(...)))). The probe keeps this
+        # branch inert once sqlglot renders the hex form natively, so the
+        # expression is never wrapped twice.
+        return exp.Lower(
+            this=exp.Hex(
+                this=exp.SHA2(
+                    this=exp.Encode(this=func.this, charset=exp.Literal.string("utf-8")),
+                    length=func.args.get("length"),
+                )
+            )
+        )
+
     return func
+
+
+@lru_cache(maxsize=None)
+def _sha2_renders_binary(dialect: DialectType) -> bool:
+    """Whether this dialect renders exp.SHA2 as a bare binary-semantics call.
+
+    Only the Presto family models string and binary hashes separately; other
+    dialects' SHA256(varchar) already returns a hex string.
+    """
+    dialect_name = (str(dialect) if dialect else "").split(",")[0].strip().lower()
+    if dialect_name not in ("presto", "trino", "athena"):
+        return False
+    probe = exp.SHA2(this=exp.column("_sqlmesh_probe"), length=exp.Literal.number(256))
+    return "TO_HEX" not in probe.sql(dialect=dialect)
 
 
 @macro()

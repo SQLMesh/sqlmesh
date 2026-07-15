@@ -1225,7 +1225,29 @@ def test_generate_surrogate_key_hash_semantics() -> None:
         render("trino", "MD5")
         == "SELECT LOWER(TO_HEX(MD5(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
     )
-    # Trino/Presto render SHA256/SHA512 surrogate keys as
-    # LOWER(TO_HEX(SHA256(TO_UTF8(...)))) once sqlglot ships
-    # tobymao/sqlglot#7824; the string assertions for that belong with the
-    # sqlglot version bump.
+
+    # The reported bug (#5871): Trino/Presto SHA256/SHA512 surrogate keys must
+    # be the hex-string form, not a bare SHA256(varchar). The macro-side
+    # fallback produces it under the current sqlglot pin; once sqlglot renders
+    # exp.SHA2 this way natively (tobymao/sqlglot#7824), the probe disables
+    # the fallback and these assertions hold unchanged.
+    for _dialect in ("trino", "presto"):
+        assert (
+            render(_dialect, "SHA256")
+            == "SELECT LOWER(TO_HEX(SHA256(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
+        )
+        assert (
+            render(_dialect, "SHA512")
+            == "SELECT LOWER(TO_HEX(SHA512(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
+        )
+
+    # The fallback is scoped to the Presto family: dialects whose bare
+    # SHA256(varchar) already returns a hex string are left to sqlglot.
+    from sqlmesh.core.macros import _sha2_renders_binary
+
+    assert not _sha2_renders_binary("duckdb")
+    assert not _sha2_renders_binary("bigquery")
+    assert (
+        render("snowflake", "SHA256")
+        == "SELECT SHA256(CONCAT(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_'))) FROM foo"
+    )
