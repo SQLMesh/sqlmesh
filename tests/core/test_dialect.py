@@ -527,6 +527,37 @@ def test_format_config_normalize_functions_false():
     assert config.generator_options["normalize_functions"] is False
 
 
+def test_format_config_normalize_functions_none():
+    """FormatConfig(normalize_functions=None) must be accepted but excluded from
+    generator_options by Pydantic's exclude_none serialization.  The config-layer
+    null therefore takes the False-default path in format_model_expressions rather
+    than deferring to SQLGlot's generator default the way True does.
+    """
+    config = FormatConfig(normalize_functions=None)
+
+    assert config.normalize_functions is None
+    # None is excluded by PydanticModel.dict(exclude_none=True), so the key must
+    # be absent from generator_options — format_model_expressions will use False.
+    assert "normalize_functions" not in config.generator_options
+
+    # Confirm the False-default behaviour: custom audit names must be preserved.
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        SELECT id FROM foo
+        """
+    )
+    result = format_model_expressions(expressions, **config.generator_options)
+    assert "unique_combination_of_columns" in result
+    assert "not_null" in result
+
+
 def test_macro_format():
     assert parse_one("@EACH(ARRAY(1,2), x -> x)").sql() == "@EACH(ARRAY(1, 2), x -> x)"
     assert parse_one("INTERVAL @x DAY").sql() == "INTERVAL @x DAY"

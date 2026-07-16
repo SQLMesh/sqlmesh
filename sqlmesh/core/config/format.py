@@ -20,10 +20,13 @@ class FormatConfig(BaseConfig):
             * ``"upper"`` — uppercases all function names, including custom audit
               references.
             * ``"lower"`` — lowercases all function names, including built-in ones.
-            * ``True`` or ``None`` — defers to SQLGlot's generator default, which
-              uppercases all function names including custom ones.  These two values are
-              equivalent; ``None`` passes the deferral explicitly rather than relying on
-              the SQLGlot default.
+            * ``True`` — defers to SQLGlot's generator default, which uppercases all
+              function names including custom ones.
+            * ``None`` — excluded from the serialized generator options by Pydantic's
+              ``exclude_none`` behaviour, so ``format_model_expressions`` falls back to
+              its own ``False`` default.  Setting this in YAML as ``null`` or omitting
+              the key is therefore equivalent to ``false``; it does **not** defer to
+              SQLGlot's generator default the way ``True`` does.
         leading_comma: Whether to use leading commas or not.
         max_text_width: The maximum text width in a segment before creating new lines.
         append_newline: Whether to append a newline to the end of the file or not.

@@ -807,9 +807,13 @@ def format_model_expressions(
             * ``"upper"`` — uppercases all function names including custom audit
               references.
             * ``"lower"`` — lowercases all function names including built-ins.
-            * ``True`` or ``None`` — defers to SQLGlot's generator default, which
-              uppercases all function names including custom ones.  Passing ``None``
-              makes the deferral explicit rather than relying on the SQLGlot default.
+            * ``True`` — defers to SQLGlot's generator default (uppercase).
+            * ``None`` — passes ``None`` directly to the SQLGlot generator, which
+              defers to SQLGlot's own default (typically uppercase, but may vary by
+              dialect).  Note: this is the **direct generator API** behaviour.  When
+              called via ``FormatConfig``, ``None`` is excluded by Pydantic's
+              ``exclude_none`` serialization and this function receives its own ``False``
+              default instead — so the two paths are not equivalent.
         **kwargs: Additional keyword arguments to pass to the sql generator.
 
     Returns:
