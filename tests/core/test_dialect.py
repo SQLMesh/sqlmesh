@@ -341,6 +341,68 @@ ON_VIRTUAL_UPDATE_END;"""
     )
 
 
+def test_format_model_expressions_normalize_functions():
+    """Regression: default formatting must preserve original function casing in both
+    audit references (model metadata) and query bodies.  Explicit normalize_functions
+    options must normalise casing in both locations."""
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+
+        SELECT SUM(id), count(id) FROM foo;
+        """
+    )
+
+    # Default: original spellings must be preserved (this assertion is expected to
+    # FAIL until the underlying formatter bug is fixed – that is intentional for TDD).
+    assert (
+        format_model_expressions(expressions)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (id)),
+    not_null(columns := (id))
+  )
+);
+
+SELECT SUM(id), count(id) FROM foo;"""
+    )
+
+    # normalize_functions="upper" must upper-case both audit references and query functions.
+    assert (
+        format_model_expressions(expressions, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (id)),
+    NOT_NULL(columns := (id))
+  )
+);
+
+SELECT SUM(id), COUNT(id) FROM foo;"""
+    )
+
+    # normalize_functions="lower" must lower-case both audit references and query functions.
+    assert (
+        format_model_expressions(expressions, normalize_functions="lower")
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (id)),
+    not_null(columns := (id))
+  )
+);
+
+SELECT sum(id), count(id) FROM foo;"""
+    )
+
+
 def test_macro_format():
     assert parse_one("@EACH(ARRAY(1,2), x -> x)").sql() == "@EACH(ARRAY(1, 2), x -> x)"
     assert parse_one("INTERVAL @x DAY").sql() == "INTERVAL @x DAY"
