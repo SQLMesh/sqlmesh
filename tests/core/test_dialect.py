@@ -436,6 +436,29 @@ SELECT
 FROM foo"""
     )
 
+    # None: explicit deferral to SQLGlot default → custom/audit names uppercased,
+    # just like "upper".  This is distinct from False (preserve) and must be tested
+    # explicitly because None used to be indistinguishable from the missing kwarg.
+    assert (
+        format_model_expressions(expressions, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
     # Single-meta-expression path: normalize_functions must be forwarded.
     # Without the fix, this path ignored normalize_functions entirely.
     single_model = parse(
@@ -474,6 +497,22 @@ FROM foo"""
       id
     )),
     not_null(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    # Single-meta path, None: custom audit names are uppercased (explicit SQLGlot default deferral).
+    assert (
+        format_model_expressions(single_model, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
       id
     ))
   )

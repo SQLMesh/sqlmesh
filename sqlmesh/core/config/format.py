@@ -12,9 +12,18 @@ class FormatConfig(BaseConfig):
         normalize: Whether to normalize the SQL code or not.
         pad: The number of spaces to use for padding.
         indent: The number of spaces to use for indentation.
-        normalize_functions: How to normalize function name casing. Use ``False`` (default) to
-            preserve the original casing, ``"upper"`` to uppercase all function names, or
-            ``"lower"`` to lowercase all function names.
+        normalize_functions: How to normalize function name casing.
+
+            * ``False`` (default) — preserves the original spelling of custom and audit
+              function names.  SQLGlot built-in functions (e.g. ``COUNT``, ``SUM``) may
+              still be uppercased because the parser discards the original token.
+            * ``"upper"`` — uppercases all function names, including custom audit
+              references.
+            * ``"lower"`` — lowercases all function names, including built-in ones.
+            * ``True`` or ``None`` — defers to SQLGlot's generator default, which
+              uppercases all function names including custom ones.  These two values are
+              equivalent; ``None`` passes the deferral explicitly rather than relying on
+              the SQLGlot default.
         leading_comma: Whether to use leading commas or not.
         max_text_width: The maximum text width in a segment before creating new lines.
         append_newline: Whether to append a newline to the end of the file or not.

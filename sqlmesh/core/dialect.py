@@ -799,8 +799,17 @@ def format_model_expressions(
         expressions: The model's expressions, must be at least model def + query.
         dialect: The dialect to render the expressions as.
         rewrite_casts: Whether to rewrite all casts to use the :: syntax.
-        normalize_functions: How to normalize function name casing. ``False`` (default)
-            preserves original casing; ``"upper"`` uppercases; ``"lower"`` lowercases.
+        normalize_functions: How to normalize function name casing.
+
+            * ``False`` (default) — preserves the original spelling of custom and audit
+              function names.  SQLGlot built-in functions may still canonicalize because
+              the parser discards the original token.
+            * ``"upper"`` — uppercases all function names including custom audit
+              references.
+            * ``"lower"`` — lowercases all function names including built-ins.
+            * ``True`` or ``None`` — defers to SQLGlot's generator default, which
+              uppercases all function names including custom ones.  Passing ``None``
+              makes the deferral explicit rather than relying on the SQLGlot default.
         **kwargs: Additional keyword arguments to pass to the sql generator.
 
     Returns:
