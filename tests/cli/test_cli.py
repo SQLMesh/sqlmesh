@@ -2305,10 +2305,9 @@ def test_lint_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
     assert mock.called, "state-sync was never accessed during `lint`"
 
 
-def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker, monkeypatch):
+def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
     mock = _setup_local_only_project(tmp_path, mocker)
     init_spy = mocker.spy(Context, "__init__")
-    monkeypatch.setattr("sys.argv", ["sqlmesh", "--paths", str(tmp_path), "lint", "--local"])
 
     result = runner.invoke(cli, ["--paths", str(tmp_path), "lint", "--local"])
 
