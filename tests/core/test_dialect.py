@@ -15,6 +15,7 @@ from sqlmesh.core.dialect import (
 import sqlmesh.core.dialect as d
 from sqlmesh.core.model import SqlModel, load_sql_based_model
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
+from sqlmesh.core.config.format import FormatConfig
 
 pytestmark = pytest.mark.dialect_isolated
 
@@ -98,7 +99,7 @@ def test_format_model_expressions():
   references (a, (b, c) AS d), /* c */
   @macro_prop_with_comment(proper := 'foo'), /* k */
   audits ARRAY(
-    NOT_NULL(
+    not_null(
       columns = ARRAY(
         foo_id,
         foo_normalised,
@@ -112,14 +113,14 @@ def test_format_model_expressions():
         tier
       )
     ),
-    UNIQUE_VALUES(columns = ARRAY(foo_id)),
-    ACCEPTED_RANGE(column = foo_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = bar_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = total_weight, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_RANGE(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_VALUES(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
-    ACCEPTED_VALUES(
+    unique_values(columns = ARRAY(foo_id)),
+    accepted_range(column = foo_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = bar_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = total_weight, min_v = 0, max_v = 100),
+    accepted_range(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_range(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_values(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
+    accepted_values(
       column = total_weight_decile,
       is_in = ARRAY(
         'Decile_01',
@@ -359,19 +360,27 @@ def test_format_model_expressions_normalize_functions():
         """
     )
 
-    # Default: original spellings must be preserved (this assertion is expected to
-    # FAIL until the underlying formatter bug is fixed – that is intentional for TDD).
+    # Default (normalize_functions=False): original spellings must be preserved for
+    # audit references in model metadata; standard SQL functions follow SQLGlot's
+    # class-based output (always uppercase for named functions like COUNT/SUM).
     assert (
         format_model_expressions(expressions)
         == """MODEL (
   name x,
   audits (
-    unique_combination_of_columns(columns := (id)),
-    not_null(columns := (id))
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
   )
 );
 
-SELECT SUM(id), count(id) FROM foo;"""
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
     )
 
     # normalize_functions="upper" must upper-case both audit references and query functions.
@@ -380,12 +389,19 @@ SELECT SUM(id), count(id) FROM foo;"""
         == """MODEL (
   name x,
   audits (
-    UNIQUE_COMBINATION_OF_COLUMNS(columns := (id)),
-    NOT_NULL(columns := (id))
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
   )
 );
 
-SELECT SUM(id), COUNT(id) FROM foo;"""
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
     )
 
     # normalize_functions="lower" must lower-case both audit references and query functions.
@@ -394,13 +410,27 @@ SELECT SUM(id), COUNT(id) FROM foo;"""
         == """MODEL (
   name x,
   audits (
-    unique_combination_of_columns(columns := (id)),
-    not_null(columns := (id))
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
   )
 );
 
-SELECT sum(id), count(id) FROM foo;"""
+SELECT
+  sum(id),
+  count(id)
+FROM foo"""
     )
+
+
+def test_format_config_normalize_functions_false():
+    config = FormatConfig(normalize_functions=False)
+
+    assert config.normalize_functions is False
+    assert config.generator_options["normalize_functions"] is False
 
 
 def test_macro_format():

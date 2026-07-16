@@ -12,7 +12,9 @@ class FormatConfig(BaseConfig):
         normalize: Whether to normalize the SQL code or not.
         pad: The number of spaces to use for padding.
         indent: The number of spaces to use for indentation.
-        normalize_functions: Whether or not to normalize all function names. Possible values are: 'upper', 'lower'
+        normalize_functions: How to normalize function name casing. Use ``False`` (default) to
+            preserve the original casing, ``"upper"`` to uppercase all function names, or
+            ``"lower"`` to lowercase all function names.
         leading_comma: Whether to use leading commas or not.
         max_text_width: The maximum text width in a segment before creating new lines.
         append_newline: Whether to append a newline to the end of the file or not.
@@ -22,7 +24,7 @@ class FormatConfig(BaseConfig):
     normalize: bool = False
     pad: int = 2
     indent: int = 2
-    normalize_functions: t.Optional[str] = None
+    normalize_functions: t.Union[str, bool, None] = False
     leading_comma: bool = False
     max_text_width: int = 80
     append_newline: bool = False

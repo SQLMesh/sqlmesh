@@ -790,6 +790,7 @@ def format_model_expressions(
     expressions: t.List[exp.Expr],
     dialect: t.Optional[str] = None,
     rewrite_casts: bool = True,
+    normalize_functions: t.Union[str, bool, None] = False,
     **kwargs: t.Any,
 ) -> str:
     """Format a model's expressions into a standardized format.
@@ -798,6 +799,8 @@ def format_model_expressions(
         expressions: The model's expressions, must be at least model def + query.
         dialect: The dialect to render the expressions as.
         rewrite_casts: Whether to rewrite all casts to use the :: syntax.
+        normalize_functions: How to normalize function name casing. ``False`` (default)
+            preserves original casing; ``"upper"`` uppercases; ``"lower"`` lowercases.
         **kwargs: Additional keyword arguments to pass to the sql generator.
 
     Returns:
@@ -844,6 +847,7 @@ def format_model_expressions(
         expression.sql(
             pretty=True,
             dialect=None if is_meta_expression(expression) else dialect,
+            normalize_functions=normalize_functions,
             **kwargs,
         )
         for expression in expressions
