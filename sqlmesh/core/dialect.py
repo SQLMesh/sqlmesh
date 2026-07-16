@@ -810,7 +810,9 @@ def format_model_expressions(
         # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
         # so they must never be transpiled to the target dialect (e.g. tsql would
         # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
-        return expressions[0].sql(pretty=True, dialect=None)
+        return expressions[0].sql(
+            pretty=True, dialect=None, normalize_functions=normalize_functions
+        )
 
     if rewrite_casts:
 

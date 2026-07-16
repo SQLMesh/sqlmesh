@@ -343,9 +343,22 @@ ON_VIRTUAL_UPDATE_END;"""
 
 
 def test_format_model_expressions_normalize_functions():
-    """Regression: default formatting must preserve original function casing in both
-    audit references (model metadata) and query bodies.  Explicit normalize_functions
-    options must normalise casing in both locations."""
+    """Regression: formatter function-name casing behavior.
+
+    Approved behavior:
+    - Default (``normalize_functions=False``): custom/audit function names
+      (stored as strings in the AST) are preserved with their original casing.
+      SQLGlot built-in functions like COUNT/SUM are always output in their
+      canonical uppercase form because the parser discards the original spelling.
+    - ``normalize_functions="upper"``: both audit references and query functions
+      are uppercased.
+    - ``normalize_functions="lower"``: both audit references and query functions
+      are lowercased.
+
+    The fix also covers the single-meta-expression early-return path in
+    ``format_model_expressions``; assertions at the end of this test exercise
+    that path to prevent regression.
+    """
     expressions = parse(
         """
         MODEL (
@@ -360,9 +373,7 @@ def test_format_model_expressions_normalize_functions():
         """
     )
 
-    # Default (normalize_functions=False): original spellings must be preserved for
-    # audit references in model metadata; standard SQL functions follow SQLGlot's
-    # class-based output (always uppercase for named functions like COUNT/SUM).
+    # Default: audit references preserved lowercase; COUNT/SUM canonicalized uppercase.
     assert (
         format_model_expressions(expressions)
         == """MODEL (
@@ -383,7 +394,7 @@ SELECT
 FROM foo"""
     )
 
-    # normalize_functions="upper" must upper-case both audit references and query functions.
+    # "upper": audit references uppercased; query functions uppercased.
     assert (
         format_model_expressions(expressions, normalize_functions="upper")
         == """MODEL (
@@ -404,7 +415,7 @@ SELECT
 FROM foo"""
     )
 
-    # normalize_functions="lower" must lower-case both audit references and query functions.
+    # "lower": audit references preserved lowercase (already lower); query functions lowercased.
     assert (
         format_model_expressions(expressions, normalize_functions="lower")
         == """MODEL (
@@ -423,6 +434,50 @@ SELECT
   sum(id),
   count(id)
 FROM foo"""
+    )
+
+    # Single-meta-expression path: normalize_functions must be forwarded.
+    # Without the fix, this path ignored normalize_functions entirely.
+    single_model = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        """
+    )
+
+    assert (
+        format_model_expressions(single_model, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    assert (
+        format_model_expressions(single_model)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+)"""
     )
 
 
