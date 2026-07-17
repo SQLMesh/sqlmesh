@@ -789,7 +789,7 @@ def filter_(evaluator: MacroEvaluator, *args: t.Any) -> t.List[t.Any]:
     """
     *items, func = args
     items, func = _norm_var_arg_lambda(evaluator, func, *items)  # type: ignore
-    return list(filter(lambda arg: evaluator.eval_expression(func(arg)), items))
+    return list(filter(lambda arg: evaluator.eval_expression(func(arg)), ensure_collection(items)))
 
 
 def _optional_expression(
