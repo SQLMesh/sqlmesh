@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import glob
 import itertools
+import json
 import linecache
 import os
 import re
@@ -38,6 +39,7 @@ from sqlmesh.core.signal import signal
 from sqlmesh.core.test import ModelTestMetadata
 from sqlmesh.utils import UniqueKeyDict, sys_path
 from sqlmesh.utils.errors import ConfigError
+from sqlmesh.utils.hashing import crc32
 from sqlmesh.utils.jinja import JinjaMacroRegistry, MacroExtractor
 from sqlmesh.utils.metaprogramming import import_python_file
 from sqlmesh.utils.pydantic import validation_error_message
@@ -65,6 +67,7 @@ class LoadedProject:
     environment_statements: t.List[EnvironmentStatements]
     user_rules: RuleSet
     model_test_metadata: t.List[ModelTestMetadata]
+    indexed_model_fqns: t.Optional[t.Set[str]] = None
 
 
 class CacheBase(abc.ABC):
@@ -188,9 +191,18 @@ class Loader(abc.ABC):
         }
         _init_model_defaults(self.config_essentials, self.context.selected_gateway)
 
-    def load(self) -> LoadedProject:
+    def load(
+        self,
+        model_fqns: t.Optional[t.Set[str]] = None,
+        use_project_index: bool = False,
+    ) -> LoadedProject:
         """
         Loads all macros and models in the context's path.
+
+        Args:
+            model_fqns: Optional model names to load. Loaders that support partial loading
+                also include these models' transitive upstream dependencies.
+            use_project_index: Whether to use and maintain the persistent project model index.
 
         Returns:
             A loaded project object.
@@ -228,12 +240,14 @@ class Loader(abc.ABC):
                 else:
                     standalone_audits[name] = audit
 
-            models = self._load_models(
+            models, indexed_model_fqns = self._load_models(
                 macros,
                 jinja_macros,
                 self.context.selected_gateway,
                 audits,
                 signals,
+                model_fqns,
+                use_project_index,
             )
 
             metrics = self._load_metrics()
@@ -258,6 +272,7 @@ class Loader(abc.ABC):
                 environment_statements=environment_statements,
                 user_rules=user_rules,
                 model_test_metadata=model_test_metadata,
+                indexed_model_fqns=indexed_model_fqns,
             )
             return project
 
@@ -286,7 +301,9 @@ class Loader(abc.ABC):
         gateway: t.Optional[str],
         audits: UniqueKeyDict[str, ModelAudit],
         signals: UniqueKeyDict[str, signal],
-    ) -> UniqueKeyDict[str, Model]:
+        model_fqns: t.Optional[t.Set[str]] = None,
+        use_project_index: bool = False,
+    ) -> t.Tuple[UniqueKeyDict[str, Model], t.Optional[t.Set[str]]]:
         """Loads all models."""
 
     @abc.abstractmethod
@@ -481,6 +498,10 @@ class Loader(abc.ABC):
 class SqlMeshLoader(Loader):
     """Loads macros and models for a context using the SQLMesh file formats"""
 
+    MODEL_INDEX_VERSION = 1
+    _signals_max_mtime: t.Optional[float]
+    _audits_max_mtime: t.Optional[float]
+
     def _load_scripts(self) -> t.Tuple[MacroRegistry, JinjaMacroRegistry]:
         """Loads all user defined macros."""
         # Store a copy of the macro registry
@@ -533,23 +554,144 @@ class SqlMeshLoader(Loader):
         gateway: t.Optional[str],
         audits: UniqueKeyDict[str, ModelAudit],
         signals: UniqueKeyDict[str, signal],
-    ) -> UniqueKeyDict[str, Model]:
+        model_fqns: t.Optional[t.Set[str]] = None,
+        use_project_index: bool = False,
+    ) -> t.Tuple[UniqueKeyDict[str, Model], t.Optional[t.Set[str]]]:
         """
         Loads all of the models within the model directory with their associated
         audits into a Dict and creates the dag
         """
         cache = SqlMeshLoader._Cache(self, self.config_path)
+        selected_model_index = (
+            self._selected_model_paths(model_fqns) if use_project_index and model_fqns else None
+        )
+        selected_paths, indexed_model_fqns = selected_model_index or (None, None)
 
-        sql_models = self._load_sql_models(macros, jinja_macros, audits, signals, cache, gateway)
+        sql_models = self._load_sql_models(
+            macros,
+            jinja_macros,
+            audits,
+            signals,
+            cache,
+            gateway,
+            selected_paths=selected_paths,
+        )
         external_models = self._load_external_models(audits, cache, gateway)
-        python_models = self._load_python_models(macros, jinja_macros, audits, signals)
+        python_models = self._load_python_models(
+            macros,
+            jinja_macros,
+            audits,
+            signals,
+            selected_paths=selected_paths,
+        )
 
         all_model_names = list(sql_models) + list(external_models) + list(python_models)
         duplicates = [name for name, count in Counter(all_model_names).items() if count > 1]
         if duplicates:
             raise ConfigError(f"Duplicate model name(s) found: {', '.join(duplicates)}.")
 
-        return UniqueKeyDict("models", **sql_models, **external_models, **python_models)
+        models: UniqueKeyDict[str, Model] = UniqueKeyDict(
+            "models", **sql_models, **external_models, **python_models
+        )
+        if use_project_index and selected_paths is None:
+            self._write_model_index(models)
+        return models, indexed_model_fqns
+
+    @property
+    def _model_index_path(self) -> Path:
+        project_path_hash = crc32([str(self.config_path.resolve())])
+        return (
+            self.context.cache_dir
+            / f"{self.config.project or 'default'}_{project_path_hash}_model_index.json"
+        )
+
+    def _model_index_id(self) -> t.List[t.Optional[t.Union[str, float]]]:
+        return [
+            str(self.MODEL_INDEX_VERSION),
+            self.config.fingerprint,
+            self.context.default_catalog,
+            self.context.gateway or self.config.default_gateway_name,
+            self._macros_max_mtime,
+            self._signals_max_mtime,
+            self._audits_max_mtime,
+            self._config_mtimes.get(self.config_path),
+            self._config_mtimes.get(c.SQLMESH_PATH),
+        ]
+
+    def _model_paths(self) -> t.Set[Path]:
+        paths: t.Set[Path] = set()
+        for extension in (".sql", ".py"):
+            paths.update(
+                path
+                for path in self._glob_paths(
+                    self.config_path / c.MODELS,
+                    ignore_patterns=self.config.ignore_patterns,
+                    extension=extension,
+                )
+                if os.path.getsize(path)
+            )
+        return paths
+
+    def _selected_model_paths(
+        self, model_fqns: t.Set[str]
+    ) -> t.Optional[t.Tuple[t.Set[Path], t.Set[str]]]:
+        try:
+            index = json.loads(self._model_index_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+        if index.get("index_id") != self._model_index_id():
+            return None
+
+        current_paths = self._model_paths()
+        indexed_files = index.get("files", {})
+        indexed_paths = {self.config_path / relative_path for relative_path in indexed_files}
+        if current_paths != indexed_paths:
+            return None
+
+        model_to_path: t.Dict[str, Path] = {}
+        dependencies: t.Dict[str, t.Set[str]] = {}
+        for relative_path, file_info in indexed_files.items():
+            path = self.config_path / relative_path
+            for fqn, depends_on in file_info.get("models", {}).items():
+                model_to_path[fqn] = path
+                dependencies[fqn] = set(depends_on)
+
+        selected = {fqn for fqn in model_fqns if fqn in model_to_path}
+        stack = list(selected)
+        while stack:
+            fqn = stack.pop()
+            for dependency in dependencies.get(fqn, set()):
+                if dependency in model_to_path and dependency not in selected:
+                    selected.add(dependency)
+                    stack.append(dependency)
+
+        return {model_to_path[fqn] for fqn in selected}, set(model_to_path)
+
+    def _write_model_index(self, models: UniqueKeyDict[str, Model]) -> None:
+        model_paths = self._model_paths()
+        if not model_paths:
+            return
+
+        files: t.Dict[str, t.Dict[str, t.Any]] = {}
+        for path in model_paths:
+            files[str(path.relative_to(self.config_path))] = {
+                "models": {},
+            }
+
+        for model in models.values():
+            if model._path not in model_paths:
+                continue
+            relative_path = str(t.cast(Path, model._path).relative_to(self.config_path))
+            files[relative_path]["models"][model.fqn] = sorted(model.depends_on)
+
+        self._model_index_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._model_index_path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps({"index_id": self._model_index_id(), "files": files}, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._model_index_path)
 
     def _load_sql_models(
         self,
@@ -559,6 +701,7 @@ class SqlMeshLoader(Loader):
         signals: UniqueKeyDict[str, signal],
         cache: CacheBase,
         gateway: t.Optional[str],
+        selected_paths: t.Optional[t.Set[Path]] = None,
     ) -> UniqueKeyDict[str, Model]:
         """Loads the sql models into a Dict"""
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
@@ -570,6 +713,8 @@ class SqlMeshLoader(Loader):
             ignore_patterns=self.config.ignore_patterns,
             extension=".sql",
         ):
+            if selected_paths is not None and path not in selected_paths:
+                continue
             if not os.path.getsize(path):
                 continue
 
@@ -641,6 +786,7 @@ class SqlMeshLoader(Loader):
         jinja_macros: JinjaMacroRegistry,
         audits: UniqueKeyDict[str, ModelAudit],
         signals: UniqueKeyDict[str, signal],
+        selected_paths: t.Optional[t.Set[Path]] = None,
     ) -> UniqueKeyDict[str, Model]:
         """Loads the python models into a Dict"""
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
@@ -655,6 +801,8 @@ class SqlMeshLoader(Loader):
                 ignore_patterns=self.config.ignore_patterns,
                 extension=".py",
             ):
+                if selected_paths is not None and path not in selected_paths:
+                    continue
                 if not os.path.getsize(path):
                     continue
 

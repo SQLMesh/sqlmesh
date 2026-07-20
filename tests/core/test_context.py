@@ -36,9 +36,10 @@ from sqlmesh.core.console import create_console, get_console
 from sqlmesh.core.dialect import parse, schema_
 from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.environment import Environment, EnvironmentNamingInfo, EnvironmentStatements
+from sqlmesh.core.loader import SqlMeshLoader
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
-from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model
+from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model, update_model_schemas
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.cache import OptimizedQueryCache
 from sqlmesh.core.renderer import render_statements
@@ -1402,13 +1403,13 @@ def test_physical_schema_override(copy_to_temp_path: t.Callable) -> None:
 def test_physical_schema_mapping(tmp_path: pathlib.Path) -> None:
     create_temp_file(
         tmp_path,
-        pathlib.Path(pathlib.Path("models"), "a.sql"),
+        pathlib.Path("models", "a.sql"),
         "MODEL(name foo_staging.model_a); SELECT 1;",
     )
 
     create_temp_file(
         tmp_path,
-        pathlib.Path(pathlib.Path("models"), "b.sql"),
+        pathlib.Path("models", "b.sql"),
         "MODEL(name testone.model_b); SELECT 1;",
     )
 
@@ -2935,6 +2936,120 @@ def test_model_linting(tmp_path: pathlib.Path, sushi_context) -> None:
         with pytest.raises(LinterError, match=config_err):
             sushi_context.upsert_model(python_model)
             sushi_context.plan(environment="dev", auto_apply=True, no_prompts=True)
+
+
+def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    create_temp_file(
+        tmp_path,
+        pathlib.Path(pathlib.Path("models"), "a.sql"),
+        "MODEL(name a); SELECT 1 AS col FROM raw.unregistered_source;",
+    )
+    create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT * FROM b;")
+    create_temp_file(tmp_path, pathlib.Path("models", "d.sql"), "MODEL(name d); SELECT 2 AS col;")
+
+    # Case: Without the opt-in, linting a specific model preserves the full-load behavior.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        violations = ctx.lint_models(["b"])
+
+    assert violations == []
+    assert schemas_mock.call_count == 1
+    assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+    # Case: The project-index opt-in scopes schema resolution to the target and its
+    # upstream dependencies. The initial full file load also creates the index.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        violations = ctx.lint_models(["b"], use_project_index=True)
+
+    assert violations == []
+    assert schemas_mock.call_count == 1
+    updated_models = schemas_mock.call_args.kwargs["models"]
+    assert set(updated_models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+    # Case: Once a full load has populated the model index, an edited target still
+    # loads only its file and upstream dependencies. If the edit introduces a new
+    # dependency outside this set, Context.load safely retries with a full load.
+    create_temp_file(
+        tmp_path,
+        pathlib.Path(pathlib.Path("models"), "b.sql"),
+        "MODEL(name b); SELECT col + 1 AS col FROM a;",
+    )
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert ctx.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_count == 1
+    selected_paths = load_sql_models_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(ctx.models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+    # Case: A newly introduced dependency that is known to the index triggers a safe
+    # full reload instead of leaving the context incomplete.
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col FROM d;",
+    )
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert ctx.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_count == 2
+    assert set(ctx.models) == {
+        ctx.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b", "c", "d")
+    }
+
+    # Case: Violations are still detected when linting specific models.
+    with pytest.raises(
+        LinterError, match="Linter detected errors in the code. Please fix them before proceeding."
+    ):
+        create_context().lint_models(["c"], use_project_index=True)
+
+    # Case: Linting without a model selection triggers a full load and lints every model.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        with pytest.raises(
+            LinterError,
+            match="Linter detected errors in the code. Please fix them before proceeding.",
+        ):
+            ctx.lint_models()
+
+    assert schemas_mock.call_count == 1
+    assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
 
 
 def test_plan_selector_expression_no_match(sushi_context: Context) -> None:
