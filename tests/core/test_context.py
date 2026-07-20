@@ -1936,7 +1936,7 @@ def test_invalidate_environment_nonexistent_raises(sushi_context, mocker: Mocker
     ).return_value
     state_sync_mock.get_environment.return_value = None
 
-    with pytest.raises(SQLMeshError, match="Environment 'doesnotexist' does not exist"):
+    with pytest.raises(SQLMeshError, match="Environment 'doesnotexist' was not found"):
         sushi_context.invalidate_environment("doesnotexist")
 
     state_sync_mock.invalidate_environment.assert_not_called()

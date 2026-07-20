@@ -1880,7 +1880,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         """
         name = Environment.sanitize_name(name)
         if self.state_sync.get_environment(name) is None:
-            raise SQLMeshError(f"Environment '{name}' does not exist.")
+            raise SQLMeshError(f"Environment '{name}' was not found.")
         self.state_sync.invalidate_environment(name)
         if sync:
             self._cleanup_environments(name=name)
