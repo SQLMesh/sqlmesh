@@ -4510,3 +4510,86 @@ def test_forward_only_indirect_change_to_materialized_view(make_snapshot):
     # Forward-only indirect changes to MVs should not always be classified as indirect breaking.
     # Instead, we want to preserve the standard categorization.
     assert snapshot_b_new.change_category == SnapshotChangeCategory.INDIRECT_NON_BREAKING
+
+
+def test_plan_builder_scopes_dag_to_changed_model_lineage(make_snapshot):
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("select 1 as id")))
+    snapshot_b_old = make_snapshot(
+        SqlModel(name="b", query=parse_one("select id from a")),
+        nodes={snapshot_a.name: snapshot_a.model},
+    )
+    snapshot_b_new = make_snapshot(
+        SqlModel(name="b", query=parse_one("select id + 1 as id from a")),
+        nodes={snapshot_a.name: snapshot_a.model},
+    )
+    snapshot_c = make_snapshot(
+        SqlModel(name="c", query=parse_one("select id from b")),
+        nodes={
+            snapshot_a.name: snapshot_a.model,
+            snapshot_b_new.name: snapshot_b_new.model,
+        },
+    )
+    snapshot_unrelated = make_snapshot(
+        SqlModel(name="unrelated", query=parse_one("select 2 as id"))
+    )
+    snapshot_sibling = make_snapshot(
+        SqlModel(name="sibling", query=parse_one("select id from a")),
+        nodes={snapshot_a.name: snapshot_a.model},
+    )
+
+    context_diff = ContextDiff(
+        environment="prod",
+        is_new_environment=False,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        modified_snapshots={
+            snapshot_b_new.name: (snapshot_b_new, snapshot_b_old),
+        },
+        snapshots={
+            snapshot_a.snapshot_id: snapshot_a,
+            snapshot_b_new.snapshot_id: snapshot_b_new,
+            snapshot_c.snapshot_id: snapshot_c,
+            snapshot_sibling.snapshot_id: snapshot_sibling,
+            snapshot_unrelated.snapshot_id: snapshot_unrelated,
+        },
+        new_snapshots={snapshot_b_new.snapshot_id: snapshot_b_new},
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+
+    assert set(PlanBuilder(context_diff)._build_dag()) == set(context_diff.snapshots)
+
+    dag = PlanBuilder(
+        context_diff,
+        scope_to_changed_lineage=True,
+    )._build_dag()
+
+    assert set(dag) == {
+        snapshot_a.snapshot_id,
+        snapshot_b_new.snapshot_id,
+        snapshot_c.snapshot_id,
+    }
+    assert snapshot_sibling.snapshot_id not in dag
+    assert snapshot_unrelated.snapshot_id not in dag
+
+    restatement_dag = PlanBuilder(
+        context_diff,
+        restate_models={snapshot_unrelated.name},
+        scope_to_changed_lineage=True,
+    )._build_dag()
+    assert snapshot_unrelated.snapshot_id in restatement_dag
+
+    backfill_dag = PlanBuilder(
+        context_diff,
+        backfill_models={snapshot_unrelated.name},
+        scope_to_changed_lineage=True,
+    )._build_dag()
+    assert snapshot_unrelated.snapshot_id in backfill_dag

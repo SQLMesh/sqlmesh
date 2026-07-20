@@ -64,6 +64,13 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
+def _raise_if_no_models(context: Context, path: t.Any) -> None:
+    if not context.models:
+        raise click.ClickException(
+            f"`{path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
+        )
+
+
 @click.group(cls=_SQLMeshGroup, no_args_is_help=True)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
@@ -142,7 +149,7 @@ def cli(
             load = False
 
     # These commands can scope their own load for multi-project contexts.
-    if ctx.invoked_subcommand in ("lint", "render"):
+    if ctx.invoked_subcommand in ("lint", "plan", "render"):
         load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
@@ -163,10 +170,8 @@ def cli(
             logger.exception("Failed to initialize SQLMesh context")
         raise
 
-    if load and not context.models:
-        raise click.ClickException(
-            f"`{paths}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
-        )
+    if load:
+        _raise_if_no_models(context, paths)
 
     ctx.obj = context
 
@@ -568,6 +573,11 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     default=None,
     help="For every model, ensure at least this many intervals are covered by a missing intervals check regardless of the plan start date",
 )
+@click.option(
+    "--use-project-index",
+    is_flag=True,
+    help="Refresh the persistent project index, reuse loaded snapshot state, and scope plan graph work to changed or selected model lineage without changing the plan result.",
+)
 @opt.verbose
 @click.pass_context
 @error_handler
@@ -586,7 +596,11 @@ def plan(
     allow_additive_models = kwargs.pop("allow_additive_model") or None
     backfill_models = kwargs.pop("backfill_model") or None
     ignore_cron = kwargs.pop("ignore_cron") or None
+    use_project_index = kwargs.pop("use_project_index")
     setattr(get_console(), "verbosity", Verbosity(verbose))
+
+    context.load(use_project_index=use_project_index)
+    _raise_if_no_models(context, context.path)
 
     context.plan(
         environment,
@@ -596,6 +610,7 @@ def plan(
         allow_additive_models=allow_additive_models,
         backfill_models=backfill_models,
         ignore_cron=ignore_cron,
+        use_project_index=use_project_index,
         **kwargs,
     )
 
@@ -1246,10 +1261,7 @@ def lint(
         use_project_index=use_project_index,
     )
 
-    if not obj.models:
-        raise click.ClickException(
-            f"`{obj.path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
-        )
+    _raise_if_no_models(obj, obj.path)
 
 
 @cli.group(no_args_is_help=True)

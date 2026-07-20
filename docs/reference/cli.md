@@ -405,6 +405,16 @@ Options:
                                   versions of the models and standalone
                                   audits.
   --explain                       Explain the plan instead of applying it.
+  --ignore-cron                   Run all missing intervals, ignoring
+                                  individual cron schedules. Only applies if
+                                  --run is set.
+  --min-intervals TEXT            For every model, ensure at least this many
+                                  intervals are covered by a missing intervals
+                                  check regardless of the plan start date
+  --use-project-index             Refresh the persistent project index, reuse
+                                  loaded snapshot state, and scope plan graph
+                                  work to changed or selected model lineage
+                                  without changing the plan result.
   -v, --verbose                   Verbose output. Use -vv for very verbose
                                   output.
   --help                          Show this message and exit.

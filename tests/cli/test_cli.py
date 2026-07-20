@@ -179,6 +179,27 @@ def test_plan(runner, tmp_path):
     assert "sqlmesh_example.incremental_model   [insert 2020-01-01 - 2022-12-31]" in result.output
 
 
+@time_machine.travel(FREEZE_TIME)
+def test_plan_use_project_index(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--use-project-index",
+        ],
+        input="y\n",
+    )
+
+    assert_plan_success(result)
+    assert list((tmp_path / ".cache").glob("*_model_index.json"))
+
+
 def test_plan_skip_tests(runner, tmp_path):
     create_example_project(tmp_path)
 

@@ -369,6 +369,91 @@ def test_render_only_loads_upstream_model_files(tmp_path: pathlib.Path) -> None:
 
 
 @pytest.mark.slow
+def test_plan_builder_fetches_stored_snapshots_once(sushi_context: Context):
+    sushi_context.upsert_model("sushi.customers", stamp="force a new snapshot version")
+    snapshot_count = len(sushi_context.snapshots)
+
+    with patch.object(
+        sushi_context.state_reader,
+        "get_snapshots",
+        wraps=sushi_context.state_reader.get_snapshots,
+    ) as default_get_snapshots_mock:
+        sushi_context.plan_builder("dev", skip_tests=True, skip_linter=True)
+
+    default_full_fetches = [
+        call_args
+        for call_args in default_get_snapshots_mock.call_args_list
+        if len(list(call_args.args[0])) >= snapshot_count
+    ]
+
+    with patch.object(
+        sushi_context.state_reader,
+        "get_snapshots",
+        wraps=sushi_context.state_reader.get_snapshots,
+    ) as get_snapshots_mock:
+        plan_builder = sushi_context.plan_builder(
+            "dev",
+            skip_tests=True,
+            skip_linter=True,
+            use_project_index=True,
+        )
+
+    full_fetches = [
+        call_args
+        for call_args in get_snapshots_mock.call_args_list
+        if len(list(call_args.args[0])) >= snapshot_count
+    ]
+    assert len(full_fetches) < len(default_full_fetches)
+
+    # The diff is unaffected and still reflects the modified model.
+    context_diff = plan_builder._context_diff
+    assert '"memory"."sushi"."customers"' in context_diff.modified_snapshots
+
+
+@pytest.mark.slow
+def test_project_index_plan_matches_default_plan(sushi_context: Context) -> None:
+    sushi_context.upsert_model("sushi.customers", stamp="force a new snapshot version")
+
+    def build_plan(use_project_index: bool) -> Plan:
+        return sushi_context.plan_builder(
+            "dev",
+            start="2023-01-01",
+            end="2023-01-07",
+            execution_time="2023-01-08",
+            skip_tests=True,
+            skip_linter=True,
+            use_project_index=use_project_index,
+        ).build()
+
+    default_plan = build_plan(use_project_index=False)
+    indexed_plan = build_plan(use_project_index=True)
+
+    assert indexed_plan.directly_modified == default_plan.directly_modified
+    assert indexed_plan.indirectly_modified == default_plan.indirectly_modified
+    assert indexed_plan.restatements == default_plan.restatements
+    assert indexed_plan.models_to_backfill == default_plan.models_to_backfill
+    assert indexed_plan.missing_intervals == default_plan.missing_intervals
+
+    default_snapshots = {
+        snapshot.name: snapshot for snapshot in default_plan.context_diff.snapshots.values()
+    }
+    indexed_snapshots = {
+        snapshot.name: snapshot for snapshot in indexed_plan.context_diff.snapshots.values()
+    }
+    assert set(indexed_snapshots) == set(default_snapshots)
+    assert {name: snapshot.change_category for name, snapshot in indexed_snapshots.items()} == {
+        name: snapshot.change_category for name, snapshot in default_snapshots.items()
+    }
+    assert {
+        name: indexed_plan.deployability_index.is_deployable(snapshot)
+        for name, snapshot in indexed_snapshots.items()
+    } == {
+        name: default_plan.deployability_index.is_deployable(snapshot)
+        for name, snapshot in default_snapshots.items()
+    }
+
+
+@pytest.mark.slow
 def test_diff(sushi_context: Context, mocker: MockerFixture):
     mock_console = mocker.Mock()
     sushi_context.console = mock_console
