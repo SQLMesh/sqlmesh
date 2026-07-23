@@ -1728,21 +1728,11 @@ class GenericContext(BaseContext, t.Generic[C]):
                 and default_end is not None
                 and execution_time_ts > default_end
             ):
-                # An explicitly provided execution time acts as the plan's effective "now", so the
-                # default end is allowed to extend past the recorded prod frontier instead of being
-                # capped by it. This mirrors how an explicit `end` causes the per-model interval end
-                # caps to be dropped entirely in PlanBuilder.build() (see `self.override_end`,
-                # sqlmesh/core/plan/builder.py line 206). Raising (rather than dropping) the caps is
-                # safe here because `plan --run` already runs with no caps at all.
-                #
-                # Note this raises every entry already present in max_interval_end_per_model (i.e.
-                # every model in this dict, which _get_max_interval_end_per_model above has already
-                # scoped down to backfill_models/its ancestors when a selection is in effect) - not
-                # just modified or explicitly selected models within that scope. That's intentional,
-                # not an oversight. It's what makes a plain, unscoped `sqlmesh plan --execution-time X`
-                # in prod report the same missing intervals as `sqlmesh plan --run --execution-time X`
-                # would at the same simulated time. Narrowing this further would reintroduce a `plan`
-                # vs `plan --run` mismatch for models within that scope.
+                # An explicit execution time is the plan's effective "now", so the default end may
+                # extend past the recorded prod frontier (as an explicit `end` already does via
+                # PlanBuilder.override_end). Raising every per-model cap to it keeps a plain
+                # `plan --execution-time X` in step with `plan --run --execution-time X`, which
+                # already runs with no caps.
                 default_end = execution_time_ts
                 execution_time_dt = to_datetime(execution_time_ts)
                 max_interval_end_per_model = {
