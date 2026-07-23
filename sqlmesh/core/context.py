@@ -1721,6 +1721,25 @@ class GenericContext(BaseContext, t.Generic[C]):
                 execution_time or now(),
             )
 
+            execution_time_ts = to_timestamp(execution_time) if execution_time is not None else None
+            if (
+                execution_time_ts is not None
+                and end is None
+                and default_end is not None
+                and execution_time_ts > default_end
+            ):
+                # An explicit execution time is the plan's effective "now", so the default end may
+                # extend past the recorded prod frontier (as an explicit `end` already does via
+                # PlanBuilder.override_end). Raising every per-model cap to it keeps a plain
+                # `plan --execution-time X` in step with `plan --run --execution-time X`, which
+                # already runs with no caps.
+                default_end = execution_time_ts
+                execution_time_dt = to_datetime(execution_time_ts)
+                max_interval_end_per_model = {
+                    model_fqn: max(interval_end, execution_time_dt)
+                    for model_fqn, interval_end in max_interval_end_per_model.items()
+                }
+
             # Refresh snapshot intervals to ensure that they are up to date with values reflected in the max_interval_end_per_model.
             self.state_sync.refresh_snapshot_intervals(context_diff.snapshots.values())
 
