@@ -1199,6 +1199,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         end: t.Optional[TimeLike] = None,
         execution_time: t.Optional[TimeLike] = None,
         expand: t.Union[bool, t.Iterable[str]] = False,
+        use_project_index: bool = False,
         **kwargs: t.Any,
     ) -> exp.Expr:
         """Renders a model's query, expanding macros with provided kwargs, and optionally expanding referenced models.
@@ -1211,11 +1212,19 @@ class GenericContext(BaseContext, t.Generic[C]):
             expand: Whether or not to use expand materialized models, defaults to False.
                 If True, all referenced models are expanded as raw queries.
                 If a list, only referenced models are expanded as raw queries.
+            use_project_index: Whether to use the persistent project index to load and
+                render only the target model and its transitive upstream dependencies.
 
         Returns:
             The rendered expression.
         """
         execution_time = execution_time or now()
+
+        if not self._loaded:
+            target_fqns = (
+                {self._node_or_snapshot_to_fqn(model_or_snapshot)} if use_project_index else None
+            )
+            self.load(model_fqns=target_fqns, use_project_index=use_project_index)
 
         model = self.get_model(model_or_snapshot, raise_if_missing=True)
 
@@ -1245,7 +1254,19 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
             return next(pandas_to_sql(t.cast(pd.DataFrame, df), model.columns_to_types))
 
-        snapshots = self.snapshots
+        if use_project_index:
+            # Only the target model and its transitive upstream dependencies can be referenced
+            # by the rendered query, so there is no need to create snapshots for the rest.
+            upstream_fqns = {model.fqn, *self.dag.upstream(model.fqn)}
+            upstream_models: UniqueKeyDict[str, Model] = UniqueKeyDict(
+                "models", {fqn: m for fqn, m in self._models.items() if fqn in upstream_fqns}
+            )
+            snapshots = self._snapshots(
+                upstream_models,
+                include_standalone_audits=False,
+            )
+        else:
+            snapshots = self.snapshots
         deployability_index = DeployabilityIndex.create(snapshots.values(), start=start)
 
         return model.render_query_or_raise(
@@ -3009,9 +3030,13 @@ class GenericContext(BaseContext, t.Generic[C]):
         return self.engine_adapter
 
     def _snapshots(
-        self, models_override: t.Optional[UniqueKeyDict[str, Model]] = None
+        self,
+        models_override: t.Optional[UniqueKeyDict[str, Model]] = None,
+        include_standalone_audits: bool = True,
     ) -> t.Dict[str, Snapshot]:
-        nodes = {**(models_override or self._models), **self._standalone_audits}
+        nodes: t.Dict[str, Node] = dict(models_override or self._models)
+        if include_standalone_audits:
+            nodes.update(self._standalone_audits)
         snapshots = self._nodes_to_snapshots(nodes)
         stored_snapshots = self.state_reader.get_snapshots(snapshots.values())
 

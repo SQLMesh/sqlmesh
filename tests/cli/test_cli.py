@@ -2111,6 +2111,19 @@ GROUP BY
 
     assert expected in cleaned_output
 
+    indexed_result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(tmp_path),
+            "render",
+            "sqlmesh_example.full_model",
+            "--use-project-index",
+            "--no-format",
+        ],
+    )
+    assert indexed_result.exit_code == 0
+
 
 @time_machine.travel(FREEZE_TIME)
 def test_signals(runner: CliRunner, tmp_path: Path):

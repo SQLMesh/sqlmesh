@@ -277,6 +277,82 @@ def test_render_seed_model(sushi_context, assert_exp_eq):
 
 
 @pytest.mark.slow
+def test_render_only_creates_snapshots_for_upstream_models(sushi_context: Context):
+    model = sushi_context.get_model("sushi.top_waiters", raise_if_missing=True)
+    upstream_fqns = {model.fqn, *sushi_context.dag.upstream(model.fqn)}
+
+    # Sanity check that the project contains models outside of the target model's subgraph.
+    assert set(sushi_context.models) - upstream_fqns
+
+    with patch.object(
+        sushi_context.state_reader,
+        "get_snapshots",
+        wraps=sushi_context.state_reader.get_snapshots,
+    ) as default_get_snapshots_mock:
+        sushi_context.render("sushi.top_waiters")
+
+    default_requested_names = {
+        snapshot.name
+        for call_args in default_get_snapshots_mock.call_args_list
+        for snapshot in call_args.args[0]
+    }
+    assert set(sushi_context.models) <= default_requested_names
+
+    with patch.object(
+        sushi_context.state_reader,
+        "get_snapshots",
+        wraps=sushi_context.state_reader.get_snapshots,
+    ) as get_snapshots_mock:
+        sushi_context.render("sushi.top_waiters", use_project_index=True)
+
+    requested_names = {
+        snapshot.name
+        for call_args in get_snapshots_mock.call_args_list
+        for snapshot in call_args.args[0]
+    }
+    assert model.fqn in requested_names
+    assert requested_names == upstream_fqns
+
+
+def test_render_only_loads_upstream_model_files(tmp_path: pathlib.Path) -> None:
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a, kind FULL); SELECT 1 AS col;",
+    )
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b, kind FULL); SELECT col FROM a;",
+    )
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "c.sql"),
+        "MODEL(name c, kind FULL); SELECT col FROM b;",
+    )
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+
+    # Populate the persistent model path/dependency index.
+    Context(config=config, paths=tmp_path, load=False).load(use_project_index=True)
+
+    ctx = Context(config=config, paths=tmp_path, load=False)
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        ctx.render("b", use_project_index=True)
+
+    selected_paths = load_sql_models_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(ctx.models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+
+@pytest.mark.slow
 def test_diff(sushi_context: Context, mocker: MockerFixture):
     mock_console = mocker.Mock()
     sushi_context.console = mock_console

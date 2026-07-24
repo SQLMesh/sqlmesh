@@ -447,6 +447,9 @@ Options:
                               only they will be expanded as raw queries.
   --dialect TEXT              The SQL dialect to render the query as.
   --no-format                 Disable fancy formatting of the query.
+  --use-project-index         Use the persistent project index to load and
+                              render only the target model and its upstream
+                              dependencies.
   --max-text-width INTEGER    The max number of characters in a segment before
                               creating new lines in pretty mode.
   --leading-comma             Determines whether or not the comma is leading
