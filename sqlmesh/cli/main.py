@@ -44,6 +44,17 @@ SKIP_CONTEXT_COMMANDS = ("init", "ui")
 LOCAL_ONLY_COMMANDS = ("format",)
 
 
+class _SQLMeshGroup(click.Group):
+    def parse_args(self, ctx: click.Context, args: t.List[str]) -> t.List[str]:
+        rest = super().parse_args(ctx, args)
+        # Preserve the subcommand arguments because Click consumes them before invoking the group callback.
+        protected_args = getattr(ctx, "_protected_args", None)
+        if protected_args is None:
+            protected_args = ctx.protected_args
+        ctx.meta["subcommand_args"] = tuple(protected_args) + tuple(ctx.args)
+        return rest
+
+
 def _sqlmesh_version() -> str:
     try:
         from sqlmesh import __version__
@@ -53,7 +64,7 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
-@click.group(no_args_is_help=True)
+@click.group(cls=_SQLMeshGroup, no_args_is_help=True)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
 @opt.config
@@ -118,6 +129,9 @@ def cli(
     load = True
     # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
+    # The parent callback constructs Context before Click invokes `lint`, so inspect its parsed args here.
+    if ctx.invoked_subcommand == "lint" and "--local" in ctx.meta["subcommand_args"]:
+        load_state = False
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -1193,6 +1207,12 @@ def environments(obj: Context) -> None:
     "--model",
     multiple=True,
     help="A model to lint. Multiple models can be linted. If no models are specified, every model will be linted.",
+)
+@click.option(
+    "--local",
+    is_flag=True,
+    expose_value=False,
+    help="Lint using only locally loaded project files without loading state.",
 )
 @click.pass_obj
 @error_handler

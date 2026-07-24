@@ -2305,6 +2305,24 @@ def test_lint_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
     assert mock.called, "state-sync was never accessed during `lint`"
 
 
+def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "lint", "--local"])
+
+    assert result.exit_code == 0, f"Lint failed: {result.output}\nException: {result.exception}"
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is False, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `lint --local`"
+        )
+    mock.assert_not_called()
+
+
 @pytest.mark.parametrize("command", ["format"])
 def test_local_only_commands_skip_state_multiple_paths(
     runner: CliRunner, tmp_path: Path, mocker, command: str
