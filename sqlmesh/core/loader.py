@@ -7,6 +7,7 @@ import json
 import linecache
 import os
 import re
+import tempfile
 import typing as t
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -605,9 +606,9 @@ class SqlMeshLoader(Loader):
             / f"{self.config.project or 'default'}_{project_path_hash}_model_index.json"
         )
 
-    def _model_index_id(self) -> t.List[t.Optional[t.Union[str, float]]]:
+    def _model_index_id(self) -> t.List[t.Optional[t.Union[str, int, float]]]:
         return [
-            str(self.MODEL_INDEX_VERSION),
+            self.MODEL_INDEX_VERSION,
             self.config.fingerprint,
             self.context.default_catalog,
             self.context.gateway or self.config.default_gateway_name,
@@ -640,20 +641,35 @@ class SqlMeshLoader(Loader):
         except (OSError, ValueError):
             return None
 
+        if not isinstance(index, dict):
+            return None
+
         if index.get("index_id") != self._model_index_id():
             return None
 
         current_paths = self._model_paths()
-        indexed_files = index.get("files", {})
+        indexed_files = index.get("files")
+        if not isinstance(indexed_files, dict) or not all(
+            isinstance(relative_path, str) and isinstance(file_models, dict)
+            for relative_path, file_models in indexed_files.items()
+        ):
+            return None
+
         indexed_paths = {self.config_path / relative_path for relative_path in indexed_files}
         if current_paths != indexed_paths:
             return None
 
         model_to_path: t.Dict[str, Path] = {}
         dependencies: t.Dict[str, t.Set[str]] = {}
-        for relative_path, file_info in indexed_files.items():
+        for relative_path, file_models in indexed_files.items():
             path = self.config_path / relative_path
-            for fqn, depends_on in file_info.get("models", {}).items():
+            for fqn, depends_on in file_models.items():
+                if (
+                    not isinstance(fqn, str)
+                    or not isinstance(depends_on, list)
+                    or not all(isinstance(dependency, str) for dependency in depends_on)
+                ):
+                    return None
                 model_to_path[fqn] = path
                 dependencies[fqn] = set(depends_on)
 
@@ -673,25 +689,36 @@ class SqlMeshLoader(Loader):
         if not model_paths:
             return
 
-        files: t.Dict[str, t.Dict[str, t.Any]] = {}
-        for path in model_paths:
-            files[str(path.relative_to(self.config_path))] = {
-                "models": {},
-            }
-
+        # Maps each model file to the models it defines and their dependencies.
+        files: t.Dict[str, t.Dict[str, t.List[str]]] = {
+            str(path.relative_to(self.config_path)): {} for path in model_paths
+        }
         for model in models.values():
-            if model._path not in model_paths:
-                continue
-            relative_path = str(t.cast(Path, model._path).relative_to(self.config_path))
-            files[relative_path]["models"][model.fqn] = sorted(model.depends_on)
+            if model._path in model_paths:
+                relative_path = str(t.cast(Path, model._path).relative_to(self.config_path))
+                files[relative_path][model.fqn] = sorted(model.depends_on)
 
         self._model_index_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self._model_index_path.with_suffix(".tmp")
-        temporary_path.write_text(
-            json.dumps({"index_id": self._model_index_id(), "files": files}, sort_keys=True),
-            encoding="utf-8",
-        )
-        temporary_path.replace(self._model_index_path)
+        temporary_path: t.Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._model_index_path.parent,
+                prefix=f".{self._model_index_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                json.dump(
+                    {"index_id": self._model_index_id(), "files": files},
+                    temporary_file,
+                    sort_keys=True,
+                )
+                temporary_path = Path(temporary_file.name)
+            temporary_path.replace(self._model_index_path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def _load_sql_models(
         self,

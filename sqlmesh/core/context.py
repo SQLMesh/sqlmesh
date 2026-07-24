@@ -3419,11 +3419,11 @@ class GenericContext(BaseContext, t.Generic[C]):
         raise_on_error: bool = True,
         use_project_index: bool = False,
     ) -> t.List[AnnotatedRuleViolation]:
-        input_models = list(models) if models is not None else []
+        models = list(models) if models is not None else []
 
         if not self._loaded:
-            if input_models and use_project_index:
-                target_fqns = {
+            target_fqns = (
+                {
                     normalize_model_name(
                         model,
                         default_catalog=self.default_catalog,
@@ -3431,20 +3431,18 @@ class GenericContext(BaseContext, t.Generic[C]):
                     )
                     if isinstance(model, str)
                     else model.fqn
-                    for model in input_models
+                    for model in models
                 }
-                self.load(
-                    model_fqns=target_fqns,
-                    use_project_index=True,
-                )
-            else:
-                self.load(use_project_index=use_project_index)
+                if models and use_project_index
+                else None
+            )
+            self.load(model_fqns=target_fqns, use_project_index=use_project_index)
 
         found_error = False
 
         model_list = (
-            list(self.get_model(model, raise_if_missing=True) for model in input_models)
-            if input_models
+            list(self.get_model(model, raise_if_missing=True) for model in models)
+            if models
             else self.models.values()
         )
         all_violations = []

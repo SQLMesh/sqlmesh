@@ -1,3 +1,4 @@
+import json
 import logging
 import pathlib
 import typing as t
@@ -1403,13 +1404,13 @@ def test_physical_schema_override(copy_to_temp_path: t.Callable) -> None:
 def test_physical_schema_mapping(tmp_path: pathlib.Path) -> None:
     create_temp_file(
         tmp_path,
-        pathlib.Path("models", "a.sql"),
+        pathlib.Path(pathlib.Path("models"), "a.sql"),
         "MODEL(name foo_staging.model_a); SELECT 1;",
     )
 
     create_temp_file(
         tmp_path,
-        pathlib.Path("models", "b.sql"),
+        pathlib.Path(pathlib.Path("models"), "b.sql"),
         "MODEL(name testone.model_b); SELECT 1;",
     )
 
@@ -2951,7 +2952,7 @@ def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
 
     create_temp_file(
         tmp_path,
-        pathlib.Path(pathlib.Path("models"), "a.sql"),
+        pathlib.Path("models", "a.sql"),
         "MODEL(name a); SELECT 1 AS col FROM raw.unregistered_source;",
     )
     create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
@@ -2990,7 +2991,7 @@ def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
     # dependency outside this set, Context.load safely retries with a full load.
     create_temp_file(
         tmp_path,
-        pathlib.Path(pathlib.Path("models"), "b.sql"),
+        pathlib.Path("models", "b.sql"),
         "MODEL(name b); SELECT col + 1 AS col FROM a;",
     )
     ctx = create_context()
@@ -3050,6 +3051,49 @@ def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
 
     assert schemas_mock.call_count == 1
     assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+
+@pytest.mark.parametrize("invalid_files_shape", ["file_list", "model_list"])
+def test_invalid_model_index_falls_back_to_full_load(
+    tmp_path: pathlib.Path, invalid_files_shape: str
+) -> None:
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a); SELECT 1 AS col;",
+    )
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col FROM a;",
+    )
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+
+    indexed_context = Context(config=config, paths=tmp_path, load=False)
+    indexed_context.load(use_project_index=True)
+    indexed_loader = t.cast(SqlMeshLoader, indexed_context._loaders[0])
+    index = json.loads(indexed_loader._model_index_path.read_text(encoding="utf-8"))
+    if invalid_files_shape == "file_list":
+        index["files"] = list(index["files"])
+    else:
+        relative_path = next(iter(index["files"]))
+        index["files"][relative_path] = []
+    indexed_loader._model_index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    context = Context(config=config, paths=tmp_path, load=False)
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert context.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_args.kwargs["selected_paths"] is None
+    assert set(context.models) == {
+        context.get_model("a", raise_if_missing=True).fqn,
+        context.get_model("b", raise_if_missing=True).fqn,
+    }
 
 
 def test_plan_selector_expression_no_match(sushi_context: Context) -> None:
