@@ -1185,3 +1185,11 @@ def test_pipe_syntax():
         ast.sql("bigquery")
         == "SELECT * FROM (WITH __tmp1 AS (SELECT id FROM t2) SELECT * FROM __tmp1)"
     )
+
+
+def test_extend_sqlglot_is_idempotent():
+    # extend_sqlglot() runs at import time; calling it again must not re-wrap the
+    # already-installed overrides, otherwise they call themselves (RecursionError).
+    d.extend_sqlglot()
+
+    assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
