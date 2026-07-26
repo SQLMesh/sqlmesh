@@ -164,7 +164,9 @@ Standalone audits are defined independently rather than being attached to a spec
 
 Unlike model-level audits, standalone audits can be used to validate data across one or more models without being associated with a single model.
 
-```sql
+Standalone audits run as scheduled nodes during both `sqlmesh plan` and `sqlmesh run`.
+
+```sql linenums="1"
 AUDIT (
   name assert_item_price_is_not_null,
   dialect spark,
@@ -183,7 +185,7 @@ WHERE
 
 In this example, the audit checks that the `price` column in `sushi.items` does not contain `NULL` values for the selected date range.
 
-Standalone audits must declare the models they depend on using `depends_on`, since they are not attached to a model definition.
+Standalone audits can declare dependencies using the `depends_on` property. SQLMesh can often infer dependencies directly from the audit query, but using `depends_on` is recommended when inference isn't sufficient.
 
 !!! note
 
