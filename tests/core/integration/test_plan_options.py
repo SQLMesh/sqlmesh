@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import typing as t
 import pytest
 from sqlmesh.core.console import (
@@ -112,7 +113,7 @@ def test_empty_backfill_new_model(init_and_plan_context: t.Callable):
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
-def test_plan_explain(init_and_plan_context: t.Callable):
+def test_plan_explain(init_and_plan_context: t.Callable, caplog):
     old_console = get_console()
     set_console(TerminalConsole())
 
@@ -131,15 +132,19 @@ def test_plan_explain(init_and_plan_context: t.Callable):
     common_kwargs = dict(skip_tests=True, no_prompts=True, explain=True)
 
     # For now just making sure the plan doesn't error
-    context.plan("dev", **common_kwargs)
-    context.plan("dev", **common_kwargs, skip_backfill=True)
-    context.plan("dev", **common_kwargs, empty_backfill=True)
-    context.plan("dev", **common_kwargs, forward_only=True, enable_preview=True)
-    context.plan("prod", **common_kwargs)
-    context.plan("prod", **common_kwargs, forward_only=True)
-    context.plan("prod", **common_kwargs, restate_models=[waiter_revenue_by_day_model.name])
+    with caplog.at_level(logging.ERROR, logger="sqlmesh.core.plan.explainer"):
+        context.plan("dev", **common_kwargs)
+        context.plan("dev", **common_kwargs, skip_backfill=True)
+        context.plan("dev", **common_kwargs, empty_backfill=True)
+        context.plan("dev", **common_kwargs, forward_only=True, enable_preview=True)
+        context.plan("prod", **common_kwargs)
+        context.plan("prod", **common_kwargs, forward_only=True)
+        context.plan("prod", **common_kwargs, restate_models=[waiter_revenue_by_day_model.name])
 
     set_console(old_console)
+
+    # Every stage produced by the plan must have a corresponding visit method on the explainer
+    assert "Unexpected stage" not in caplog.text
 
     # Make sure that the now changes were actually applied
     for target_env in ("dev", "prod"):
