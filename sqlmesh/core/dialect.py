@@ -703,6 +703,8 @@ PARSERS = {
     "METRIC": _create_parser(Metric, ["name"]),
 }
 
+_SQLMESH_COLUMNS_DIALECT = "sqlmesh_columns_dialect"
+
 
 def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
     props = []
@@ -712,7 +714,25 @@ def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
         if isinstance(prop, MacroFunc):
             sql = self.indent(self.sql(prop, comment=False))
         else:
-            sql = self.indent(f"{prop.name} {self.sql(prop, 'value')}")
+            value = prop.args.get("value")
+            parent = prop.parent
+            columns_dialect = parent.meta.get(_SQLMESH_COLUMNS_DIALECT) if parent else None
+            if prop.name.lower() == "columns" and columns_dialect and isinstance(value, exp.Expr):
+                value_sql = value.sql(
+                    dialect=columns_dialect,
+                    pretty=self.pretty,
+                    identify=self.identify,
+                    normalize=self.normalize,
+                    pad=self.pad,
+                    indent=self._indent,
+                    normalize_functions=self.normalize_functions,
+                    leading_comma=self.leading_comma,
+                    max_text_width=self.max_text_width,
+                    comments=self.comments,
+                )
+            else:
+                value_sql = self.sql(prop, "value")
+            sql = self.indent(f"{prop.name} {value_sql}")
 
         if i < size - 1:
             sql += ","
@@ -819,11 +839,18 @@ def format_model_expressions(
     Returns:
         A string representing the formatted model.
     """
+
+    def expression_with_columns_dialect(expression: exp.Expr) -> exp.Expr:
+        if isinstance(expression, Model) and dialect:
+            expression = expression.copy()
+            expression.meta[_SQLMESH_COLUMNS_DIALECT] = dialect
+        return expression
+
     if len(expressions) == 1 and is_meta_expression(expressions[0]):
         # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
         # so they must never be transpiled to the target dialect (e.g. tsql would
         # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
-        return expressions[0].sql(
+        return expression_with_columns_dialect(expressions[0]).sql(
             pretty=True, dialect=None, normalize_functions=normalize_functions
         )
 
@@ -857,9 +884,9 @@ def format_model_expressions(
         expressions = new_expressions
 
     return ";\n\n".join(
-        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL and must stay
-        # dialect-agnostic; only the actual query/statement expressions transpile.
-        expression.sql(
+        # Meta expressions (MODEL/AUDIT/METRIC) stay dialect-agnostic, except for
+        # MODEL column types. Actual query/statement expressions are transpiled.
+        expression_with_columns_dialect(expression).sql(
             pretty=True,
             dialect=None if is_meta_expression(expression) else dialect,
             normalize_functions=normalize_functions,

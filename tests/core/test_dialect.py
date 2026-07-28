@@ -342,6 +342,44 @@ ON_VIRTUAL_UPDATE_END;"""
     )
 
 
+@pytest.mark.parametrize("dialect", ["tsql", "fabric"])
+def test_format_model_columns_uses_model_dialect(dialect: str):
+    formatted = format_model_expressions(
+        parse(
+            f"""
+            MODEL (
+              name test_model,
+              dialect {dialect},
+              description 'my description',
+              formatting false,
+              columns (
+                _dwh_load_datetime_utc DATETIME2(6)
+              )
+            );
+
+            SELECT 1 AS id
+            """
+        ),
+        dialect=dialect,
+    )
+
+    assert (
+        formatted
+        == f"""MODEL (
+  name test_model,
+  dialect {dialect},
+  description 'my description',
+  formatting FALSE,
+  columns (
+    _dwh_load_datetime_utc DATETIME2(6)
+  )
+);
+
+SELECT
+  1 AS id"""
+    )
+
+
 def test_format_model_expressions_normalize_functions():
     """Regression: formatter function-name casing behavior.
 
