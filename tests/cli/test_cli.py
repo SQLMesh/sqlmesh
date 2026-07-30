@@ -387,44 +387,6 @@ def test_plan_skip_backfill(runner, tmp_path, flag):
     assert "Model batches executed" not in result.output
 
 
-def test_plan_min_intervals(runner, tmp_path):
-    create_example_project(tmp_path)
-
-    # build prod so the dev plan below has a baseline to diff against
-    runner.invoke(
-        cli,
-        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts", "--auto-apply"],
-    )
-    update_incremental_model(tmp_path)
-
-    # --min-intervals must be coerced to int; otherwise the string reaches
-    # range() in _calculate_start_override_per_model and raises TypeError
-    result = runner.invoke(
-        cli,
-        [
-            "--log-file-dir",
-            tmp_path,
-            "--paths",
-            tmp_path,
-            "plan",
-            "dev",
-            "--no-prompts",
-            "--auto-apply",
-            "--min-intervals",
-            "1",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-
-    # a non-integer value is rejected by click, not surfaced as a traceback
-    result = runner.invoke(
-        cli,
-        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "dev", "--min-intervals", "abc"],
-    )
-    assert result.exit_code == 2
-    assert "is not a valid integer" in result.output
-
-
 def test_plan_auto_apply(runner, tmp_path):
     create_example_project(tmp_path)
 

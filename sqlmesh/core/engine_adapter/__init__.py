@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import typing as t
 
 from sqlmesh.core.engine_adapter.base import (
@@ -22,6 +23,10 @@ from sqlmesh.core.engine_adapter.athena import AthenaEngineAdapter
 from sqlmesh.core.engine_adapter.risingwave import RisingwaveEngineAdapter
 from sqlmesh.core.engine_adapter.fabric import FabricEngineAdapter
 
+# DB2 adapter requires Python 3.10+ for db2-sqlglot-dialect
+if sys.version_info >= (3, 10):
+    from sqlmesh.core.engine_adapter.db2 import Db2EngineAdapter
+
 DIALECT_TO_ENGINE_ADAPTER = {
     "hive": SparkEngineAdapter,
     "spark": SparkEngineAdapter,
@@ -40,6 +45,10 @@ DIALECT_TO_ENGINE_ADAPTER = {
     "fabric": FabricEngineAdapter,
     "starrocks": StarRocksEngineAdapter,
 }
+
+# Add DB2 only on Python 3.10+
+if sys.version_info >= (3, 10):
+    DIALECT_TO_ENGINE_ADAPTER["db2"] = Db2EngineAdapter
 
 DIALECT_ALIASES = {
     "postgresql": "postgres",

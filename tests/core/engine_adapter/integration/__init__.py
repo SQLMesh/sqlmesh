@@ -87,6 +87,7 @@ ENGINES = [
     IntegrationTestEngine("snowflake", native_dataframe_type="snowpark", cloud=True),
     IntegrationTestEngine("fabric", cloud=True),
     IntegrationTestEngine("gcp_postgres", cloud=True),
+    IntegrationTestEngine("db2", cloud=False),
 ]
 
 ENGINES_BY_NAME = {e.engine: e for e in ENGINES}
