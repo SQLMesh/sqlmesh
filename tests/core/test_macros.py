@@ -1138,6 +1138,29 @@ def test_resolve_template_table():
     )
 
 
+def test_resolve_template_subquery():
+    # Audits on models with a time column render @this_model as a subquery that filters the
+    # physical table on the time range, so the underlying table needs to be extracted from it
+    parsed_sql = parse_one(
+        "SELECT * FROM @resolve_template('@{catalog_name}.@{schema_name}.@{table_name}$partitions', mode := 'table')"
+    )
+
+    evaluator = MacroEvaluator(runtime_stage=RuntimeStage.EVALUATING)
+    evaluator.locals.update(
+        {
+            "this_model": exp.select("*")
+            .from_(exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505"))
+            .where(exp.column("ds").between("2020-01-01", "2020-01-02"))
+            .subquery()
+        }
+    )
+
+    assert (
+        evaluator.transform(parsed_sql).sql(identify=True)
+        == 'SELECT * FROM "test_catalog"."sqlmesh__test"."test__test_model__2517971505$partitions"'
+    )
+
+
 def test_macro_with_spaces():
     evaluator = MacroEvaluator()
     evaluator.evaluate(d.parse_one(""" @DEF(x, "a b") """))

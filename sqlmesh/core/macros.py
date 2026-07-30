@@ -1402,7 +1402,13 @@ def resolve_template(
         "'s3://data-bucket/prod/test_catalog/sqlmesh__test/test__test_model__2517971505'"
     """
     if "this_model" in evaluator.locals:
-        this_model = exp.to_table(evaluator.locals["this_model"], dialect=evaluator.dialect)
+        this_model_expr = evaluator.locals["this_model"]
+        if isinstance(this_model_expr, exp.Subquery):
+            # Audits on models with a time column render @this_model as a subquery that filters the
+            # physical table on the audited time range, so extract the table it selects from
+            this_model_expr = this_model_expr.find(exp.Table) or this_model_expr
+
+        this_model = exp.to_table(this_model_expr, dialect=evaluator.dialect)
         template_str: str = template.this
         result = (
             template_str.replace("@{catalog_name}", this_model.catalog)
