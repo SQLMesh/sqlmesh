@@ -1174,11 +1174,12 @@ def extend_sqlglot() -> None:
                 MacroDef,
             )
 
-        generator.UNWRAPPED_INTERVAL_VALUES = (
-            *generator.UNWRAPPED_INTERVAL_VALUES,
-            MacroStrReplace,
-            MacroVar,
-        )
+        if MacroVar not in generator.UNWRAPPED_INTERVAL_VALUES:
+            generator.UNWRAPPED_INTERVAL_VALUES = (
+                *generator.UNWRAPPED_INTERVAL_VALUES,
+                MacroStrReplace,
+                MacroVar,
+            )
 
     _override(Parser, _parse_select)
     _override(Parser, _parse_statement)

@@ -1190,6 +1190,12 @@ def test_pipe_syntax():
 def test_extend_sqlglot_is_idempotent():
     # extend_sqlglot() runs at import time; calling it again must not re-wrap the
     # already-installed overrides, otherwise they call themselves (RecursionError).
+    from sqlglot.generator import Generator
+
+    before = Generator.UNWRAPPED_INTERVAL_VALUES
+
     d.extend_sqlglot()
 
     assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
+    # The class-level registries must not grow on repeated calls.
+    assert Generator.UNWRAPPED_INTERVAL_VALUES == before
