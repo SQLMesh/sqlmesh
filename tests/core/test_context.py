@@ -1672,6 +1672,176 @@ def test_plan_start_ahead_of_end(copy_to_temp_path):
 
 
 @pytest.mark.slow
+def test_plan_execution_time_ahead_of_prod_frontier(copy_to_temp_path):
+    """An explicitly provided `execution_time` should be able to extend the plan's default end
+    past the recorded prod frontier, since it represents the plan's effective "now". Without
+    this, an explicit execution_time beyond the last applied interval is silently ignored and
+    the plan reports no changes/no backfill even though new intervals are due.
+
+    See: https://github.com/SQLMesh/sqlmesh/issues/5640
+    """
+    path = copy_to_temp_path("examples/sushi")
+    with time_machine.travel("2024-01-02 00:00:00 UTC"):
+        context = Context(paths=path, gateway="duckdb_persistent")
+        context.plan("prod", no_prompts=True, auto_apply=True)
+        assert all(
+            i == to_timestamp("2024-01-02")
+            for i in context.state_sync.max_interval_end_per_model("prod").values()
+        )
+        context.close()
+
+    # No model changes, but a subsequent plan explicitly passes an execution_time that is ahead
+    # of the recorded prod frontier (2024-01-02). This mimics running
+    # `sqlmesh plan --execution-time '2024-01-05'` a few days later.
+    with time_machine.travel("2024-01-06 00:00:00 UTC"):
+        context = Context(paths=path, gateway="duckdb_persistent")
+        plan = context.plan_builder("prod", execution_time="2024-01-05").build()
+        assert plan.requires_backfill
+        assert to_timestamp(plan.end) == to_timestamp("2024-01-05")
+        context.apply(plan)
+        # The seed model isn't backfilled on a cron schedule like the other models, so its
+        # recorded interval end doesn't advance to the new execution time (same exclusion as
+        # test_plan_seed_model_excluded_from_default_end).
+        max_ends = context.state_sync.max_interval_end_per_model("prod")
+        assert all(
+            i == to_timestamp("2024-01-05")
+            for fqn, i in max_ends.items()
+            if "waiter_names" not in fqn
+        )
+        context.close()
+
+    # Sanity check that the downward clamp is unaffected: an explicit execution_time that is
+    # *behind* the recorded prod frontier should still clamp the default end down to it (this is
+    # already covered for the dev case by test_plan_execution_time_start_end).
+    with time_machine.travel("2024-01-07 00:00:00 UTC"):
+        context = Context(paths=path, gateway="duckdb_persistent")
+        plan = context.plan_builder("prod", execution_time="2024-01-04").build()
+        assert not plan.requires_backfill
+        assert to_timestamp(plan.end) == to_timestamp("2024-01-04")
+        context.close()
+
+
+def _write_daily_and_weekly_model_project(tmp_path: Path) -> None:
+    """Minimal 2-model project used to exercise the interaction between execution_time and
+    multiple, differently-cadenced models' recorded prod frontiers. A daily and a weekly model
+    are used so that, after an initial backfill, they end up with different recorded interval
+    ends (the weekly model's frontier lags the daily model's), which is what the original bug
+    report's project topology looked like.
+    """
+    (tmp_path / "models").mkdir()
+    (tmp_path / "config.yaml").write_text(
+        """
+model_defaults:
+    dialect: duckdb
+"""
+    )
+    (tmp_path / "models" / "daily_model.sql").write_text(
+        """
+MODEL (
+  name daily_model,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column start_dt
+  ),
+  start '2024-01-01',
+  cron '@daily'
+);
+
+select @start_ds as start_ds, @end_ds as end_ds, @start_dt as start_dt, @end_dt as end_dt;
+"""
+    )
+    (tmp_path / "models" / "weekly_model.sql").write_text(
+        """
+MODEL (
+  name weekly_model,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column start_dt
+  ),
+  start '2024-01-01',
+  cron '@weekly'
+);
+
+select @start_ds as start_ds, @end_ds as end_ds, @start_dt as start_dt, @end_dt as end_dt;
+"""
+    )
+
+
+def _missing_intervals_by_name(plan: Plan) -> t.Dict[str, t.Tuple[t.Tuple[int, int], ...]]:
+    return {si.snapshot_id.name: tuple(si.merged_intervals) for si in plan.missing_intervals}
+
+
+def test_plan_execution_time_ahead_of_prod_frontier_matches_run_for_all_models(tmp_path: Path):
+    """Locks in that raising `max_interval_end_per_model` for an explicitly provided
+    `execution_time` sweeps in *every* model with a recorded prod frontier, not just
+    modified/selected ones. This is intentional, not an oversight: it's what makes a plain,
+    unscoped `sqlmesh plan --execution-time X` in prod report the exact same missing intervals
+    that `sqlmesh plan --run --execution-time X` would report at the same simulated time - the
+    parity the original bug report asks for (https://github.com/SQLMesh/sqlmesh/issues/5640,
+    which cites `--run` as already having the correct behavior). A future change that "scopes"
+    the raise down to fewer models would silently break this `plan`/`plan --run` parity and
+    should fail this test.
+    """
+    _write_daily_and_weekly_model_project(tmp_path)
+    context = Context(paths=tmp_path)
+
+    # Catch both models up, but to different frontiers: the weekly model's cadence means its
+    # last fully-elapsed interval (2024-01-14) is a day behind the daily model's (2024-01-15).
+    context.plan(auto_apply=True, no_prompts=True, execution_time="2024-01-15 00:00:01")
+    max_ends = context.state_sync.max_interval_end_per_model("prod")
+    assert max_ends['"daily_model"'] == to_timestamp("2024-01-15")
+    assert max_ends['"weekly_model"'] == to_timestamp("2024-01-14")
+
+    # A plain, unscoped prod plan (no model changes, no --select-model/--backfill-model, no
+    # restatement) with execution_time set well ahead of both frontiers and no explicit end.
+    execution_time = "2024-01-25 00:00:01"
+    plan = context.plan_builder("prod", execution_time=execution_time).build()
+    assert plan.requires_backfill
+    assert to_timestamp(plan.end) == to_timestamp(execution_time)
+
+    missing = _missing_intervals_by_name(plan)
+    # Both models show missing intervals, even though only the daily model's cadence would
+    # naturally put it "due" first - the weekly model is swept in too.
+    assert set(missing) == {'"daily_model"', '"weekly_model"'}
+
+    # An equivalent `plan --run` at the same execution_time computes missing intervals with no
+    # caps at all. If it matches exactly, that confirms the plain-plan raise reproduces the
+    # `--run` result rather than under- or over-shooting it.
+    run_plan = context.plan_builder("prod", execution_time=execution_time, run=True).build()
+    assert run_plan.requires_backfill
+    assert _missing_intervals_by_name(run_plan) == missing
+
+
+def test_plan_execution_time_ahead_of_prod_frontier_with_explicit_end(tmp_path: Path):
+    """When the user provides an explicit `end` alongside `execution_time`, the new
+    `end is None` guard means the per-model interval end caps are never raised towards
+    `execution_time` in the first place - the plan's end is exactly the explicit end, and
+    the pre-existing `PlanBuilder.override_end` behavior (which drops the per-model caps
+    entirely once `end` is explicit, see sqlmesh/core/plan/builder.py) takes over instead, same
+    as it did before this fix. This locks in that combining explicit `end` with a far-future
+    `execution_time` cannot make the backfill silently jump past the requested end.
+    """
+    _write_daily_and_weekly_model_project(tmp_path)
+    context = Context(paths=tmp_path)
+    context.plan(auto_apply=True, no_prompts=True, execution_time="2024-01-15 00:00:01")
+
+    # Explicit start/end is only allowed for dev plans (or prod plans with restatements), so use
+    # a dev plan here; the guard being exercised doesn't depend on which of those it is.
+    plan = context.plan_builder(
+        "dev",
+        execution_time="2024-01-30 00:00:01",
+        end="2024-01-21",
+        include_unmodified=True,
+    ).build()
+    assert plan.requires_backfill
+    # The plan's end matches the explicit end exactly - it is not raised towards execution_time.
+    assert to_timestamp(plan.end) == to_timestamp("2024-01-21")
+
+    # Missing intervals for both models stop at the explicit end and never reach anywhere near
+    # the much-later execution_time.
+    for si in plan.missing_intervals:
+        assert si.merged_intervals[-1][1] <= to_timestamp("2024-01-22")
+
+
+@pytest.mark.slow
 def test_plan_seed_model_excluded_from_default_end(copy_to_temp_path: t.Callable):
     path = copy_to_temp_path("examples/sushi")
     with time_machine.travel("2024-06-01 00:00:00 UTC"):
@@ -3254,7 +3424,12 @@ def test_plan_min_intervals(tmp_path: Path):
     plan = context.plan(execution_time=current_time)
 
     assert to_datetime(plan.start) == to_datetime("2020-01-01 00:00:00")
-    assert to_datetime(plan.end) == to_datetime("2020-02-01 00:00:00")
+    # the explicitly provided execution_time is 1 second past the day-aligned frontier of the
+    # other, already-caught-up models, so the plan end now matches it exactly instead of being
+    # capped at that frontier (see https://github.com/SQLMesh/sqlmesh/issues/5640). This
+    # doesn't change which intervals are missing below since they're still bucketed by each
+    # model's own cron.
+    assert to_datetime(plan.end) == to_datetime("2020-02-01 00:00:01")
     assert to_datetime(plan.execution_time) == to_datetime("2020-02-01 00:00:01")
 
     def _get_missing_intervals(plan: Plan, name: str) -> t.List[t.Tuple[datetime, datetime]]:

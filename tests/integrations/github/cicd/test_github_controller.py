@@ -915,3 +915,39 @@ def test_forward_only_config_falls_back_to_plan_config(
 
     controller._context.config.plan.forward_only = False
     assert controller.forward_only_plan is False
+
+
+def test_chunk_up_api_message_preserves_ascii_behavior(
+    github_client, make_event_issue_comment, make_controller
+):
+    controller = make_controller(make_event_issue_comment("created", "test"), github_client)
+
+    max_bytes = controller.MAX_BYTE_LENGTH
+    message = ("a" * max_bytes) + ("b" * max_bytes) + "c"
+
+    assert controller._chunk_up_api_message("") == []
+    assert controller._chunk_up_api_message(message) == [
+        "a" * max_bytes,
+        "b" * max_bytes,
+        "c",
+    ]
+
+
+@pytest.mark.parametrize("multibyte_char", ["🙂", "界"])
+def test_chunk_up_api_message_preserves_multibyte_chars(
+    github_client, make_event_issue_comment, make_controller, multibyte_char
+):
+    controller = make_controller(make_event_issue_comment("created", "test"), github_client)
+
+    max_bytes = controller.MAX_BYTE_LENGTH
+    # Place a multibyte character exactly on the byte boundary between two chunks so
+    # that byte-oriented slicing would bisect its UTF-8 encoding and drop it.
+    message = ("a" * (max_bytes - 1)) + multibyte_char + "b"
+    assert len(message.encode("utf-8")) > max_bytes
+
+    chunks = controller._chunk_up_api_message(message)
+
+    # No character is lost, so the chunks reassemble into the original message.
+    assert "".join(chunks) == message
+    # Each chunk still respects the GitHub API byte limit.
+    assert all(len(chunk.encode("utf-8")) <= max_bytes for chunk in chunks)
