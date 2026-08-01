@@ -2920,7 +2920,11 @@ class NotebookMagicConsole(TerminalConsole):
 
         super().__init__(console, **kwargs)
 
-        self.display = display or get_ipython().user_ns.get("display", ipython_display)
+        shell = get_ipython()
+        user_ns_display = (
+            shell.user_ns.get("display", ipython_display) if shell else ipython_display
+        )
+        self.display = display or user_ns_display
         self.missing_dates_output = widgets.Output()
         self.dynamic_options_after_categorization_output = widgets.VBox()
 
