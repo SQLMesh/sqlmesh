@@ -1160,6 +1160,26 @@ def test_resolve_template_subquery():
         == 'SELECT * FROM "test_catalog"."sqlmesh__test"."test__test_model__2517971505$partitions"'
     )
 
+    # the table is taken from the subquery's FROM clause, so other tables referenced elsewhere
+    # in it (here, in a WHERE subquery) can't be picked up instead
+    evaluator.locals.update(
+        {
+            "this_model": exp.select("*")
+            .from_(exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505"))
+            .where(
+                exp.column("ds").isin(
+                    query=exp.select("ds").from_(exp.to_table("other_catalog.other_schema.other"))
+                )
+            )
+            .subquery()
+        }
+    )
+
+    assert (
+        evaluator.transform(parsed_sql).sql(identify=True)
+        == 'SELECT * FROM "test_catalog"."sqlmesh__test"."test__test_model__2517971505$partitions"'
+    )
+
 
 def test_macro_with_spaces():
     evaluator = MacroEvaluator()
