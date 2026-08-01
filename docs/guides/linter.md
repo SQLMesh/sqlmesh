@@ -74,6 +74,7 @@ Here are all of SQLMesh's built-in linting rules:
 | `invalidselectstarexpansion` | Correctness | The query's top-level selection may be `SELECT *`, but only if SQLMesh can expand the `SELECT *` into individual columns |
 | `noselectstar`               | Stylistic   | The query's top-level selection may not be `SELECT *`, even if SQLMesh can expand the `SELECT *` into individual columns |
 | `nomissingaudits`             | Governance  | SQLMesh did not find any `audits` in the model's configuration to test data quality.                                                 |
+| `nomissingunittest` | Governance | SQLMesh did not find any `unit tests` associated with the model to test |
 
 ### User-defined rules
 
