@@ -358,6 +358,18 @@ def test_ast_correctness(macro_evaluator):
             "700",
             {},
         ),
+        # @FILTER documents "The first argument can be an Array or var args can be
+        # used", like @EACH and @REDUCE, so a lone item must work too.
+        (
+            """@SQL(@REDUCE(@FILTER(300, x -> x > 250), (x,y) -> x + y))""",
+            "300",
+            {},
+        ),
+        (
+            """select @FILTER(a, x -> x > 1)""",
+            "SELECT a",
+            {},
+        ),
         (
             """select @EACH([a, b, c], x -> x and @SQL('@y'))""",
             "SELECT a AND z, b AND z, c AND z",
