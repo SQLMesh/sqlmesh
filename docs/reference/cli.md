@@ -316,7 +316,7 @@ Usage: sqlmesh janitor [OPTIONS]
 
 Options:
   --ignore-ttl      Cleanup snapshots that are not referenced in any
-                    environment, regardless of when they're set to expire. Has
+                    environment, regardless of when they're set to expire.
                     When --environment is specified, cleanup is scoped to
                     snapshots formerly referenced by that environment.
   --force-delete    Delete expired environment and snapshot state records even
