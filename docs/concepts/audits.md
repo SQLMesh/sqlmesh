@@ -715,7 +715,7 @@ By default, SQLMesh will halt the pipeline when an audit fails to prevent potent
 
 ## Advanced usage
 ### Skipping audits
-Audits can be skipped by setting the `skip` argument to `true` as in the following example:
+Individual audits can be skipped by setting the `skip` argument to `true` as in the following example:
 
 ```sql linenums="1" hl_lines="3"
 AUDIT (
@@ -725,6 +725,13 @@ AUDIT (
 SELECT * from sushi.items
 WHERE ds BETWEEN @start_ds AND @end_ds AND
    price IS NULL;
+```
+
+To skip **all** audits for an entire `plan` or `run` invocation, use the `--skip-audits` CLI flag:
+
+```bash
+sqlmesh plan --skip-audits
+sqlmesh run --skip-audits
 ```
 
 ### Non-blocking audits

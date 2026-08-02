@@ -1213,3 +1213,38 @@ def test_dag_upstream_dependency_caching_with_complex_diamond(mocker: MockerFixt
         expected_g_node: {expected_a_node},
         expected_h_node: {expected_a_node},
     }
+
+
+def test_evaluate_skip_audits(mocker: MockerFixture, make_snapshot):
+    snapshot: Snapshot = make_snapshot(
+        SqlModel(
+            name="name",
+            kind=IncrementalByTimeRangeKind(time_column="ds"),
+            query=parse_one("SELECT ds FROM parent.tbl"),
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    state_sync_mock = mocker.MagicMock()
+    scheduler = Scheduler(
+        snapshots=[snapshot],
+        snapshot_evaluator=SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1),
+        state_sync=state_sync_mock,
+        max_workers=1,
+        default_catalog=None,
+    )
+
+    audit_spy = mocker.spy(scheduler, "_audit_snapshot")
+
+    result = scheduler.evaluate(
+        snapshot,
+        start=to_datetime("2022-01-01"),
+        end=to_datetime("2022-01-02"),
+        execution_time=to_datetime("2022-01-02"),
+        deployability_index=DeployabilityIndex.all_deployable(),
+        batch_index=0,
+        skip_audits=True,
+    )
+
+    assert result == []
+    audit_spy.assert_not_called()

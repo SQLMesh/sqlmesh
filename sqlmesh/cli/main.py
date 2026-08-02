@@ -557,6 +557,12 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     default=None,
     help="For every model, ensure at least this many intervals are covered by a missing intervals check regardless of the plan start date",
 )
+@click.option(
+    "--skip-audits",
+    is_flag=True,
+    help="Skip audit execution during plan application.",
+    default=None,
+)
 @opt.verbose
 @click.pass_context
 @error_handler
@@ -614,6 +620,11 @@ def plan(
     "--no-auto-upstream",
     is_flag=True,
     help="Do not automatically include upstream models. Only applicable when --select-model is used. Note: this may result in missing / invalid data for the selected models.",
+)
+@click.option(
+    "--skip-audits",
+    is_flag=True,
+    help="Skip audit execution during the run.",
 )
 @click.pass_context
 @error_handler

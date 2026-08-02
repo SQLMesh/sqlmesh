@@ -1776,6 +1776,114 @@ select 1 as a;
     assert audit_warning not in result.output
 
 
+def test_plan_skip_audits(runner: CliRunner, tmp_path: Path) -> None:
+    create_example_project(tmp_path)
+
+    # Add non-blocking audit that always fails to generate a WARNING
+    with open(tmp_path / "models" / "full_model.sql", "w", encoding="utf-8") as f:
+        f.write(
+            """
+MODEL (
+  name sqlmesh_example.full_model,
+  kind FULL,
+  cron '@daily',
+  grain item_id,
+  audits (full_nonblocking_audit),
+);
+
+SELECT
+  item_id,
+  COUNT(DISTINCT id) AS num_orders,
+FROM
+  sqlmesh_example.incremental_model
+GROUP BY item_id;
+
+AUDIT (
+    name full_nonblocking_audit,
+    blocking false,
+);
+select 1 as a;
+"""
+        )
+
+    audit_warning = "[WARNING] sqlmesh_example.full_model: 'full_nonblocking_audit' audit error: "
+
+    # Without --skip-audits, the audit warning appears
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "plan", "--no-prompts", "--auto-apply", "--skip-tests"],
+    )
+    assert result.exit_code == 0
+    assert audit_warning in result.output
+
+    # With --skip-audits, the audit is not executed so no warning appears
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "plan", "--no-prompts", "--auto-apply", "--skip-tests", "--skip-audits"],
+    )
+    assert result.exit_code == 0
+    assert audit_warning not in result.output
+
+
+def test_run_skip_audits(runner: CliRunner, tmp_path: Path) -> None:
+    create_example_project(tmp_path)
+
+    # Add non-blocking audit that always fails to generate a WARNING
+    with open(tmp_path / "models" / "full_model.sql", "w", encoding="utf-8") as f:
+        f.write(
+            """
+MODEL (
+  name sqlmesh_example.full_model,
+  kind FULL,
+  cron '@daily',
+  grain item_id,
+  audits (full_nonblocking_audit),
+);
+
+SELECT
+  item_id,
+  COUNT(DISTINCT id) AS num_orders,
+FROM
+  sqlmesh_example.incremental_model
+GROUP BY item_id;
+
+AUDIT (
+    name full_nonblocking_audit,
+    blocking false,
+);
+select 1 as a;
+"""
+        )
+
+    audit_warning = "[WARNING] sqlmesh_example.full_model: 'full_nonblocking_audit' audit error: "
+
+    with time_machine.travel("2023-01-01 23:59:00 UTC", tick=False) as traveler:
+        # Initialize prod at time T1
+        result = runner.invoke(
+            cli,
+            ["--paths", str(tmp_path), "plan", "--no-prompts", "--auto-apply", "--skip-tests"],
+        )
+        assert result.exit_code == 0
+
+        # Advance time so the daily cron has elapsed, then run without --skip-audits
+        traveler.move_to("2023-01-02 00:01:00 UTC")
+        result = runner.invoke(
+            cli,
+            ["--paths", str(tmp_path), "run"],
+        )
+        assert result.exit_code == 0
+        assert audit_warning in result.output
+
+        # Advance time again so the daily cron has elapsed, then run with --skip-audits
+        traveler.move_to("2023-01-03 00:01:00 UTC")
+        result = runner.invoke(
+            cli,
+            ["--paths", str(tmp_path), "run", "--skip-audits"],
+        )
+        assert result.exit_code == 0
+        assert audit_warning not in result.output
+
+
 def test_table_diff_schema_diff_ignore_case(runner: CliRunner, tmp_path: Path):
     from sqlmesh.core.engine_adapter import DuckDBEngineAdapter
 

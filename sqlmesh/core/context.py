@@ -780,6 +780,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         select_models: t.Optional[t.Collection[str]] = None,
         exit_on_env_update: t.Optional[int] = None,
         no_auto_upstream: bool = False,
+        skip_audits: bool = False,
     ) -> CompletionStatus:
         """Run the entire dag through the scheduler.
 
@@ -795,6 +796,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             exit_on_env_update: If set, exits with the provided code if the run is interrupted by an update
                 to the target environment.
             no_auto_upstream: Whether to not force upstream models to run. Only applicable when using `select_models`.
+            skip_audits: Whether to skip audit execution after a successful run. Default: False.
 
         Returns:
             True if the run was successful, False otherwise.
@@ -863,6 +865,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                     select_models=select_models,
                     circuit_breaker=_has_environment_changed,
                     no_auto_upstream=no_auto_upstream,
+                    skip_audits=skip_audits,
                 )
                 done = True
             except CircuitBreakerError:
@@ -1366,6 +1369,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         explain: t.Optional[bool] = None,
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
+        skip_audits: t.Optional[bool] = None,
     ) -> Plan:
         """Interactively creates a plan.
 
@@ -1415,6 +1419,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain: Whether to explain the plan instead of applying it.
             min_intervals: Adjust the plan start date on a per-model basis in order to ensure at least this many intervals are covered
                 on every model when checking for missing intervals
+            skip_audits: Whether to skip audit execution after a successful backfill. Default: False.
 
         Returns:
             The populated Plan object.
@@ -1446,6 +1451,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain=explain,
             ignore_cron=ignore_cron,
             min_intervals=min_intervals,
+            skip_audits=skip_audits,
         )
 
         plan = plan_builder.build()
@@ -1503,6 +1509,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
         always_include_local_changes: t.Optional[bool] = None,
+        skip_audits: t.Optional[bool] = None,
     ) -> PlanBuilder:
         """Creates a plan builder.
 
@@ -1545,6 +1552,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 on every model when checking for missing intervals
             always_include_local_changes: Usually when restatements are present, local changes in the filesystem are ignored.
                 However, it can be desirable to deploy changes + restatements in the same plan, so this flag overrides the default behaviour.
+            skip_audits: Whether to skip audit execution after a successful backfill. Default: False.
 
         Returns:
             The plan builder.
@@ -1578,6 +1586,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             "diff_rendered": diff_rendered,
             "skip_linter": skip_linter,
             "min_intervals": min_intervals,
+            "skip_audits": skip_audits,
         }
         user_provided_flags: t.Dict[str, UserProvidedFlags] = {
             k: v for k, v in kwargs.items() if v is not None
@@ -1587,6 +1596,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         no_gaps = no_gaps or False
         skip_backfill = skip_backfill or False
         empty_backfill = empty_backfill or False
+        skip_audits = skip_audits or False
         run = run or False
         diff_rendered = diff_rendered or False
         skip_linter = skip_linter or False
@@ -1809,6 +1819,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             },
             explain=explain or False,
             ignore_cron=ignore_cron or False,
+            skip_audits=skip_audits,
         )
 
     def apply(
@@ -2605,6 +2616,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         select_models: t.Optional[t.Collection[str]],
         circuit_breaker: t.Optional[t.Callable[[], bool]],
         no_auto_upstream: bool,
+        skip_audits: bool = False,
     ) -> CompletionStatus:
         scheduler = self.scheduler(environment=environment)
         snapshots = scheduler.snapshots
@@ -2624,6 +2636,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             selected_snapshots=select_models,
             auto_restatement_enabled=environment.lower() == c.PROD,
             run_environment_statements=True,
+            skip_audits=skip_audits,
         )
 
         if completion_status.is_nothing_to_do:

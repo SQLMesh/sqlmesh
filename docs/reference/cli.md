@@ -405,6 +405,8 @@ Options:
                                   versions of the models and standalone
                                   audits.
   --explain                       Explain the plan instead of applying it.
+  --skip-audits                   Skip audit execution during plan
+                                  application.
   -v, --verbose                   Verbose output. Use -vv for very verbose
                                   output.
   --help                          Show this message and exit.
@@ -516,6 +518,7 @@ Options:
                                 Only applicable when --select-model is used.
                                 Note: this may result in missing / invalid
                                 data for the selected models.
+  --skip-audits                 Skip audit execution during the run.
   --help                        Show this message and exit.
 ```
 

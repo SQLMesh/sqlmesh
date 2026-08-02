@@ -346,3 +346,37 @@ def test_default_audits_with_custom_audit_definitions(tmp_path: Path):
         if audit_name == "positive_amount":
             assert "column" in audit_args
             assert audit_args["column"].name == "amount"
+
+
+@pytest.mark.slow
+def test_skip_audits_bypasses_blocking_audit(tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    create_temp_file(
+        tmp_path,
+        models_dir / "bad_model.sql",
+        dedent("""
+            MODEL (
+                name test.bad_model,
+                kind FULL
+            );
+
+            SELECT NULL AS customer_id
+        """),
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(
+            dialect="duckdb", audits=["not_null(columns := [customer_id])"]
+        )
+    )
+
+    context = Context(paths=tmp_path, config=config)
+
+    # Without skip_audits, the blocking audit causes a PlanError
+    with pytest.raises(PlanError):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # With skip_audits=True, the plan succeeds even though the audit would fail
+    context.plan("prod", no_prompts=True, auto_apply=True, skip_audits=True)

@@ -113,6 +113,7 @@ class PlanBuilder:
         no_gaps: bool = False,
         skip_backfill: bool = False,
         empty_backfill: bool = False,
+        skip_audits: bool = False,
         is_dev: bool = False,
         forward_only: bool = False,
         allow_destructive_models: t.Optional[t.Iterable[str]] = None,
@@ -143,6 +144,7 @@ class PlanBuilder:
         self._no_gaps = no_gaps
         self._skip_backfill = skip_backfill
         self._empty_backfill = empty_backfill
+        self._skip_audits = skip_audits
         self._is_dev = is_dev
         self._forward_only = forward_only
         self._allow_destructive_models = set(
@@ -350,6 +352,7 @@ class PlanBuilder:
             is_dev=self._is_dev,
             skip_backfill=self._skip_backfill,
             empty_backfill=self._empty_backfill,
+            skip_audits=self._skip_audits,
             no_gaps=self._no_gaps,
             forward_only=self._forward_only,
             explain=self._explain,

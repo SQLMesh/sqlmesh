@@ -259,6 +259,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             selected_snapshot_ids=stage.selected_snapshot_ids,
             selected_models=plan.selected_models,
             is_restatement=bool(plan.restatements),
+            skip_audits=plan.skip_audits,
         )
         if errors:
             raise PlanError("Plan application failed.")
@@ -266,6 +267,9 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def visit_audit_only_run_stage(
         self, stage: stages.AuditOnlyRunStage, plan: EvaluatablePlan
     ) -> None:
+        if plan.skip_audits:
+            return
+
         audit_snapshots = stage.snapshots
         if not audit_snapshots:
             return

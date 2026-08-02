@@ -41,6 +41,7 @@ class Plan(PydanticModel, frozen=True):
     is_dev: bool
     skip_backfill: bool
     empty_backfill: bool
+    skip_audits: bool = False
     no_gaps: bool
     forward_only: bool
     allow_destructive_models: t.Set[str]
@@ -271,6 +272,7 @@ class Plan(PydanticModel, frozen=True):
             no_gaps=self.no_gaps,
             skip_backfill=self.skip_backfill,
             empty_backfill=self.empty_backfill,
+            skip_audits=self.skip_audits,
             restatements={s.name: i for s, i in self.restatements.items()},
             restate_all_snapshots=self.restate_all_snapshots,
             is_dev=self.is_dev,
@@ -316,6 +318,7 @@ class EvaluatablePlan(PydanticModel):
     no_gaps: bool
     skip_backfill: bool
     empty_backfill: bool
+    skip_audits: bool = False
     restatements: t.Dict[str, Interval]
     restate_all_snapshots: bool
     is_dev: bool
