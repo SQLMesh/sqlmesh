@@ -32,6 +32,7 @@ nav:
     - SQLMesh tools:
       - guides/vscode.md
       - guides/tablediff.md
+      - guides/history.md
       - guides/linter.md
       - guides/ui.md
     - Advanced usage:

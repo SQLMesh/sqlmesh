@@ -19,15 +19,16 @@ from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
     DataObject,
     DataObjectType,
+    QueryHistoryRecord,
     SourceQuery,
     set_catalog,
     InsertOverwriteStrategy,
 )
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.schema_diff import TableAlterOperation, NestedSupport
-from sqlmesh.utils import optional_import, get_source_columns_to_types
+from sqlmesh.utils import optional_import, get_source_columns_to_types, CorrelationId
 from sqlmesh.utils.date import to_datetime
-from sqlmesh.utils.errors import SQLMeshError
+from sqlmesh.utils.errors import SQLMeshError, QueryHistoryPermissionError
 from sqlmesh.utils.pandas import columns_to_types_from_dtypes
 
 if t.TYPE_CHECKING:
@@ -74,6 +75,7 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
     MAX_TABLE_COMMENT_LENGTH = 1024
     MAX_COLUMN_COMMENT_LENGTH = 1024
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
+    SUPPORTS_QUERY_HISTORY = True
     SUPPORTED_DROP_CASCADE_OBJECT_KINDS = ["SCHEMA"]
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.MERGE
 
@@ -130,6 +132,16 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             return bigframes.connect(context=options)
         return None
 
+    def _correlation_labels(self) -> t.Dict[str, str]:
+        """BigQuery job labels tagging a job with the current correlation id (keys must be lowercase).
+
+        Used for both query jobs (`_job_params`) and dataframe/seed load jobs so that everything
+        SQLMesh runs for a plan is discoverable via `query_history`.
+        """
+        if self.correlation_id:
+            return {self.correlation_id.job_type.value.lower(): self.correlation_id.job_id}
+        return {}
+
     @property
     def _job_params(self) -> t.Dict[str, t.Any]:
         from sqlmesh.core.config.connection import BigQueryPriority
@@ -144,10 +156,9 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             params["maximum_bytes_billed"] = self._extra_config.get("maximum_bytes_billed")
         if self._extra_config.get("reservation") is not None:
             params["reservation"] = self._extra_config.get("reservation")
-        if self.correlation_id:
-            # BigQuery label keys must be lowercase
-            key = self.correlation_id.job_type.value.lower()
-            params["labels"] = {key: self.correlation_id.job_id}
+        labels = self._correlation_labels()
+        if labels:
+            params["labels"] = labels
         return params
 
     @property
@@ -470,6 +481,139 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
         )
         return list(self._query_data)
 
+    def _query_history_location(self, project: str) -> t.Optional[str]:
+        """Best-effort BigQuery region for INFORMATION_SCHEMA.JOBS: the connection's configured
+        location, falling back to the location of the first dataset in the project."""
+        if self.client.location:
+            return self.client.location
+        datasets = list(self._db_call(self.client.list_datasets, project=project, max_results=1))
+        if datasets:
+            return self._get_bq_dataset_location(project, datasets[0].dataset_id)
+        return None
+
+    def query_history(self, correlation_id: CorrelationId) -> t.List[QueryHistoryRecord]:
+        """Return the queries executed under `correlation_id` from BigQuery's INFORMATION_SCHEMA.JOBS.
+
+        Jobs are matched on the label SQLMesh attaches to every job it runs (see `_correlation_labels`).
+        Both query jobs and dataframe/seed load jobs are captured. Reading project-wide job history
+        requires the `bigquery.jobs.listAll` permission.
+
+        Note: signals (Python readiness checks) and pure-Python model logic execute no SQL, so they
+        do not appear here.
+        """
+        from google.api_core.exceptions import Forbidden
+
+        project = self.get_current_catalog()
+        location = self._query_history_location(project) if project else None
+        if not project or not location:
+            raise SQLMeshError(
+                "Cannot read BigQuery query history: could not determine the project or its "
+                "region. Set the 'location' field on the BigQuery gateway connection and retry."
+            )
+
+        # https://cloud.google.com/bigquery/docs/information-schema-jobs
+        jobs_table = exp.to_table(
+            f"`{project}`.`region-{location.lower()}`.INFORMATION_SCHEMA.JOBS",
+            dialect=self.dialect,
+        )
+        # BigQuery label keys must be lowercase, matching how `_job_params` sets them.
+        label_key = correlation_id.job_type.value.lower()
+        label_match = exp.Exists(
+            this=exp.select(exp.Literal.number(1))
+            .from_(
+                exp.Unnest(
+                    expressions=[exp.column("labels")],
+                    alias=exp.TableAlias(columns=[exp.to_identifier("l")]),
+                )
+            )
+            .where(
+                exp.and_(
+                    exp.column("key", table="l").eq(exp.Literal.string(label_key)),
+                    exp.column("value", table="l").eq(exp.Literal.string(correlation_id.job_id)),
+                )
+            )
+        )
+        query = (
+            exp.select(
+                exp.column("start_time"),
+                exp.column("end_time"),
+                exp.column("query"),
+                exp.column("state"),
+                exp.column("message", table="error_result").as_("error_message"),
+                exp.column("total_bytes_processed"),
+                exp.column("job_id"),
+                exp.column("dataset_id", table="destination_table").as_("dest_dataset"),
+                exp.column("table_id", table="destination_table").as_("dest_table"),
+            )
+            .from_(jobs_table)
+            .where(label_match)
+            # COALESCE so queued jobs (NULL start_time) sort chronologically, not first.
+            .order_by(exp.func("COALESCE", exp.column("start_time"), exp.column("creation_time")))
+        )
+
+        try:
+            rows = self.fetchall(query)
+        except Forbidden as e:
+            raise QueryHistoryPermissionError(
+                f"Permission denied reading BigQuery job history for project '{project}'. "
+                "Reading all jobs in the project requires the 'bigquery.jobs.listAll' permission.",
+                remediation=(
+                    f"gcloud projects add-iam-policy-binding {project} "
+                    "--member='user:YOUR_EMAIL' --role='roles/bigquery.resourceViewer'"
+                ),
+                docs_url="https://cloud.google.com/bigquery/docs/information-schema-jobs#required_permissions",
+            ) from e
+
+        records: t.List[QueryHistoryRecord] = []
+        for (
+            start_time,
+            end_time,
+            sql,
+            state,
+            error_message,
+            total_bytes,
+            job_id,
+            dest_dataset,
+            dest_table,
+        ) in rows:
+            # BigQuery routes SELECTs to anonymous result tables (dataset "_...", table "anon...");
+            # only surface a real destination the statement actually wrote to.
+            target = None
+            if (
+                dest_table
+                and dest_dataset
+                and not dest_dataset.startswith("_")
+                and not dest_table.startswith("anon")
+            ):
+                target = f"{dest_dataset}.{dest_table}"
+            if not sql:
+                # Load jobs (dataframe/seed loads) carry no SQL text.
+                sql = f"LOAD INTO {target}" if target else "LOAD"
+            if error_message:
+                status = "failed"
+            elif state in ("RUNNING", "PENDING"):
+                status = "running"
+            else:
+                status = "success"
+            duration_ms = (
+                int((end_time - start_time).total_seconds() * 1000)
+                if start_time and end_time
+                else None
+            )
+            records.append(
+                QueryHistoryRecord(
+                    started_at=start_time,
+                    sql=sql,
+                    status=status,
+                    duration_ms=duration_ms,
+                    bytes_processed=int(total_bytes) if total_bytes is not None else None,
+                    error=error_message,
+                    query_id=job_id,
+                    target=target,
+                )
+            )
+        return records
+
     def _split_alter_expressions(
         self,
         alter_expressions: t.List[exp.Alter],
@@ -582,6 +726,10 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
         from google.cloud import bigquery
 
         job_config = bigquery.job.LoadJobConfig(schema=self.__get_bq_schema(columns_to_types))
+        labels = self._correlation_labels()
+        if labels:
+            # Label load jobs too, so Python-model dataframe loads and seeds show up in query_history.
+            job_config.labels = labels
         if replace:
             job_config.write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
         logger.info(f"Loading dataframe to BigQuery. Table Path: {table.path}")

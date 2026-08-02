@@ -15,7 +15,7 @@ from sqlmesh.core.dialect import normalize_model_name
 from sqlmesh.core.engine_adapter import EngineAdapter, EngineAdapterWithIndexSupport
 from sqlmesh.core.engine_adapter.shared import InsertOverwriteStrategy, DataObject
 from sqlmesh.core.schema_diff import SchemaDiffer, TableAlterOperation, NestedSupport
-from sqlmesh.utils import columns_to_types_to_struct
+from sqlmesh.utils import columns_to_types_to_struct, CorrelationId
 from sqlmesh.utils.date import to_ds
 from sqlmesh.utils.errors import SQLMeshError, UnsupportedCatalogOperationError
 from tests.core.engine_adapter import to_sql_calls
@@ -4170,3 +4170,13 @@ def test_get_current_grants_config_not_implemented(make_mocked_engine_adapter: t
 
     with pytest.raises(NotImplementedError):
         adapter._get_current_grants_config(relation)
+
+
+def test_query_history_not_supported(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(EngineAdapter, dialect="postgres")
+    assert adapter.SUPPORTS_QUERY_HISTORY is False
+
+    with pytest.raises(
+        SQLMeshError, match="Query history is not supported for the 'postgres' engine."
+    ):
+        adapter.query_history(CorrelationId.from_plan_id("abc123"))

@@ -5,6 +5,8 @@ import inspect
 import logging
 import types
 import typing as t
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 from pydantic import Field
@@ -297,6 +299,24 @@ class SourceQuery:
         if self.cleanup_func:
             self.cleanup_func()
         return None
+
+
+@dataclass(frozen=True)
+class QueryHistoryRecord:
+    """A single query SQLMesh executed, reconstructed from the engine's query history.
+
+    Returned by `EngineAdapter.query_history` and rendered by the `sqlmesh history` command.
+    """
+
+    started_at: t.Optional[datetime]
+    sql: str
+    status: str  # "success", "failed", or "running"
+    duration_ms: t.Optional[int] = None
+    bytes_processed: t.Optional[int] = None
+    rows: t.Optional[int] = None
+    error: t.Optional[str] = None
+    query_id: t.Optional[str] = None
+    target: t.Optional[str] = None  # physical table the statement wrote to, if any
 
 
 def set_catalog(override_mapping: t.Optional[t.Dict[str, CatalogSupport]] = None) -> t.Callable:

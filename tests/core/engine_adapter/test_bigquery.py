@@ -13,10 +13,10 @@ from sqlglot.helper import ensure_list
 import sqlmesh.core.dialect as d
 from sqlmesh.core.engine_adapter import BigQueryEngineAdapter
 from sqlmesh.core.engine_adapter.bigquery import select_partitions_expr
-from sqlmesh.core.engine_adapter.shared import DataObjectType
+from sqlmesh.core.engine_adapter.shared import DataObjectType, QueryHistoryRecord
 from sqlmesh.core.node import IntervalUnit
-from sqlmesh.utils import AttributeDict
-from sqlmesh.utils.errors import SQLMeshError
+from sqlmesh.utils import AttributeDict, CorrelationId
+from sqlmesh.utils.errors import QueryHistoryPermissionError, SQLMeshError
 
 pytestmark = [pytest.mark.bigquery, pytest.mark.engine]
 
@@ -1380,3 +1380,164 @@ def test_sync_grants_config_no_schema(
 
     with pytest.raises(ValueError, match="Table test_table does not have a schema \\(dataset\\)"):
         adapter.sync_grants_config(relation, new_grants_config)
+
+
+def test_query_history_builds_labels_filter_sql(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    fetchall_mock = mocker.patch.object(adapter, "fetchall", return_value=[])
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", "us-central1")
+
+    adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+    fetchall_mock.assert_called_once()
+    executed_query = fetchall_mock.call_args[0][0]
+    executed_sql = executed_query.sql(dialect="bigquery")
+    expected_sql = (
+        "SELECT start_time, end_time, query, state, error_result.message AS error_message, "
+        "total_bytes_processed, job_id, destination_table.dataset_id AS dest_dataset, "
+        "destination_table.table_id AS dest_table "
+        "FROM `project`.`region-us-central1`.`INFORMATION_SCHEMA.JOBS` AS JOBS "
+        "WHERE EXISTS(SELECT 1 FROM UNNEST(labels) AS l WHERE l.key = 'sqlmesh_plan' AND l.value = 'abc123') "
+        "ORDER BY COALESCE(start_time, creation_time)"
+    )
+    assert executed_sql == expected_sql
+
+
+@pytest.mark.parametrize(
+    "state, error_message, expected_status",
+    [
+        ("DONE", None, "success"),
+        ("DONE", "Syntax error at line 1", "failed"),
+        ("RUNNING", None, "running"),
+        ("PENDING", None, "running"),
+    ],
+)
+def test_query_history_maps_job_status(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+    state: str,
+    error_message: t.Optional[str],
+    expected_status: str,
+):
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    start_time = datetime(2024, 1, 1, 10, 0, 0)
+    end_time = datetime(2024, 1, 1, 10, 0, 5)
+    mocker.patch.object(
+        adapter,
+        "fetchall",
+        return_value=[
+            (
+                start_time,
+                end_time,
+                "SELECT 1",
+                state,
+                error_message,
+                1024,
+                "job-1",
+                "sushi",
+                "orders__abc",
+            ),
+        ],
+    )
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", "us-central1")
+
+    records = adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+    assert len(records) == 1
+    record = records[0]
+    assert isinstance(record, QueryHistoryRecord)
+    assert record.status == expected_status
+    assert record.error == error_message
+    assert record.started_at == start_time
+    assert record.duration_ms == 5000
+    assert record.bytes_processed == 1024
+    assert record.query_id == "job-1"
+    assert record.sql == "SELECT 1"
+    assert record.target == "sushi.orders__abc"
+
+
+def test_query_history_captures_load_jobs_and_skips_anon(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    start_time = datetime(2024, 1, 1, 10, 0, 0)
+    end_time = datetime(2024, 1, 1, 10, 0, 3)
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    mocker.patch.object(
+        adapter,
+        "fetchall",
+        return_value=[
+            # load job: no SQL text, real destination -> becomes a LOAD row with a target
+            (start_time, end_time, None, "DONE", None, 4096, "job-load", "sushi", "seed_data__v1"),
+            # plain SELECT routed to an anonymous result table -> no target surfaced
+            (start_time, end_time, "SELECT 1", "DONE", None, 10, "job-anon", "_scratch", "anon9f8"),
+        ],
+    )
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", "us-central1")
+
+    records = adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+    assert records[0].sql == "LOAD INTO sushi.seed_data__v1"
+    assert records[0].target == "sushi.seed_data__v1"
+    assert records[1].target is None
+
+
+def test_query_history_forbidden_raises_permission_error(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    from google.api_core.exceptions import Forbidden
+
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    mocker.patch.object(adapter, "fetchall", side_effect=Forbidden("permission denied"))
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", "us-central1")
+
+    with pytest.raises(QueryHistoryPermissionError) as exc_info:
+        adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+    assert "project" in str(exc_info.value)
+    assert exc_info.value.remediation
+    assert "project" in exc_info.value.remediation
+    assert exc_info.value.docs_url == (
+        "https://cloud.google.com/bigquery/docs/information-schema-jobs#required_permissions"
+    )
+    # The CLI only shows str(exc), so the remediation + docs must be folded into it.
+    assert exc_info.value.remediation in str(exc_info.value)
+    assert exc_info.value.docs_url in str(exc_info.value)
+
+
+def test_query_history_missing_location_raises(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", None)
+    mocker.patch.object(adapter, "_db_call", side_effect=lambda func, *a, **k: func(*a, **k))
+    # No configured location and no datasets to resolve one from -> clear error.
+    mocker.patch.object(adapter.client, "list_datasets", return_value=[])
+
+    with pytest.raises(SQLMeshError, match="Cannot read BigQuery query history"):
+        adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+
+def test_query_history_resolves_location_from_dataset(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+    mocker.patch.object(adapter, "get_current_catalog", return_value="project")
+    mocker.patch.object(adapter.client, "location", None)
+    mocker.patch.object(adapter, "_db_call", side_effect=lambda func, *a, **k: func(*a, **k))
+    mocker.patch.object(
+        adapter.client, "list_datasets", return_value=[mocker.Mock(dataset_id="analytics")]
+    )
+    mocker.patch.object(adapter, "_get_bq_dataset_location", return_value="EU")
+    fetchall_mock = mocker.patch.object(adapter, "fetchall", return_value=[])
+
+    adapter.query_history(CorrelationId.from_plan_id("abc123"))
+
+    # region resolved from the dataset and lowercased
+    assert "region-eu" in fetchall_mock.call_args[0][0].sql(dialect="bigquery")

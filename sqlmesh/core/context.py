@@ -118,7 +118,7 @@ from sqlmesh.core.test import (
     filter_tests_by_patterns,
 )
 from sqlmesh.core.user import User
-from sqlmesh.utils import UniqueKeyDict, Verbosity
+from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity
 from sqlmesh.utils.concurrency import concurrent_apply_to_values
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -2476,6 +2476,57 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
 
         return results
+
+    @python_api_analytics
+    def plan_history(
+        self,
+        plan_id: t.Optional[str] = None,
+        environment: t.Optional[str] = None,
+        output_file: t.Optional[Path] = None,
+    ) -> None:
+        """Show the query engine history of everything SQLMesh ran for a plan.
+
+        Args:
+            plan_id: The plan to inspect. If None, an interactive menu of known plans is shown.
+            environment: Restrict the plan menu to this environment. Defaults to all environments.
+            output_file: If set, export the executed SQL to this file instead of printing it.
+        """
+        environments = self.state_reader.get_environments()
+        if environment:
+            environments = [env for env in environments if env.name == environment]
+            if not environments:
+                raise SQLMeshError(f"Environment '{environment}' was not found.")
+
+        env: t.Optional[Environment]
+        if plan_id is None:
+            plan_id, env = self.console.select_plan(environments)
+        else:
+            env = next(
+                (e for e in environments if plan_id in (e.plan_id, e.previous_plan_id)),
+                None,
+            )
+
+        # NOTE: uses the default gateway adapter; per-environment gateways are a follow-up.
+        records = self.engine_adapter.query_history(CorrelationId.from_plan_id(plan_id))
+
+        if output_file:
+            lines: t.List[str] = []
+            for record in records:
+                started = record.started_at.isoformat() if record.started_at else "unknown"
+                header = f"-- [{started}] {record.status.upper()}"
+                if record.duration_ms is not None:
+                    header += f" ({record.duration_ms} ms)"
+                if record.error:
+                    header += f" error: {record.error}"
+                lines.append(header)
+                lines.append(f"{record.sql.strip().rstrip(';')};\n")
+            try:
+                output_file.write_text("\n".join(lines))
+            except OSError as e:
+                raise SQLMeshError(f"Failed to write history to '{output_file}': {e}") from e
+            self.console.log_success(f"Exported {len(records)} queries to {output_file}")
+        else:
+            self.console.show_history(records, plan_id, env)
 
     @python_api_analytics
     def migrate(self) -> None:
