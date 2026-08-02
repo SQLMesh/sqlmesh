@@ -2881,7 +2881,7 @@ def _list_of_calls_to_exp(value: t.List[t.Tuple[str, t.Dict[str, t.Any]]]) -> ex
     )
 
 
-def _has_ordinal_references(query: exp.Select) -> bool:
+def _has_ordinal_references(query: exp.Query) -> bool:
     order = query.args.get("order")
     if order and any(
         isinstance(ob.this, exp.Literal) and ob.this.is_number for ob in order.expressions
@@ -2893,7 +2893,28 @@ def _has_ordinal_references(query: exp.Select) -> bool:
     )
 
 
-def _is_valid_added_projection(projection: exp.Expr) -> bool:
+def _has_ordinal_references_in_scope(query: exp.Select) -> bool:
+    """Return whether the SELECT or any set operation it is a branch of uses ordinal references.
+
+    An ORDER BY on a UNION is attached to the set operation rather than to its branches, but its
+    ordinals address the branch projections positionally, so a mid-list addition shifts them too.
+    Ascending only while the direct parent is a set operation keeps the walk within the projection
+    list's own output scope: it covers chained set operations but stops at a subquery or CTE
+    boundary, whose ordinals refer to that enclosing scope's projections instead.
+    """
+    if _has_ordinal_references(query):
+        return True
+
+    parent = query.parent
+    while isinstance(parent, exp.SetOperation):
+        if _has_ordinal_references(parent):
+            return True
+        parent = parent.parent
+
+    return False
+
+
+def _added_projection_preserves_cardinality(projection: exp.Expr) -> bool:
     """Return whether an added projection preserves the query's row cardinality.
 
     A directly projected UDTF can emit multiple rows. SQLMesh treats it as safe when its nearest
@@ -2912,7 +2933,7 @@ def _is_valid_added_projection(projection: exp.Expr) -> bool:
     )
 
 
-def _projection_lists_match(previous_query: exp.Select, this_query: exp.Select) -> bool:
+def _projections_only_safely_added(previous_query: exp.Select, this_query: exp.Select) -> bool:
     """Return whether a SELECT's projections differ only through safe additions.
 
     Every previous projection must occur unchanged and in the same order in the current list.
@@ -2923,45 +2944,36 @@ def _projection_lists_match(previous_query: exp.Select, this_query: exp.Select) 
     previous_projections = previous_query.expressions
     this_projections = this_query.expressions
     this_index = 0
-    added_at: list[int] = []
-    matched_at: list[int] = []
+    added_before_existing = False
 
     # Match each previous projection to the earliest identical current projection. Any current
-    # projections skipped along the way are additions.
+    # projections skipped along the way are additions placed before an existing projection.
     for previous_projection in previous_projections:
         while (
             this_index < len(this_projections)
             and previous_projection != this_projections[this_index]
         ):
-            if not _is_valid_added_projection(this_projections[this_index]):
+            if not _added_projection_preserves_cardinality(this_projections[this_index]):
                 return False
 
-            added_at.append(this_index)
+            added_before_existing = True
             this_index += 1
 
         if this_index == len(this_projections):
             return False
 
-        matched_at.append(this_index)
         this_index += 1
 
-    # Once all previous projections are matched, every remaining projection was appended.
+    # Once all previous projections are matched, every remaining projection was appended, which
+    # leaves the positions of the existing projections untouched.
     for index in range(this_index, len(this_projections)):
-        if not _is_valid_added_projection(this_projections[index]):
+        if not _added_projection_preserves_cardinality(this_projections[index]):
             return False
-        added_at.append(index)
 
-    # Be conservative about every mid-list addition when ordinals are present. Determining whether
-    # a particular ordinal was shifted would couple this comparison to dialect-specific semantics.
-    if (
-        added_at
-        and matched_at
-        and _has_ordinal_references(this_query)
-        and any(index < matched_at[-1] for index in added_at)
-    ):
-        return False
-
-    return True
+    # Be conservative about every addition placed before an existing projection when ordinals are
+    # present. Determining whether a particular ordinal was shifted would couple this comparison
+    # to dialect-specific semantics.
+    return not (added_before_existing and _has_ordinal_references_in_scope(this_query))
 
 
 def _is_only_projection_additions(
@@ -3004,7 +3016,7 @@ def _is_only_projection_additions(
                     and isinstance(this_expression, exp.Select)
                     and arg_key == "expressions"
                 ):
-                    if not _projection_lists_match(previous_expression, this_expression):
+                    if not _projections_only_safely_added(previous_expression, this_expression):
                         return False
                 elif len(previous_value) != len(this_value):
                     return False

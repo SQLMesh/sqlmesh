@@ -1858,6 +1858,30 @@ def test_categorize_change_sql_additive_projection_edge_cases(make_snapshot):
             None,
             id="derived-table-udtf",
         ),
+        pytest.param(
+            "SELECT a, c FROM t ORDER BY 2",
+            "SELECT a, b, c FROM t ORDER BY 2",
+            None,
+            id="order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y ORDER BY 2",
+            "SELECT a, b, c FROM x UNION ALL SELECT a, b, c FROM y ORDER BY 2",
+            None,
+            id="union-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y UNION ALL SELECT a, c FROM z ORDER BY 2",
+            "SELECT a, b, c FROM x UNION ALL SELECT a, b, c FROM y UNION ALL SELECT a, b, c FROM z ORDER BY 2",
+            None,
+            id="nested-union-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y ORDER BY 2",
+            "SELECT a, c, b FROM x UNION ALL SELECT a, c, b FROM y ORDER BY 2",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="union-order-by-ordinal-append",
+        ),
     ],
 )
 def test_categorize_change_sql_nested_projection_additions(
