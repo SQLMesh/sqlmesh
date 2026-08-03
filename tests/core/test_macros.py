@@ -1263,9 +1263,9 @@ def test_generate_surrogate_key_hash_semantics() -> None:
 
     def render(dialect: str, hash_function: str) -> str:
         sql = f"SELECT @GENERATE_SURROGATE_KEY(a, hash_function := '{hash_function}') FROM foo"
-        return (
-            MacroEvaluator(dialect=dialect).transform(parse_one(sql, dialect=dialect)).sql(dialect)
-        )
+        rendered = MacroEvaluator(dialect=dialect).transform(parse_one(sql, dialect=dialect))
+        assert isinstance(rendered, exp.Expr)
+        return rendered.sql(dialect)
 
     # Rendered SQL, stable across supported sqlglot versions.
     assert (
