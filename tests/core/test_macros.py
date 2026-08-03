@@ -1238,18 +1238,12 @@ def test_macro_coerce_literal_type(macro_evaluator):
 def test_generate_surrogate_key_hash_semantics() -> None:
     from sqlmesh.core.macros import generate_surrogate_key
 
-    surrogate_key = (
-        generate_surrogate_key.func
-        if hasattr(generate_surrogate_key, "func")
-        else generate_surrogate_key
-    )
-
     # The macro must always build the string-semantics hash expression, never
     # a binary digest, so dialects that model the two separately (Presto and
     # Trino after tobymao/sqlglot#7824) can render the hex-string form.
     # BigQuery's parser maps SHA256 to SHA2Digest, which exercises the
     # conversion on every supported sqlglot version.
-    func = surrogate_key(
+    func = generate_surrogate_key(
         MacroEvaluator(dialect="bigquery"),
         exp.column("a"),
         hash_function=exp.Literal.string("SHA256"),
@@ -1286,7 +1280,12 @@ def test_generate_surrogate_key_hash_semantics() -> None:
     # fallback produces it under the current sqlglot pin; once sqlglot renders
     # exp.SHA2 this way natively (tobymao/sqlglot#7824), the probe disables
     # the fallback and these assertions hold unchanged.
-    for _dialect in ("trino", "presto"):
+    # Athena is included: it runs the Trino engine and hits the same
+    # sha256(varbinary) failure, but its parser has no SHA256/SHA512 entry, so
+    # exp.func hands back exp.Anonymous rather than exp.SHA2/exp.SHA2Digest.
+    # That is true on every sqlglot version tested, before and after #7824, so
+    # the Anonymous path is not a pin-era workaround the way the probe is.
+    for _dialect in ("trino", "presto", "athena"):
         assert (
             render(_dialect, "SHA256")
             == "SELECT LOWER(TO_HEX(SHA256(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
@@ -1295,6 +1294,14 @@ def test_generate_surrogate_key_hash_semantics() -> None:
             render(_dialect, "SHA512")
             == "SELECT LOWER(TO_HEX(SHA512(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
         )
+
+    # Anonymous is sqlglot's catch-all for an unrecognised function name, so
+    # the conversion is keyed on the name: an unknown hash_function must pass
+    # through untouched rather than be reinterpreted as a SHA-2 digest.
+    assert (
+        render("athena", "MYHASH")
+        == "SELECT MYHASH(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR)) FROM foo"
+    )
 
     # The fallback is scoped to the Presto family: dialects whose bare
     # SHA256(varchar) already returns a hex string are left to sqlglot.
