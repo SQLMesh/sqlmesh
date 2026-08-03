@@ -9,8 +9,7 @@ from functools import cached_property, partial
 from pathlib import Path
 
 from pydantic import Field
-from sqlglot import diff, exp
-from sqlglot.diff import Insert
+from sqlglot import exp
 from sqlglot.helper import seq_get
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 from sqlglot.optimizer.simplify import gen
@@ -1580,37 +1579,12 @@ class SqlModel(_Model):
             # Can't determine if there's a breaking change if we can't render the query.
             return None
 
-        if previous_query is this_query:
-            edits = []
-        else:
-            edits = diff(
-                previous_query,
-                this_query,
-                matchings=[(previous_query, this_query)],
-                delta_only=True,
-                dialect=self.dialect if self.dialect == previous.dialect else None,
-            )
-        inserted_expressions = {e.expression for e in edits if isinstance(e, Insert)}
+        if previous_query is this_query or _is_only_projection_additions(
+            previous_query, this_query
+        ):
+            return False
 
-        for edit in edits:
-            if not isinstance(edit, Insert):
-                return _additive_projection_change(previous_query, this_query, self.dialect)
-
-            expr = edit.expression
-            if isinstance(expr, exp.UDTF):
-                # projection subqueries do not change cardinality, engines don't allow these to return
-                # more than one row of data
-                parent = expr.find_ancestor(exp.Subquery)
-
-                if not parent:
-                    return None
-
-                expr = parent
-
-            if not _is_projection(expr) and expr.parent not in inserted_expressions:
-                return _additive_projection_change(previous_query, this_query, self.dialect)
-
-        return False
+        return None
 
     def is_metadata_only_change(self, previous: _Node) -> bool:
         if self._is_metadata_only_change_cache.get(id(previous), None) is not None:
@@ -2907,12 +2881,7 @@ def _list_of_calls_to_exp(value: t.List[t.Tuple[str, t.Dict[str, t.Any]]]) -> ex
     )
 
 
-def _is_projection(expr: exp.Expr) -> bool:
-    parent = expr.parent
-    return isinstance(parent, exp.Select) and expr.arg_key == "expressions"
-
-
-def _has_ordinal_references(query: exp.Select) -> bool:
+def _has_ordinal_references(query: exp.Query) -> bool:
     order = query.args.get("order")
     if order and any(
         isinstance(ob.this, exp.Literal) and ob.this.is_number for ob in order.expressions
@@ -2924,84 +2893,146 @@ def _has_ordinal_references(query: exp.Select) -> bool:
     )
 
 
-def _additive_projection_change(
-    previous_query: exp.Query,
-    this_query: exp.Query,
-    dialect: DialectType,
-) -> t.Optional[bool]:
-    """Fallback for when SQLGlot's tree diff can't express an additive projection change.
+def _has_ordinal_references_in_scope(query: exp.Select) -> bool:
+    """Return whether the SELECT or any set operation it is a branch of uses ordinal references.
 
-    SQLGlot's diff matches nodes by structural similarity, so interchangeable leaves (e.g. two
-    identical ``CAST(... AS T)`` target types) can be cross-matched. Inserting a same-type cast
-    above an existing one therefore yields spurious ``Move`` / ``Update`` edits even though a
-    column was simply added to the SELECT list. In that case the edit-based check above is
-    inconclusive, so we verify additivity directly against the output projections.
-
-    Returns ``False`` (non-breaking) only when the change is provably additive:
-      * both queries are simple ``SELECT`` statements,
-      * everything other than the projection list is structurally identical,
-      * no added projection is a (potentially cardinality-changing) ``UDTF``,
-      * every previous projection is preserved, in order, within the new projection list, and
-      * no mid-list insert shifts ordinal ``ORDER BY`` / ``GROUP BY`` references.
-
-    Otherwise returns ``None`` (undetermined), preserving the conservative default.
+    An ORDER BY on a UNION is attached to the set operation rather than to its branches, but its
+    ordinals address the branch projections positionally, so a mid-list addition shifts them too.
+    Ascending only while the direct parent is a set operation keeps the walk within the projection
+    list's own output scope: it covers chained set operations but stops at a subquery or CTE
+    boundary, whose ordinals refer to that enclosing scope's projections instead.
     """
-    # UNIONs or other query expressions, are left to the caller's conservative diff result.
-    if not isinstance(previous_query, exp.Select) or not isinstance(this_query, exp.Select):
-        return None
+    if _has_ordinal_references(query):
+        return True
 
+    parent = query.parent
+    while isinstance(parent, exp.SetOperation):
+        if _has_ordinal_references(parent):
+            return True
+        parent = parent.parent
+
+    return False
+
+
+def _added_projection_preserves_cardinality(projection: exp.Expr) -> bool:
+    """Return whether an added projection preserves the query's row cardinality.
+
+    A directly projected UDTF can emit multiple rows. SQLMesh treats it as safe when its nearest
+    subquery ancestor is contained by the added projection because engines require that projection
+    subquery to return at most one row.
+    """
+    udtfs = list(projection.find_all(exp.UDTF))
+    if not udtfs:
+        return True
+
+    projection_node_ids = {id(node) for node in projection.walk()}
+    return all(
+        (subquery := udtf.find_ancestor(exp.Subquery)) is not None
+        and id(subquery) in projection_node_ids
+        for udtf in udtfs
+    )
+
+
+def _projections_only_safely_added(previous_query: exp.Select, this_query: exp.Select) -> bool:
+    """Return whether a SELECT's projections differ only through safe additions.
+
+    Every previous projection must occur unchanged and in the same order in the current list.
+    Unmatched current projections are additions, subject to the UDTF cardinality check. Additions
+    before an existing projection are unsafe when the query uses ordinal GROUP BY or ORDER BY
+    references because they can change which output those ordinals address.
+    """
     previous_projections = previous_query.expressions
     this_projections = this_query.expressions
-    # If the new query has not gained any projections, this cannot be an additive projection-only
-    # change, so there is nothing for this fallback to prove.
-    if len(this_projections) <= len(previous_projections):
-        return None
+    this_index = 0
+    added_before_existing = False
 
-    # Adding a UDTF projection (e.g. EXPLODE / UNNEST) can change row cardinality, so such a
-    # change is not safely non-breaking even when it appears as an extra SELECT item.
-    for projection in this_projections:
-        bare = projection.this if isinstance(projection, exp.Alias) else projection
-        if isinstance(bare, exp.UDTF):
-            return None
+    # Match each previous projection to the earliest identical current projection. Any current
+    # projections skipped along the way are additions placed before an existing projection.
+    for previous_projection in previous_projections:
+        while (
+            this_index < len(this_projections)
+            and previous_projection != this_projections[this_index]
+        ):
+            if not _added_projection_preserves_cardinality(this_projections[this_index]):
+                return False
 
-    # Everything other than the projection list must be structurally identical. Replacing each
-    # SELECT list with the same dummy literal lets the expression equality check focus on the
-    # FROM / WHERE / GROUP BY / ORDER BY / etc. parts of the query.
-    previous_skeleton = previous_query.copy()
-    this_skeleton = this_query.copy()
-    previous_skeleton.set("expressions", [exp.Literal.number(1)])
-    this_skeleton.set("expressions", [exp.Literal.number(1)])
-    if previous_skeleton != this_skeleton:
-        return None
+            added_before_existing = True
+            this_index += 1
 
-    # Every previous projection must appear, in order, within the new projection list. Comparing
-    # dialect-normalized SQL makes semantically equivalent projection nodes match even when the
-    # parser built distinct object identities.
-    this_projection_sql = [p.sql(dialect=dialect, comments=False) for p in this_projections]
-    search_start = 0
-    matched_at: list[int] = []
-    for projection in previous_projections:
-        target_sql = projection.sql(dialect=dialect, comments=False)
-        # Continue after the previous match so added columns can appear before, between, or after
-        # the original projections, but existing projections cannot be reordered or rewritten.
-        for index in range(search_start, len(this_projection_sql)):
-            if this_projection_sql[index] == target_sql:
-                matched_at.append(index)
-                search_start = index + 1
-                break
-        else:
-            return None
+        if this_index == len(this_projections):
+            return False
 
-    # Mid-list inserts shift ordinal references in ORDER BY / GROUP BY clauses.
-    if _has_ordinal_references(this_query):
-        matched_set = set(matched_at)
-        last_matched = matched_at[-1]
-        if any(i < last_matched for i in range(len(this_projections)) if i not in matched_set):
-            return None
+        this_index += 1
 
-    # At this point the query shape is unchanged and all prior outputs are preserved, so the only
-    # remaining difference is one or more additional, non-UDTF projections.
-    return False
+    # Once all previous projections are matched, every remaining projection was appended, which
+    # leaves the positions of the existing projections untouched.
+    for index in range(this_index, len(this_projections)):
+        if not _added_projection_preserves_cardinality(this_projections[index]):
+            return False
+
+    # Be conservative about every addition placed before an existing projection when ordinals are
+    # present. Determining whether a particular ordinal was shifted would couple this comparison
+    # to dialect-specific semantics.
+    return not (added_before_existing and _has_ordinal_references_in_scope(this_query))
+
+
+def _is_only_projection_additions(
+    previous_query: exp.Query,
+    this_query: exp.Query,
+) -> bool:
+    """Return whether a query changed exclusively through safe projection additions.
+
+    The two ASTs are walked in lockstep. Node types, scalar arguments, and non-projection child
+    lists must match exactly. SELECT projection lists may contain additional expressions as long
+    as all previous projections remain unchanged and ordered and the additions pass the
+    cardinality and ordinal-reference safeguards.
+
+    This specialized comparison avoids the candidate matching performed by SQLGlot's general tree
+    diff while remaining conservative for every change other than an added projection.
+    """
+    expression_pairs: t.List[t.Tuple[exp.Expr, exp.Expr]] = [(previous_query, this_query)]
+
+    while expression_pairs:
+        previous_expression, this_expression = expression_pairs.pop()
+
+        if type(previous_expression) is not type(this_expression):
+            return False
+
+        for arg_key in previous_expression.args.keys() | this_expression.args.keys():
+            previous_value = previous_expression.args.get(arg_key)
+            this_value = this_expression.args.get(arg_key)
+
+            if isinstance(previous_value, exp.Expr):
+                if not isinstance(this_value, exp.Expr):
+                    return False
+
+                expression_pairs.append((previous_value, this_value))
+            elif isinstance(previous_value, list):
+                if not isinstance(this_value, list):
+                    return False
+
+                if (
+                    isinstance(previous_expression, exp.Select)
+                    and isinstance(this_expression, exp.Select)
+                    and arg_key == "expressions"
+                ):
+                    if not _projections_only_safely_added(previous_expression, this_expression):
+                        return False
+                elif len(previous_value) != len(this_value):
+                    return False
+                else:
+                    for previous_item, this_item in zip(previous_value, this_value):
+                        if isinstance(previous_item, exp.Expr):
+                            if not isinstance(this_item, exp.Expr):
+                                return False
+
+                            expression_pairs.append((previous_item, this_item))
+                        elif previous_item != this_item:
+                            return False
+            elif previous_value != this_value:
+                return False
+
+    return True
 
 
 def _single_expr_or_tuple(values: t.Sequence[exp.Expr]) -> exp.Expr | exp.Tuple:
