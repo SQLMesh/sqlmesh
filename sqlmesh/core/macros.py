@@ -789,7 +789,7 @@ def filter_(evaluator: MacroEvaluator, *args: t.Any) -> t.List[t.Any]:
     """
     *items, func = args
     items, func = _norm_var_arg_lambda(evaluator, func, *items)  # type: ignore
-    return list(filter(lambda arg: evaluator.eval_expression(func(arg)), items))
+    return list(filter(lambda arg: evaluator.eval_expression(func(arg)), ensure_collection(items)))
 
 
 def _optional_expression(
@@ -1419,15 +1419,17 @@ def resolve_template(
     """
     Generates either a String literal or an exp.Table representing a physical table location, based on rendering the provided template String literal.
 
-    Note: It relies on the @this_model variable being available in the evaluation context (@this_model resolves to an exp.Table object
-    representing the current physical table).
+    Note: It relies on the @this_model variable being available in the evaluation context. @this_model usually resolves to an
+    exp.Table object representing the current physical table, but in an audit on a model with a time column it resolves to a
+    subquery that selects from that table and filters it down to the audited time range. In that case the placeholders below
+    are resolved against the physical table the subquery selects from.
     Therefore, the @resolve_template macro must be used at creation or evaluation time and not at load time.
 
     Args:
         template: Template string literal. Can contain the following placeholders:
-            @{catalog_name} -> replaced with the catalog of the exp.Table returned from @this_model
-            @{schema_name} -> replaced with the schema of the exp.Table returned from @this_model
-            @{table_name} -> replaced with the name of the exp.Table returned from @this_model
+            @{catalog_name} -> replaced with the catalog of the physical table @this_model refers to
+            @{schema_name} -> replaced with the schema of the physical table @this_model refers to
+            @{table_name} -> replaced with the name of the physical table @this_model refers to
         mode: What to return.
             'literal' -> return an exp.Literal string
             'table' -> return an exp.Table
@@ -1440,9 +1442,26 @@ def resolve_template(
         >>> evaluator.locals.update({"this_model": exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505")})
         >>> evaluator.transform(parse_one(sql)).sql()
         "'s3://data-bucket/prod/test_catalog/sqlmesh__test/test__test_model__2517971505'"
+
+        The same template resolves to the same location when @this_model is the time-filtered
+        subquery that audits on models with a time column receive:
+
+        >>> table = exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505")
+        >>> subquery = exp.select("*").from_(table).where(exp.column("ds").eq("2020-01-01")).subquery()
+        >>> evaluator.locals.update({"this_model": subquery})
+        >>> evaluator.transform(parse_one(sql)).sql()
+        "'s3://data-bucket/prod/test_catalog/sqlmesh__test/test__test_model__2517971505'"
     """
     if "this_model" in evaluator.locals:
-        this_model = exp.to_table(evaluator.locals["this_model"], dialect=evaluator.dialect)
+        this_model_expr = evaluator.locals["this_model"]
+        if isinstance(this_model_expr, exp.Subquery):
+            # Audits on models with a time column render @this_model as a subquery that filters the
+            # physical table on the audited time range, so resolve against the table it selects from
+            from_ = this_model_expr.unnest().args.get("from_")
+            if from_ is not None and isinstance(from_.this, exp.Table):
+                this_model_expr = from_.this
+
+        this_model = exp.to_table(this_model_expr, dialect=evaluator.dialect)
         template_str: str = template.this
         result = (
             template_str.replace("@{catalog_name}", this_model.catalog)

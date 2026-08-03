@@ -114,7 +114,7 @@ Formatting settings for the `sqlmesh format` command and UI.
 | `normalize`           | Whether to normalize SQL (Default: False)                                                      | boolean |    N     |
 | `pad`                 | The number of spaces to use for padding (Default: 2)                                           |   int   |    N     |
 | `indent`              | The number of spaces to use for indentation (Default: 2)                                       |   int   |    N     |
-| `normalize_functions` | Whether to normalize function names. Supported values are: 'upper' and 'lower' (Default: None) | string  |    N     |
+| `normalize_functions` | How to normalize function name casing. `false` (default) preserves the casing of custom and audit function names as written; `"upper"` uppercases all function names; `"lower"` lowercases all function names; `true` defers to SQLGlot's generator default and uppercases all function names including custom ones; `null` (or omitting the key) is excluded during serialization and therefore takes the same `false` default path — it does **not** defer to SQLGlot's generator default. Note: SQLGlot built-in function names may still be canonicalized by the parser regardless of this setting. | string \| boolean \| null |    N     |
 | `leading_comma`       | Whether to use leading commas (Default: False)                                                 | boolean |    N     |
 | `max_text_width`      | The maximum text width in a segment before creating new lines (Default: 80)                    |   int   |    N     |
 | `append_newline`      | Whether to append a newline to the end of the file (Default: False)                            | boolean |    N     |

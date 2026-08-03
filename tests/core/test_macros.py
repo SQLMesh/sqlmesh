@@ -358,6 +358,18 @@ def test_ast_correctness(macro_evaluator):
             "700",
             {},
         ),
+        # @FILTER documents "The first argument can be an Array or var args can be
+        # used", like @EACH and @REDUCE, so a lone item must work too.
+        (
+            """@SQL(@REDUCE(@FILTER(300, x -> x > 250), (x,y) -> x + y))""",
+            "300",
+            {},
+        ),
+        (
+            """select @FILTER(a, x -> x > 1)""",
+            "SELECT a",
+            {},
+        ),
         (
             """select @EACH([a, b, c], x -> x and @SQL('@y'))""",
             "SELECT a AND z, b AND z, c AND z",
@@ -1118,6 +1130,49 @@ def test_resolve_template_table():
     evaluator = MacroEvaluator(runtime_stage=RuntimeStage.CREATING)
     evaluator.locals.update(
         {"this_model": exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505")}
+    )
+
+    assert (
+        evaluator.transform(parsed_sql).sql(identify=True)
+        == 'SELECT * FROM "test_catalog"."sqlmesh__test"."test__test_model__2517971505$partitions"'
+    )
+
+
+def test_resolve_template_subquery():
+    # Audits on models with a time column render @this_model as a subquery that filters the
+    # physical table on the time range, so the underlying table needs to be extracted from it
+    parsed_sql = parse_one(
+        "SELECT * FROM @resolve_template('@{catalog_name}.@{schema_name}.@{table_name}$partitions', mode := 'table')"
+    )
+
+    evaluator = MacroEvaluator(runtime_stage=RuntimeStage.EVALUATING)
+    evaluator.locals.update(
+        {
+            "this_model": exp.select("*")
+            .from_(exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505"))
+            .where(exp.column("ds").between("2020-01-01", "2020-01-02"))
+            .subquery()
+        }
+    )
+
+    assert (
+        evaluator.transform(parsed_sql).sql(identify=True)
+        == 'SELECT * FROM "test_catalog"."sqlmesh__test"."test__test_model__2517971505$partitions"'
+    )
+
+    # the table is taken from the subquery's FROM clause, so other tables referenced elsewhere
+    # in it (here, in a WHERE subquery) can't be picked up instead
+    evaluator.locals.update(
+        {
+            "this_model": exp.select("*")
+            .from_(exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505"))
+            .where(
+                exp.column("ds").isin(
+                    query=exp.select("ds").from_(exp.to_table("other_catalog.other_schema.other"))
+                )
+            )
+            .subquery()
+        }
     )
 
     assert (
