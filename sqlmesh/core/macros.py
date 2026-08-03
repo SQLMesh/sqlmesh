@@ -981,6 +981,20 @@ def generate_surrogate_key(
         # Same split as MD5/MD5Digest: the surrogate key must be a hex string,
         # not a binary digest, on every dialect.
         func = exp.SHA2(this=func.this, length=func.args.get("length"))
+    elif isinstance(func, exp.Anonymous) and _is_presto_family(evaluator.dialect):
+        # Athena runs the Trino engine, so sha256() takes varbinary there too,
+        # but its parser has no SHA256/SHA512 entry: exp.func returns an
+        # Anonymous node, so neither branch above fires and the surrogate key
+        # keeps the bare SHA256(varchar) form reported in #5871. Unlike the
+        # probe below, this is not a pin-era workaround — Athena still parses
+        # to Anonymous on sqlglot versions that carry tobymao/sqlglot#7824.
+        #
+        # Anonymous is the catch-all for every unrecognised function name, and
+        # hash_function is caller-supplied, so the name is checked rather than
+        # assumed: an unknown hash must pass through untouched.
+        length = _SHA2_DIGEST_LENGTHS.get(func.name.upper())
+        if length is not None:
+            func = exp.SHA2(this=concat, length=exp.Literal.number(length))
 
     if isinstance(func, exp.SHA2) and _sha2_renders_binary(evaluator.dialect):
         # Presto/Trino render a bare SHA256(varchar) for exp.SHA2 on sqlglot
@@ -1002,6 +1016,20 @@ def generate_surrogate_key(
     return func
 
 
+# Dialects that model string and binary hashes separately, so a bare
+# SHA256(varchar) is a type error rather than a hex-string surrogate key.
+# Athena is on the list because it runs the Trino engine.
+_PRESTO_FAMILY = frozenset({"presto", "trino", "athena"})
+
+# The SHA-2 digest widths a surrogate key may ask for, by function name.
+_SHA2_DIGEST_LENGTHS = {"SHA256": 256, "SHA512": 512}
+
+
+def _is_presto_family(dialect: DialectType) -> bool:
+    """Whether this dialect is Presto, Trino or Athena."""
+    return (str(dialect) if dialect else "").split(",")[0].strip().lower() in _PRESTO_FAMILY
+
+
 @lru_cache(maxsize=None)
 def _sha2_renders_binary(dialect: DialectType) -> bool:
     """Whether this dialect renders exp.SHA2 as a bare binary-semantics call.
@@ -1009,8 +1037,7 @@ def _sha2_renders_binary(dialect: DialectType) -> bool:
     Only the Presto family models string and binary hashes separately; other
     dialects' SHA256(varchar) already returns a hex string.
     """
-    dialect_name = (str(dialect) if dialect else "").split(",")[0].strip().lower()
-    if dialect_name not in ("presto", "trino", "athena"):
+    if not _is_presto_family(dialect):
         return False
     probe = exp.SHA2(this=exp.column("_sqlmesh_probe"), length=exp.Literal.number(256))
     return "TO_HEX" not in probe.sql(dialect=dialect)
