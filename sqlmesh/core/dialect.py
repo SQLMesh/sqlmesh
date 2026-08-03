@@ -790,6 +790,7 @@ def format_model_expressions(
     expressions: t.List[exp.Expr],
     dialect: t.Optional[str] = None,
     rewrite_casts: bool = True,
+    normalize_functions: t.Union[str, bool, None] = False,
     **kwargs: t.Any,
 ) -> str:
     """Format a model's expressions into a standardized format.
@@ -798,6 +799,21 @@ def format_model_expressions(
         expressions: The model's expressions, must be at least model def + query.
         dialect: The dialect to render the expressions as.
         rewrite_casts: Whether to rewrite all casts to use the :: syntax.
+        normalize_functions: How to normalize function name casing.
+
+            * ``False`` (default) — preserves the original spelling of custom and audit
+              function names.  SQLGlot built-in functions may still canonicalize because
+              the parser discards the original token.
+            * ``"upper"`` — uppercases all function names including custom audit
+              references.
+            * ``"lower"`` — lowercases all function names including built-ins.
+            * ``True`` — defers to SQLGlot's generator default (uppercase).
+            * ``None`` — passes ``None`` directly to the SQLGlot generator, which
+              defers to SQLGlot's own default (typically uppercase, but may vary by
+              dialect).  Note: this is the **direct generator API** behaviour.  When
+              called via ``FormatConfig``, ``None`` is excluded by Pydantic's
+              ``exclude_none`` serialization and this function receives its own ``False``
+              default instead — so the two paths are not equivalent.
         **kwargs: Additional keyword arguments to pass to the sql generator.
 
     Returns:
@@ -807,7 +823,9 @@ def format_model_expressions(
         # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
         # so they must never be transpiled to the target dialect (e.g. tsql would
         # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
-        return expressions[0].sql(pretty=True, dialect=None)
+        return expressions[0].sql(
+            pretty=True, dialect=None, normalize_functions=normalize_functions
+        )
 
     if rewrite_casts:
 
@@ -844,6 +862,7 @@ def format_model_expressions(
         expression.sql(
             pretty=True,
             dialect=None if is_meta_expression(expression) else dialect,
+            normalize_functions=normalize_functions,
             **kwargs,
         )
         for expression in expressions

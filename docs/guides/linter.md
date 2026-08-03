@@ -74,6 +74,7 @@ Here are all of SQLMesh's built-in linting rules:
 | `invalidselectstarexpansion` | Correctness | The query's top-level selection may be `SELECT *`, but only if SQLMesh can expand the `SELECT *` into individual columns |
 | `noselectstar`               | Stylistic   | The query's top-level selection may not be `SELECT *`, even if SQLMesh can expand the `SELECT *` into individual columns |
 | `nomissingaudits`             | Governance  | SQLMesh did not find any `audits` in the model's configuration to test data quality.                                                 |
+| `nomissingunittest` | Governance | SQLMesh did not find any `unit tests` associated with the model to test |
 
 ### User-defined rules
 
@@ -125,6 +126,14 @@ Error: Linter detected errors in the code. Please fix them before proceeding.
 ```
 
 Use `sqlmesh lint --help` for more information.
+
+You can pass `--local` to run lint without loading state from the configured state connection:
+
+``` bash
+$ sqlmesh lint --local
+```
+
+This can make linting faster in repositories where all referenced models are loaded from local files. In multi-repository setups, or when linting only a subset of projects, `--local` may cause additional linting errors because SQLMesh will not resolve references or schemas from models that exist only in remote state.
 
 
 ## Applying linting rules

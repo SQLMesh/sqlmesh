@@ -1541,6 +1541,44 @@ def test_seed_model_custom_types(tmp_path):
     assert df["empty_date"].iloc[0] is None
 
 
+def test_seed_model_boolean_nulls_are_preserved(tmp_path):
+    model_csv_path = (tmp_path / "model.csv").absolute()
+
+    with open(model_csv_path, "w", encoding="utf-8") as fd:
+        fd.write("id,test_ind\n")
+        fd.write("1,null\n")
+        fd.write("2,false\n")
+        fd.write("3,true\n")
+        fd.write("4,null\n")
+
+    model = create_seed_model(
+        "test_db.test_model",
+        SeedKind(path=str(model_csv_path)),
+        columns={
+            "id": "int",
+            "test_ind": "boolean",
+        },
+        dialect="databricks",
+    )
+
+    df = next(model.render_seed())
+
+    assert df["test_ind"].to_list() == [None, False, True, None]
+
+    context = Context(
+        config=Config(
+            default_connection=DuckDBConnectionConfig(),
+            model_defaults=ModelDefaultsConfig(dialect="databricks"),
+        )
+    )
+    context.upsert_model(model)
+
+    rendered_sql = context.render(model).sql("databricks")
+
+    assert "CAST(NULL AS BOOLEAN)" in rendered_sql
+    assert "(4, NULL)" in rendered_sql
+
+
 def test_seed_with_special_characters_in_column(tmp_path, assert_exp_eq):
     config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
     context = Context(config=config)

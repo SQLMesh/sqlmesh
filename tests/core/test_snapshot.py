@@ -1633,10 +1633,7 @@ def test_categorize_change_sql(make_snapshot):
     )
 
 
-def test_categorize_change_sql_redundant_cast(make_snapshot):
-    # Adding a column with a redundant CAST above an existing same-type cast makes SQLGlot's tree
-    # diff emit spurious Move/Update edits (interchangeable DataType leaves get cross-matched),
-    # even though the change is purely an added projection. These must remain NON_BREAKING.
+def test_categorize_change_sql_additive_projection_edge_cases(make_snapshot):
     config = CategorizerConfig(sql=AutoCategorizationMode.SEMI)
 
     old_snapshot = make_snapshot(
@@ -1648,6 +1645,18 @@ def test_categorize_change_sql_redundant_cast(make_snapshot):
         categorize_change(
             new=make_snapshot(
                 SqlModel(name="a", query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # An added projection identical to an existing projection remains non-breaking.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT s::TEXT, a::DATE, s::TEXT FROM t"))
             ),
             old=old_snapshot,
             config=config,
@@ -1771,7 +1780,7 @@ def test_categorize_change_sql_redundant_cast(make_snapshot):
         is None
     )
 
-    # Aliased UDTF projection via fallback path: undetermined.
+    # Aliased UDTF projection: undetermined.
     assert (
         categorize_change(
             new=make_snapshot(
@@ -1807,6 +1816,90 @@ def test_categorize_change_sql_redundant_cast(make_snapshot):
             config=config,
         )
         == SnapshotChangeCategory.NON_BREAKING
+    )
+
+
+@pytest.mark.parametrize(
+    ("previous_query", "this_query", "expected"),
+    [
+        pytest.param(
+            "WITH x AS (SELECT a FROM t) SELECT a FROM x",
+            "WITH x AS (SELECT a, b FROM t) SELECT a FROM x",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="cte",
+        ),
+        pytest.param(
+            "SELECT a FROM t WHERE EXISTS (SELECT x FROM u)",
+            "SELECT a FROM t WHERE EXISTS (SELECT x, y FROM u)",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="exists",
+        ),
+        pytest.param(
+            "SELECT (SELECT a FROM t) AS x",
+            "SELECT (SELECT a, b FROM t) AS x",
+            None,
+            id="scalar-subquery-projection",
+        ),
+        pytest.param(
+            "SELECT a FROM x UNION ALL SELECT a FROM y",
+            "SELECT a, b FROM x UNION ALL SELECT a, b FROM y",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="union",
+        ),
+        pytest.param(
+            "WITH x AS (SELECT a::DATE, s::TEXT FROM t ORDER BY 2) SELECT * FROM x",
+            "WITH x AS (SELECT a::DATE, x::TEXT, s::TEXT FROM t ORDER BY 2) SELECT * FROM x",
+            None,
+            id="nested-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a FROM (SELECT x FROM t) AS nested",
+            "SELECT a FROM (SELECT x, EXPLODE(y) FROM t) AS nested",
+            None,
+            id="derived-table-udtf",
+        ),
+        pytest.param(
+            "SELECT a, c FROM t ORDER BY 2",
+            "SELECT a, b, c FROM t ORDER BY 2",
+            None,
+            id="order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y ORDER BY 2",
+            "SELECT a, b, c FROM x UNION ALL SELECT a, b, c FROM y ORDER BY 2",
+            None,
+            id="union-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y UNION ALL SELECT a, c FROM z ORDER BY 2",
+            "SELECT a, b, c FROM x UNION ALL SELECT a, b, c FROM y UNION ALL SELECT a, b, c FROM z ORDER BY 2",
+            None,
+            id="nested-union-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y ORDER BY 2",
+            "SELECT a, c, b FROM x UNION ALL SELECT a, c, b FROM y ORDER BY 2",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="union-order-by-ordinal-append",
+        ),
+    ],
+)
+def test_categorize_change_sql_nested_projection_additions(
+    make_snapshot,
+    previous_query,
+    this_query,
+    expected,
+):
+    config = CategorizerConfig(sql=AutoCategorizationMode.SEMI)
+    old_snapshot = make_snapshot(SqlModel(name="a", query=parse_one(previous_query)))
+
+    assert (
+        categorize_change(
+            new=make_snapshot(SqlModel(name="a", query=parse_one(this_query))),
+            old=old_snapshot,
+            config=config,
+        )
+        is expected
     )
 
 

@@ -15,6 +15,7 @@ from sqlmesh.core.dialect import (
 import sqlmesh.core.dialect as d
 from sqlmesh.core.model import SqlModel, load_sql_based_model
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
+from sqlmesh.core.config.format import FormatConfig
 
 pytestmark = pytest.mark.dialect_isolated
 
@@ -98,7 +99,7 @@ def test_format_model_expressions():
   references (a, (b, c) AS d), /* c */
   @macro_prop_with_comment(proper := 'foo'), /* k */
   audits ARRAY(
-    NOT_NULL(
+    not_null(
       columns = ARRAY(
         foo_id,
         foo_normalised,
@@ -112,14 +113,14 @@ def test_format_model_expressions():
         tier
       )
     ),
-    UNIQUE_VALUES(columns = ARRAY(foo_id)),
-    ACCEPTED_RANGE(column = foo_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = bar_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = total_weight, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_RANGE(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_VALUES(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
-    ACCEPTED_VALUES(
+    unique_values(columns = ARRAY(foo_id)),
+    accepted_range(column = foo_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = bar_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = total_weight, min_v = 0, max_v = 100),
+    accepted_range(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_range(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_values(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
+    accepted_values(
       column = total_weight_decile,
       is_in = ARRAY(
         'Decile_01',
@@ -339,6 +340,222 @@ GRANT REFERENCES, SELECT ON FUTURE VIEWS IN DATABASE demo_db TO ROLE owner_name;
 GRANT SELECT ON VIEW demo_db.table /* sqlglot.meta replace=false */ TO ROLE admin;
 ON_VIRTUAL_UPDATE_END;"""
     )
+
+
+def test_format_model_expressions_normalize_functions():
+    """Regression: formatter function-name casing behavior.
+
+    Approved behavior:
+    - Default (``normalize_functions=False``): custom/audit function names
+      (stored as strings in the AST) are preserved with their original casing.
+      SQLGlot built-in functions like COUNT/SUM are always output in their
+      canonical uppercase form because the parser discards the original spelling.
+    - ``normalize_functions="upper"``: both audit references and query functions
+      are uppercased.
+    - ``normalize_functions="lower"``: both audit references and query functions
+      are lowercased.
+
+    The fix also covers the single-meta-expression early-return path in
+    ``format_model_expressions``; assertions at the end of this test exercise
+    that path to prevent regression.
+    """
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+
+        SELECT SUM(id), count(id) FROM foo;
+        """
+    )
+
+    # Default: audit references preserved lowercase; COUNT/SUM canonicalized uppercase.
+    assert (
+        format_model_expressions(expressions)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # "upper": audit references uppercased; query functions uppercased.
+    assert (
+        format_model_expressions(expressions, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # "lower": audit references preserved lowercase (already lower); query functions lowercased.
+    assert (
+        format_model_expressions(expressions, normalize_functions="lower")
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  sum(id),
+  count(id)
+FROM foo"""
+    )
+
+    # None: explicit deferral to SQLGlot default → custom/audit names uppercased,
+    # just like "upper".  This is distinct from False (preserve) and must be tested
+    # explicitly because None used to be indistinguishable from the missing kwarg.
+    assert (
+        format_model_expressions(expressions, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # Single-meta-expression path: normalize_functions must be forwarded.
+    # Without the fix, this path ignored normalize_functions entirely.
+    single_model = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        """
+    )
+
+    assert (
+        format_model_expressions(single_model, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    assert (
+        format_model_expressions(single_model)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    # Single-meta path, None: custom audit names are uppercased (explicit SQLGlot default deferral).
+    assert (
+        format_model_expressions(single_model, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+
+def test_format_config_normalize_functions_false():
+    config = FormatConfig(normalize_functions=False)
+
+    assert config.normalize_functions is False
+    assert config.generator_options["normalize_functions"] is False
+
+
+def test_format_config_normalize_functions_none():
+    """FormatConfig(normalize_functions=None) must be accepted but excluded from
+    generator_options by Pydantic's exclude_none serialization.  The config-layer
+    null therefore takes the False-default path in format_model_expressions rather
+    than deferring to SQLGlot's generator default the way True does.
+    """
+    config = FormatConfig(normalize_functions=None)
+
+    assert config.normalize_functions is None
+    # None is excluded by PydanticModel.dict(exclude_none=True), so the key must
+    # be absent from generator_options — format_model_expressions will use False.
+    assert "normalize_functions" not in config.generator_options
+
+    # Confirm the False-default behaviour: custom audit names must be preserved.
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        SELECT id FROM foo
+        """
+    )
+    result = format_model_expressions(expressions, **config.generator_options)
+    assert "unique_combination_of_columns" in result
+    assert "not_null" in result
 
 
 def test_macro_format():
