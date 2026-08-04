@@ -1185,3 +1185,29 @@ def test_pipe_syntax():
         ast.sql("bigquery")
         == "SELECT * FROM (WITH __tmp1 AS (SELECT id FROM t2) SELECT * FROM __tmp1)"
     )
+
+
+def test_extend_sqlglot_is_idempotent():
+    # extend_sqlglot() patches sqlglot's global classes and already ran at import time, so a
+    # second application must not re-save the installed wrappers as the "original" methods
+    from sqlglot.generator import Generator
+    from sqlglot.parser import Parser
+    from sqlglot.tokens import Tokenizer
+
+    patched_parse_types = Parser._parse_types
+    original_parse_types = Parser.__dict__["__parse_types"]
+    unwrapped_interval_values = Generator.UNWRAPPED_INTERVAL_VALUES
+    transforms = dict(Generator.TRANSFORMS)
+    var_single_tokens = set(Tokenizer.VAR_SINGLE_TOKENS)
+
+    d.extend_sqlglot()
+
+    assert Parser._parse_types is patched_parse_types
+    # the wrapper delegates to this, so saving the wrapper here is what causes infinite recursion
+    assert Parser.__dict__["__parse_types"] is original_parse_types
+    assert Generator.UNWRAPPED_INTERVAL_VALUES == unwrapped_interval_values
+    assert Generator.TRANSFORMS == transforms
+    assert set(Tokenizer.VAR_SINGLE_TOKENS) == var_single_tokens
+
+    assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
+    assert d.parse_one("SELECT @x AS y").sql() == "SELECT @x AS y"
