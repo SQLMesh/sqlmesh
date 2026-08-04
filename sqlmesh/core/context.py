@@ -118,7 +118,7 @@ from sqlmesh.core.test import (
     filter_tests_by_patterns,
 )
 from sqlmesh.core.user import User
-from sqlmesh.utils import UniqueKeyDict, Verbosity
+from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity
 from sqlmesh.utils.concurrency import concurrent_apply_to_values
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -870,6 +870,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             engine_type=self.snapshot_evaluator.adapter.dialect,
             state_sync_type=self.state_sync.state_type(),
         )
+        snapshot_evaluator = self.snapshot_evaluator.set_correlation_id(
+            CorrelationId.from_run_id(analytics_run_id)
+        )
         self._load_materializations()
 
         env_check_attempts_num = max(
@@ -922,6 +925,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                     select_models=select_models,
                     circuit_breaker=_has_environment_changed,
                     no_auto_upstream=no_auto_upstream,
+                    snapshot_evaluator=snapshot_evaluator,
                 )
                 done = True
             except CircuitBreakerError:
@@ -2664,8 +2668,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         select_models: t.Optional[t.Collection[str]],
         circuit_breaker: t.Optional[t.Callable[[], bool]],
         no_auto_upstream: bool,
+        snapshot_evaluator: t.Optional[SnapshotEvaluator] = None,
     ) -> CompletionStatus:
-        scheduler = self.scheduler(environment=environment)
+        scheduler = self.scheduler(environment=environment, snapshot_evaluator=snapshot_evaluator)
         snapshots = scheduler.snapshots
 
         if select_models is not None:
