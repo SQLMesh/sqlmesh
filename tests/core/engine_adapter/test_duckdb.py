@@ -1,4 +1,5 @@
 import typing as t
+from datetime import date
 
 import pandas as pd  # noqa: TID253
 import pytest
@@ -154,3 +155,31 @@ def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
         f"SELECT * FROM __ducklake_metadata_{catalog}.main.ducklake_partition_info"
     ).fetchdf()
     assert partition_info.shape[0] == 1
+
+
+def test_ducklake_partitioning_on_initial_query(adapter: EngineAdapter, duck_conn, tmp_path):
+    catalog = "ducklake_initial_partition_db"
+
+    duck_conn.install_extension("ducklake")
+    duck_conn.load_extension("ducklake")
+    duck_conn.execute(
+        f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} "
+        f"(DATA_PATH '{tmp_path}', DATA_INLINING_ROW_LIMIT 0);"
+    )
+
+    adapter.create_schema(f"{catalog}.test_schema")
+    adapter.replace_query(
+        f"{catalog}.test_schema.test_table",
+        parse_one("SELECT 1 AS id, DATE '2000-01-01' AS ds UNION ALL SELECT 2, DATE '2000-01-02'"),
+        partitioned_by=[exp.to_column("ds")],
+    )
+
+    assert adapter.fetchall(f"SELECT * FROM {catalog}.test_schema.test_table ORDER BY id") == [
+        (1, date(2000, 1, 1)),
+        (2, date(2000, 1, 2)),
+    ]
+    partition_ids = duck_conn.execute(
+        f"SELECT partition_id FROM __ducklake_metadata_{catalog}.main.ducklake_data_file"
+    ).fetchall()
+    assert partition_ids
+    assert all(partition_id is not None for (partition_id,) in partition_ids)
