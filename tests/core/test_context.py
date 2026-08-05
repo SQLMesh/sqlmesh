@@ -41,6 +41,7 @@ from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
 from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.cache import OptimizedQueryCache
+from sqlmesh.core.snapshot import SnapshotChangeCategory
 from sqlmesh.core.renderer import render_statements
 from sqlmesh.core.model.kind import ModelKindName
 from sqlmesh.core.state_sync.cache import CachingStateSync
@@ -559,6 +560,59 @@ def test_snapshot_evaluator_calls_ensure_virtual_catalog_injection(mocker):
     _ = ctx.snapshot_evaluator
 
     inject_spy.assert_called_once()
+
+
+@pytest.mark.fast
+def test_cleanup_environments_initializes_virtual_catalog(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup-only contexts must inject ClickHouse's virtual catalog before dropping views."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(
+        DuckDBEngineAdapter,
+        default_catalog="main",
+    )
+    clickhouse_adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="__clickhouse_gw__.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="clickhouse_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert clickhouse_adapter._default_catalog == "__clickhouse_gw__"
+    clickhouse_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
 
 
 @pytest.mark.fast

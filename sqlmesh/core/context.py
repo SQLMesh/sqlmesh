@@ -3066,6 +3066,9 @@ class GenericContext(BaseContext, t.Generic[C]):
                 f"Environment '{name}' is not expired or does not exist. Nothing to clean up."
             )
 
+        if expired_environments_summaries:
+            self._ensure_virtual_catalog_injection()
+
         for expired_env_summary in expired_environments_summaries:
             expired_env = self.state_reader.get_environment(expired_env_summary.name)
 
