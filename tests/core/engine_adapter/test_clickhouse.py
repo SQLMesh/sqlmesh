@@ -1594,3 +1594,46 @@ def test_virtual_catalog_stripped_in_alter_table(make_mocked_engine_adapter: t.C
     assert "mydb" in sql_calls[0]
     assert "my_table" in sql_calls[0]
     assert "ALTER TABLE" in sql_calls[0]
+
+
+def test_virtual_catalog_stripped_from_create_view_source(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        cluster="my_cluster",
+    )
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one("SELECT * FROM __clickhouse_gw__.my_db.my_db__connection_test__1234567890")
+
+    adapter.create_view(
+        "__clickhouse_gw__.my_db.connection_test__dev",
+        query,
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE OR REPLACE VIEW "my_db"."connection_test__dev" '
+        'ON CLUSTER "my_cluster" AS SELECT * FROM '
+        '"my_db"."my_db__connection_test__1234567890"'
+    ]
+    assert query.sql() == (
+        "SELECT * FROM __clickhouse_gw__.my_db.my_db__connection_test__1234567890"
+    )
+
+
+def test_create_view_source_rejects_unexpected_virtual_catalog(
+    make_mocked_engine_adapter: t.Callable,
+):
+    from sqlmesh.utils.errors import SQLMeshError
+
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("clickhouse_gw")
+
+    with pytest.raises(
+        SQLMeshError,
+        match="Provided catalog: unexpected_catalog",
+    ):
+        adapter.create_view(
+            "__clickhouse_gw__.my_db.connection_test__dev",
+            parse_one("SELECT * FROM unexpected_catalog.my_db.physical_view"),
+        )
