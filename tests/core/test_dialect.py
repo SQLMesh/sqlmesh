@@ -419,6 +419,33 @@ FROM t"""
     )
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        "columns (ts DATETIME2(6))",
+        "audits (my_audit(t := CAST('2024-01-01' AS DATETIME2)))",
+        "kind SCD_TYPE_2_BY_COLUMN(unique_key id, columns (a, b), time_data_type DATETIME2(6))",
+        "physical_properties (labels = (('env', 'prod')))",
+        "allow_partials true, description 'my description'",
+    ],
+)
+def test_format_model_expressions_is_idempotent(header: str):
+    """Formatting an already-formatted model must be a no-op.
+
+    Rendering a dialect-specific type with the generic generator does not merely lose
+    formatting, it compounds: tsql `DATETIME2` renders as `TIMESTAMP`, and tsql parses
+    `TIMESTAMP` as ROWVERSION (a binary type), so a second pass writes `VARBINARY`. Two
+    runs of `sqlmesh format` silently turned a datetime into a binary type -- and for
+    `time_data_type` that is the physical type of the SCD valid_from/valid_to columns.
+    """
+    source = f"MODEL (name a.b, dialect tsql, {header});\nSELECT 1 AS x"
+
+    once = format_model_expressions(parse(source, default_dialect="tsql"), dialect="tsql")
+    twice = format_model_expressions(parse(once, default_dialect="tsql"), dialect="tsql")
+
+    assert once == twice
+
+
 def test_format_audit_expressions_meta_render_policy():
     """AUDIT headers have their own meta model, and get the same split: `blocking` is
     SQLMesh's own boolean and must not become tsql's `(1 = 0)`, while `defaults` holds
