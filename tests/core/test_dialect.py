@@ -342,6 +342,109 @@ ON_VIRTUAL_UPDATE_END;"""
     )
 
 
+@pytest.mark.parametrize(
+    "dialect,audit_type,int_type",
+    # These dialects spell the same types differently -- fabric renders a bare DATETIME2
+    # with its default precision and keeps INT, tsql does the reverse. The point of the
+    # test is that each keeps *its own* spelling rather than being flattened.
+    [("tsql", "DATETIME2", "INTEGER"), ("fabric", "DATETIME2(6)", "INT")],
+)
+def test_format_model_expressions_meta_render_policy(dialect: str, audit_type: str, int_type: str):
+    """Header properties whose values are warehouse SQL render with the model dialect,
+    while SQLMesh's own properties stay dialect-agnostic.
+
+    Rendering the whole header with the dialect corrupts SQLMesh DDL (tsql turns
+    `allow_partials TRUE` into the unparseable `(1 = 1)`), but rendering all of it
+    generically discards dialect-specific values the user authored, such as the
+    `DATETIME2` types below. The split is derived from the field declarations, so it
+    covers `columns`, `audits`, `physical_properties` and the expression properties
+    nested inside `kind` alike.
+    """
+    formatted = format_model_expressions(
+        parse(
+            f"""
+            MODEL (
+              name a.b,
+              dialect {dialect},
+              kind SCD_TYPE_2_BY_TIME (
+                unique_key id,
+                time_data_type DATETIME2(6)
+              ),
+              allow_partials true,
+              description 'my description',
+              columns (
+                ts DATETIME2(6)
+              ),
+              audits (
+                my_audit(threshold := CAST('2024-01-01' AS DATETIME2))
+              ),
+              physical_properties (
+                labels = (('env', 'prod'))
+              )
+            );
+
+            SELECT CAST(x AS INT) AS y FROM t
+            """
+        ),
+        dialect=dialect,
+    )
+
+    assert (
+        formatted
+        == f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  kind SCD_TYPE_2_BY_TIME (
+    unique_key id,
+    time_data_type DATETIME2(6)
+  ),
+  allow_partials TRUE,
+  description 'my description',
+  columns (
+    ts DATETIME2(6)
+  ),
+  audits (
+    my_audit(threshold := '2024-01-01'::{audit_type})
+  ),
+  physical_properties (
+    labels = (
+      ('env', 'prod')
+    )
+  )
+);
+
+SELECT
+  x::{int_type} AS y
+FROM t"""
+    )
+
+
+def test_format_audit_expressions_meta_render_policy():
+    """AUDIT headers have their own meta model, and get the same split: `blocking` is
+    SQLMesh's own boolean and must not become tsql's `(1 = 0)`, while `defaults` holds
+    user expressions and keeps its dialect-specific type."""
+    formatted = format_model_expressions(
+        parse(
+            """
+            AUDIT (
+              name my_audit,
+              dialect tsql,
+              blocking false,
+              defaults (
+                cutoff := CAST('2024-01-01' AS DATETIME2)
+              )
+            );
+
+            SELECT * FROM t WHERE x > 0
+            """
+        ),
+        dialect="tsql",
+    )
+
+    assert "blocking FALSE" in formatted
+    assert "cutoff := '2024-01-01'::DATETIME2" in formatted
+
+
 def test_format_model_expressions_normalize_functions():
     """Regression: formatter function-name casing behavior.
 
