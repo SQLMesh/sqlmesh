@@ -178,6 +178,7 @@ class EngineAdapter:
             "query_execution_tracker": kwargs.pop(
                 "query_execution_tracker", self._query_execution_tracker
             ),
+            "pre_ping": kwargs.pop("pre_ping", self._pre_ping),
             **self._extra_config,
             **kwargs,
         }

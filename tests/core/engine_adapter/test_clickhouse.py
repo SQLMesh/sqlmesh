@@ -305,6 +305,25 @@ def test_model_properties(adapter: ClickhouseEngineAdapter):
         == "ENGINE=MergeTree ORDER BY (a) PRIMARY KEY (a)"
     )
 
+    # A parenthesized single-column PRIMARY_KEY must be unwrapped regardless of the
+    # ORDER_BY shape. Previously the PRIMARY_KEY branch checked ORDER_BY's expression,
+    # so pairing PRIMARY_KEY = (a) with a non-parenthesized ORDER_BY emitted the
+    # malformed "PRIMARY KEY ((a))".
+    assert (
+        build_properties_sql(order_by="ORDER_BY = a,", primary_key="PRIMARY_KEY = (a)")
+        == "ENGINE=MergeTree ORDER BY (a) PRIMARY KEY (a)"
+    )
+
+    assert (
+        build_properties_sql(order_by="ORDER_BY = (a, b),", primary_key="PRIMARY_KEY = (a)")
+        == "ENGINE=MergeTree ORDER BY (a, b) PRIMARY KEY (a)"
+    )
+
+    assert (
+        build_properties_sql(primary_key="PRIMARY_KEY = (a)")
+        == "ENGINE=MergeTree ORDER BY () PRIMARY KEY (a)"
+    )
+
     assert build_properties_sql(order_by="ORDER_BY = a + 1,") == "ENGINE=MergeTree ORDER BY (a + 1)"
 
     assert (

@@ -850,7 +850,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             primary_key_vals = []
             if isinstance(primary_key, (exp.Tuple, exp.Array)):
                 primary_key_vals = primary_key.expressions
-            if isinstance(ordered_by_raw, exp.Paren):
+            if isinstance(primary_key, exp.Paren):
                 primary_key_vals = [primary_key.this]
 
             if not primary_key_vals:
