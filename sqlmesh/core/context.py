@@ -3066,17 +3066,21 @@ class GenericContext(BaseContext, t.Generic[C]):
                 f"Environment '{name}' is not expired or does not exist. Nothing to clean up."
             )
 
-        if expired_environments_summaries:
-            self._ensure_virtual_catalog_injection()
-
         for expired_env_summary in expired_environments_summaries:
             expired_env = self.state_reader.get_environment(expired_env_summary.name)
 
             if expired_env:
+                cleanup_default_adapter, cleanup_engine_adapters, failure = (
+                    self._cleanup_adapters_for_environment(expired_env)
+                )
+                if failure:
+                    logger.warning(failure)
+                    failures.append(failure)
+                    continue
                 failures.extend(
                     cleanup_expired_views(
-                        default_adapter=self.engine_adapter,
-                        engine_adapters=self.engine_adapters,
+                        default_adapter=cleanup_default_adapter,
+                        engine_adapters=cleanup_engine_adapters,
                         environments=[expired_env],
                         console=self.console,
                     )
@@ -3087,6 +3091,62 @@ class GenericContext(BaseContext, t.Generic[C]):
         if not failures or force_delete:
             self.state_sync.delete_expired_environments(current_ts=current_ts, name=name)
         return failures
+
+    def _cleanup_adapters_for_environment(
+        self, environment: Environment
+    ) -> t.Tuple[EngineAdapter, t.Dict[str, EngineAdapter], t.Optional[str]]:
+        """Create cleanup-scoped adapters for an expired environment.
+
+        Persisted catalog-qualified view names indicate that virtual catalog injection was active,
+        so cleanup can clone only the selected adapters with the historical catalog and leave the
+        context's adapters unchanged.
+        """
+        engine_adapters = self.engine_adapters
+        default_adapter = self.engine_adapter
+        catalogs_by_gateway: t.Dict[str, t.Set[str]] = collections.defaultdict(set)
+
+        for snapshot in environment.snapshots:
+            if not snapshot.is_model or snapshot.is_symbolic:
+                continue
+
+            gateway = (
+                snapshot.model_gateway
+                if environment.gateway_managed and snapshot.model_gateway in engine_adapters
+                else self.selected_gateway
+            )
+            adapter = engine_adapters.get(gateway, default_adapter)
+            catalog = snapshot.qualified_view_name.catalog_for_environment(
+                environment.naming_info, dialect=adapter.dialect
+            )
+            if catalog and adapter.supports_virtual_catalog() is True:
+                catalogs_by_gateway[gateway].add(catalog)
+
+        for gateway, catalogs in catalogs_by_gateway.items():
+            if len(catalogs) > 1:
+                catalogs_description = ", ".join(f"'{catalog}'" for catalog in sorted(catalogs))
+                return (
+                    default_adapter,
+                    engine_adapters,
+                    (
+                        f"Failed to clean up expired environment '{environment.name}': gateway "
+                        f"'{gateway}' references multiple virtual catalogs: {catalogs_description}"
+                    ),
+                )
+
+        cleanup_engine_adapters = engine_adapters.copy()
+        cleanup_default_adapter = default_adapter
+        for gateway, catalogs in catalogs_by_gateway.items():
+            cleanup_adapter = engine_adapters.get(gateway, default_adapter).with_settings()
+            cleanup_adapter.inject_virtual_catalog(gateway)
+            # inject_virtual_catalog() may initialize adapter-specific state in addition to
+            # _default_catalog. Override only the cleanup clone with the catalog persisted in the
+            # expired environment so historical names pass SINGLE_CATALOG_ONLY validation.
+            cleanup_adapter._default_catalog = next(iter(catalogs))
+            cleanup_engine_adapters[gateway] = cleanup_adapter
+            if gateway == self.selected_gateway:
+                cleanup_default_adapter = cleanup_adapter
+
+        return cleanup_default_adapter, cleanup_engine_adapters, None
 
     def _try_connection(self, connection_name: str, validator: t.Callable[[], None]) -> None:
         connection_name = connection_name.capitalize()
