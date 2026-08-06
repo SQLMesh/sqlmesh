@@ -791,6 +791,7 @@ def format_model_expressions(
     dialect: t.Optional[str] = None,
     rewrite_casts: bool = True,
     normalize_functions: t.Union[str, bool, None] = False,
+    transpile_meta: bool = False,
     **kwargs: t.Any,
 ) -> str:
     """Format a model's expressions into a standardized format.
@@ -814,17 +815,25 @@ def format_model_expressions(
               called via ``FormatConfig``, ``None`` is excluded by Pydantic's
               ``exclude_none`` serialization and this function receives its own ``False``
               default instead — so the two paths are not equivalent.
+        transpile_meta: Whether to render the MODEL/AUDIT/METRIC header with ``dialect``
+            instead of keeping it dialect-agnostic.  Headers are dialect-agnostic by
+            default because SQLMesh properties are not warehouse SQL, but projects that
+            author headers in their warehouse dialect can opt in to preserve
+            dialect-specific values such as column types.
         **kwargs: Additional keyword arguments to pass to the sql generator.
 
     Returns:
         A string representing the formatted model.
     """
+    # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL, so by
+    # default they are not transpiled to the target dialect (e.g. tsql would rewrite a
+    # boolean property like `allow_partials TRUE` to `(1 = 1)`). Projects that author
+    # their headers in the warehouse dialect can opt in via `transpile_meta`.
+    meta_dialect = dialect if transpile_meta else None
+
     if len(expressions) == 1 and is_meta_expression(expressions[0]):
-        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
-        # so they must never be transpiled to the target dialect (e.g. tsql would
-        # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
         return expressions[0].sql(
-            pretty=True, dialect=None, normalize_functions=normalize_functions
+            pretty=True, dialect=meta_dialect, normalize_functions=normalize_functions
         )
 
     if rewrite_casts:
@@ -857,11 +866,9 @@ def format_model_expressions(
         expressions = new_expressions
 
     return ";\n\n".join(
-        # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL and must stay
-        # dialect-agnostic; only the actual query/statement expressions transpile.
         expression.sql(
             pretty=True,
-            dialect=None if is_meta_expression(expression) else dialect,
+            dialect=meta_dialect if is_meta_expression(expression) else dialect,
             normalize_functions=normalize_functions,
             **kwargs,
         )

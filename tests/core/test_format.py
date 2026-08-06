@@ -9,6 +9,7 @@ from sqlmesh.core.model import SqlModel, load_sql_based_model
 from tests.utils.test_filesystem import create_temp_file
 from unittest.mock import call
 from sqlmesh.core.config import ModelDefaultsConfig
+from sqlmesh.core.config.format import FormatConfig
 
 
 def test_format_files(tmp_path: pathlib.Path, mocker: MockerFixture):
@@ -101,6 +102,21 @@ def test_format_files(tmp_path: pathlib.Path, mocker: MockerFixture):
         upd4
         == "MODEL (\n  name audit.model,\n  audits (\n    inline_audit\n  )\n);\n\nSELECT\n  3 AS item_id;\n\nAUDIT (\n  name inline_audit\n);\n\nSELECT\n  *\nFROM @this_model\nWHERE\n  item_id < 0"
     )
+
+
+def test_format_transpile_meta(tmp_path: pathlib.Path):
+    model_text = (
+        "MODEL(name this.model, dialect 'tsql', columns (ts DATETIME2(6))); SELECT 1 AS col"
+    )
+    models_dir = pathlib.Path("models")
+
+    model = create_temp_file(tmp_path, pathlib.Path(models_dir, "model_1.sql"), model_text)
+    Context(paths=tmp_path, config=Config()).format()
+    assert "ts TIMESTAMP(6)" in model.read_text(encoding="utf-8")
+
+    model = create_temp_file(tmp_path, pathlib.Path(models_dir, "model_1.sql"), model_text)
+    Context(paths=tmp_path, config=Config(format=FormatConfig(transpile_meta=True))).format()
+    assert "ts DATETIME2(6)" in model.read_text(encoding="utf-8")
 
 
 def test_ignore_formating_files(tmp_path: pathlib.Path):

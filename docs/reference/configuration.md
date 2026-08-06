@@ -119,6 +119,7 @@ Formatting settings for the `sqlmesh format` command and UI.
 | `max_text_width`      | The maximum text width in a segment before creating new lines (Default: 80)                    |   int   |    N     |
 | `append_newline`      | Whether to append a newline to the end of the file (Default: False)                            | boolean |    N     |
 | `no_rewrite_casts`    | Preserve the existing casts, without rewriting them to use the :: syntax. (Default: False)                  | boolean |    N     |
+| `transpile_meta`      | Whether to render the `MODEL`/`AUDIT`/`METRIC` header with the model's dialect instead of keeping it dialect-agnostic. Headers are dialect-agnostic by default because SQLMesh properties are not warehouse SQL, but projects that author headers in their warehouse dialect can enable this to preserve dialect-specific values such as column types. Note that enabling it also transpiles SQLMesh's own properties, so a boolean such as `allow_partials TRUE` is rendered as `(1 = 1)` in T-SQL. (Default: False) | boolean |    N     |
 
 
 ## Janitor
