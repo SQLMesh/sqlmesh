@@ -785,30 +785,42 @@ def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
     size = len(expressions)
 
     for i, prop in enumerate(expressions):
+        parent = prop.parent
+        meta_dialect = parent.meta.get(_SQLMESH_META_DIALECT) if parent else None
+
+        def render_with_model_dialect(node: exp.Expr, **overrides: t.Any) -> str:
+            opts: t.Dict[str, t.Any] = {
+                "dialect": meta_dialect,
+                "pretty": self.pretty,
+                "identify": self.identify,
+                "normalize": self.normalize,
+                "pad": self.pad,
+                "indent": self._indent,
+                "normalize_functions": self.normalize_functions,
+                "leading_comma": self.leading_comma,
+                "max_text_width": self.max_text_width,
+                "comments": self.comments,
+            }
+            opts.update(overrides)
+            return node.sql(**opts)
+
         if isinstance(prop, MacroFunc):
-            sql = self.indent(self.sql(prop, comment=False))
+            # A macro in property position wraps user-authored arguments, so it carries
+            # warehouse SQL the same way `columns` or `audits` do.
+            sql = self.indent(
+                render_with_model_dialect(prop, comments=False)
+                if meta_dialect
+                else self.sql(prop, comment=False)
+            )
         else:
             value = prop.args.get("value")
-            parent = prop.parent
-            meta_dialect = parent.meta.get(_SQLMESH_META_DIALECT) if parent else None
 
             if (
                 meta_dialect
                 and isinstance(value, exp.Expr)
                 and _meta_render_policy().get(prop.name.lower())
             ):
-                value_sql = value.sql(
-                    dialect=meta_dialect,
-                    pretty=self.pretty,
-                    identify=self.identify,
-                    normalize=self.normalize,
-                    pad=self.pad,
-                    indent=self._indent,
-                    normalize_functions=self.normalize_functions,
-                    leading_comma=self.leading_comma,
-                    max_text_width=self.max_text_width,
-                    comments=self.comments,
-                )
+                value_sql = render_with_model_dialect(value)
             else:
                 value_sql = self.sql(prop, "value")
 

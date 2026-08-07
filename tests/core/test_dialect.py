@@ -427,6 +427,7 @@ FROM t"""
         "kind SCD_TYPE_2_BY_COLUMN(unique_key id, columns (a, b), time_data_type DATETIME2(6))",
         "physical_properties (labels = (('env', 'prod')))",
         "allow_partials true, description 'my description'",
+        "@my_prop(cutoff := CAST('2024-01-01' AS DATETIME2))",
     ],
 )
 def test_format_model_expressions_is_idempotent(header: str):
