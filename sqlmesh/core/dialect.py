@@ -812,6 +812,10 @@ def _parse_interval_span(self: Parser, this: exp.Expr) -> exp.Interval:
 
 def _override(klass: t.Type[Tokenizer | Parser | Generator], func: t.Callable) -> None:
     name = func.__name__
+    if getattr(klass, name, None) is func:
+        # Already overridden. Re-applying would save the override itself as the
+        # "original", making the wrapper call itself and recurse infinitely.
+        return
     setattr(klass, f"_{name}", getattr(klass, name))
     setattr(klass, name, func)
 
@@ -1200,11 +1204,12 @@ def extend_sqlglot() -> None:
                 MacroDef,
             )
 
-        generator.UNWRAPPED_INTERVAL_VALUES = (
-            *generator.UNWRAPPED_INTERVAL_VALUES,
-            MacroStrReplace,
-            MacroVar,
-        )
+        if MacroVar not in generator.UNWRAPPED_INTERVAL_VALUES:
+            generator.UNWRAPPED_INTERVAL_VALUES = (
+                *generator.UNWRAPPED_INTERVAL_VALUES,
+                MacroStrReplace,
+                MacroVar,
+            )
 
     _override(Parser, _parse_select)
     _override(Parser, _parse_statement)
