@@ -473,6 +473,95 @@ def test_format_audit_expressions_meta_render_policy():
     assert "cutoff := '2024-01-01'::DATETIME2" in formatted
 
 
+def test_format_model_expressions_time_column_dialect():
+    """`time_column` is a nested Pydantic model (`TimeColumn`) wrapping an expression, not
+    an `exp.Expr` annotation itself, so the render-policy reflection must recurse into
+    nested Pydantic models to classify it as warehouse SQL. Otherwise it falls back to
+    generic rendering and loses dialect-specific identifier quoting: tsql's `[end]`
+    becomes ANSI `"end"`, even though the same identifier in the query body is correctly
+    kept as `[end]`.
+    """
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              kind INCREMENTAL_BY_TIME_RANGE (
+                time_column [end]
+              )
+            );
+
+            SELECT 1 AS x, [end] FROM t
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert (
+        formatted
+        == """MODEL (
+  name a.b,
+  dialect tsql,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column [end]
+  )
+);
+
+SELECT
+  1 AS x,
+  [end]
+FROM t"""
+    )
+
+
+def test_format_model_expressions_macro_property_comments_preserved_with_dialect():
+    """Comments inside a macro header-property must survive formatting when the model
+    has a `dialect` set.
+
+    The dialect-render path goes through `Expression.sql(dialect=...)`, which builds a
+    fresh `Generator` with `comments` as a constructor flag: passing `comments=False`
+    there disables comment rendering for the *entire* subtree, rather than just
+    suppressing the redundant outer-level `maybe_comment` call the way `comment=False`
+    does for `Generator.sql()`. That previously caused comments like `/* inline note */`
+    to be silently dropped whenever the model declared a `dialect`.
+    """
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              @my_prop(cutoff := CAST('2024-01-01' AS DATETIME2) /* inline note */)
+            );
+
+            SELECT 1 AS x
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert "/* inline note */" in formatted
+    assert (
+        formatted
+        == """MODEL (
+  name a.b,
+  dialect tsql,
+  @my_prop(cutoff := '2024-01-01'::DATETIME2 /* inline note */)
+);
+
+SELECT
+  1 AS x"""
+    )
+
+    # Idempotency: formatting an already-formatted macro property must not duplicate or
+    # drop the comment on a second pass.
+    twice = format_model_expressions(parse(formatted, default_dialect="tsql"), dialect="tsql")
+    assert formatted == twice
+
+
 def test_format_model_expressions_normalize_functions():
     """Regression: formatter function-name casing behavior.
 

@@ -737,15 +737,28 @@ PARSERS = {
 _SQLMESH_META_DIALECT = "sqlmesh_meta_dialect"
 
 
-def _holds_expression(annotation: t.Any) -> bool:
+def _holds_expression(annotation: t.Any, _visited: t.Optional[t.FrozenSet[t.Any]] = None) -> bool:
     """Whether a declared field type bottoms out in a SQLGlot expression.
 
-    Covers List[exp.Expr], Optional[Dict[str, exp.DataType]], Optional[exp.Tuple] and
-    the nested Tuple[str, Dict[str, exp.Expr]] shape used by audits/signals.
+    Covers List[exp.Expr], Optional[Dict[str, exp.DataType]], Optional[exp.Tuple], the
+    nested Tuple[str, Dict[str, exp.Expr]] shape used by audits/signals, and nested
+    Pydantic models that themselves wrap an expression field, such as `TimeColumn`
+    (IncrementalByTimeRangeKind.time_column).
     """
-    if isinstance(annotation, type) and issubclass(annotation, exp.Expr):
-        return True
-    return any(_holds_expression(arg) for arg in t.get_args(annotation))
+    if isinstance(annotation, type):
+        if issubclass(annotation, exp.Expr):
+            return True
+        visited = _visited or frozenset()
+        if annotation in visited:
+            return False
+        if hasattr(annotation, "model_fields"):
+            visited = visited | {annotation}
+            return any(
+                _holds_expression(field.annotation, visited)
+                for field in annotation.model_fields.values()
+            )
+        return False
+    return any(_holds_expression(arg, _visited) for arg in t.get_args(annotation))
 
 
 @functools.lru_cache(maxsize=1)
@@ -806,12 +819,19 @@ def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
 
         if isinstance(prop, MacroFunc):
             # A macro in property position wraps user-authored arguments, so it carries
-            # warehouse SQL the same way `columns` or `audits` do.
-            sql = self.indent(
-                render_with_model_dialect(prop, comments=False)
-                if meta_dialect
-                else self.sql(prop, comment=False)
-            )
+            # warehouse SQL the same way `columns` or `audits` do. Clear the outer node's
+            # own comments (not `.this`'s, which `_macro_func_sql` already attaches)
+            # before rendering with the model dialect, mirroring what `comment=False`
+            # does for the non-dialect path below -- passing `comments=False` here
+            # instead would build a fresh Generator with comments globally disabled,
+            # silently dropping every comment in the subtree rather than just the
+            # redundant outer one.
+            if meta_dialect:
+                prop_for_render = prop.copy()
+                prop_for_render.comments = None
+                sql = self.indent(render_with_model_dialect(prop_for_render))
+            else:
+                sql = self.indent(self.sql(prop, comment=False))
         else:
             value = prop.args.get("value")
 
