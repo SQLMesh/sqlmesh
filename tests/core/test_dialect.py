@@ -516,6 +516,61 @@ FROM t"""
     )
 
 
+def test_format_model_expressions_kind_scalar_sibling_dialect():
+    """A scalar sibling property of an expression-bearing property inside `kind` (e.g.
+    `forward_only` next to `time_column`) must stay dialect-agnostic even though the
+    render policy correctly marks `kind` as containing an expression-holding field
+    somewhere in the `ModelKind` union.
+
+    Regression: recursing into nested Pydantic models to fix `time_column` (see
+    `test_format_model_expressions_time_column_dialect`) made `_holds_expression` also
+    match on `kind` itself, since *some* member of the `ModelKind` union
+    (`IncrementalByTimeRangeKind.time_column`) holds an expression. That routed the
+    entire `kind (...)` subtree through a dialect-specific generator, so tsql's
+    boolean-literal preprocessing rewrote `forward_only TRUE` into `forward_only (1 = 1)`.
+    That reparses without error, but `str_to_bool` on `Paren(EQ(1, 1)).name` (`""`)
+    evaluates to `False`, so the value silently flips on reload.
+    """
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              kind INCREMENTAL_BY_TIME_RANGE (
+                time_column [end],
+                forward_only true
+              )
+            );
+
+            SELECT 1 AS x, [end] FROM t
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert (
+        formatted
+        == """MODEL (
+  name a.b,
+  dialect tsql,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column [end],
+    forward_only TRUE
+  )
+);
+
+SELECT
+  1 AS x,
+  [end]
+FROM t"""
+    )
+
+    model = load_sql_based_model(parse(formatted, default_dialect="tsql"), dialect="tsql")
+    assert model.kind.forward_only is True
+
+
 def test_format_model_expressions_macro_property_comments_preserved_with_dialect():
     """Comments inside a macro header-property must survive formatting when the model
     has a `dialect` set.

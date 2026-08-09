@@ -744,10 +744,24 @@ def _holds_expression(annotation: t.Any, _visited: t.Optional[t.FrozenSet[t.Any]
     nested Tuple[str, Dict[str, exp.Expr]] shape used by audits/signals, and nested
     Pydantic models that themselves wrap an expression field, such as `TimeColumn`
     (IncrementalByTimeRangeKind.time_column).
+
+    Stops at `_ModelKind` subclasses without recursing into their fields: a `kind`
+    property's own nested properties are independently dialect-tagged via the
+    `ModelKind` expression node's own meta when `_props_sql` recurses into them, so
+    treating the `kind` field itself as "holds an expression" -- true only because some
+    other member of the `ModelKind` union has an expression field, e.g.
+    `IncrementalByTimeRangeKind.time_column` -- would route its entire subtree,
+    including scalar sibling properties like `forward_only`, through a dialect-specific
+    generator and transpile them when they shouldn't be (tsql booleans becoming
+    `(1 = 1)`, which silently reparses as `False`).
     """
+    from sqlmesh.core.model.kind import _ModelKind
+
     if isinstance(annotation, type):
         if issubclass(annotation, exp.Expr):
             return True
+        if issubclass(annotation, _ModelKind):
+            return False
         visited = _visited or frozenset()
         if annotation in visited:
             return False
