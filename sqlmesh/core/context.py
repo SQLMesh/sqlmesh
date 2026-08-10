@@ -3181,9 +3181,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             cleanup_adapter = engine_adapters.get(gateway, default_adapter).with_settings()
             cleanup_adapter.inject_virtual_catalog(gateway)
             # inject_virtual_catalog() may initialize adapter-specific state in addition to
-            # _default_catalog. Override only the cleanup clone with the catalog persisted in the
-            # expired environment so historical names pass SINGLE_CATALOG_ONLY validation.
-            cleanup_adapter._default_catalog = next(iter(catalogs))
+            # the default catalog. Override only the cleanup clone with the catalog persisted
+            # in the expired environment so historical names pass SINGLE_CATALOG_ONLY validation.
+            cleanup_adapter.set_default_catalog(next(iter(catalogs)))
             cleanup_engine_adapters[gateway] = cleanup_adapter
             if gateway == self.selected_gateway:
                 cleanup_default_adapter = cleanup_adapter
