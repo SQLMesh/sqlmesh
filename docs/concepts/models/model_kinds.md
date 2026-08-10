@@ -583,7 +583,7 @@ MODEL (
 
 ### When Matched Expression
 
-The logic to use when updating columns when a match occurs (the source and target match on the given keys) by default updates all the columns. This can be overriden with custom logic like below:
+The logic to use when updating columns when a match occurs (the source and target match on the given keys) by default updates all the columns. This can be overridden with custom logic like below:
 
 ```sql linenums="1" hl_lines="5"
 MODEL (
@@ -1437,7 +1437,7 @@ GROUP BY
 
 SCD Type 2 models are designed by default to protect the data that has been captured because it is not possible to recreate the history once it has been lost.
 However, there are cases where you may want to clear the history and start fresh.
-For this use use case you will want to start by setting `disable_restatement` to `false` in the model definition.
+For this use case you will want to start by setting `disable_restatement` to `false` in the model definition.
 
 ```sql linenums="1" hl_lines="5"
 MODEL (
