@@ -118,7 +118,7 @@ from sqlmesh.core.test import (
     filter_tests_by_patterns,
 )
 from sqlmesh.core.user import User
-from sqlmesh.utils import UniqueKeyDict, Verbosity
+from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity
 from sqlmesh.utils.concurrency import concurrent_apply_to_values
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -811,6 +811,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             engine_type=self.snapshot_evaluator.adapter.dialect,
             state_sync_type=self.state_sync.state_type(),
         )
+        snapshot_evaluator = self.snapshot_evaluator.set_correlation_id(
+            CorrelationId.from_run_id(analytics_run_id)
+        )
         self._load_materializations()
 
         env_check_attempts_num = max(
@@ -863,6 +866,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                     select_models=select_models,
                     circuit_breaker=_has_environment_changed,
                     no_auto_upstream=no_auto_upstream,
+                    snapshot_evaluator=snapshot_evaluator,
                 )
                 done = True
             except CircuitBreakerError:
@@ -2605,8 +2609,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         select_models: t.Optional[t.Collection[str]],
         circuit_breaker: t.Optional[t.Callable[[], bool]],
         no_auto_upstream: bool,
+        snapshot_evaluator: t.Optional[SnapshotEvaluator] = None,
     ) -> CompletionStatus:
-        scheduler = self.scheduler(environment=environment)
+        scheduler = self.scheduler(environment=environment, snapshot_evaluator=snapshot_evaluator)
         snapshots = scheduler.snapshots
 
         if select_models is not None:
@@ -3065,10 +3070,17 @@ class GenericContext(BaseContext, t.Generic[C]):
             expired_env = self.state_reader.get_environment(expired_env_summary.name)
 
             if expired_env:
+                cleanup_default_adapter, cleanup_engine_adapters, failure = (
+                    self._cleanup_adapters_for_environment(expired_env)
+                )
+                if failure:
+                    logger.warning(failure)
+                    failures.append(failure)
+                    continue
                 failures.extend(
                     cleanup_expired_views(
-                        default_adapter=self.engine_adapter,
-                        engine_adapters=self.engine_adapters,
+                        default_adapter=cleanup_default_adapter,
+                        engine_adapters=cleanup_engine_adapters,
                         environments=[expired_env],
                         console=self.console,
                     )
@@ -3079,6 +3091,62 @@ class GenericContext(BaseContext, t.Generic[C]):
         if not failures or force_delete:
             self.state_sync.delete_expired_environments(current_ts=current_ts, name=name)
         return failures
+
+    def _cleanup_adapters_for_environment(
+        self, environment: Environment
+    ) -> t.Tuple[EngineAdapter, t.Dict[str, EngineAdapter], t.Optional[str]]:
+        """Create cleanup-scoped adapters for an expired environment.
+
+        Persisted catalog-qualified view names indicate that virtual catalog injection was active,
+        so cleanup can clone only the selected adapters with the historical catalog and leave the
+        context's adapters unchanged.
+        """
+        engine_adapters = self.engine_adapters
+        default_adapter = self.engine_adapter
+        catalogs_by_gateway: t.Dict[str, t.Set[str]] = collections.defaultdict(set)
+
+        for snapshot in environment.snapshots:
+            if not snapshot.is_model or snapshot.is_symbolic:
+                continue
+
+            gateway = (
+                snapshot.model_gateway
+                if environment.gateway_managed and snapshot.model_gateway in engine_adapters
+                else self.selected_gateway
+            )
+            adapter = engine_adapters.get(gateway, default_adapter)
+            catalog = snapshot.qualified_view_name.catalog_for_environment(
+                environment.naming_info, dialect=adapter.dialect
+            )
+            if catalog and adapter.supports_virtual_catalog() is True:
+                catalogs_by_gateway[gateway].add(catalog)
+
+        for gateway, catalogs in catalogs_by_gateway.items():
+            if len(catalogs) > 1:
+                catalogs_description = ", ".join(f"'{catalog}'" for catalog in sorted(catalogs))
+                return (
+                    default_adapter,
+                    engine_adapters,
+                    (
+                        f"Failed to clean up expired environment '{environment.name}': gateway "
+                        f"'{gateway}' references multiple virtual catalogs: {catalogs_description}"
+                    ),
+                )
+
+        cleanup_engine_adapters = engine_adapters.copy()
+        cleanup_default_adapter = default_adapter
+        for gateway, catalogs in catalogs_by_gateway.items():
+            cleanup_adapter = engine_adapters.get(gateway, default_adapter).with_settings()
+            cleanup_adapter.inject_virtual_catalog(gateway)
+            # inject_virtual_catalog() may initialize adapter-specific state in addition to
+            # _default_catalog. Override only the cleanup clone with the catalog persisted in the
+            # expired environment so historical names pass SINGLE_CATALOG_ONLY validation.
+            cleanup_adapter._default_catalog = next(iter(catalogs))
+            cleanup_engine_adapters[gateway] = cleanup_adapter
+            if gateway == self.selected_gateway:
+                cleanup_default_adapter = cleanup_adapter
+
+        return cleanup_default_adapter, cleanup_engine_adapters, None
 
     def _try_connection(self, connection_name: str, validator: t.Callable[[], None]) -> None:
         connection_name = connection_name.capitalize()

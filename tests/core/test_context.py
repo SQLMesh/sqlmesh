@@ -41,6 +41,7 @@ from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
 from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.cache import OptimizedQueryCache
+from sqlmesh.core.snapshot import SnapshotChangeCategory
 from sqlmesh.core.renderer import render_statements
 from sqlmesh.core.model.kind import ModelKindName
 from sqlmesh.core.state_sync.cache import CachingStateSync
@@ -559,6 +560,322 @@ def test_snapshot_evaluator_calls_ensure_virtual_catalog_injection(mocker):
     _ = ctx.snapshot_evaluator
 
     inject_spy.assert_called_once()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize(
+    ("virtual_catalog", "expected_catalog"),
+    [
+        (None, "__clickhouse_gw__"),
+        ("my_custom_catalog", "my_custom_catalog"),
+        ("new_catalog", "old_catalog"),
+    ],
+)
+def test_cleanup_environments_initializes_virtual_catalog_without_probing_unrelated_gateway(
+    mocker: MockerFixture,
+    make_mocked_engine_adapter: t.Callable,
+    make_snapshot: t.Callable,
+    virtual_catalog: t.Optional[str],
+    expected_catalog: str,
+):
+    """Cleanup must initialize the selected ClickHouse gateway without probing unrelated ones."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(
+        DuckDBEngineAdapter,
+        default_catalog="main",
+    )
+    clickhouse_adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog=virtual_catalog,
+    )
+    unavailable_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    unavailable_adapter.cursor.execute.side_effect = RuntimeError("unrelated gateway unavailable")
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+        "unavailable_gw": unavailable_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name=f"{expected_catalog}.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="clickhouse_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert clickhouse_adapter._default_catalog is None
+    unavailable_adapter.cursor.execute.assert_not_called()
+    clickhouse_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
+
+
+@pytest.mark.fast
+def test_cleanup_environments_does_not_leak_historical_virtual_catalog(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Historical cleanup catalogs must not mutate root or evaluator adapters."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    clickhouse_adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="new_catalog",
+    )
+    clickhouse_adapter.inject_virtual_catalog("clickhouse_gw")
+
+    context = Context(config=Config(), load=False)
+    context.selected_gateway = "duckdb_gw"
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="old_catalog.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="clickhouse_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    evaluator_before_cleanup = context.snapshot_evaluator
+    assert evaluator_before_cleanup.adapters["clickhouse_gw"]._default_catalog == "new_catalog"
+
+    assert context._cleanup_environments(name="dev") == []
+    assert clickhouse_adapter._default_catalog == "new_catalog"
+    assert evaluator_before_cleanup.adapters["clickhouse_gw"]._default_catalog == "new_catalog"
+
+    context._snapshot_evaluator = None
+    assert context.snapshot_evaluator.adapters["clickhouse_gw"]._default_catalog == "new_catalog"
+
+
+@pytest.mark.fast
+def test_cleanup_environments_supports_legacy_virtual_catalog_adapter(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup must support opt-in adapters whose injection override accepts only a gateway."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    class LegacyVirtualCatalogAdapter(ClickhouseEngineAdapter):
+        def inject_virtual_catalog(self, gateway: str) -> None:
+            self._default_catalog = f"__{gateway}__"
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    legacy_adapter = make_mocked_engine_adapter(LegacyVirtualCatalogAdapter)
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "legacy_gw": legacy_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="old_catalog.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="legacy_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert legacy_adapter._default_catalog is None
+    legacy_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
+
+
+@pytest.mark.fast
+def test_cleanup_environments_initializes_scoped_third_party_adapter(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup clones must run the virtual-catalog hook before restoring persisted state."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    class StatefulVirtualCatalogAdapter(ClickhouseEngineAdapter):
+        def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
+            self.virtual_catalog_enabled = False
+            super().__init__(*args, **kwargs)
+
+        @property
+        def catalog_support(self) -> CatalogSupport:
+            return (
+                CatalogSupport.SINGLE_CATALOG_ONLY
+                if self.virtual_catalog_enabled
+                else CatalogSupport.UNSUPPORTED
+            )
+
+        def supports_virtual_catalog(self) -> bool:
+            return True
+
+        def inject_virtual_catalog(self, gateway: str) -> None:
+            self.virtual_catalog_enabled = True
+            self._default_catalog = f"__{gateway}__"
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    stateful_adapter = make_mocked_engine_adapter(StatefulVirtualCatalogAdapter)
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "stateful_gw": stateful_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="old_catalog.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="stateful_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert stateful_adapter.virtual_catalog_enabled is False
+    assert stateful_adapter._default_catalog is None
+    stateful_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
+
+
+@pytest.mark.fast
+def test_cleanup_environments_rejects_ambiguous_persisted_virtual_catalogs(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup must not partially drop views when one gateway has multiple persisted catalogs."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    clickhouse_adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="old_catalog",
+    )
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+    }
+
+    snapshots = []
+    for catalog, model_name in (("old_catalog", "one"), ("other_catalog", "two")):
+        snapshot = make_snapshot(
+            SqlModel(
+                name=f"{catalog}.my_db.{model_name}",
+                query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+                gateway="clickhouse_gw",
+                dialect="clickhouse",
+            )
+        )
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots.append(snapshot.table_info)
+
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=snapshots,
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    failures = context._cleanup_environments(name="dev")
+
+    assert len(failures) == 1
+    assert "multiple virtual catalogs" in failures[0]
+    assert clickhouse_adapter._default_catalog is None
+    clickhouse_adapter.cursor.execute.assert_not_called()
+    state_sync.delete_expired_environments.assert_not_called()
 
 
 @pytest.mark.fast

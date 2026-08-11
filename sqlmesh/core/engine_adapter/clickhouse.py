@@ -595,6 +595,48 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 target_columns_to_types or self.columns(table_name),
             )
 
+    def create_view(
+        self,
+        view_name: TableName,
+        query_or_df: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        replace: bool = True,
+        materialized: bool = False,
+        materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        **create_kwargs: t.Any,
+    ) -> None:
+        if self._default_catalog and isinstance(query_or_df, exp.Query):
+            from sqlmesh.utils.errors import SQLMeshError
+
+            query_or_df = query_or_df.copy()
+            for table in query_or_df.find_all(exp.Table):
+                if not table.catalog:
+                    continue
+                if table.catalog != self._default_catalog:
+                    raise SQLMeshError(
+                        f"{self.dialect} requires that all catalog operations be against a single "
+                        f"catalog: {self._default_catalog}. Provided catalog: {table.catalog}"
+                    )
+                table.set("catalog", None)
+
+        super().create_view(
+            view_name,
+            query_or_df,
+            target_columns_to_types=target_columns_to_types,
+            replace=replace,
+            materialized=materialized,
+            materialized_properties=materialized_properties,
+            table_description=table_description,
+            column_descriptions=column_descriptions,
+            view_properties=view_properties,
+            source_columns=source_columns,
+            **create_kwargs,
+        )
+
     def _strip_virtual_catalog(self, name: "TableName") -> exp.Table:
         """Strip the virtual catalog prefix from a table name if present.
 
@@ -850,7 +892,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             primary_key_vals = []
             if isinstance(primary_key, (exp.Tuple, exp.Array)):
                 primary_key_vals = primary_key.expressions
-            if isinstance(ordered_by_raw, exp.Paren):
+            if isinstance(primary_key, exp.Paren):
                 primary_key_vals = [primary_key.this]
 
             if not primary_key_vals:

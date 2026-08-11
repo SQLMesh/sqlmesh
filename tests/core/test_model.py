@@ -1958,6 +1958,45 @@ def test_render_definition():
     assert "def test_macro(evaluator, v):" in d.format_model_expressions(model.render_definition())
 
 
+def test_tsql_alter_column_post_statement(make_snapshot: t.Callable) -> None:
+    # Issue #5932: the trailing NOT NULL made this parse as a Command, which left @this_model
+    # unresolved and sent the macro to the engine verbatim.
+    expressions = d.parse(
+        """
+        MODEL (
+            name test.test_model,
+            dialect tsql,
+        );
+
+        SELECT 1 AS id;
+
+        @IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INT NOT NULL);
+        """
+    )
+
+    model = load_sql_based_model(expressions, default_catalog="catalog")
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    post_statements = model.render_post_statements(
+        snapshots={model.fqn: snapshot},
+        runtime_stage=RuntimeStage.CREATING,
+    )
+
+    assert len(post_statements) == 1
+    assert (
+        post_statements[0].sql(dialect="tsql")
+        == f"ALTER TABLE [catalog].[sqlmesh__test].[test__test_model__{snapshot.version}] /* catalog.test.test_model */ ALTER COLUMN [id] INTEGER NOT NULL"
+    )
+
+    # The statement is skipped outside of the creating stage
+    assert not model.render_post_statements(
+        snapshots={model.fqn: snapshot},
+        runtime_stage=RuntimeStage.EVALUATING,
+    )
+
+
 def test_render_definition_with_defaults():
     query = """
         SELECT
