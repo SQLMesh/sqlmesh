@@ -3,7 +3,7 @@ import traceback
 import typing as t
 
 from fastapi import HTTPException
-from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY
+from starlette.status import HTTP_422_UNPROCESSABLE_CONTENT
 
 from sqlmesh.utils.date import now_timestamp
 from web.server.models import ApiExceptionPayload
@@ -14,7 +14,7 @@ class ApiException(HTTPException):
         self,
         origin: str,
         message: str,
-        status_code: int = HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code: int = HTTP_422_UNPROCESSABLE_CONTENT,
         trigger: t.Optional[str] = None,
     ):
         super().__init__(status_code)
