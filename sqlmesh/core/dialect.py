@@ -315,16 +315,26 @@ def _parse_with(self: Parser, skip_with_token: bool = False) -> t.Optional[exp.E
 
 
 def _parse_join(
-    self: Parser, skip_join_token: bool = False, parse_bracket: bool = False
+    self: Parser,
+    skip_join_token: bool = False,
+    parse_bracket: bool = False,
+    alias_tokens: t.Optional[t.Collection[TokenType]] = None,
 ) -> t.Optional[exp.Expr]:
     index = self._index
     method, side, kind = self._parse_join_parts()
     macro = _parse_matching_macro(self, "JOIN")
     if not macro:
         self._retreat(index)
-        return self.__parse_join(skip_join_token=skip_join_token, parse_bracket=parse_bracket)  # type: ignore
+        parse_join = self.__parse_join  # type: ignore
+        if "alias_tokens" in parse_join.__code__.co_varnames:
+            return parse_join(
+                skip_join_token=skip_join_token,
+                parse_bracket=parse_bracket,
+                alias_tokens=alias_tokens,
+            )
+        return parse_join(skip_join_token=skip_join_token, parse_bracket=parse_bracket)
 
-    join = self.__parse_join(skip_join_token=True)  # type: ignore
+    join = self.__parse_join(skip_join_token=True, alias_tokens=alias_tokens)  # type: ignore
     if method:
         join.set("method", method.text)
     if side:
@@ -575,7 +585,11 @@ def altercolumn_sql(self: Generator, expression: exp.AlterColumn) -> str:
     # sqlglot's generator returns as soon as it renders the type, so the nullability parsed
     # above has to be appended here
     allow_null = expression.args.get("allow_null")
-    if expression.args.get("dtype") and allow_null is not None:
+    if (
+        expression.args.get("dtype")
+        and allow_null is not None
+        and not hasattr(self, "_alter_column_null_constraint_sql")
+    ):
         sql = f"{sql} NULL" if allow_null else f"{sql} NOT NULL"
 
     return sql
@@ -800,8 +814,14 @@ def _whens_sql(self: Generator, expression: exp.Whens) -> str:
     return self.wrap(self.expressions(expression, sep=" ", indent=False))
 
 
-def _parse_interval_span(self: Parser, this: exp.Expr) -> exp.Interval:
-    interval = self.__parse_interval_span(this)  # type: ignore
+def _parse_interval_span(
+    self: Parser, this: exp.Expr, parse_function_unit: bool = True
+) -> exp.Interval:
+    parse_interval_span = self.__parse_interval_span  # type: ignore
+    if "parse_function_unit" in parse_interval_span.__code__.co_varnames:
+        interval = parse_interval_span(this, parse_function_unit=parse_function_unit)
+    else:
+        interval = parse_interval_span(this)
     # Without this, @unit in `INTERVAL @value @unit` is misread as an alias.
     if not interval.args.get("unit") and self._match(TokenType.PARAMETER):
         macro = _parse_macro(self)
