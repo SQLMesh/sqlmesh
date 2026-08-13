@@ -568,21 +568,23 @@ def test_try_invalidate_pr_environment(github_client, make_controller, mocker: M
     invalidate_controller = make_controller(
         "tests/fixtures/github/pull_request_synchronized.json", github_client
     )
-    invalidate_controller._context._state_sync = mocker.MagicMock()
-    invalidate_controller.try_invalidate_pr_environment()
-    invalidate_controller._context._state_sync.invalidate_environment.assert_called_once_with(
-        "hello_world_2"
+    invalidate_environment = mocker.patch.object(
+        invalidate_controller._context, "invalidate_environment"
     )
+    invalidate_controller.try_invalidate_pr_environment()
+    invalidate_environment.assert_called_once_with("hello_world_2")
 
     no_invalidate_controller = make_controller(
         "tests/fixtures/github/pull_request_synchronized.json",
         github_client,
         bot_config=GithubCICDBotConfig(invalidate_environment_after_deploy=False),
     )
-    no_invalidate_controller._context._state_sync = mocker.MagicMock()
+    no_invalidate_environment = mocker.patch.object(
+        no_invalidate_controller._context, "invalidate_environment"
+    )
     no_invalidate_controller.try_invalidate_pr_environment()
 
-    assert not no_invalidate_controller._context._state_sync.invalidate_environment.called
+    no_invalidate_environment.assert_not_called()
 
 
 def test_try_merge_pr(github_client, make_controller, mocker: MockerFixture):

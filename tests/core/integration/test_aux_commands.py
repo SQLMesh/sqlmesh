@@ -481,6 +481,124 @@ def test_invalidating_environment(sushi_context: Context):
     assert start_schemas - schemas_after_janitor == {"sushi__dev"}
 
 
+def test_invalidate_environment_cleanup_snapshots_scoped(tmp_path: Path):
+    """Test that --cleanup-snapshots only deletes unreferenced snapshots from the invalidated env."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "model1.sql").write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+    (models_dir / "model2.sql").write_text("MODEL(name test.model2, kind FULL); SELECT 2 AS col")
+
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+    )
+
+    # Apply both models to prod and dev.
+    ctx.plan("prod", no_prompts=True, auto_apply=True)
+    ctx.plan("dev", no_prompts=True, auto_apply=True, include_unmodified=True)
+
+    prod_env = ctx.state_sync.get_environment("prod")
+    dev_env = ctx.state_sync.get_environment("dev")
+    assert prod_env is not None
+    assert dev_env is not None
+
+    prod_snapshot_ids = {s.snapshot_id for s in prod_env.snapshots}
+    dev_snapshot_ids = {s.snapshot_id for s in dev_env.snapshots}
+
+    # In a virtual environment, dev shares snapshots with prod.
+    # Shared snapshots must NOT be deleted when invalidating dev with --cleanup-snapshots.
+    shared_snapshot_ids = prod_snapshot_ids & dev_snapshot_ids
+
+    ctx.invalidate_environment("dev", cleanup_snapshots=True)
+
+    # The dev environment record should be gone.
+    assert ctx.state_sync.get_environment("dev") is None
+
+    # Shared snapshots (also in prod) must still exist.
+    remaining_snapshots = ctx.state_sync.get_snapshots(list(shared_snapshot_ids))
+    assert set(remaining_snapshots.keys()) == shared_snapshot_ids
+
+    # Prod environment should be unaffected.
+    assert ctx.state_sync.get_environment("prod") is not None
+
+
+def test_invalidate_environment_cleanup_snapshots_warns_and_drops_physical_tables(
+    tmp_path: Path, mocker: MockerFixture
+):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "model1.sql").write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+    )
+
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+    snapshot = ctx.get_snapshot("test.model1")
+    assert snapshot is not None
+    snapshot_ids = [snapshot.snapshot_id]
+    physical_table_names = [
+        snapshot.table_name(is_deployable=False),
+        snapshot.table_name(is_deployable=True),
+    ]
+    assert any(ctx.engine_adapter.table_exists(table_name) for table_name in physical_table_names)
+
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx.invalidate_environment("dev", cleanup_snapshots=True)
+
+    warning_mock.assert_any_call(
+        "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot tables "
+        "formerly referenced by environment 'dev'."
+    )
+    assert ctx.state_sync.get_environment("dev") is None
+    assert not ctx.state_sync.get_snapshots(snapshot_ids)
+    assert not any(
+        ctx.engine_adapter.table_exists(table_name) for table_name in physical_table_names
+    )
+
+
+def test_janitor_environment_ignore_ttl_cleans_only_scoped_snapshots(
+    tmp_path: Path, mocker: MockerFixture
+):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    model_path = models_dir / "model1.sql"
+    model_path.write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+    )
+
+    ctx.plan("dev_a", no_prompts=True, auto_apply=True)
+    dev_a_snapshot = ctx.get_snapshot("test.model1")
+    assert dev_a_snapshot is not None
+
+    model_path.write_text("MODEL(name test.model1, kind FULL); SELECT 2 AS col")
+    ctx.load()
+    ctx.plan("dev_b", no_prompts=True, auto_apply=True)
+    dev_b_snapshot = ctx.get_snapshot("test.model1")
+    assert dev_b_snapshot is not None
+    assert dev_a_snapshot.snapshot_id != dev_b_snapshot.snapshot_id
+
+    ctx.invalidate_environment("dev_a")
+    ctx.invalidate_environment("dev_b")
+    warning_mock = mocker.patch.object(ctx.console, "log_warning")
+
+    ctx.run_janitor(ignore_ttl=True, environment="dev_a")
+
+    warning_mock.assert_any_call(
+        "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot tables "
+        "formerly referenced by environment 'dev_a'."
+    )
+    assert ctx.state_sync.get_environment("dev_a") is None
+    assert ctx.state_sync.get_environment("dev_b") is not None
+    assert not ctx.state_sync.get_snapshots([dev_a_snapshot.snapshot_id])
+    assert ctx.state_sync.get_snapshots([dev_b_snapshot.snapshot_id])
+
+
 @time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_evaluate_uncategorized_snapshot(init_and_plan_context: t.Callable):
     context, plan = init_and_plan_context("examples/sushi")

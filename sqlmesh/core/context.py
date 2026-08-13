@@ -99,6 +99,7 @@ from sqlmesh.core.snapshot import (
     Snapshot,
     SnapshotEvaluator,
     SnapshotFingerprint,
+    SnapshotId,
     missing_intervals,
     to_table_mapping,
 )
@@ -108,7 +109,10 @@ from sqlmesh.core.state_sync import (
     StateReader,
     StateSync,
 )
-from sqlmesh.core.janitor import cleanup_expired_views, delete_expired_snapshots
+from sqlmesh.core.janitor import (
+    cleanup_expired_views,
+    delete_expired_snapshots,
+)
 from sqlmesh.core.table_diff import TableDiff
 from sqlmesh.core.test import (
     ModelTextTestResult,
@@ -1870,17 +1874,24 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     @python_api_analytics
-    def invalidate_environment(self, name: str, sync: bool = False) -> None:
+    def invalidate_environment(
+        self, name: str, sync: bool = False, cleanup_snapshots: bool = False
+    ) -> None:
         """Invalidates the target environment by setting its expiration timestamp to now.
 
         Args:
             name: The name of the environment to invalidate.
             sync: If True, the call blocks until the environment is deleted. Otherwise, the environment will
                 be deleted asynchronously by the janitor process.
+            cleanup_snapshots: If True, immediately deletes unreferenced physical snapshot tables that were
+                formerly referenced by this environment. Cleanup runs synchronously regardless of sync.
         """
         name = Environment.sanitize_name(name)
         self.state_sync.invalidate_environment(name)
-        if sync:
+        if cleanup_snapshots:
+            self._run_janitor(ignore_ttl=True, environment=name)
+            self.console.log_success(f"Environment '{name}' deleted.")
+        elif sync:
             self._cleanup_environments(name=name)
             self.console.log_success(f"Environment '{name}' deleted.")
         else:
@@ -3017,6 +3028,16 @@ class GenericContext(BaseContext, t.Generic[C]):
         current_ts = now_timestamp()
         failures: t.List[str] = []
 
+        target_snapshot_ids: t.Set[SnapshotId] = set()
+        if environment is not None and ignore_ttl:
+            expired_environments = self.state_sync.get_expired_environments(
+                current_ts=current_ts, name=environment
+            )
+            if expired_environments:
+                expired_env = self.state_reader.get_environment(expired_environments[0].name)
+                if expired_env:
+                    target_snapshot_ids = {s.snapshot_id for s in expired_env.snapshots}
+
         # Clean up expired environments by removing their views and schemas
         failures.extend(
             self._cleanup_environments(
@@ -3037,6 +3058,27 @@ class GenericContext(BaseContext, t.Generic[C]):
                 )
             )
             self.state_sync.compact_intervals()
+        elif (
+            ignore_ttl
+            and target_snapshot_ids
+            and not self.state_reader.get_environment(environment)
+        ):
+            self.console.log_warning(
+                "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot "
+                f"tables formerly referenced by environment '{environment}'."
+            )
+            failures.extend(
+                delete_expired_snapshots(
+                    self.state_sync,
+                    self.snapshot_evaluator,
+                    current_ts=current_ts,
+                    ignore_ttl=ignore_ttl,
+                    force_delete=force_delete,
+                    console=self.console,
+                    batch_size=self.config.janitor.expired_snapshots_batch_size,
+                    target_snapshot_ids=target_snapshot_ids,
+                )
+            )
 
         if failures:
             failure_string = "\n  - ".join(failures)
@@ -3139,9 +3181,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             cleanup_adapter = engine_adapters.get(gateway, default_adapter).with_settings()
             cleanup_adapter.inject_virtual_catalog(gateway)
             # inject_virtual_catalog() may initialize adapter-specific state in addition to
-            # _default_catalog. Override only the cleanup clone with the catalog persisted in the
-            # expired environment so historical names pass SINGLE_CATALOG_ONLY validation.
-            cleanup_adapter._default_catalog = next(iter(catalogs))
+            # the default catalog. Override only the cleanup clone with the catalog persisted
+            # in the expired environment so historical names pass SINGLE_CATALOG_ONLY validation.
+            cleanup_adapter.set_default_catalog(next(iter(catalogs)))
             cleanup_engine_adapters[gateway] = cleanup_adapter
             if gateway == self.selected_gateway:
                 cleanup_default_adapter = cleanup_adapter

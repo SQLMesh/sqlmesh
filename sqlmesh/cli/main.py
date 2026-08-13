@@ -635,6 +635,11 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
     is_flag=True,
     help="Wait for the environment to be deleted before returning. If not specified, the environment will be deleted asynchronously by the janitor process. This option requires a connection to the data warehouse.",
 )
+@click.option(
+    "--cleanup-snapshots",
+    is_flag=True,
+    help="After invalidating, synchronously delete unreferenced physical snapshot tables formerly referenced by this environment.",
+)
 @click.pass_context
 @error_handler
 @cli_analytics
@@ -648,7 +653,7 @@ def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
 @click.option(
     "--ignore-ttl",
     is_flag=True,
-    help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire. Has no effect when --environment is specified.",
+    help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire. When --environment is specified, cleanup is scoped to snapshots formerly referenced by that environment.",
 )
 @click.option(
     "--force-delete",
@@ -660,7 +665,7 @@ def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
     "--environment",
     "-e",
     default=None,
-    help="Scope cleanup to a single expired environment. Global snapshot and interval compaction are skipped.",
+    help="Scope cleanup to a single expired environment. With --ignore-ttl, snapshot cleanup is scoped to snapshots formerly referenced by this environment.",
 )
 @click.pass_context
 @error_handler
