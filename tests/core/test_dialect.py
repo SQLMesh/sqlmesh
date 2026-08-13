@@ -1231,3 +1231,12 @@ def test_extend_sqlglot_is_idempotent():
     assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
     # The class-level registries must not grow on repeated calls.
     assert Generator.UNWRAPPED_INTERVAL_VALUES == before
+
+
+def test_extend_sqlglot_supports_collated_types():
+    # SQLGlot calls Parser._parse_types with this keyword while parsing
+    # collated types. Keep the SQLMesh override compatible with that API.
+    assert (
+        parse_one("SELECT CAST('x' AS VARCHAR COLLATE utf8)", "spark").sql("spark")
+        == "SELECT CAST('x' AS STRING COLLATE utf8)"
+    )
