@@ -1255,6 +1255,10 @@ def extend_sqlglot() -> None:
     # DuckDB's prefix absolute power operator `@` clashes with the macro syntax
     DuckDB.Parser.NO_PAREN_FUNCTION_PARSERS.pop("@", None)
 
+    # SQLGlot 30.17 stopped marking DuckDB divisions as safe. Keep the behavior
+    # used by earlier SQLGlot releases, where division by zero returns NULL.
+    DuckDB.SAFE_DIVISION = True
+
 
 def select_from_values(
     values: t.List[t.Tuple[t.Any, ...]],

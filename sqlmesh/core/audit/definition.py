@@ -7,14 +7,13 @@ from pathlib import Path
 
 from pydantic import Field
 from sqlglot import exp
-from sqlglot.optimizer.simplify import gen
-
 from sqlmesh.core import dialect as d
 from sqlmesh.core.macros import MacroRegistry, macro
 from sqlmesh.core.model.common import (
     bool_validator,
     default_catalog_validator,
     depends_on_validator,
+    gen_for_jinja,
     sort_python_env,
     sorted_python_env_payloads,
 )
@@ -452,8 +451,8 @@ def load_audit(
     extra_kwargs: t.Dict[str, t.Any] = {}
     if is_standalone:
         jinja_macro_refrences, referenced_variables = extract_macro_references_and_variables(
-            *(gen(s) for s in statements),
-            gen(query),
+            *(gen_for_jinja(s) for s in statements),
+            gen_for_jinja(query),
         )
         jinja_macros = (jinja_macros or JinjaMacroRegistry()).trim(jinja_macro_refrences)
         for jinja_macro in jinja_macros.root_macros.values():
