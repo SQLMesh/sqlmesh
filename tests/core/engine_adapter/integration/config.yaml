@@ -200,20 +200,30 @@ gateways:
     state_connection:
       type: duckdb
 
-  inttest_db2:
-    connection:
-      type: db2
-      host: {{ env_var('DB2_HOST') }}
-      port: {{ env_var('DB2_PORT', '50000') }}
-      database: {{ env_var('DB2_DATABASE') }}
-      username: {{ env_var('DB2_USERNAME') }}
-      password: {{ env_var('DB2_PASSWORD') }}
-      # db2_schema sets CURRENTSCHEMA on the connection — controls the default schema
-      # for unqualified references. The test framework always uses fully-qualified names
-      # so any valid schema the user has access to works here (e.g. the username itself,
-      # which is the Db2 default when no schema is specified).
-      db2_schema: {{ env_var('DB2_SCHEMA', env_var('DB2_USERNAME')) }}
-      check_import: false
+  # inttest_db2:
+  #   connection:
+  #     type: db2
+  #     host: {{ env_var('DB2_HOST') }}
+  #     port: {{ env_var('DB2_PORT', '50000') }}
+  #     database: {{ env_var('DB2_DATABASE') }}
+  #     username: {{ env_var('DB2_USERNAME') }}
+  #     password: {{ env_var('DB2_PASSWORD') }}
+  #     # db2_schema sets CURRENTSCHEMA on the connection — controls the default schema
+  #     # for unqualified references. The test framework always uses fully-qualified names
+  #     # so any valid schema the user has access to works here (e.g. the username itself,
+  #     # which is the Db2 default when no schema is specified).
+  #     db2_schema: {{ env_var('DB2_SCHEMA', env_var('DB2_USERNAME')) }}
+  #     check_import: false
+inttest_db2:
+  connection:
+    type: db2
+    host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
+    port: {{ env_var('DB2_PORT', '50001') }}
+    database: {{ env_var('DB2_DATABASE', 'testdb') }}
+    username: {{ env_var('DB2_USERNAME', 'db2inst1') }}
+    password: {{ env_var('DB2_PASSWORD', 'password') }}
+    db2_schema: {{ env_var('DB2_SCHEMA', 'DB2INST1') }}
+    check_import: false
     state_connection:
       type: duckdb
 
