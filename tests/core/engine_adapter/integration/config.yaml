@@ -214,18 +214,19 @@ gateways:
   #     # which is the Db2 default when no schema is specified).
   #     db2_schema: {{ env_var('DB2_SCHEMA', env_var('DB2_USERNAME')) }}
   #     check_import: false
-inttest_db2:
-  connection:
-    type: db2
-    host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
-    port: {{ env_var('DB2_PORT', '50001') }}
-    database: {{ env_var('DB2_DATABASE', 'testdb') }}
-    username: {{ env_var('DB2_USERNAME', 'db2inst1') }}
-    password: {{ env_var('DB2_PASSWORD', 'password') }}
-    db2_schema: {{ env_var('DB2_SCHEMA', 'DB2INST1') }}
-    check_import: false
+  inttest_db2:
+    connection:
+      type: db2
+      host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
+      port: {{ env_var('DB2_PORT', '50001') }}
+      database: {{ env_var('DB2_DATABASE', 'testdb') }}
+      username: {{ env_var('DB2_USERNAME', 'db2inst1') }}
+      password: {{ env_var('DB2_PASSWORD', 'password') }}
+      db2_schema: {{ env_var('DB2_SCHEMA', 'DB2INST1') }}
+      check_import: false
     state_connection:
       type: duckdb
+      # ... keep whatever was here before ...
 
   inttest_fabric:
     connection:
