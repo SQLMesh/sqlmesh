@@ -535,6 +535,14 @@ class TestContext:
                     CAST(ep.value AS NVARCHAR(MAX)) comment 
                 FROM fn_listextendedproperty('MS_Description', 'schema', '{schema_name}', '{kind}', '{table_name}', DEFAULT, DEFAULT) ep
             """
+        elif self.dialect == "db2":
+            # Db2 stores table/view remarks in SYSCAT.TABLES
+            query = f"""
+                SELECT TABNAME, REMARKS
+                FROM SYSCAT.TABLES
+                WHERE UPPER(TABSCHEMA) = '{schema_name.upper()}'
+                AND UPPER(TABNAME) = '{table_name.upper()}'
+            """
 
         result = self.engine_adapter.fetchall(query)
 
@@ -650,10 +658,18 @@ class TestContext:
             query = f"""
                 SELECT
                     col.COLUMN_NAME column_name,
-                    CAST(ep.value AS NVARCHAR(MAX)) comment 
+                    CAST(ep.value AS NVARCHAR(MAX)) comment
                 FROM INFORMATION_SCHEMA.COLUMNS col
                 CROSS APPLY fn_listextendedproperty('MS_Description', 'schema', col.TABLE_SCHEMA, '{kind}', col.TABLE_NAME, 'column', col.COLUMN_NAME) ep
                 WHERE col.TABLE_SCHEMA = '{schema_name}' AND col.TABLE_NAME = '{table_name}'
+            """
+        elif self.dialect == "db2":
+            # Db2 stores column remarks in SYSCAT.COLUMNS
+            query = f"""
+                SELECT COLNAME, REMARKS
+                FROM SYSCAT.COLUMNS
+                WHERE UPPER(TABSCHEMA) = '{schema_name.upper()}'
+                AND UPPER(TABNAME) = '{table_name.upper()}'
             """
 
         result = self.engine_adapter.fetchall(query)
