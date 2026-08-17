@@ -432,13 +432,17 @@ class Db2EngineAdapter(
             else:
                 self.drop_view(table, ignore_if_not_exists=True)
 
+            # Do NOT pass table_description here: Db2 does not support inline
+            # COMMENT= in CREATE TABLE AS ... WITH DATA syntax (SQL0104N).
+            # The description is applied via a separate COMMENT ON TABLE command
+            # below (when COMMENT_CREATION_TABLE.is_comment_command_only).
             create_exp = self._build_create_table_exp(
                 table_name_or_schema=table_name_or_schema,
                 expression=expression,
                 exists=False,
                 replace=False,
                 target_columns_to_types=target_columns_to_types,
-                table_description=table_description,
+                table_description=None,
                 table_kind=table_kind,
                 **kwargs,
             )
