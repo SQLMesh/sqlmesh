@@ -134,7 +134,10 @@ snowflake = [
 starrocks = ["pymysql"]
 trino = ["trino"]
 web = [
-    "fastapi==0.120.1",
+    # fastapi>=0.136.3 brings in starlette>=1.0.1, which fixes PYSEC-2026-161.
+    # Both require Python >= 3.10, so 3.9 stays on the previous pin.
+    "fastapi>=0.136.3; python_version >= '3.10'",
+    "fastapi==0.120.1; python_version < '3.10'",
     "watchfiles>=0.19.0",
     "uvicorn[standard]==0.22.0",
     "sse-starlette>=0.2.2",
@@ -142,7 +145,8 @@ web = [
 ]
 lsp = [
     # Duplicate of web
-    "fastapi==0.120.1",
+    "fastapi>=0.136.3; python_version >= '3.10'",
+    "fastapi==0.120.1; python_version < '3.10'",
     "watchfiles>=0.19.0",
     # "uvicorn[standard]==0.22.0",
     "sse-starlette>=0.2.2",
