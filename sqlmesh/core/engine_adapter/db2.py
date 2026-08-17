@@ -52,7 +52,11 @@ class Db2EngineAdapter(
     COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
-    SUPPORTED_DROP_CASCADE_OBJECT_KINDS = ["SCHEMA", "TABLE", "VIEW"]
+    # Db2 does not support DROP TABLE/VIEW ... CASCADE — doing so raises SQL0104N.
+    # Schema cascade is handled manually inside drop_schema() and does not rely
+    # on this flag, so the list is intentionally empty.
+    # SUPPORTED_DROP_CASCADE_OBJECT_KINDS = ["SCHEMA", "TABLE", "VIEW"]
+    SUPPORTED_DROP_CASCADE_OBJECT_KINDS: t.List[str] = []
     MAX_IDENTIFIER_LENGTH: t.Optional[int] = 128
     SCHEMA_DIFFER_KWARGS = {
         "parameterized_type_defaults": {
