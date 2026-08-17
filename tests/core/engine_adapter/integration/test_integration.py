@@ -93,7 +93,9 @@ class PlanResults(PydanticModel):
 
 def test_connection(ctx: TestContext):
     cursor_from_connection = ctx.engine_adapter.connection.cursor()
-    cursor_from_connection.execute("SELECT 1")
+    # cursor_from_connection.execute("SELECT 1")  # fails on Db2 — bare SELECT 1 raises SQL0104N
+    # Fix: use dialect-aware SQL so Db2 generates SELECT 1 FROM SYSIBM.SYSDUMMY1
+    cursor_from_connection.execute(exp.select("1").sql(dialect=ctx.dialect))
     assert cursor_from_connection.fetchone()[0] == 1
 
 
