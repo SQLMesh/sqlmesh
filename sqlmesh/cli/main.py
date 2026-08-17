@@ -641,7 +641,7 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
 def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
     """Invalidate the target environment, forcing its removal during the next run of the janitor process."""
     context = ctx.obj
-    context.invalidate_environment(environment, **kwargs)
+    context.invalidate_environment(environment, must_exist=True, **kwargs)
 
 
 @cli.command("janitor")

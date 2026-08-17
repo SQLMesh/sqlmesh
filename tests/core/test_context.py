@@ -1928,6 +1928,40 @@ def test_invalidate_environment_no_sync_skips_cleanup(sushi_context, mocker: Moc
     state_sync_mock.delete_expired_environments.assert_not_called()
 
 
+def test_invalidate_environment_nonexistent_raises(sushi_context, mocker: MockerFixture) -> None:
+    """Invalidating an environment that does not exist should error instead of
+    reporting success, so a mistyped name is caught rather than silently accepted."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_environment.return_value = None
+
+    with pytest.raises(SQLMeshError, match="Environment 'doesnotexist' was not found"):
+        sushi_context.invalidate_environment("doesnotexist", must_exist=True)
+
+    state_sync_mock.invalidate_environment.assert_not_called()
+
+
+def test_invalidate_environment_nonexistent_is_a_noop_by_default(
+    sushi_context, mocker: MockerFixture
+) -> None:
+    """Without must_exist, invalidating a missing environment stays a no-op.
+
+    Internal callers depend on this. `GithubController.try_invalidate_pr_environment`
+    invalidates the PR environment after a prod deploy, and that environment may never
+    have been created — a forward-only deploy, for instance. Raising there turns a
+    routine cleanup into a failed deploy.
+    """
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_environment.return_value = None
+
+    sushi_context.invalidate_environment("doesnotexist")
+
+    state_sync_mock.invalidate_environment.assert_called_once_with("doesnotexist")
+
+
 @pytest.mark.slow
 def test_plan_default_end(sushi_context_pre_scheduling: Context):
     prod_plan_builder = sushi_context_pre_scheduling.plan_builder("prod")
