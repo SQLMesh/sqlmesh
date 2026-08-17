@@ -237,6 +237,11 @@ def test_create_table(ctx: TestContext):
 
 def test_ctas(ctx_query_and_df: TestContext):
     ctx = ctx_query_and_df
+    if ctx.dialect == "db2":
+        pytest.skip(
+            "Db2 has no inline COMMENT clause in CREATE TABLE (SQL0104N); "
+            "COMMENT_CREATION_TABLE flag not yet set on the Db2 adapter"
+        )
     table = ctx.table("test_table")
 
     input_data = pd.DataFrame(
