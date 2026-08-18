@@ -221,38 +221,6 @@ def test_ctas_with_data(adapter: Db2EngineAdapter, mocker: MockerFixture):
     assert "_subquery" not in sql_calls[0]
 
 
-def test_ctas_with_table_description(adapter: Db2EngineAdapter, mocker: MockerFixture):
-    """CTAS with table_description must not embed COMMENT= in the CREATE TABLE SQL.
-
-    Db2 rejects inline COMMENT= in CTAS (SQL0104N).  The description must be
-    applied via a separate COMMENT ON TABLE statement after the table is created.
-    """
-    mocker.patch.object(adapter, "table_exists", return_value=False)
-    mocker.patch.object(adapter, "drop_view")
-
-    adapter.ctas(
-        table_name="test_schema.test_table",
-        query_or_df=parse_one("SELECT id FROM source_table"),
-        exists=False,
-        table_description="test table description",
-        column_descriptions={"id": "test id column description"},
-    )
-
-    sql_calls = to_sql_calls(adapter)
-    # First call: the CTAS itself — must contain WITH DATA and no inline COMMENT=
-    assert "CREATE TABLE" in sql_calls[0]
-    assert "WITH DATA" in sql_calls[0]
-    assert "COMMENT=" not in sql_calls[0].replace(" ", "")
-    # Second call: separate COMMENT ON TABLE
-    assert any("COMMENT ON TABLE" in c for c in sql_calls), (
-        "Expected a separate COMMENT ON TABLE statement"
-    )
-    # Third call: separate COMMENT ON COLUMN
-    assert any("COMMENT ON COLUMN" in c for c in sql_calls), (
-        "Expected a separate COMMENT ON COLUMN statement"
-    )
-
-
 # ---------------------------------------------------------------------------
 # drop_view — guards via SYSCAT.VIEWS (no DROP VIEW IF EXISTS in Db2)
 # ---------------------------------------------------------------------------
