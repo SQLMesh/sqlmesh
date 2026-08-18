@@ -1000,6 +1000,32 @@ def test_column_descriptions(sushi_context, assert_exp_eq):
     assert model.column_descriptions == {"id": "primary key", "foo": "bar"}
 
 
+def test_column_descriptions_quoted_identifier():
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect snowflake,
+            column_descriptions (
+                "myColumn" = 'a case-sensitive column',
+                other_column = 'an unquoted column'
+            )
+        );
+
+        SELECT 1 AS "myColumn", 2 AS other_column
+    """
+    )
+    model = load_sql_based_model(expressions, dialect="snowflake")
+
+    # A quoted key keeps its case, an unquoted one is still normalized.
+    assert model.column_descriptions == {
+        "myColumn": "a case-sensitive column",
+        "OTHER_COLUMN": "an unquoted column",
+    }
+    assert set(model.column_descriptions) <= set(model.columns_to_types)
+
+
 def test_model_jinja_macro_reference_extraction():
     @macro()
     def test_macro(**kwargs) -> None:
