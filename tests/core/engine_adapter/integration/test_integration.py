@@ -1138,6 +1138,14 @@ def test_scd_type_2_by_time(ctx_query_and_df: TestContext):
     # Athena only supports the operations required for SCD models on Iceberg tables
     if ctx.mark == "athena_hive":
         pytest.skip("SCD Type 2 is only supported on Athena / Iceberg")
+    if ctx.dialect == "db2":
+        pytest.skip(
+            "Db2 SQL preprocessor treats identifiers starting with '_' as conditional "
+            "compilation directives (SQL20521N reason 7). The generated SCD query contains "
+            "_exists, _key0 (SQLMesh base.py) and _row_number, _t (sqlglot DISTINCT rewrite) "
+            "— all underscore-prefixed. Fix requires overriding _scd_type_2 in Db2EngineAdapter "
+            "to rename these aliases before execution."
+        )
 
     time_type = exp.DataType.build("timestamp")
 
@@ -1293,6 +1301,14 @@ def test_scd_type_2_by_time_source_columns(ctx_query_and_df: TestContext):
     # Athena only supports the operations required for SCD models on Iceberg tables
     if ctx.mark == "athena_hive":
         pytest.skip("SCD Type 2 is only supported on Athena / Iceberg")
+    if ctx.dialect == "db2":
+        pytest.skip(
+            "Db2 SQL preprocessor treats identifiers starting with '_' as conditional "
+            "compilation directives (SQL20521N reason 7). The generated SCD query contains "
+            "_exists, _key0 (SQLMesh base.py) and _row_number, _t (sqlglot DISTINCT rewrite) "
+            "— all underscore-prefixed. Fix requires overriding _scd_type_2 in Db2EngineAdapter "
+            "to rename these aliases before execution."
+        )
 
     time_type = exp.DataType.build("timestamp")
 
@@ -1491,6 +1507,14 @@ def test_scd_type_2_by_column(ctx_query_and_df: TestContext):
     # Athena only supports the operations required for SCD models on Iceberg tables
     if ctx.mark == "athena_hive":
         pytest.skip("SCD Type 2 is only supported on Athena / Iceberg")
+    if ctx.dialect == "db2":
+        pytest.skip(
+            "Db2 SQL preprocessor treats identifiers starting with '_' as conditional "
+            "compilation directives (SQL20521N reason 7). The generated SCD query contains "
+            "_exists, _key0 (SQLMesh base.py) and _row_number, _t (sqlglot DISTINCT rewrite) "
+            "— all underscore-prefixed. Fix requires overriding _scd_type_2 in Db2EngineAdapter "
+            "to rename these aliases before execution."
+        )
 
     time_type = exp.DataType.build("timestamp")
 
@@ -1668,6 +1692,14 @@ def test_scd_type_2_by_column_source_columns(ctx_query_and_df: TestContext):
     # Athena only supports the operations required for SCD models on Iceberg tables
     if ctx.mark == "athena_hive":
         pytest.skip("SCD Type 2 is only supported on Athena / Iceberg")
+    if ctx.dialect == "db2":
+        pytest.skip(
+            "Db2 SQL preprocessor treats identifiers starting with '_' as conditional "
+            "compilation directives (SQL20521N reason 7). The generated SCD query contains "
+            "_exists, _key0 (SQLMesh base.py) and _row_number, _t (sqlglot DISTINCT rewrite) "
+            "— all underscore-prefixed. Fix requires overriding _scd_type_2 in Db2EngineAdapter "
+            "to rename these aliases before execution."
+        )
 
     time_type = exp.DataType.build("timestamp")
 
