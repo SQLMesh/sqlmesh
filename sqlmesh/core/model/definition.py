@@ -242,7 +242,12 @@ class _Model(ModelMeta, frozen=True):
                             value=exp.to_table(field_value, dialect=self.dialect),
                         )
                     )
-                elif field_name not in ("default_catalog", "enabled", "ignored_rules_"):
+                elif field_name not in (
+                    "default_catalog",
+                    "enabled",
+                    "ignored_rules_",
+                    "virtual_layer_catalog",
+                ):
                     expressions.append(
                         exp.Property(
                             this=field_info.alias or field_name,
@@ -1239,6 +1244,10 @@ class _Model(ModelMeta, frozen=True):
                 self.grants_target_layer,
             ]
 
+            # Preserve existing metadata hashes when no gateway publishing route is configured.
+            if virtual_layer_catalog := getattr(self, "virtual_layer_catalog", None):
+                metadata.append(virtual_layer_catalog)
+
             for key, value in (self.virtual_properties or {}).items():
                 metadata.append(key)
                 metadata.append(gen(value))
@@ -2063,6 +2072,8 @@ def create_models_from_blueprints(
     module_path: Path = Path(),
     dialect: DialectType = None,
     default_catalog_per_gateway: t.Optional[t.Dict[str, str]] = None,
+    virtual_layer_catalog_per_gateway: t.Optional[t.Dict[str, str]] = None,
+    selected_gateway: t.Optional[str] = None,
     **loader_kwargs: t.Any,
 ) -> t.List[Model]:
     model_blueprints: t.List[Model] = []
@@ -2105,6 +2116,13 @@ def create_models_from_blueprints(
                 # default from the primary gateway doesn't leak into this model's name.
                 loader_kwargs["default_catalog"] = None
 
+        effective_gateway = gateway_name or selected_gateway
+        loader_kwargs["resolved_virtual_layer_catalog"] = (
+            virtual_layer_catalog_per_gateway.get(effective_gateway)
+            if virtual_layer_catalog_per_gateway and effective_gateway
+            else None
+        )
+
         model_blueprints.append(
             loader(
                 path=path,
@@ -2126,6 +2144,8 @@ def load_sql_based_models(
     module_path: Path = Path(),
     dialect: DialectType = None,
     default_catalog_per_gateway: t.Optional[t.Dict[str, str]] = None,
+    virtual_layer_catalog_per_gateway: t.Optional[t.Dict[str, str]] = None,
+    selected_gateway: t.Optional[str] = None,
     **loader_kwargs: t.Any,
 ) -> t.List[Model]:
     gateway: t.Optional[exp.Expr] = None
@@ -2170,6 +2190,8 @@ def load_sql_based_models(
         module_path=module_path,
         dialect=dialect,
         default_catalog_per_gateway=default_catalog_per_gateway,
+        virtual_layer_catalog_per_gateway=virtual_layer_catalog_per_gateway,
+        selected_gateway=selected_gateway,
         **loader_kwargs,
     )
 
@@ -2581,8 +2603,16 @@ def _create_model(
     variables: t.Optional[t.Dict[str, t.Any]] = None,
     blueprint_variables: t.Optional[t.Dict[str, t.Any]] = None,
     use_original_sql: bool = False,
+    resolved_virtual_layer_catalog: t.Optional[str] = None,
     **kwargs: t.Any,
 ) -> Model:
+    if "virtual_layer_catalog" in kwargs:
+        raise_config_error(
+            "`virtual_layer_catalog` cannot be set on a per-model basis. "
+            "Configure it on the model's gateway instead.",
+            path,
+        )
+
     validate_extra_and_required_fields(
         klass,
         {"name", *kwargs} - {"grain", "table_properties"},
@@ -2614,6 +2644,7 @@ def _create_model(
         # external_models.yaml, so it must remain explicit rather than inheriting the
         # gateway used to execute managed models in the project.
         defaults.pop("gateway", None)
+        resolved_virtual_layer_catalog = None
     if not issubclass(klass, SqlModel):
         defaults.pop("optimize_query", None)
 
@@ -2687,6 +2718,7 @@ def _create_model(
             "dialect": dialect,
             "depends_on": depends_on,
             "physical_schema_override": physical_schema_override,
+            "virtual_layer_catalog": resolved_virtual_layer_catalog,
             **kwargs,
         },
     )

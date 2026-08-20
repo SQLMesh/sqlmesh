@@ -134,6 +134,101 @@ If your project's engines don’t have a mutually accessible catalog or your raw
 
 To enable this, set `gateway_managed_virtual_layer` to `true` in your configuration. By default, this flag is set to false.
 
+Each gateway normally uses the model's catalog for both physical snapshot tables and virtual-layer
+views. For an unqualified model name, that is the gateway connection's default catalog. Set the
+gateway's `virtual_layer_catalog` when those layers should use different catalogs. This setting does
+not change the physical snapshot location; it publishes that gateway's model views in
+`virtual_layer_catalog`.
+
+This is useful when multiple projects share SQLMesh state and one production environment, but
+each project owns a separate physical catalog and publishes stable model names through a separate
+catalog. Configure the route once on the gateway rather than on each model:
+
+=== "YAML"
+
+    ```yaml linenums="1"
+    gateways:
+      project_a:
+        connection:
+          type: databricks
+          catalog: project_a_physical
+          server_hostname: <server_hostname>
+          http_path: <http_path>
+          access_token: <access_token>
+        virtual_layer_catalog: project_a_published
+      project_b:
+        connection:
+          type: databricks
+          catalog: project_b_physical
+          server_hostname: <server_hostname>
+          http_path: <http_path>
+          access_token: <access_token>
+        virtual_layer_catalog: project_b_published
+
+    model_defaults:
+      dialect: databricks
+      gateway: project_a
+
+    gateway_managed_virtual_layer: true
+    ```
+
+=== "Python"
+
+    ```python linenums="1"
+    from sqlmesh.core.config import Config, DatabricksConnectionConfig, GatewayConfig, ModelDefaultsConfig
+
+    config = Config(
+        gateways={
+            "project_a": GatewayConfig(
+                connection=DatabricksConnectionConfig(
+                    catalog="project_a_physical",
+                    server_hostname="<server_hostname>",
+                    http_path="<http_path>",
+                    access_token="<access_token>",
+                ),
+                virtual_layer_catalog="project_a_published",
+            ),
+            "project_b": GatewayConfig(
+                connection=DatabricksConnectionConfig(
+                    catalog="project_b_physical",
+                    server_hostname="<server_hostname>",
+                    http_path="<http_path>",
+                    access_token="<access_token>",
+                ),
+                virtual_layer_catalog="project_b_published",
+            ),
+        },
+        model_defaults=ModelDefaultsConfig(dialect="databricks", gateway="project_a"),
+        gateway_managed_virtual_layer=True,
+    )
+    ```
+
+The example focuses on catalog routing. When separate workflows operate on the projects, configure
+them to use the same state backend or scheduler so they read and update the same SQLMesh
+environment. See the [multi-repository guide](multi_repo.md) for the shared-state configuration.
+
+For a model named `sales.orders` using the `project_a` gateway, this configuration stores
+versioned snapshot tables under `project_a_physical` and creates the environment's `sales.orders`
+view under `project_a_published`. SQLMesh resolves and stores this route with the snapshot, so a
+later plan that loads only one project retains the routes of models loaded from shared state.
+
+The gateway route is the base catalog for normal environment naming. Existing naming settings
+retain their precedence:
+
+- A matching `environment_catalog_mapping` target overrides `virtual_layer_catalog`.
+- With `environment_suffix_target: catalog`, a development environment suffix is appended to
+  `virtual_layer_catalog`.
+- If neither setting changes the catalog, `virtual_layer_catalog` is used as configured.
+
+Changing only `virtual_layer_catalog` is a metadata-only model change. Applying the plan creates
+the view at its new location and removes the view at its previous location without rebuilding the
+physical snapshot table. Ensure the gateway can create and drop objects in both catalogs during a
+route change. All composed project configurations that define the same gateway name must agree on
+its `virtual_layer_catalog`; SQLMesh rejects conflicting routes.
+
+`virtual_layer_catalog` is gateway-level configuration. It cannot be set in a `MODEL` block or in
+`model_defaults`. External models are source definitions and do not inherit this publishing route.
+
 #### Example: Redshift + Athena + Snowflake
 
 Consider a scenario where you need to create a project with models in Redshift, Athena and Snowflake, where each engine hosts its models' virtual layer views.

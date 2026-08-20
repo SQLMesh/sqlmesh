@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import glob
 import itertools
+import json
 import linecache
 import os
 import re
@@ -600,6 +601,8 @@ class SqlMeshLoader(Loader):
                 infer_names=self.config.model_naming.infer_names,
                 signal_definitions=signals,
                 default_catalog_per_gateway=self.context.default_catalog_per_gateway,
+                virtual_layer_catalog_per_gateway=self.context.virtual_layer_catalog_per_gateway,
+                selected_gateway=self.context.selected_gateway,
                 virtual_environment_mode=self.config.virtual_environment_mode,
             )
 
@@ -680,6 +683,8 @@ class SqlMeshLoader(Loader):
                             audit_definitions=audits,
                             signal_definitions=signals,
                             default_catalog_per_gateway=self.context.default_catalog_per_gateway,
+                            virtual_layer_catalog_per_gateway=self.context.virtual_layer_catalog_per_gateway,
+                            selected_gateway=self.context.selected_gateway,
                             virtual_environment_mode=self.config.virtual_environment_mode,
                         ):
                             if model.enabled:
@@ -951,5 +956,12 @@ class SqlMeshLoader(Loader):
                     # model's python environment if the @gateway macro variable is
                     # used in the model
                     self._loader.context.gateway or self._loader.config.default_gateway_name,
+                    # A model's virtual-layer catalog can come from another composed
+                    # project's gateway configuration, so the local config fingerprint
+                    # alone is not sufficient to invalidate this cache entry.
+                    json.dumps(
+                        self._loader.context.virtual_layer_catalog_per_gateway,
+                        sort_keys=True,
+                    ),
                 ]
             )

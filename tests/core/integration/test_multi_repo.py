@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch
 from textwrap import dedent
 import os
+import typing as t
 import pytest
 from pathlib import Path
 from sqlmesh.core.console import (
@@ -21,6 +22,7 @@ from sqlmesh.core.config import (
 )
 from sqlmesh.core.console import get_console
 from sqlmesh.core.context import Context
+from sqlmesh.core.plan.stages import VirtualLayerUpdateStage, build_plan_stages
 from sqlmesh.utils import yaml
 from sqlmesh.utils.date import now
 from tests.conftest import DuckDBMetadata
@@ -183,6 +185,146 @@ def test_multi_repo_model_default_gateways(tmp_path: Path) -> None:
     assert override_model.catalog == "repo_two"
     assert override_model.project == "repo_one"
     assert context.render(override_model.fqn).sql() == ("SELECT 'repo-two-variable' AS \"owner\"")
+
+
+def test_multi_repo_virtual_layer_catalog_route_survives_partial_plan(tmp_path: Path) -> None:
+    """A partial project plan retains remote routes and can move a local route without backfill."""
+    project_one = tmp_path / "project_one"
+    project_two = tmp_path / "project_two"
+    (project_one / "models").mkdir(parents=True)
+    (project_two / "models").mkdir(parents=True)
+    (project_one / "models" / "one.sql").write_text(
+        "MODEL (name analytics.model_one, kind FULL); SELECT 1 AS id"
+    )
+    (project_two / "models" / "two.sql").write_text(
+        "MODEL (name analytics.model_two, kind FULL); SELECT 2 AS id"
+    )
+
+    physical_one = tmp_path / "physical_one.db"
+    physical_two = tmp_path / "physical_two.db"
+    published_one = tmp_path / "published_one.db"
+    published_one_next = tmp_path / "published_one_next.db"
+    published_two = tmp_path / "published_two.db"
+
+    def gateway_config(
+        physical: Path, published: t.Dict[str, Path], virtual_layer_catalog: str
+    ) -> GatewayConfig:
+        return GatewayConfig(
+            connection=DuckDBConnectionConfig(
+                catalogs={
+                    physical.stem: str(physical),
+                    **{name: str(path) for name, path in published.items()},
+                },
+            ),
+            virtual_layer_catalog=virtual_layer_catalog,
+        )
+
+    gateway_one = gateway_config(
+        physical_one,
+        {
+            "published_one": published_one,
+            "published_one_next": published_one_next,
+        },
+        "published_one",
+    )
+    gateway_two = gateway_config(
+        physical_two,
+        {"published_two": published_two},
+        "published_two",
+    )
+
+    def project_config(
+        project: str, default_gateway: str, gateways: t.Dict[str, GatewayConfig]
+    ) -> Config:
+        return Config(
+            project=project,
+            gateways=gateways,
+            default_gateway=default_gateway,
+            model_defaults=ModelDefaultsConfig(dialect="duckdb", gateway=default_gateway),
+            gateway_managed_virtual_layer=True,
+        )
+
+    initial_context = Context(
+        paths=[project_one, project_two],
+        config={
+            project_one: project_config(
+                "project_one",
+                "gateway_one",
+                {"gateway_one": gateway_one, "gateway_two": gateway_two},
+            ),
+            project_two: project_config(
+                "project_two",
+                "gateway_two",
+                {"gateway_one": gateway_one, "gateway_two": gateway_two},
+            ),
+        },
+        gateway="gateway_one",
+    )
+    initial_context._new_state_sync().reset(  # type: ignore[attr-defined]
+        default_catalog=initial_context.default_catalog
+    )
+    initial_plan = initial_context.plan_builder().build()
+    initial_context.apply(initial_plan)
+
+    adapter_one = initial_context._get_engine_adapter("gateway_one")
+    adapter_two = initial_context._get_engine_adapter("gateway_two")
+    assert adapter_one.table_exists("published_one.analytics.model_one")
+    assert adapter_two.table_exists("published_two.analytics.model_two")
+
+    moved_gateway_one = gateway_config(
+        physical_one,
+        {
+            "published_one": published_one,
+            "published_one_next": published_one_next,
+        },
+        "published_one_next",
+    )
+    gateway_two_without_project_route = GatewayConfig(connection=gateway_two.connection)
+    partial_context = Context(
+        paths=[project_one],
+        config={
+            project_one: project_config(
+                "project_one",
+                "gateway_one",
+                {
+                    "gateway_one": moved_gateway_one,
+                    "gateway_two": gateway_two_without_project_route,
+                },
+            )
+        },
+        state_sync=initial_context.state_sync,
+        gateway="gateway_one",
+    )
+    partial_context._engine_adapter = adapter_one
+    partial_plan = partial_context.plan_builder().build()
+
+    assert not partial_plan.requires_backfill
+    remote_table_info = next(
+        table_info
+        for table_info in partial_plan.environment.snapshots
+        if table_info.name.endswith('"model_two"')
+    )
+    assert remote_table_info.virtual_layer_catalog == "published_two"
+
+    stages = build_plan_stages(
+        partial_plan.to_evaluatable(), partial_context.state_reader, partial_context.default_catalog
+    )
+    virtual_layer_stage = next(
+        stage for stage in stages if isinstance(stage, VirtualLayerUpdateStage)
+    )
+    assert {
+        table_info.qualified_view_name.catalog
+        for table_info in virtual_layer_stage.demoted_snapshots
+    } == {"published_one"}
+    assert {
+        table_info.qualified_view_name.catalog
+        for table_info in virtual_layer_stage.promoted_snapshots
+    } == {"published_one_next"}
+
+    partial_context.apply(partial_plan)
+    assert not adapter_one.table_exists("published_one.analytics.model_one")
+    assert adapter_one.table_exists("published_one_next.analytics.model_one")
+    assert adapter_two.table_exists("published_two.analytics.model_two")
 
 
 @use_terminal_console

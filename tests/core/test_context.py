@@ -99,6 +99,88 @@ def test_config_parameter(copy_to_temp_path: t.Callable):
     assert context.config.project == "test_project"
 
 
+def test_conflicting_virtual_layer_catalogs_for_gateway(tmp_path: Path) -> None:
+    project_one = tmp_path / "project_one"
+    project_two = tmp_path / "project_two"
+    project_one.mkdir()
+    project_two.mkdir()
+
+    def config(project: str, virtual_layer_catalog: str) -> Config:
+        return Config(
+            project=project,
+            gateways={
+                "shared_gateway": GatewayConfig(
+                    connection=DuckDBConnectionConfig(),
+                    virtual_layer_catalog=virtual_layer_catalog,
+                )
+            },
+            default_gateway="shared_gateway",
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        )
+
+    context = Context(
+        paths=[project_one, project_two],
+        config={
+            project_one: config("project_one", "published_one"),
+            project_two: config("project_two", "published_two"),
+        },
+        load=False,
+    )
+
+    with pytest.raises(ConfigError, match="conflicting virtual_layer_catalog values"):
+        _ = context.virtual_layer_catalog_per_gateway
+
+
+def test_model_cache_tracks_composed_virtual_layer_catalogs(tmp_path: Path) -> None:
+    routing_project = tmp_path / "routing_project"
+    model_project = tmp_path / "model_project"
+    routing_project.mkdir()
+    (model_project / "models").mkdir(parents=True)
+    (model_project / "models" / "cached.sql").write_text(
+        "MODEL (name analytics.cached, kind FULL); SELECT 1 AS id"
+    )
+
+    def routing_config(virtual_layer_catalog: str) -> Config:
+        return Config(
+            project="routing_project",
+            gateways={
+                "work": GatewayConfig(
+                    connection=DuckDBConnectionConfig(),
+                    virtual_layer_catalog=virtual_layer_catalog,
+                )
+            },
+            default_gateway="work",
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        )
+
+    model_config = Config(
+        project="model_project",
+        gateways={"work": GatewayConfig(connection=DuckDBConnectionConfig())},
+        default_gateway="work",
+        model_defaults=ModelDefaultsConfig(dialect="duckdb", gateway="work"),
+    )
+
+    initial_context = Context(
+        paths=[routing_project, model_project],
+        config={
+            routing_project: routing_config("published_old"),
+            model_project: model_config,
+        },
+        load_state=False,
+    )
+    assert initial_context.get_model("analytics.cached").virtual_layer_catalog == "published_old"
+
+    updated_context = Context(
+        paths=[routing_project, model_project],
+        config={
+            routing_project: routing_config("published_new"),
+            model_project: model_config,
+        },
+        load_state=False,
+    )
+    assert updated_context.get_model("analytics.cached").virtual_layer_catalog == "published_new"
+
+
 def test_generate_table_name_in_dialect(mocker: MockerFixture):
     context = Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="bigquery")))
     mocker.patch(

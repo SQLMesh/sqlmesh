@@ -362,6 +362,7 @@ class SnapshotInfoMixin(ModelKindMixin):
     dev_table_suffix: str
     table_naming_convention: TableNamingConvention
     forward_only: bool
+    virtual_layer_catalog: t.Optional[str]
 
     @cached_property
     def identifier(self) -> str:
@@ -375,7 +376,7 @@ class SnapshotInfoMixin(ModelKindMixin):
     def qualified_view_name(self) -> QualifiedViewName:
         view_name = exp.to_table(self.fully_qualified_table or self.name)
         return QualifiedViewName(
-            catalog=view_name.catalog or None,
+            catalog=getattr(self, "virtual_layer_catalog", None) or view_name.catalog or None,
             schema_name=view_name.db or None,
             table=view_name.name,
         )
@@ -531,6 +532,7 @@ class SnapshotTableInfo(PydanticModel, SnapshotInfoMixin, frozen=True):
     custom_materialization: t.Optional[str] = None
     dev_table_suffix: str
     model_gateway: t.Optional[str] = None
+    virtual_layer_catalog: t.Optional[str] = None
     forward_only: bool = False
     table_naming_convention: TableNamingConvention = TableNamingConvention.default
     virtual_environment_mode_: VirtualEnvironmentMode = Field(
@@ -728,6 +730,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
     dev_table_suffix: str = "dev"
     table_naming_convention: TableNamingConvention = TableNamingConvention.default
     forward_only: bool = False
+    virtual_layer_catalog: t.Optional[str] = None
     # Physical table last modified timestamp, not to be confused with the "updated_ts" field
     # which is for the snapshot record itself
     last_altered_ts: t.Optional[int] = None
@@ -828,6 +831,11 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             ttl=ttl,
             version=version,
             table_naming_convention=table_naming_convention,
+            virtual_layer_catalog=(
+                getattr(t.cast(_Model, node), "virtual_layer_catalog", None)
+                if node.is_model
+                else None
+            ),
         )
 
     def __eq__(self, other: t.Any) -> bool:
@@ -1366,6 +1374,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             custom_materialization=custom_materialization,
             dev_table_suffix=self.dev_table_suffix,
             model_gateway=self.model_gateway,
+            virtual_layer_catalog=getattr(self, "virtual_layer_catalog", None),
             table_naming_convention=self.table_naming_convention,  # type: ignore
             forward_only=self.forward_only,
             virtual_environment_mode=self.virtual_environment_mode,

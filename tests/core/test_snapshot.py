@@ -1162,6 +1162,40 @@ def test_fingerprint_virtual_properties(model: Model, parent_model: Model):
     assert updated_fingerprint.data_hash == fingerprint.data_hash
 
 
+def test_fingerprint_virtual_layer_catalog_is_metadata_only(model: Model) -> None:
+    original_fingerprint = fingerprint_from_node(model, nodes={})
+    updated_model = type(model)(**{**model.dict(), "virtual_layer_catalog": "published_catalog"})
+    updated_fingerprint = fingerprint_from_node(updated_model, nodes={})
+
+    assert updated_fingerprint.data_hash == original_fingerprint.data_hash
+    assert updated_fingerprint.metadata_hash != original_fingerprint.metadata_hash
+
+    snapshot = Snapshot.from_node(updated_model, nodes={updated_model.fqn: updated_model})
+    snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+    persisted_snapshot = Snapshot.parse_raw(snapshot.json())
+    table_info = SnapshotTableInfo.parse_raw(snapshot.table_info.json())
+
+    assert persisted_snapshot.model.virtual_layer_catalog == "published_catalog"
+    assert persisted_snapshot.virtual_layer_catalog == "published_catalog"
+    assert table_info.virtual_layer_catalog == "published_catalog"
+    assert table_info.qualified_view_name.catalog == "published_catalog"
+    assert (
+        table_info.qualified_view_name.for_environment(
+            EnvironmentNamingInfo(name="prod", catalog_name_override="mapped_catalog")
+        )
+        == "mapped_catalog.default.name"
+    )
+    assert (
+        table_info.qualified_view_name.for_environment(
+            EnvironmentNamingInfo(
+                name="dev",
+                suffix_target=EnvironmentSuffixTarget.CATALOG,
+            )
+        )
+        == "published_catalog__dev.default.name"
+    )
+
+
 def test_fingerprint_grants(model: Model, parent_model: Model):
     from sqlmesh.core.model.meta import GrantsTargetLayer
 

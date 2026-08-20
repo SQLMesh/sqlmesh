@@ -1044,6 +1044,16 @@ def test_gateway_model_defaults_cron_tz(tmp_path):
     assert ctx.config.model_defaults.cron_tz.key == "America/New_York"
 
 
+def test_gateway_virtual_layer_catalog_parse_and_serialize() -> None:
+    gateway = GatewayConfig(virtual_layer_catalog="published_catalog")
+
+    assert gateway.virtual_layer_catalog == "published_catalog"
+    assert GatewayConfig.parse_raw(gateway.json()).virtual_layer_catalog == "published_catalog"
+
+    with pytest.raises(ConfigError, match="cannot be an empty string"):
+        GatewayConfig(virtual_layer_catalog="  ")
+
+
 def test_redshift_merge_flag(tmp_path, mocker: MockerFixture):
     config_path = tmp_path / "config_redshift_merge.yaml"
     with open(config_path, "w", encoding="utf-8") as fd:

@@ -2897,6 +2897,23 @@ class GenericContext(BaseContext, t.Generic[C]):
         """Returns the default catalogs for each engine adapter."""
         return self._scheduler.get_default_catalog_per_gateway(self)
 
+    @cached_property
+    def virtual_layer_catalog_per_gateway(self) -> t.Dict[str, str]:
+        """Returns configured virtual-layer catalogs keyed by gateway name."""
+        catalogs: t.Dict[str, str] = {}
+        for config in self.configs.values():
+            for gateway_name, gateway in config.gateways.items():
+                if not gateway.virtual_layer_catalog:
+                    continue
+                existing = catalogs.get(gateway_name)
+                if existing is not None and existing != gateway.virtual_layer_catalog:
+                    raise ConfigError(
+                        f"Gateway '{gateway_name}' has conflicting virtual_layer_catalog values "
+                        f"'{existing}' and '{gateway.virtual_layer_catalog}'."
+                    )
+                catalogs[gateway_name] = gateway.virtual_layer_catalog
+        return catalogs
+
     @property
     def concurrent_tasks(self) -> int:
         if self._concurrent_tasks is None:

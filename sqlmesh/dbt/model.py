@@ -551,6 +551,7 @@ class ModelConfig(BaseModelConfig):
         context: DbtContext,
         audit_definitions: t.Optional[t.Dict[str, ModelAudit]] = None,
         virtual_environment_mode: VirtualEnvironmentMode = VirtualEnvironmentMode.default,
+        resolved_virtual_layer_catalog: t.Optional[str] = None,
     ) -> Model:
         """Converts the dbt model into a SQLMesh model."""
         model_dialect = self.dialect(context)
@@ -767,6 +768,7 @@ class ModelConfig(BaseModelConfig):
             extract_dependencies_from_query=False,
             allow_partials=allow_partials,
             virtual_environment_mode=virtual_environment_mode,
+            resolved_virtual_layer_catalog=resolved_virtual_layer_catalog,
             dbt_node_info=self.node_info,
             **optional_kwargs,
             **model_kwargs,
