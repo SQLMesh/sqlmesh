@@ -2082,7 +2082,11 @@ def create_models_from_blueprints(
                 default_catalog=loader_kwargs.get("default_catalog"),
                 blueprint_variables=blueprint_variables,
             )
-            gateway_name = rendered_gateway[0].name if rendered_gateway else None
+            gateway_name = rendered_gateway[0].name.lower() if rendered_gateway else None
+        elif configured_gateway := (loader_kwargs.get("defaults") or {}).get("gateway"):
+            # Config gateway names are literals, not SQL expressions. In particular, parsing a
+            # gateway such as "secondary-gw" as SQL would interpret it as subtraction.
+            gateway_name = configured_gateway.lower()
         else:
             gateway_name = None
 
@@ -2600,6 +2604,11 @@ def _create_model(
         kwargs["kind"] = create_model_kind(raw_kind, dialect, defaults or {})
 
     defaults = {k: v for k, v in (defaults or {}).items() if k in klass.all_fields()}
+    if issubclass(klass, ExternalModel):
+        # An external model's gateway selects a gateway-specific source definition in
+        # external_models.yaml, so it must remain explicit rather than inheriting the
+        # gateway used to execute managed models in the project.
+        defaults.pop("gateway", None)
     if not issubclass(klass, SqlModel):
         defaults.pop("optimize_query", None)
 
