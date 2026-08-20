@@ -2407,32 +2407,44 @@ def test_earliest_start_date(sushi_context: Context):
 
 
 def test_deployability_index(make_snapshot):
+    # Breaking change - should be both representantive / deployable
     snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1")))
     snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
 
+    # Forward only breaking change - cannot be representative / deployable due to forward only
     snapshot_b = make_snapshot(SqlModel(name="b", query=parse_one("SELECT 1")))
     snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
     snapshot_b.parents = (snapshot_a.snapshot_id,)
 
+    # Indirect breaking - cannot be representative / deployable due to forward only non-deployable parent
     snapshot_c = make_snapshot(SqlModel(name="c", query=parse_one("SELECT 1")))
     snapshot_c.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
     snapshot_c.parents = (snapshot_b.snapshot_id,)
 
+    # Indirect breaking - cannot be representative / deployable due to forward only non-deployable parent
     snapshot_d = make_snapshot(SqlModel(name="d", query=parse_one("SELECT 1")))
     snapshot_d.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
     snapshot_d.parents = (snapshot_b.snapshot_id, snapshot_a.snapshot_id)
 
+    # Non breaking - representative / deployable due to no breaking changes
     snapshot_e = make_snapshot(SqlModel(name="e", query=parse_one("SELECT 1")))
     snapshot_e.categorize_as(SnapshotChangeCategory.NON_BREAKING)
 
+    # Indirect breaking - can be representative / deployable due to deployable parents
     snapshot_f = make_snapshot(SqlModel(name="f", query=parse_one("SELECT 1")))
     snapshot_f.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
     snapshot_f.parents = (snapshot_e.snapshot_id, snapshot_a.snapshot_id)
 
+    # Indirect non breaking - cannot be representative / deployable due to possible data drift from prod
     snapshot_g = make_snapshot(SqlModel(name="g", query=parse_one("SELECT 1")))
     snapshot_g.intervals = [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
     snapshot_g.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
     snapshot_g.parents = (snapshot_e.snapshot_id,)
+    
+    # Indirect breaking - cannot be representative / deployable due to indirect non breaking non-deployable parent
+    snapshot_h = make_snapshot(SqlModel(name="h", query=parse_one("SELECT 1")))
+    snapshot_h.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
+    snapshot_h.parents = (snapshot_g.snapshot_id,)
 
     snapshots = {
         s.snapshot_id: s
@@ -2444,6 +2456,7 @@ def test_deployability_index(make_snapshot):
             snapshot_e,
             snapshot_f,
             snapshot_g,
+            snapshot_h,
         ]
     }
 
@@ -2452,18 +2465,20 @@ def test_deployability_index(make_snapshot):
     assert deployability_index.is_deployable(snapshot_a)
     assert deployability_index.is_deployable(snapshot_e)
     assert deployability_index.is_deployable(snapshot_f)
-    assert not deployability_index.is_deployable(snapshot_g)
     assert not deployability_index.is_deployable(snapshot_b)
     assert not deployability_index.is_deployable(snapshot_c)
     assert not deployability_index.is_deployable(snapshot_d)
+    assert not deployability_index.is_deployable(snapshot_g)
+    assert not deployability_index.is_deployable(snapshot_h)
 
     assert deployability_index.is_representative(snapshot_a)
     assert deployability_index.is_representative(snapshot_e)
     assert deployability_index.is_representative(snapshot_f)
-    assert deployability_index.is_representative(snapshot_g)
     assert not deployability_index.is_representative(snapshot_b)
     assert not deployability_index.is_representative(snapshot_c)
     assert not deployability_index.is_representative(snapshot_d)
+    assert not deployability_index.is_representative(snapshot_g)
+    assert not deployability_index.is_representative(snapshot_h)
 
     all_deployable_index = deployability_index.all_deployable()
     assert all(all_deployable_index.is_deployable(s) for s in snapshots.values())
