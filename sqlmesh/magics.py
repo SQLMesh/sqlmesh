@@ -983,7 +983,7 @@ class SQLMeshMagics(Magics):
     def invalidate(self, context: Context, line: str) -> None:
         """Invalidate the target environment, forcing its removal during the next run of the janitor process."""
         args = parse_argstring(self.invalidate, line)
-        context.invalidate_environment(args.environment)
+        context.invalidate_environment(args.environment, must_exist=True)
 
     @magic_arguments()
     @argument(

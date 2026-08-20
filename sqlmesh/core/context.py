@@ -1870,15 +1870,24 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     @python_api_analytics
-    def invalidate_environment(self, name: str, sync: bool = False) -> None:
+    def invalidate_environment(
+        self, name: str, sync: bool = False, must_exist: bool = False
+    ) -> None:
         """Invalidates the target environment by setting its expiration timestamp to now.
 
         Args:
             name: The name of the environment to invalidate.
             sync: If True, the call blocks until the environment is deleted. Otherwise, the environment will
                 be deleted asynchronously by the janitor process.
+            must_exist: If True, raise if the environment doesn't exist instead of silently doing nothing.
+                Used by the user-facing entry points, where a mistyped name should be reported rather than
+                look like it succeeded. Internal callers such as
+                `GithubController.try_invalidate_pr_environment` rely on the default no-op behavior, since
+                a PR environment may never have been created.
         """
         name = Environment.sanitize_name(name)
+        if must_exist and self.state_sync.get_environment(name) is None:
+            raise SQLMeshError(f"Environment '{name}' was not found.")
         self.state_sync.invalidate_environment(name)
         if sync:
             self._cleanup_environments(name=name)
