@@ -733,11 +733,19 @@ class Db2EngineAdapter(
         )
 
     def _truncate_table(self, table_name: TableName) -> None:
-        # Db2 requires the IMMEDIATE keyword after the table name; without it
-        # the statement fails with SQL0104N (unexpected token END-OF-STATEMENT,
-        # expected IMMEDIATE).
-        table = exp.to_table(table_name)
-        self.execute(f"TRUNCATE TABLE {table.sql(dialect=self.dialect, identify=True)} IMMEDIATE")
+        # Db2's TRUNCATE TABLE ... IMMEDIATE commits instantly and cannot be
+        # rolled back (SQL0428N if inside an open transaction). When a
+        # transaction is already active, use DELETE which participates in the
+        # transaction normally and can be rolled back. When no transaction is
+        # active, use TRUNCATE TABLE ... IMMEDIATE — the IMMEDIATE keyword is
+        # mandatory in Db2 syntax (SQL0104N without it).
+        if self._connection_pool.is_transaction_active:
+            self.execute(exp.Delete(this=exp.to_table(table_name)))
+        else:
+            table = exp.to_table(table_name)
+            self.execute(
+                f"TRUNCATE TABLE {table.sql(dialect=self.dialect, identify=True)} IMMEDIATE"
+            )
 
     def _convert_df_datetime(self, df: DF, columns_to_types: t.Dict[str, exp.DataType]) -> None:
         """
