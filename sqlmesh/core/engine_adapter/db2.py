@@ -732,6 +732,13 @@ class Db2EngineAdapter(
             )
         )
 
+    def _truncate_table(self, table_name: TableName) -> None:
+        # Db2 requires the IMMEDIATE keyword after the table name; without it
+        # the statement fails with SQL0104N (unexpected token END-OF-STATEMENT,
+        # expected IMMEDIATE).
+        table = exp.to_table(table_name)
+        self.execute(f"TRUNCATE TABLE {table.sql(dialect=self.dialect, identify=True)} IMMEDIATE")
+
     def _convert_df_datetime(self, df: DF, columns_to_types: t.Dict[str, exp.DataType]) -> None:
         """
         Db2 has strict type casting rules: TIME columns cannot be cast to TIMESTAMP or
