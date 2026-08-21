@@ -2027,6 +2027,15 @@ def test_sushi(
             "example uses cross-engine incremental/SCD models without a StarRocks primary_key, so "
             "this end-to-end test does not apply to StarRocks"
         )
+    if ctx.dialect == "db2":
+        pytest.skip(
+            "Db2 does not support CREATE SCHEMA IF NOT EXISTS (SQL0104N). The test_sushi "
+            "before_all statements are rendered through the duckdb dialect then re-rendered "
+            "through the db2-sqlglot-dialect generator, which inherits sqlglot's base "
+            "create_sql() and emits IF NOT EXISTS unconditionally. Fix requires adding a "
+            "create_sql() override to db2_sqlglot.Db2 that strips IF NOT EXISTS from "
+            "CREATE SCHEMA statements before delegating to the base generator."
+        )
 
     sushi_test_schema = ctx.add_test_suffix("sushi")
     sushi_state_schema = ctx.add_test_suffix("sushi_state")
