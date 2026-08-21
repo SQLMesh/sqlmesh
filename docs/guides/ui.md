@@ -225,7 +225,7 @@ You may include all a project's models by clicking `All` in the Show drop-down o
 
 ![Lineage module - all models](./ui/ui-guide_lineage-all.png){ loading=lazy }
 
-Click `Connected` in the Show drop-down menu to highlight edges between upstream parents and downstream children in blue. This may be helpful when when a project contains many models:
+Click `Connected` in the Show drop-down menu to highlight edges between upstream parents and downstream children in blue. This may be helpful when a project contains many models:
 
 ![Lineage module - all models, connected edges](./ui/ui-guide_lineage-all-connected.png){ loading=lazy }
 
