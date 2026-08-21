@@ -115,6 +115,7 @@ from sqlmesh.core.test import (
     ModelTestMetadata,
     generate_test,
     run_tests,
+    filter_tests_by_model_names,
     filter_tests_by_patterns,
 )
 from sqlmesh.core.user import User
@@ -1347,6 +1348,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         execution_time: t.Optional[TimeLike] = None,
         create_from: t.Optional[str] = None,
         skip_tests: t.Optional[bool] = None,
+        all_tests: t.Optional[bool] = None,
         restate_models: t.Optional[t.Iterable[str]] = None,
         no_gaps: t.Optional[bool] = None,
         skip_backfill: t.Optional[bool] = None,
@@ -1384,6 +1386,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             create_from: The environment to create the target environment from if it
                 doesn't exist. If not specified, the "prod" environment will be used.
             skip_tests: Unit tests are run by default so this will skip them if enabled
+            all_tests: Run every loaded unit test instead of only tests for models in the plan
             restate_models: A list of either internal or external models, or tags, that need to be restated
                 for the given plan interval. If the target environment is a production environment,
                 ALL snapshots that depended on these upstream tables will have their intervals deleted
@@ -1430,6 +1433,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             execution_time=execution_time,
             create_from=create_from,
             skip_tests=skip_tests,
+            all_tests=all_tests,
             restate_models=restate_models,
             no_gaps=no_gaps,
             skip_backfill=skip_backfill,
@@ -1484,6 +1488,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         execution_time: t.Optional[TimeLike] = None,
         create_from: t.Optional[str] = None,
         skip_tests: t.Optional[bool] = None,
+        all_tests: t.Optional[bool] = None,
         restate_models: t.Optional[t.Iterable[str]] = None,
         no_gaps: t.Optional[bool] = None,
         skip_backfill: t.Optional[bool] = None,
@@ -1518,6 +1523,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             create_from: The environment to create the target environment from if it
                 doesn't exist. If not specified, the "prod" environment will be used.
             skip_tests: Unit tests are run by default so this will skip them if enabled
+            all_tests: Run every loaded unit test instead of only tests for models in the plan
             restate_models: A list of either internal or external models, or tags, that need to be restated
                 for the given plan interval. If the target environment is a production environment,
                 ALL snapshots that depended on these upstream tables will have their intervals deleted
@@ -1559,6 +1565,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             "execution_time": execution_time,
             "create_from": create_from,
             "skip_tests": skip_tests,
+            "all_tests": all_tests,
             "restate_models": list(restate_models) if restate_models is not None else None,
             "no_gaps": no_gaps,
             "skip_backfill": skip_backfill,
@@ -1588,6 +1595,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         }
 
         skip_tests = explain or skip_tests or False
+        all_tests = all_tests or False
+        if skip_tests and all_tests:
+            raise PlanError("Cannot combine --all-tests with --skip-tests.")
         no_gaps = no_gaps or False
         skip_backfill = skip_backfill or False
         empty_backfill = empty_backfill or False
@@ -1595,6 +1605,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         diff_rendered = diff_rendered or False
         skip_linter = skip_linter or False
         min_intervals = min_intervals or 0
+
+        # Virtual-only plans (--skip-backfill / --dry-run) skip unit tests unless --all-tests.
+        if skip_backfill and not all_tests:
+            skip_tests = True
 
         environment = environment or self.config.default_target_environment
         environment = Environment.sanitize_name(environment)
@@ -1613,8 +1627,6 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         if not skip_linter:
             self.lint_models()
-
-        self._run_plan_tests(skip_tests=skip_tests)
 
         environment_ttl = (
             self.environment_ttl if environment not in self.pinned_environments else None
@@ -1697,6 +1709,15 @@ class GenericContext(BaseContext, t.Generic[C]):
             *context_diff.modified_snapshots,
             *[s.name for s in context_diff.added],
         }
+
+        self._run_plan_tests(
+            skip_tests=skip_tests,
+            all_tests=all_tests,
+            model_names={
+                *modified_model_names,
+                *(expanded_restate_models or set()),
+            },
+        )
 
         if (
             is_dev
@@ -2314,6 +2335,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         verbosity: Verbosity = Verbosity.DEFAULT,
         preserve_fixtures: bool = False,
         stream: t.Optional[t.TextIO] = None,
+        model_names: t.Optional[t.Collection[str]] = None,
     ) -> ModelTextTestResult:
         """Discover and run model tests"""
         if verbosity >= Verbosity.VERBOSE:
@@ -2321,7 +2343,7 @@ class GenericContext(BaseContext, t.Generic[C]):
 
             pd.set_option("display.max_columns", None)
 
-        test_meta = self.select_tests(tests=tests, patterns=match_patterns)
+        test_meta = self.select_tests(tests=tests, patterns=match_patterns, model_names=model_names)
 
         result = run_tests(
             model_test_metadata=test_meta,
@@ -2781,15 +2803,24 @@ class GenericContext(BaseContext, t.Generic[C]):
         result = self.test(stream=test_output_io, verbosity=verbosity)
         return result, test_output_io.getvalue()
 
-    def _run_plan_tests(self, skip_tests: bool = False) -> t.Optional[ModelTextTestResult]:
-        if not skip_tests:
-            result = self.test()
-            if not result.wasSuccessful():
-                raise PlanError(
-                    "Cannot generate plan due to failing test(s). Fix test(s) and run again."
-                )
-            return result
-        return None
+    def _run_plan_tests(
+        self,
+        skip_tests: bool = False,
+        all_tests: bool = False,
+        model_names: t.Optional[t.Collection[str]] = None,
+    ) -> t.Optional[ModelTextTestResult]:
+        if skip_tests:
+            return None
+
+        if not all_tests and model_names is not None and not model_names:
+            return None
+
+        result = self.test(model_names=None if all_tests else model_names)
+        if not result.wasSuccessful():
+            raise PlanError(
+                "Cannot generate plan due to failing test(s). Fix test(s) and run again."
+            )
+        return result
 
     def _warn_if_virtual_catalog_rematerialization(self, plan: "Plan") -> None:
         """Warn when ClickHouse models appear as new snapshots solely because a virtual catalog
@@ -3465,6 +3496,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self,
         tests: t.Optional[t.List[str]] = None,
         patterns: t.Optional[t.List[str]] = None,
+        model_names: t.Optional[t.Collection[str]] = None,
     ) -> t.List[ModelTestMetadata]:
         """Filter pre-loaded test metadata based on tests and patterns."""
 
@@ -3487,6 +3519,14 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         if patterns:
             test_meta = filter_tests_by_patterns(test_meta, patterns)
+
+        if model_names is not None:
+            test_meta = filter_tests_by_model_names(
+                test_meta,
+                set(model_names),
+                default_catalog=self.default_catalog,
+                dialect=self.default_dialect,
+            )
 
         return test_meta
 

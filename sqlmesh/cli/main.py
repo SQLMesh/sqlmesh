@@ -424,6 +424,12 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     default=None,
 )
 @click.option(
+    "--all-tests",
+    is_flag=True,
+    help="Run all unit tests instead of only tests for models included in the plan.",
+    default=None,
+)
+@click.option(
     "--skip-linter",
     is_flag=True,
     help="Skip linting prior to generating the plan if the linter is enabled.",
@@ -446,7 +452,7 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     "--skip-backfill",
     "--dry-run",
     is_flag=True,
-    help="Skip the backfill step and only create a virtual update for the plan.",
+    help="Skip the backfill step and only create a virtual update for the plan. Unit tests are also skipped unless --all-tests is passed.",
     default=None,
 )
 @click.option(

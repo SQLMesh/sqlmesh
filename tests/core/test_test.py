@@ -3527,3 +3527,81 @@ test_foo:
 
     assert "Ran 1 tests" in output
     assert "Failed tests (1)" in output
+
+
+def test_filter_tests_by_model_names():
+    from sqlmesh.core.test.discovery import ModelTestMetadata, filter_tests_by_model_names
+
+    tests = [
+        ModelTestMetadata(path=Path("a.yaml"), test_name="t1", body={"model": "sushi.a"}),
+        ModelTestMetadata(path=Path("b.yaml"), test_name="t2", body={"model": "sushi.b"}),
+        ModelTestMetadata(path=Path("c.yaml"), test_name="t3", body={"model": ""}),
+    ]
+
+    filtered = filter_tests_by_model_names(
+        tests,
+        {'"memory"."sushi"."a"'},
+        default_catalog="memory",
+        dialect="duckdb",
+    )
+    assert [t.test_name for t in filtered] == ["t1"]
+
+    filtered_short = filter_tests_by_model_names(
+        tests,
+        {"sushi.a"},
+        default_catalog="memory",
+        dialect="duckdb",
+    )
+    assert [t.test_name for t in filtered_short] == ["t1"]
+
+
+def test_plan_scoped_unit_tests(tmp_path: Path, mocker: MockerFixture):
+    init_example_project(tmp_path, engine_type="duckdb")
+    config = Config(
+        gateways={"duckdb": GatewayConfig(connection=DuckDBConnectionConfig())},
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+    )
+    context = Context(paths=tmp_path, config=config)
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    calls: t.List[t.Dict[str, t.Any]] = []
+
+    def fake_test(**kwargs: t.Any) -> ModelTextTestResult:
+        calls.append(kwargs)
+        result = mocker.MagicMock(spec=ModelTextTestResult)
+        result.wasSuccessful.return_value = True
+        result.testsRun = 0
+        return result
+
+    mocker.patch.object(context, "test", side_effect=fake_test)
+
+    # No-op plan should not run tests
+    context.plan("prod", auto_apply=True, no_prompts=True)
+    assert calls == []
+
+    # --all-tests on no-op should run the full suite
+    context.plan("prod", auto_apply=True, no_prompts=True, all_tests=True)
+    assert len(calls) == 1
+    assert calls[0].get("model_names") is None
+
+    calls.clear()
+
+    # Changing one model should only pass that model's name into test()
+    model_path = tmp_path / "models" / "full_model.sql"
+    model_path.write_text(model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)"))
+    context.load()
+    context.plan("prod", auto_apply=True, no_prompts=True)
+    assert len(calls) == 1
+    model_names = calls[0].get("model_names")
+    assert model_names is not None
+    assert any("full_model" in name for name in model_names)
+    assert not any("seed_model" in name for name in model_names)
+
+    calls.clear()
+
+    # --all-tests with real changes still runs the full suite (no model filter)
+    model_path.write_text(model_path.read_text().replace("COUNT(id)", "COUNT(DISTINCT id)"))
+    context.load()
+    context.plan("prod", auto_apply=True, no_prompts=True, all_tests=True)
+    assert len(calls) == 1
+    assert calls[0].get("model_names") is None

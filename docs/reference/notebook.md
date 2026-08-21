@@ -96,7 +96,7 @@ options:
 #### plan
 ```
 %plan [--start START] [--end END] [--execution-time EXECUTION_TIME]
-            [--create-from CREATE_FROM] [--skip-tests]
+            [--create-from CREATE_FROM] [--skip-tests] [--all-tests]
             [--restate-model [RESTATE_MODEL ...]] [--no-gaps]
             [--skip-backfill, --dry-run] [--forward-only]
             [--effective-from EFFECTIVE_FROM] [--no-prompts] [--auto-apply]
@@ -120,6 +120,8 @@ options:
                         The environment to create the target environment from
                         if it doesn't exist. Default: prod.
   --skip-tests, -t      Skip the unit tests defined for the model.
+  --all-tests           Run all unit tests instead of only tests for models
+                        included in the plan.
   --restate-model <[RESTATE_MODEL ...]>, -r <[RESTATE_MODEL ...]>
                         Restate data for specified models (and models
                         downstream from the one specified). For production
@@ -131,7 +133,9 @@ options:
                         comparing to existing snapshots for matching models in
                         the target environment.
   --skip-backfill, --dry-run
-                        Skip the backfill step and only create a virtual update for the plan.
+                        Skip the backfill step and only create a virtual
+                        update for the plan. Unit tests are also skipped
+                        unless --all-tests is passed.
   --forward-only        Create a plan for forward-only changes.
   --effective-from EFFECTIVE_FROM
                         The effective date from which to apply forward-only

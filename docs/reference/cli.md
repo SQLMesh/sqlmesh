@@ -357,6 +357,8 @@ Options:
                                   Default: prod.
   --skip-tests                    Skip tests prior to generating the plan if
                                   they are defined.
+  --all-tests                     Run all unit tests instead of only tests for
+                                  models included in the plan.
   --skip-linter                   Skip linting prior to generating the plan if
                                   the linter is enabled.
   -r, --restate-model TEXT        Restate data for specified models and models
@@ -371,7 +373,8 @@ Options:
                                   when comparing to existing snapshots for
                                   matching models in the target environment.
   --skip-backfill, --dry-run      Skip the backfill step and only create a
-                                  virtual update for the plan.
+                                  virtual update for the plan. Unit tests are
+                                  also skipped unless --all-tests is passed.
   --empty-backfill                Produce empty backfill. Like --skip-backfill
                                   no models will be backfilled, unlike --skip-
                                   backfill missing intervals will be recorded

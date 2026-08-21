@@ -408,6 +408,11 @@ class SQLMeshMagics(Magics):
         help="Skip the unit tests defined for the model.",
     )
     @argument(
+        "--all-tests",
+        action="store_true",
+        help="Run all unit tests instead of only tests for models included in the plan.",
+    )
+    @argument(
         "--skip-linter",
         action="store_true",
         help="Skip the linter for the model.",
@@ -429,7 +434,7 @@ class SQLMeshMagics(Magics):
         "--skip-backfill",
         "--dry-run",
         action="store_true",
-        help="Skip the backfill step and only create a virtual update for the plan.",
+        help="Skip the backfill step and only create a virtual update for the plan. Unit tests are also skipped unless --all-tests is passed.",
     )
     @argument(
         "--empty-backfill",
@@ -533,6 +538,7 @@ class SQLMeshMagics(Magics):
             execution_time=args.execution_time,
             create_from=args.create_from,
             skip_tests=args.skip_tests,
+            all_tests=args.all_tests,
             restate_models=args.restate_model,
             backfill_models=args.backfill_model,
             no_gaps=args.no_gaps,

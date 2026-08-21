@@ -66,7 +66,7 @@
 
     However, the commands to create and apply a plan are different. In Terraform, the "plan" command generates a plan and saves it to file. The "apply" command reads a plan file and applies it.
 
-    In SQLMesh, the `sqlmesh plan` command generates a plan, runs any unit tests, and prompts the user to apply the plan. There is no "apply" command in SQLMesh.
+    In SQLMesh, the `sqlmesh plan` command generates a plan, runs unit tests for models included in the plan, and prompts the user to apply the plan. There is no "apply" command in SQLMesh.
 
 ## Getting Started
 
@@ -102,7 +102,7 @@
     SQLMesh's default behavior is appropriate for most deployments, but you can override where SQLMesh creates physical tables and views with [schema configuration options](../guides/configuration.md#environment-schemas).
 
 ??? question "What's the difference between a `test` and an `audit`?"
-    A SQLMesh [`test`](../concepts/tests.md) is analogous to a "unit test" in software engineering. It tests *code* based on known inputs and outputs. In SQLMesh, the inputs and outputs are specified in a YAML file, and SQLMesh automatically runs them when `sqlmesh plan` is executed.
+    A SQLMesh [`test`](../concepts/tests.md) is analogous to a "unit test" in software engineering. It tests *code* based on known inputs and outputs. In SQLMesh, the inputs and outputs are specified in a YAML file, and SQLMesh runs tests for models included in the plan when `sqlmesh plan` is executed (use `--all-tests` for the full suite).
 
     Writing YAML is annoying and error-prone, so SQLMesh's [`create_test` command](../concepts/tests.md#automatic-test-generation) allows you to automatically generate YAML test files based on queries of existing data tables.
 
@@ -126,7 +126,7 @@
 ??? question "What's the difference between `sqlmesh plan` and `sqlmesh run`?"
     During project development, there are two things in play: the current state of your project files and the existing states of each environment you have.
 
-    SQLMesh’s `plan` command is the primary tool for understanding the effects of changes you make to your project. If your project files have changed or are different from the state of an environment, you execute `sqlmesh plan [environment name]` to synchronize the environment's state with your project files. `sqlmesh plan` will generate a summary of the actions needed to implement the changes, automatically run unit tests, and prompt you to `apply` the plan and implement the changes.
+    SQLMesh’s `plan` command is the primary tool for understanding the effects of changes you make to your project. If your project files have changed or are different from the state of an environment, you execute `sqlmesh plan [environment name]` to synchronize the environment's state with your project files. `sqlmesh plan` will generate a summary of the actions needed to implement the changes, run unit tests for models included in the plan, and prompt you to `apply` the plan and implement the changes.
 
     If your project files have not changed, you execute `sqlmesh run` to run your project's models and audits.
 
@@ -210,7 +210,7 @@
     - Configure your project and set up a project database (using DuckDB locally or a database connection)
     - Create, configure, and modify models, audits, tests, and other project components
     - Execute `sqlmesh plan [environment name]` to:
-        - Generate a summary of the differences between your project files and the environment and whether each change is `breaking`. The `plan` includes a list of the actions needed to implement the changes and automatically runs the project's unit `test`s.
+        - Generate a summary of the differences between your project files and the environment and whether each change is `breaking`. The `plan` includes a list of the actions needed to implement the changes and runs unit `test`s for models included in the plan.
         - Optionally apply the plan to implement the actions and run the project's `audit`s.
     - Execute `sqlmesh run` on a schedule to ingest and transform new data
 

@@ -193,6 +193,53 @@ def test_plan_skip_tests(runner, tmp_path):
     assert_backfill_success(result)
 
 
+def test_plan_no_changes_skips_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    # No model changes: unit tests should not run
+    result = runner.invoke(
+        cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran" not in result.output
+    assert "No changes to plan" in result.output or "No changes" in result.output
+
+
+def test_plan_all_tests_with_no_changes(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--all-tests", "--no-prompts"],
+        input="\n",
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+
+
+def test_plan_skip_backfill_all_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--skip-backfill",
+            "--no-gaps",
+            "--all-tests",
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+
+
 def test_plan_skip_linter(runner, tmp_path):
     create_example_project(tmp_path)
 
@@ -261,6 +308,8 @@ def test_plan_skip_backfill(runner, tmp_path, flag):
     assert result.exit_code == 0
     assert_virtual_layer_updated(result)
     assert "Model batches executed" not in result.output
+    # --skip-backfill / --dry-run skips unit tests by default
+    assert "Successfully Ran" not in result.output
 
 
 def test_plan_min_intervals(runner, tmp_path):
