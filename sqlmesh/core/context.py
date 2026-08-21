@@ -648,7 +648,16 @@ class GenericContext(BaseContext, t.Generic[C]):
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
     ) -> GenericContext[C]:
-        """Load files in the context's path, optionally scoped to specific models."""
+        """Load files in the context's path, optionally scoped to specific models.
+
+        Args:
+            update_schemas: Whether to update model schemas and validate model definitions.
+            model_fqns: If provided with ``use_project_index=True``, only the selected models
+                and their transitive upstream dependencies are loaded.
+            use_project_index: Whether to use and maintain the persistent project model index.
+                When ``model_fqns`` is not provided, all models are loaded and the index is
+                refreshed for future scoped loads.
+        """
         load_start_ts = time.perf_counter()
 
         loaded_projects = [
@@ -3422,25 +3431,40 @@ class GenericContext(BaseContext, t.Generic[C]):
         self,
         models: t.Optional[t.Iterable[t.Union[str, Model]]] = None,
         raise_on_error: bool = True,
-        use_project_index: bool = False,
+        use_project_index: t.Optional[bool] = None,
     ) -> t.List[AnnotatedRuleViolation]:
-        models = list(models) if models is not None else []
+        """Lint the selected models.
 
-        if not self._loaded:
-            target_fqns = (
-                {
-                    normalize_model_name(
-                        model,
-                        default_catalog=self.default_catalog,
-                        dialect=self.default_dialect,
-                    )
-                    if isinstance(model, str)
-                    else model.fqn
-                    for model in models
-                }
-                if models and use_project_index
-                else None
-            )
+        Args:
+            models: Models to lint. If omitted, all loaded models are linted.
+            raise_on_error: Whether to raise when an error-level violation is found.
+            use_project_index: Whether to use the persistent project index. If omitted, the
+                value of ``linter.use_project_index`` is used. Indexed linting of selected
+                models reloads an already-loaded context so the requested scope is applied.
+        """
+        models = list(models) if models is not None else []
+        use_project_index = (
+            self.config.linter.use_project_index if use_project_index is None else use_project_index
+        )
+
+        target_fqns = (
+            {
+                normalize_model_name(
+                    model,
+                    default_catalog=self.default_catalog,
+                    dialect=self.default_dialect,
+                )
+                if isinstance(model, str)
+                else model.fqn
+                for model in models
+            }
+            if models and use_project_index
+            else None
+        )
+
+        # An already-loaded context does not otherwise enter the loading path. Reload when
+        # indexed linting is requested for specific models so the scope is actually applied.
+        if not self._loaded or target_fqns is not None:
             self.load(model_fqns=target_fqns, use_project_index=use_project_index)
 
         found_error = False

@@ -3053,6 +3053,32 @@ def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
     assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
 
 
+def test_lint_models_project_index_reloads_loaded_context(tmp_path: pathlib.Path) -> None:
+    create_temp_file(tmp_path, pathlib.Path("models", "a.sql"), "MODEL(name a); SELECT 1 AS col;")
+    create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT 2 AS col;")
+
+    context = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            linter=LinterConfig(enabled=True, use_project_index=True),
+        ),
+        paths=tmp_path,
+    )
+    context.load(use_project_index=True)
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        assert context.lint_models(["b"]) == []
+
+    assert load_mock.call_count == 1
+    selected_paths = load_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(context.models) == {
+        context.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b")
+    }
+
+
 @pytest.mark.parametrize("invalid_files_shape", ["file_list", "model_list"])
 def test_invalid_model_index_falls_back_to_full_load(
     tmp_path: pathlib.Path, invalid_files_shape: str

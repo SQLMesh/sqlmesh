@@ -1216,7 +1216,8 @@ def environments(obj: Context) -> None:
 @click.option(
     "--use-project-index",
     is_flag=True,
-    help="Use the persistent project index. With --model, only the selected models and their upstream dependencies are loaded, resolved, and validated, so errors in unrelated models are not reported. Without --model, every model is still loaded and linted.",
+    default=None,
+    help="Use the persistent project index. With --model, only the selected models and their upstream dependencies are loaded, resolved, and validated, so errors in unrelated models are not reported. Without --model, every model is still loaded and linted. Can also be enabled with linter.use_project_index.",
 )
 @click.option(
     "--local",
@@ -1230,7 +1231,7 @@ def environments(obj: Context) -> None:
 def lint(
     obj: Context,
     models: t.Iterator[str],
-    use_project_index: bool,
+    use_project_index: t.Optional[bool],
 ) -> None:
     """Run the linter for the target model(s)."""
     obj.lint_models(
