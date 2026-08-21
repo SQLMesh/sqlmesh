@@ -45,6 +45,7 @@ class SeedConfig(BaseModelConfig):
         context: DbtContext,
         audit_definitions: t.Optional[t.Dict[str, ModelAudit]] = None,
         virtual_environment_mode: VirtualEnvironmentMode = VirtualEnvironmentMode.default,
+        resolved_virtual_layer_catalog: t.Optional[str] = None,
     ) -> Model:
         """Converts the dbt seed into a SQLMesh model."""
         seed_path = self.path.absolute().as_posix()
@@ -91,6 +92,7 @@ class SeedConfig(BaseModelConfig):
             dialect=self.dialect(context),
             audit_definitions=audit_definitions,
             virtual_environment_mode=virtual_environment_mode,
+            resolved_virtual_layer_catalog=resolved_virtual_layer_catalog,
             start=self.start or context.sqlmesh_config.model_defaults.start,
             dbt_node_info=self.node_info,
             **kwargs,

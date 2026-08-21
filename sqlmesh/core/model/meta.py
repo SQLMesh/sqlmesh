@@ -114,6 +114,9 @@ class ModelMeta(_Node):
     enabled: bool = True
     physical_version: t.Optional[str] = None
     gateway: t.Optional[str] = None
+    # Resolved from GatewayConfig during loading. This is persisted with the model so virtual
+    # layer routing remains available when the originating project configuration is not loaded.
+    virtual_layer_catalog: t.Optional[str] = None
     optimize_query: t.Optional[bool] = None
     ignored_rules_: t.Optional[t.Set[str]] = Field(
         default=None, exclude=True, alias="ignored_rules"

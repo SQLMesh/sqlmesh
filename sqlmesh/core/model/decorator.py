@@ -71,6 +71,11 @@ class model(registry_decorator):
 
         if "default_catalog" in kwargs:
             raise ConfigError("`default_catalog` cannot be set on a per-model basis.")
+        if "virtual_layer_catalog" in kwargs:
+            raise ConfigError(
+                "`virtual_layer_catalog` cannot be set on a per-model basis. "
+                "Configure it on the model's gateway instead."
+            )
 
         self.columns = {
             column_name: (
@@ -97,6 +102,8 @@ class model(registry_decorator):
         module_path: Path,
         dialect: t.Optional[str] = None,
         default_catalog_per_gateway: t.Optional[t.Dict[str, str]] = None,
+        virtual_layer_catalog_per_gateway: t.Optional[t.Dict[str, str]] = None,
+        selected_gateway: t.Optional[str] = None,
         **loader_kwargs: t.Any,
     ) -> t.List[Model]:
         blueprints = self.kwargs.pop("blueprints", None)
@@ -125,8 +132,12 @@ class model(registry_decorator):
 
             blueprints = blueprints[0]
 
+        gateway = self.kwargs.get("gateway")
+        if isinstance(gateway, str) and gateway.lstrip().startswith("@"):
+            gateway = parse_one(gateway, dialect=dialect)
+
         return create_models_from_blueprints(
-            gateway=self.kwargs.get("gateway"),
+            gateway=gateway,
             blueprints=blueprints,
             get_variables=get_variables,
             loader=self.model,
@@ -134,6 +145,8 @@ class model(registry_decorator):
             module_path=module_path,
             dialect=dialect,
             default_catalog_per_gateway=default_catalog_per_gateway,
+            virtual_layer_catalog_per_gateway=virtual_layer_catalog_per_gateway,
+            selected_gateway=selected_gateway,
             **loader_kwargs,
         )
 
@@ -156,6 +169,7 @@ class model(registry_decorator):
         infer_names: t.Optional[bool] = False,
         blueprint_variables: t.Optional[t.Dict[str, t.Any]] = None,
         virtual_environment_mode: VirtualEnvironmentMode = VirtualEnvironmentMode.default,
+        resolved_virtual_layer_catalog: t.Optional[str] = None,
     ) -> Model:
         """Get the model registered by this function."""
         env: t.Dict[str, t.Tuple[t.Any, t.Optional[bool]]] = {}
@@ -233,6 +247,7 @@ class model(registry_decorator):
             "signal_definitions": signal_definitions,
             "blueprint_variables": blueprint_variables,
             "virtual_environment_mode": virtual_environment_mode,
+            "resolved_virtual_layer_catalog": resolved_virtual_layer_catalog,
             **rendered_fields,
         }
 

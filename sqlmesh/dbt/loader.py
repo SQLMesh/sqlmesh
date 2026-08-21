@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import typing as t
@@ -158,6 +159,10 @@ class DbtLoader(Loader):
         signals: UniqueKeyDict[str, signal],
     ) -> UniqueKeyDict[str, Model]:
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+        effective_gateway = (gateway or self.context.selected_gateway).lower()
+        resolved_virtual_layer_catalog = self.context.virtual_layer_catalog_per_gateway.get(
+            effective_gateway
+        )
 
         def _to_sqlmesh(config: BMC, context: DbtContext) -> Model:
             logger.debug("Converting '%s' to sqlmesh format", config.canonical_name(context))
@@ -165,6 +170,7 @@ class DbtLoader(Loader):
                 context,
                 audit_definitions=audits,
                 virtual_environment_mode=self.config.virtual_environment_mode,
+                resolved_virtual_layer_catalog=resolved_virtual_layer_catalog,
             )
 
         for project in self._load_projects():
@@ -445,6 +451,10 @@ class DbtLoader(Loader):
                 [
                     str(int(max_mtime)) if max_mtime is not None else "na",
                     self._loader.config.fingerprint,
+                    json.dumps(
+                        self._loader.context.virtual_layer_catalog_per_gateway,
+                        sort_keys=True,
+                    ),
                 ]
             )
 

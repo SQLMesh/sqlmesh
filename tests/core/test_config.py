@@ -966,6 +966,27 @@ def test_gateway_model_defaults(tmp_path):
     assert ctx.config.model_defaults == expected
 
 
+def test_model_defaults_gateway_from_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+gateways:
+  project_gateway:
+    connection:
+      type: duckdb
+
+model_defaults:
+  dialect: duckdb
+  gateway: project_gateway
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config_from_paths(Config, project_paths=[config_path])
+
+    assert config.model_defaults.gateway == "project_gateway"
+
+
 def test_model_defaults_cron_tz(tmp_path):
     """Test that cron_tz can be set in model_defaults."""
     import zoneinfo
@@ -1021,6 +1042,16 @@ def test_gateway_model_defaults_cron_tz(tmp_path):
     # Also verify the cron_tz is a ZoneInfo object
     assert isinstance(ctx.config.model_defaults.cron_tz, zoneinfo.ZoneInfo)
     assert ctx.config.model_defaults.cron_tz.key == "America/New_York"
+
+
+def test_gateway_virtual_layer_catalog_parse_and_serialize() -> None:
+    gateway = GatewayConfig(virtual_layer_catalog="published_catalog")
+
+    assert gateway.virtual_layer_catalog == "published_catalog"
+    assert GatewayConfig.parse_raw(gateway.json()).virtual_layer_catalog == "published_catalog"
+
+    with pytest.raises(ConfigError, match="cannot be an empty string"):
+        GatewayConfig(virtual_layer_catalog="  ")
 
 
 def test_redshift_merge_flag(tmp_path, mocker: MockerFixture):

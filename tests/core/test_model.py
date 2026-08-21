@@ -49,6 +49,7 @@ from sqlmesh.core.model import (
     ModelCache,
     ModelMeta,
     SeedKind,
+    SeedModel,
     SqlModel,
     TimeColumn,
     ExternalKind,
@@ -5037,6 +5038,67 @@ def test_project_level_properties_python_model():
     assert not m.enabled
     assert m.allow_partials
     assert m.interval_unit == IntervalUnit.QUARTER_HOUR
+
+
+def test_explicit_hyphenated_gateway_python_model() -> None:
+    @model(
+        name="model_schema.python_explicit_gateway",
+        kind="full",
+        gateway="secondary-gw",
+        columns={"some_col": "int"},
+    )
+    def python_explicit_gateway(context, **kwargs):
+        yield {"some_col": 1}
+
+    requested_variable_gateways: t.List[t.Optional[str]] = []
+
+    def get_variables(gateway: t.Optional[str]) -> t.Dict[str, str]:
+        requested_variable_gateways.append(gateway)
+        return {}
+
+    loaded_models = model.get_registry()["model_schema.python_explicit_gateway"].models(
+        get_variables=get_variables,
+        module_path=Path("."),
+        path=Path("."),
+        dialect="duckdb",
+        defaults=ModelDefaultsConfig().dict(),
+        default_catalog="default_db",
+        default_catalog_per_gateway={"secondary-gw": "secondary_db"},
+        virtual_layer_catalog_per_gateway={"secondary-gw": "published_secondary"},
+    )
+
+    assert len(loaded_models) == 1
+    assert loaded_models[0].gateway == "secondary-gw"
+    assert loaded_models[0].catalog == "secondary_db"
+    assert loaded_models[0].virtual_layer_catalog == "published_secondary"
+    assert requested_variable_gateways == ["secondary-gw"]
+
+
+def test_model_defaults_gateway_python_model() -> None:
+    @model(
+        name="model_schema.python_gateway_default",
+        kind="full",
+        columns={"some_col": "int"},
+    )
+    def python_gateway_default(context, **kwargs):
+        yield {"some_col": 1}
+
+    loaded_models = model.get_registry()["model_schema.python_gateway_default"].models(
+        get_variables=lambda gateway: {},
+        module_path=Path("."),
+        path=Path("."),
+        dialect="duckdb",
+        defaults=ModelDefaultsConfig(gateway="python_gateway").dict(),
+        default_catalog="default_db",
+        default_catalog_per_gateway={"python_gateway": "python_db"},
+        virtual_layer_catalog_per_gateway={"python_gateway": "published_python"},
+        selected_gateway="default_gateway",
+    )
+
+    assert len(loaded_models) == 1
+    assert loaded_models[0].gateway == "python_gateway"
+    assert loaded_models[0].catalog == "python_db"
+    assert loaded_models[0].virtual_layer_catalog == "published_python"
 
 
 def test_model_defaults_macros(make_snapshot):
@@ -12980,6 +13042,207 @@ def test_default_catalog_still_applied_to_supported_gateway():
     model = models[0]
 
     assert model.catalog == "other_db", f"Expected catalog 'other_db', got: {model.catalog}"
+
+
+@pytest.mark.parametrize(
+    ("model_gateway", "expected_gateway", "expected_catalog"),
+    [
+        (None, "secondary-gw", "secondary_db"),
+        ("default_gw", "default_gw", "example_catalog"),
+    ],
+)
+def test_model_defaults_gateway(
+    model_gateway: t.Optional[str], expected_gateway: str, expected_catalog: str
+) -> None:
+    """A project-level gateway default controls loading unless the model overrides it."""
+    gateway_property = f"gateway {model_gateway}," if model_gateway else ""
+    expressions = d.parse(
+        f"""
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            {gateway_property}
+        );
+
+        SELECT 1 AS id
+        """,
+        default_dialect="duckdb",
+    )
+    requested_variable_gateways: t.List[t.Optional[str]] = []
+
+    def get_variables(gateway: t.Optional[str]) -> t.Dict[str, str]:
+        requested_variable_gateways.append(gateway)
+        return {}
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=get_variables,
+        defaults=ModelDefaultsConfig(gateway="secondary-gw").dict(),
+        dialect="duckdb",
+        default_catalog_per_gateway={
+            "default_gw": "example_catalog",
+            "secondary-gw": "secondary_db",
+        },
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 1
+    assert models[0].gateway == expected_gateway
+    assert models[0].catalog == expected_catalog
+    assert requested_variable_gateways == [expected_gateway]
+
+
+def test_model_defaults_gateway_with_blueprints() -> None:
+    expressions = d.parse(
+        """
+        MODEL (
+            name model_@suffix.my_model,
+            kind FULL,
+            blueprints (
+                (suffix := one),
+                (suffix := two),
+            ),
+        );
+
+        SELECT 1 AS id
+        """,
+        default_dialect="duckdb",
+    )
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gateway: {},
+        defaults=ModelDefaultsConfig(gateway="other_duckdb").dict(),
+        dialect="duckdb",
+        default_catalog_per_gateway={"other_duckdb": "other_db"},
+        virtual_layer_catalog_per_gateway={"other_duckdb": "published_other"},
+        selected_gateway="default_gateway",
+        default_catalog="example_catalog",
+    )
+
+    assert {model.gateway for model in models} == {"other_duckdb"}
+    assert {model.catalog for model in models} == {"other_db"}
+    assert {model.virtual_layer_catalog for model in models} == {"published_other"}
+
+
+@pytest.mark.parametrize(
+    ("model_gateway", "expected_virtual_catalog"),
+    [
+        (None, "published_secondary"),
+        ("default_gw", "published_default"),
+    ],
+)
+def test_gateway_virtual_layer_catalog_is_resolved_during_model_loading(
+    model_gateway: t.Optional[str], expected_virtual_catalog: str
+) -> None:
+    gateway_property = f"gateway {model_gateway}," if model_gateway else ""
+    expressions = d.parse(
+        f"""
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            {gateway_property}
+        );
+
+        SELECT 1 AS id
+        """,
+        default_dialect="duckdb",
+    )
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gateway: {},
+        defaults=ModelDefaultsConfig(gateway="secondary_gw").dict(),
+        dialect="duckdb",
+        default_catalog_per_gateway={
+            "default_gw": "physical_default",
+            "secondary_gw": "physical_secondary",
+        },
+        virtual_layer_catalog_per_gateway={
+            "default_gw": "published_default",
+            "secondary_gw": "published_secondary",
+        },
+        selected_gateway="default_gw",
+        default_catalog="physical_default",
+    )
+
+    assert len(models) == 1
+    assert models[0].virtual_layer_catalog == expected_virtual_catalog
+
+
+def test_selected_gateway_resolves_virtual_layer_catalog_without_model_gateway() -> None:
+    models = load_sql_based_models(
+        d.parse(
+            "MODEL (name my_schema.my_model, kind FULL); SELECT 1 AS id",
+            default_dialect="duckdb",
+        ),
+        get_variables=lambda gateway: {},
+        defaults=ModelDefaultsConfig(dialect="duckdb").dict(),
+        dialect="duckdb",
+        virtual_layer_catalog_per_gateway={"selected_gateway": "published_selected"},
+        selected_gateway="selected_gateway",
+    )
+
+    assert models[0].gateway is None
+    assert models[0].virtual_layer_catalog == "published_selected"
+
+
+def test_gateway_virtual_layer_catalog_is_resolved_for_seed_model(tmp_path: Path) -> None:
+    seed_path = tmp_path / "seed.csv"
+    seed_path.write_text("id\n1\n")
+    models = load_sql_based_models(
+        d.parse(
+            f"""
+            MODEL (
+                name my_schema.seed_model,
+                kind SEED (path '{seed_path.as_posix()}'),
+            );
+            """,
+            default_dialect="duckdb",
+        ),
+        get_variables=lambda gateway: {},
+        defaults=ModelDefaultsConfig(gateway="seed_gateway").dict(),
+        dialect="duckdb",
+        virtual_layer_catalog_per_gateway={"seed_gateway": "published_seed"},
+        selected_gateway="default_gateway",
+    )
+
+    assert isinstance(models[0], SeedModel)
+    assert models[0].virtual_layer_catalog == "published_seed"
+
+
+def test_virtual_layer_catalog_cannot_be_set_on_model() -> None:
+    with pytest.raises(ConfigError, match="Configure it on the model's gateway"):
+        load_sql_based_model(
+            d.parse(
+                """
+                MODEL (
+                    name my_schema.my_model,
+                    kind FULL,
+                    virtual_layer_catalog published_catalog,
+                );
+                SELECT 1 AS id;
+                """,
+                default_dialect="duckdb",
+            )
+        )
+
+
+def test_external_model_does_not_inherit_model_defaults_gateway() -> None:
+    default_external_model = create_external_model(
+        "source_schema.default_source",
+        defaults=ModelDefaultsConfig(gateway="managed_gateway").dict(),
+    )
+    explicit_external_model = create_external_model(
+        "source_schema.explicit_source",
+        defaults=ModelDefaultsConfig(gateway="managed_gateway").dict(),
+        gateway="source_gateway",
+        resolved_virtual_layer_catalog="published_source",
+    )
+
+    assert default_external_model.gateway is None
+    assert explicit_external_model.gateway == "source_gateway"
+    assert explicit_external_model.virtual_layer_catalog is None
 
 
 def test_no_gateway_uses_global_default_catalog():

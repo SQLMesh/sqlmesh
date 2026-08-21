@@ -97,6 +97,36 @@ def test_cleanup_expired_views(mocker: MockerFixture, make_snapshot: t.Callable)
     ]
 
 
+def test_cleanup_expired_views_uses_persisted_virtual_layer_catalog(
+    mocker: MockerFixture, make_snapshot: t.Callable
+) -> None:
+    adapter = mocker.MagicMock()
+    adapter.dialect = None
+    snapshot = make_snapshot(
+        SqlModel(
+            name="physical_catalog.schema.model",
+            query=parse_one("select 1"),
+            virtual_layer_catalog="published_catalog",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="expired",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="plan",
+        previous_plan_id="plan",
+    )
+
+    cleanup_expired_views(adapter, {}, [environment])
+
+    adapter.drop_view.assert_called_once_with(
+        "published_catalog.schema.model__expired", ignore_if_not_exists=True
+    )
+
+
 @pytest.mark.parametrize(
     "suffix_target", [EnvironmentSuffixTarget.SCHEMA, EnvironmentSuffixTarget.TABLE]
 )

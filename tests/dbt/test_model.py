@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlglot import exp
 from sqlglot.errors import SchemaError
 from sqlmesh import Context
+from sqlmesh.core.config import Config, GatewayConfig, ModelDefaultsConfig
 from sqlmesh.core.console import NoopConsole, get_console
 from sqlmesh.core.model import TimeColumn, IncrementalByTimeRangeKind
 from sqlmesh.core.model.kind import OnDestructiveChange, OnAdditiveChange, SCDType2ByColumnKind
@@ -16,6 +17,7 @@ from sqlmesh.core.config.common import VirtualEnvironmentMode
 from sqlmesh.core.model.meta import GrantsTargetLayer
 from sqlmesh.dbt.common import Dependencies
 from sqlmesh.dbt.context import DbtContext
+from sqlmesh.dbt.loader import sqlmesh_config
 from sqlmesh.dbt.model import ModelConfig
 from sqlmesh.dbt.target import BigQueryConfig, DuckDbConfig, PostgresConfig
 from sqlmesh.dbt.test import TestConfig
@@ -710,6 +712,62 @@ def test_load_multiple_snapshots_defined_in_same_file(sushi_test_dbt_context: Co
     context.load()
     assert context.get_model("snapshots.items_snapshot")
     assert context.get_model("snapshots.items_check_snapshot")
+
+
+@pytest.mark.slow
+def test_dbt_loader_virtual_layer_catalog_and_cache(create_empty_project) -> None:
+    project_dir, model_dir = create_empty_project(project_name="local", start="2020-01-01")
+    (model_dir / "routed.sql").write_text("{{ config(materialized='table') }} SELECT 1 AS id")
+    (project_dir / "seeds" / "routed_seed.csv").write_text("id\n1\n")
+
+    routing_project = project_dir.parent / "routing_project"
+    routing_project.mkdir()
+
+    dbt_config = sqlmesh_config(
+        project_root=project_dir,
+        profiles_dir=project_dir,
+        project="dbt_models",
+        model_defaults=ModelDefaultsConfig(start="2020-01-01"),
+    )
+
+    def configs(virtual_layer_catalog: str) -> t.Dict[Path, Config]:
+        routing_config = Config(
+            project="routing_project",
+            gateways={
+                "duckdb": GatewayConfig(
+                    connection=dbt_config.get_connection("duckdb"),
+                    virtual_layer_catalog=virtual_layer_catalog,
+                )
+            },
+            default_gateway="duckdb",
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        )
+        return {
+            routing_project: routing_config,
+            project_dir: dbt_config,
+        }
+
+    initial_context = Context(
+        paths=[routing_project, project_dir],
+        config=configs("published_old"),
+        load_state=False,
+    )
+    model_fqn = '"local"."main"."routed"'
+    seed_fqn = '"local"."main"."routed_seed"'
+
+    for fqn in (model_fqn, seed_fqn):
+        assert initial_context.models[fqn].catalog == "local"
+        assert initial_context.models[fqn].virtual_layer_catalog == "published_old"
+        assert initial_context.snapshots[fqn].qualified_view_name.catalog == "published_old"
+
+    updated_context = Context(
+        paths=[routing_project, project_dir],
+        config=configs("published_new"),
+        load_state=False,
+    )
+    assert updated_context.models[model_fqn].catalog == "local"
+    assert updated_context.models[model_fqn].virtual_layer_catalog == "published_new"
+    assert updated_context.snapshots[model_fqn].qualified_view_name.catalog == "published_new"
 
 
 @pytest.mark.slow

@@ -382,6 +382,7 @@ class BaseModelConfig(GeneralConfig):
         context: DbtContext,
         audit_definitions: t.Optional[t.Dict[str, ModelAudit]] = None,
         virtual_environment_mode: VirtualEnvironmentMode = VirtualEnvironmentMode.default,
+        resolved_virtual_layer_catalog: t.Optional[str] = None,
     ) -> Model:
         """Convert DBT model into sqlmesh Model"""
 
