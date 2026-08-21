@@ -219,6 +219,61 @@ def test_plan_all_tests_with_no_changes(runner, tmp_path):
     assert "Successfully Ran 1 tests against duckdb" in result.output
 
 
+def test_plan_runs_only_changed_model_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    # Two unit tests total; changing full_model should run only its test
+    (tmp_path / "tests" / "test_incremental_model.yaml").write_text(
+        """test_example_incremental_model:
+  model: sqlmesh_example.incremental_model
+  vars:
+    start: 2020-01-01
+    end: 2020-01-02
+  inputs:
+    sqlmesh_example.seed_model:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  outputs:
+    query:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+"""
+    )
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts", "--auto-apply"],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Successfully Ran 2 tests against duckdb" not in result.output
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--all-tests",
+            "--no-prompts",
+        ],
+        input="\n",
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 2 tests against duckdb" in result.output
+
+
 def test_plan_skip_backfill_all_tests(runner, tmp_path):
     create_example_project(tmp_path)
 

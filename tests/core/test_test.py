@@ -3557,6 +3557,27 @@ def test_filter_tests_by_model_names():
 
 def test_plan_scoped_unit_tests(tmp_path: Path, mocker: MockerFixture):
     init_example_project(tmp_path, engine_type="duckdb")
+    # Second unit test so scoped plans (1 test) differ from --all-tests (2 tests)
+    (tmp_path / "tests" / "test_incremental_model.yaml").write_text(
+        """test_example_incremental_model:
+  model: sqlmesh_example.incremental_model
+  vars:
+    start: 2020-01-01
+    end: 2020-01-02
+  inputs:
+    sqlmesh_example.seed_model:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  outputs:
+    query:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+"""
+    )
     config = Config(
         gateways={"duckdb": GatewayConfig(connection=DuckDBConnectionConfig())},
         model_defaults=ModelDefaultsConfig(dialect="duckdb"),
@@ -3564,16 +3585,15 @@ def test_plan_scoped_unit_tests(tmp_path: Path, mocker: MockerFixture):
     context = Context(paths=tmp_path, config=config)
     context.plan("prod", auto_apply=True, no_prompts=True)
 
-    calls: t.List[t.Dict[str, t.Any]] = []
+    calls: t.List[t.Tuple[t.Dict[str, t.Any], int]] = []
+    original_test = context.test
 
-    def fake_test(**kwargs: t.Any) -> ModelTextTestResult:
-        calls.append(kwargs)
-        result = mocker.MagicMock(spec=ModelTextTestResult)
-        result.wasSuccessful.return_value = True
-        result.testsRun = 0
+    def tracking_test(**kwargs: t.Any) -> ModelTextTestResult:
+        result = original_test(**kwargs)
+        calls.append((kwargs, result.testsRun))
         return result
 
-    mocker.patch.object(context, "test", side_effect=fake_test)
+    mocker.patch.object(context, "test", side_effect=tracking_test)
 
     # No-op plan should not run tests
     context.plan("prod", auto_apply=True, no_prompts=True)
@@ -3582,26 +3602,27 @@ def test_plan_scoped_unit_tests(tmp_path: Path, mocker: MockerFixture):
     # --all-tests on no-op should run the full suite
     context.plan("prod", auto_apply=True, no_prompts=True, all_tests=True)
     assert len(calls) == 1
-    assert calls[0].get("model_names") is None
+    assert calls[0][0].get("model_names") is None
+    assert calls[0][1] == 2
 
     calls.clear()
 
-    # Changing one model should only pass that model's name into test()
+    # Changing full_model should only run that model's unit test
     model_path = tmp_path / "models" / "full_model.sql"
     model_path.write_text(model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)"))
     context.load()
     context.plan("prod", auto_apply=True, no_prompts=True)
     assert len(calls) == 1
-    model_names = calls[0].get("model_names")
-    assert model_names is not None
-    assert any("full_model" in name for name in model_names)
-    assert not any("seed_model" in name for name in model_names)
+    model_names = calls[0][0].get("model_names")
+    assert model_names == {'"memory"."sqlmesh_example"."full_model"'}
+    assert calls[0][1] == 1
 
     calls.clear()
 
-    # --all-tests with real changes still runs the full suite (no model filter)
+    # --all-tests with real changes still runs the full suite
     model_path.write_text(model_path.read_text().replace("COUNT(id)", "COUNT(DISTINCT id)"))
     context.load()
     context.plan("prod", auto_apply=True, no_prompts=True, all_tests=True)
     assert len(calls) == 1
-    assert calls[0].get("model_names") is None
+    assert calls[0][0].get("model_names") is None
+    assert calls[0][1] == 2
