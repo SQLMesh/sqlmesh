@@ -373,8 +373,7 @@ Options:
                                   when comparing to existing snapshots for
                                   matching models in the target environment.
   --skip-backfill, --dry-run      Skip the backfill step and only create a
-                                  virtual update for the plan. Unit tests are
-                                  also skipped unless --all-tests is passed.
+                                  virtual update for the plan.
   --empty-backfill                Produce empty backfill. Like --skip-backfill
                                   no models will be backfilled, unlike --skip-
                                   backfill missing intervals will be recorded

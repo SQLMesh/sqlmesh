@@ -1606,10 +1606,6 @@ class GenericContext(BaseContext, t.Generic[C]):
         skip_linter = skip_linter or False
         min_intervals = min_intervals or 0
 
-        # Virtual-only plans (--skip-backfill / --dry-run) skip unit tests unless --all-tests.
-        if skip_backfill and not all_tests:
-            skip_tests = True
-
         environment = environment or self.config.default_target_environment
         environment = Environment.sanitize_name(environment)
         is_dev = environment != c.PROD

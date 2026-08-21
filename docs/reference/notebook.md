@@ -134,8 +134,7 @@ options:
                         the target environment.
   --skip-backfill, --dry-run
                         Skip the backfill step and only create a virtual
-                        update for the plan. Unit tests are also skipped
-                        unless --all-tests is passed.
+                        update for the plan.
   --forward-only        Create a plan for forward-only changes.
   --effective-from EFFECTIVE_FROM
                         The effective date from which to apply forward-only

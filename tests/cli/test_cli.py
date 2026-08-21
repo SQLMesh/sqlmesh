@@ -274,27 +274,6 @@ def test_plan_runs_only_changed_model_tests(runner, tmp_path):
     assert "Successfully Ran 2 tests against duckdb" in result.output
 
 
-def test_plan_skip_backfill_all_tests(runner, tmp_path):
-    create_example_project(tmp_path)
-
-    result = runner.invoke(
-        cli,
-        [
-            "--log-file-dir",
-            tmp_path,
-            "--paths",
-            tmp_path,
-            "plan",
-            "--skip-backfill",
-            "--no-gaps",
-            "--all-tests",
-        ],
-        input="y\n",
-    )
-    assert result.exit_code == 0
-    assert "Successfully Ran 1 tests against duckdb" in result.output
-
-
 def test_plan_skip_linter(runner, tmp_path):
     create_example_project(tmp_path)
 
@@ -363,8 +342,8 @@ def test_plan_skip_backfill(runner, tmp_path, flag):
     assert result.exit_code == 0
     assert_virtual_layer_updated(result)
     assert "Model batches executed" not in result.output
-    # --skip-backfill / --dry-run skips unit tests by default
-    assert "Successfully Ran" not in result.output
+    # Dry-run still runs plan-scoped unit tests
+    assert "Successfully Ran 1 tests against duckdb" in result.output
 
 
 def test_plan_min_intervals(runner, tmp_path):

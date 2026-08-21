@@ -14,10 +14,6 @@ As the unit tests run, SQLMesh will identify any that fail.
 
 By default, `sqlmesh plan` runs unit tests only for models included in the plan (added, modified, or restated). Plans with no such models skip unit tests. Use `--all-tests` to run the full suite, or `--skip-tests` to run none.
 
-!!! important
-
-    `--skip-backfill` / `--dry-run` plans skip unit tests by default. Pass `--all-tests` if you still want the full suite to run.
-
 For more information about tests, refer to [testing](../concepts/tests.md).
 
 ### Test changes to a specific model

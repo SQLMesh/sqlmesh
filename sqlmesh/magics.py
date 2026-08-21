@@ -434,7 +434,7 @@ class SQLMeshMagics(Magics):
         "--skip-backfill",
         "--dry-run",
         action="store_true",
-        help="Skip the backfill step and only create a virtual update for the plan. Unit tests are also skipped unless --all-tests is passed.",
+        help="Skip the backfill step and only create a virtual update for the plan.",
     )
     @argument(
         "--empty-backfill",

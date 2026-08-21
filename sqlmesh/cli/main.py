@@ -452,7 +452,7 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     "--skip-backfill",
     "--dry-run",
     is_flag=True,
-    help="Skip the backfill step and only create a virtual update for the plan. Unit tests are also skipped unless --all-tests is passed.",
+    help="Skip the backfill step and only create a virtual update for the plan.",
     default=None,
 )
 @click.option(

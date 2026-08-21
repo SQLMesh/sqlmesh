@@ -4,10 +4,6 @@ Testing allows you to protect your project from regression by continuously verif
 
 By default, `sqlmesh plan` runs unit tests only for models included in the plan (added, modified, or restated). Plans with no such models skip unit tests. Use `--all-tests` to run the full suite, or `--skip-tests` to run none.
 
-!!! important
-
-    `--skip-backfill` / `--dry-run` plans skip unit tests by default. Pass `--all-tests` if you still want the full suite to run.
-
 Similar to unit testing in software development, SQLMesh evaluates the model's logic against predefined inputs and then compares the output to expected outcomes provided as part of each test.
 
 A comprehensive suite of tests can empower data practitioners to work with confidence, as it allows them to ensure models behave as expected after changes have been applied to them.
