@@ -514,7 +514,12 @@ jobs:
             echo "DBT version is ${{ matrix.dbt-version }} (>= 1.6.0), keeping semantic_models and metrics sections"
           fi
 
-          make dbt-fast-test
+          # dbt 1.6 installs without web/lsp (pydantic conflict); skip collecting those tests
+          if [[ "${{ matrix.dbt-version }}" == "1.6" ]]; then
+            pytest -n auto -m "dbt and fast" --reruns 3 --ignore=tests/lsp --ignore=tests/web
+          else
+            make dbt-fast-test
+          fi
       - name: Test SQLMesh info in sushi_dbt
         working-directory: ./examples/sushi_dbt
         run: |
