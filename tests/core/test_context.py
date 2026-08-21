@@ -4,7 +4,7 @@ import typing as t
 import re
 from datetime import date, timedelta, datetime
 from tempfile import TemporaryDirectory
-from unittest.mock import PropertyMock, call, patch
+from unittest.mock import ANY, PropertyMock, call, patch
 
 import time_machine
 import pytest
@@ -3607,7 +3607,7 @@ def test_plan_explain_skips_tests(sushi_context: Context, mocker: MockerFixture)
     sushi_context.console = TerminalConsole()
     spy = mocker.spy(sushi_context, "_run_plan_tests")
     sushi_context.plan(environment="dev", explain=True, no_prompts=True, include_unmodified=True)
-    spy.assert_called_once_with(skip_tests=True)
+    spy.assert_called_once_with(skip_tests=True, all_tests=False, model_names=ANY)
 
 
 def test_dev_environment_virtual_update_with_environment_statements(tmp_path: Path) -> None:
