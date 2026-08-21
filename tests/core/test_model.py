@@ -5039,6 +5039,38 @@ def test_project_level_properties_python_model():
     assert m.interval_unit == IntervalUnit.QUARTER_HOUR
 
 
+def test_explicit_hyphenated_gateway_python_model() -> None:
+    @model(
+        name="model_schema.python_explicit_gateway",
+        kind="full",
+        gateway="secondary-gw",
+        columns={"some_col": "int"},
+    )
+    def python_explicit_gateway(context, **kwargs):
+        yield {"some_col": 1}
+
+    requested_variable_gateways: t.List[t.Optional[str]] = []
+
+    def get_variables(gateway: t.Optional[str]) -> t.Dict[str, str]:
+        requested_variable_gateways.append(gateway)
+        return {}
+
+    loaded_models = model.get_registry()["model_schema.python_explicit_gateway"].models(
+        get_variables=get_variables,
+        module_path=Path("."),
+        path=Path("."),
+        dialect="duckdb",
+        defaults=ModelDefaultsConfig().dict(),
+        default_catalog="default_db",
+        default_catalog_per_gateway={"secondary-gw": "secondary_db"},
+    )
+
+    assert len(loaded_models) == 1
+    assert loaded_models[0].gateway == "secondary-gw"
+    assert loaded_models[0].catalog == "secondary_db"
+    assert requested_variable_gateways == ["secondary-gw"]
+
+
 def test_model_defaults_gateway_python_model() -> None:
     @model(
         name="model_schema.python_gateway_default",

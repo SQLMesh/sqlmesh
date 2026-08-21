@@ -2071,9 +2071,14 @@ def create_models_from_blueprints(
         loader_kwargs["default_catalog"] = original_default_catalog
         blueprint_variables = _extract_blueprint_variables(blueprint, path)
 
-        if gateway:
+        gateway_name: t.Optional[str]
+        if isinstance(gateway, str):
+            # Python decorator gateway names are literals, not SQL expressions. In particular,
+            # parsing a gateway such as "secondary-gw" as SQL would interpret it as subtraction.
+            gateway_name = gateway.lower()
+        elif gateway:
             rendered_gateway = render_expression(
-                expression=exp.maybe_parse(gateway, dialect=dialect),
+                expression=gateway,
                 module_path=module_path,
                 macros=loader_kwargs.get("macros"),
                 jinja_macros=loader_kwargs.get("jinja_macros"),
