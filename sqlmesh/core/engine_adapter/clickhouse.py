@@ -697,6 +697,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     def alter_table(
         self,
         alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
     ) -> None:
         """
         Performs the alter statements to change the current table into the structure of the target table.
