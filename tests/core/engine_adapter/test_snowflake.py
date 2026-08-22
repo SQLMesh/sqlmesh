@@ -1032,7 +1032,7 @@ def test_alter_table_iceberg(mocker: MockerFixture, make_mocked_engine_adapter: 
 
     current_table = {"a": "INT"}
     target_table = {"a": "INT", "b": "INT"}
-    adapter.columns = lambda table_name, **kwargs: {  # type: ignore[assignment]
+    adapter.columns = lambda table_name, **kwargs: {
         k: exp.DataType.build(v)
         for k, v in (current_table if table_name == "test_table" else target_table).items()
     }
