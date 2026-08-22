@@ -7,7 +7,6 @@ authors = [{ name = "SQLMesh Contributors" }]
 license = { file = "LICENSE" }
 requires-python = ">= 3.9"
 dependencies = [
-    "astor",
     "click",
     "croniter",
     "duckdb>=0.10.0,!=0.10.3",
@@ -24,7 +23,7 @@ dependencies = [
     "requests",
     "rich[jupyter]",
     "ruamel.yaml",
-    "sqlglot[rs]~=28.10.1",
+    "sqlglot~=30.8.0",
     "tenacity",
     "time-machine",
     "json-stream"
@@ -42,6 +41,7 @@ classifiers = [
 athena = ["PyAthena[Pandas]"]
 azuresql = ["pymssql"]
 azuresql-odbc = ["pyodbc>=5.0.0"]
+azuresql-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 bigquery = [
     "google-cloud-bigquery[pandas]",
     "google-cloud-bigquery-storage"
@@ -51,7 +51,7 @@ bigquery = [
 # pinned an older SQLGlot which is incompatible with SQLMesh
 bigframes = ["bigframes>=1.32.0"]
 clickhouse = ["clickhouse-connect"]
-databricks = ["databricks-sql-connector[pyarrow]"]
+databricks = ["databricks-sql-connector[pyarrow]>=4.2.6"]
 dev = [
     "agate",
     "beautifulsoup4",
@@ -65,6 +65,10 @@ dev = [
     # it depends on the 'InvalidCatalogIntegrationConfigError' class that only exists as of dbt-adapters==1.16.6
     # so we exclude it to prevent failures and hope that upstream releases a new version with the correct constraint
     "dbt-snowflake!=1.10.1",
+    # fastjsonschema 2.22+ uses PEP 604 type hints and now requires Python >=3.10
+    # (upstream #211 / #213). Keep 3.9 on the 2.21 line; pulled in via
+    # dbt-bigquery → nbformat.
+    "fastjsonschema<2.22; python_version<'3.10'",
     "dbt-athena-community",
     "dbt-clickhouse",
     "dbt-databricks",
@@ -84,6 +88,7 @@ dev = [
     "PyAthena[Pandas]",
     "PyGithub>=2.6.0",
     "pyodbc>=5.0.0",
+    "mssql-python>=1.1.0;python_version>=\"3.10\"",
     "pyperf",
     "pyspark~=3.5.0",
     "pytest",
@@ -109,11 +114,13 @@ dbt = ["dbt-core<2"]
 dlt = ["dlt"]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
+fabric-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 gcppostgres = ["cloud-sql-python-connector[pg8000]>=1.8.0"]
 github = ["PyGithub>=2.6.0"]
 motherduck = ["duckdb>=1.3.2"]
 mssql = ["pymssql"]
 mssql-odbc = ["pyodbc>=5.0.0"]
+mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 mysql = ["pymysql"]
 mwaa = ["boto3"]
 postgres = ["psycopg2"]
@@ -124,9 +131,12 @@ snowflake = [
     "snowflake-connector-python[pandas,secure-local-storage]",
     "snowflake-snowpark-python",
 ]
+starrocks = ["pymysql"]
 trino = ["trino"]
 web = [
-    "fastapi==0.120.1",
+    "fastapi>=0.136.3; python_version >= '3.10'",
+    "starlette>=1.0.1; python_version >= '3.10'",
+    "fastapi==0.120.1; python_version < '3.10'",
     "watchfiles>=0.19.0",
     "uvicorn[standard]==0.22.0",
     "sse-starlette>=0.2.2",
@@ -134,7 +144,9 @@ web = [
 ]
 lsp = [
     # Duplicate of web
-    "fastapi==0.120.1",
+    "fastapi>=0.136.3; python_version >= '3.10'",
+    "starlette>=1.0.1; python_version >= '3.10'",
+    "fastapi==0.120.1; python_version < '3.10'",
     "watchfiles>=0.19.0",
     # "uvicorn[standard]==0.22.0",
     "sse-starlette>=0.2.2",
@@ -197,7 +209,6 @@ disable_error_code = "annotation-unchecked"
 [[tool.mypy.overrides]]
 module = [
     "api.*",
-    "astor.*",
     "IPython.*",
     "hyperscript.*",
     "py.*",
@@ -215,6 +226,7 @@ module = [
     "mysql.*",
     "pymssql.*",
     "pyodbc.*",
+    "mssql_python.*",
     "psycopg2.*",
     "pytest_lazyfixture.*",
     "dbt.adapters.*",
@@ -271,6 +283,7 @@ markers = [
     "pyspark: test for PySpark that need to run separately from the other spark tests",
     "trino: test for Trino (all connectors)",
     "risingwave: test for Risingwave",
+    "starrocks: test for StarRocks",
 
     # Other
     "set_default_connection",

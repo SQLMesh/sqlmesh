@@ -14,7 +14,7 @@ if t.TYPE_CHECKING:
 
 class Reference(PydanticModel, frozen=True):
     model_name: str
-    expression: exp.Expression
+    expression: exp.Expr
     unique: bool = False
     _name: str = ""
 

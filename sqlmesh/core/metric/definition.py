@@ -10,13 +10,13 @@ from sqlmesh.core import dialect as d
 from sqlmesh.core.node import str_or_exp_to_str
 from sqlmesh.utils import UniqueKeyDict
 from sqlmesh.utils.errors import ConfigError
-from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator
+from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator, validation_data
 
 MeasureAndDimTables = t.Tuple[str, t.Tuple[str, ...]]
 
 
 def load_metric_ddl(
-    expression: exp.Expression, dialect: t.Optional[str], path: Path = Path(), **kwargs: t.Any
+    expression: exp.Expr, dialect: t.Optional[str], path: Path = Path(), **kwargs: t.Any
 ) -> MetricMeta:
     """Returns a MetricMeta from raw Metric DDL."""
     if not isinstance(expression, d.Metric):
@@ -70,7 +70,7 @@ class MetricMeta(PydanticModel, frozen=True):
 
     name: str
     dialect: str
-    expression: exp.Expression
+    expression: exp.Expr
     description: t.Optional[str] = None
     owner: t.Optional[str] = None
 
@@ -87,11 +87,11 @@ class MetricMeta(PydanticModel, frozen=True):
         return str_or_exp_to_str(v)
 
     @field_validator("expression", mode="before")
-    def _validate_expression(cls, v: t.Any, info: ValidationInfo) -> exp.Expression:
+    def _validate_expression(cls, v: t.Any, info: ValidationInfo) -> exp.Expr:
         if isinstance(v, str):
-            dialect = info.data.get("dialect")
+            dialect = validation_data(info).get("dialect")
             return d.parse_one(v, dialect=dialect)
-        if isinstance(v, exp.Expression):
+        if isinstance(v, exp.Expr):
             return v
         return v
 
@@ -139,7 +139,7 @@ class MetricMeta(PydanticModel, frozen=True):
 
 
 class Metric(MetricMeta, frozen=True):
-    expanded: exp.Expression
+    expanded: exp.Expr
 
     @property
     def aggs(self) -> t.Dict[exp.AggFunc, MeasureAndDimTables]:
@@ -150,7 +150,7 @@ class Metric(MetricMeta, frozen=True):
         return {
             t.cast(
                 exp.AggFunc,
-                t.cast(exp.Expression, agg.parent).transform(
+                t.cast(exp.Expr, agg.parent).transform(
                     lambda node: (
                         exp.column(node.this, table=remove_namespace(node))
                         if isinstance(node, exp.Column) and node.table
@@ -162,7 +162,7 @@ class Metric(MetricMeta, frozen=True):
         }
 
     @property
-    def formula(self) -> exp.Expression:
+    def formula(self) -> exp.Expr:
         """Returns the post aggregation formula of a metric.
 
         For simple metrics it is just the metric name. For derived metrics,
@@ -181,7 +181,7 @@ def _raise_metric_config_error(msg: str, path: Path) -> None:
     raise ConfigError(f"{msg}. '{path}'")
 
 
-def _get_measure_and_dim_tables(expression: exp.Expression) -> MeasureAndDimTables:
+def _get_measure_and_dim_tables(expression: exp.Expr) -> MeasureAndDimTables:
     """Finds all the table references in a metric definition.
 
     Additionally ensure than the first table returned is the 'measure' or numeric value being aggregated.
@@ -190,7 +190,7 @@ def _get_measure_and_dim_tables(expression: exp.Expression) -> MeasureAndDimTabl
     tables = {}
     measure_table = None
 
-    def is_measure(node: exp.Expression) -> bool:
+    def is_measure(node: exp.Expr) -> bool:
         parent = node.parent
 
         if isinstance(parent, exp.AggFunc) and node.arg_key == "this":

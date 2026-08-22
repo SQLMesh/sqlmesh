@@ -145,7 +145,7 @@ Here is what you will see if you are accessing Tobiko Cloud via Okta. Click on t
 You can see what the status of your session is with the `status` command:
 
 ``` bash
-$ tcloud auth status
+tcloud auth status
 ```
 
 
@@ -156,7 +156,7 @@ $ tcloud auth status
 Run the `login` command to begin the login process:
 
 ``` bash
-$ tcloud auth login
+tcloud auth login
 ```
 
 ![tcloud_login](./single_sign_on/tcloud_login.png)
@@ -183,11 +183,11 @@ Current Tobiko Cloud SSO session expires in 1439 minutes
 In order to delete your session information you can use the log out command:
 
 ``` bash
-> tcloud auth logout
-Logged out of Tobiko Cloud
+tcloud auth logout
+# Logged out of Tobiko Cloud
 
-> tcloud auth status
-Not currently authenticated
+tcloud auth status
+# Not currently authenticated
 ```
 
 ![tcloud_logout](./single_sign_on/tcloud_logout.png)

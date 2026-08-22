@@ -81,7 +81,7 @@ def table_diff(adapter: AthenaEngineAdapter) -> TableDiff:
 def test_table_location(
     adapter: AthenaEngineAdapter,
     config_s3_warehouse_location: t.Optional[str],
-    table_properties: t.Optional[t.Dict[str, exp.Expression]],
+    table_properties: t.Optional[t.Dict[str, exp.Expr]],
     table: exp.Table,
     expected_location: t.Optional[str],
 ) -> None:

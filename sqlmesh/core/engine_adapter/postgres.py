@@ -40,7 +40,7 @@ class PostgresEngineAdapter(
     MAX_IDENTIFIER_LENGTH: t.Optional[int] = 63
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
     GRANT_INFORMATION_SCHEMA_TABLE_NAME = "role_table_grants"
-    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expression = exp.column("current_role")
+    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.column("current_role")
     SUPPORTS_MULTIPLE_GRANT_PRINCIPALS = True
     SCHEMA_DIFFER_KWARGS = {
         "parameterized_type_defaults": {
@@ -73,7 +73,7 @@ class PostgresEngineAdapter(
     }
 
     def _fetch_native_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> DF:
         """
         `read_sql_query` when using psycopg will result on a hanging transaction that must be committed
@@ -113,9 +113,9 @@ class PostgresEngineAdapter(
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        unique_key: t.Sequence[exp.Expression],
+        unique_key: t.Sequence[exp.Expr],
         when_matched: t.Optional[exp.Whens] = None,
-        merge_filter: t.Optional[exp.Expression] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **kwargs: t.Any,
     ) -> None:

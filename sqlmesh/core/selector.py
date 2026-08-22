@@ -62,7 +62,7 @@ class Selector(abc.ABC):
         target_env_name: str,
         fallback_env_name: t.Optional[str] = None,
         ensure_finalized_snapshots: bool = False,
-    ) -> UniqueKeyDict[str, Model]:
+    ) -> t.Tuple[UniqueKeyDict[str, Model], t.Set[str]]:
         """Given a set of selections returns models from the current state with names matching the
         selection while sourcing the remaining models from the target environment.
 
@@ -76,29 +76,11 @@ class Selector(abc.ABC):
                 the environment is not finalized.
 
         Returns:
-            A dictionary of models.
+            A tuple of (models dict, set of all matched FQNs including env models).
         """
-        target_env = self._state_reader.get_environment(Environment.sanitize_name(target_env_name))
-        if target_env and target_env.expired:
-            target_env = None
-
-        if not target_env and fallback_env_name:
-            target_env = self._state_reader.get_environment(
-                Environment.sanitize_name(fallback_env_name)
-            )
-
-        env_models: t.Dict[str, Model] = {}
-        if target_env:
-            environment_snapshot_infos = (
-                target_env.snapshots
-                if not ensure_finalized_snapshots
-                else target_env.finalized_or_current_snapshots
-            )
-            env_models = {
-                s.name: s.model
-                for s in self._state_reader.get_snapshots(environment_snapshot_infos).values()
-                if s.is_model
-            }
+        env_models = self._load_env_models(
+            target_env_name, fallback_env_name, ensure_finalized_snapshots
+        )
 
         all_selected_models = self.expand_model_selections(
             model_selections, models={**env_models, **self._models}
@@ -166,7 +148,37 @@ class Selector(abc.ABC):
         if needs_update:
             update_model_schemas(dag, models=models, cache_dir=self._cache_dir)
 
-        return models
+        return models, all_selected_models
+
+    def _load_env_models(
+        self,
+        target_env_name: str,
+        fallback_env_name: t.Optional[str] = None,
+        ensure_finalized_snapshots: bool = False,
+    ) -> t.Dict[str, "Model"]:
+        """Loads models from the target environment, falling back to the fallback environment if needed."""
+        target_env = self._state_reader.get_environment(Environment.sanitize_name(target_env_name))
+        if target_env and target_env.expired:
+            target_env = None
+
+        if not target_env and fallback_env_name:
+            target_env = self._state_reader.get_environment(
+                Environment.sanitize_name(fallback_env_name)
+            )
+
+        if not target_env:
+            return {}
+
+        environment_snapshot_infos = (
+            target_env.snapshots
+            if not ensure_finalized_snapshots
+            else target_env.finalized_or_current_snapshots
+        )
+        return {
+            s.name: s.model
+            for s in self._state_reader.get_snapshots(environment_snapshot_infos).values()
+            if s.is_model
+        }
 
     def expand_model_selections(
         self, model_selections: t.Iterable[str], models: t.Optional[t.Dict[str, Node]] = None
@@ -191,7 +203,7 @@ class Selector(abc.ABC):
                 models_by_tags.setdefault(tag, set())
                 models_by_tags[tag].add(model.fqn)
 
-        def evaluate(node: exp.Expression) -> t.Set[str]:
+        def evaluate(node: exp.Expr) -> t.Set[str]:
             if isinstance(node, exp.Var):
                 pattern = node.this
                 if "*" in pattern:
@@ -400,7 +412,7 @@ class Direction(exp.Expression):
     pass
 
 
-def parse(selector: str, dialect: DialectType = None) -> exp.Expression:
+def parse(selector: str, dialect: DialectType = None) -> exp.Expr:
     tokens = SelectorDialect().tokenize(selector)
     i = 0
 
@@ -444,7 +456,7 @@ def parse(selector: str, dialect: DialectType = None) -> exp.Expression:
             return True
         return False
 
-    def _parse_var() -> exp.Expression:
+    def _parse_var() -> exp.Expr:
         upstream = _match(TokenType.PLUS)
         downstream = None
         tag = _parse_kind("tag")
@@ -457,7 +469,7 @@ def parse(selector: str, dialect: DialectType = None) -> exp.Expression:
             name = _prev().text
             rstar = "*" if _match(TokenType.STAR) else ""
             downstream = _match(TokenType.PLUS)
-            this: exp.Expression = exp.Var(this=f"{lstar}{name}{rstar}")
+            this: exp.Expr = exp.Var(this=f"{lstar}{name}{rstar}")
 
         elif _match(TokenType.L_PAREN):
             this = exp.Paren(this=_parse_conjunction())
@@ -483,12 +495,12 @@ def parse(selector: str, dialect: DialectType = None) -> exp.Expression:
             this = Direction(this=this, **directions)
         return this
 
-    def _parse_unary() -> exp.Expression:
+    def _parse_unary() -> exp.Expr:
         if _match(TokenType.CARET):
             return exp.Not(this=_parse_unary())
         return _parse_var()
 
-    def _parse_conjunction() -> exp.Expression:
+    def _parse_conjunction() -> exp.Expr:
         this = _parse_unary()
 
         if _match(TokenType.AMP):

@@ -593,7 +593,7 @@ def _to_sql_calls(execute_mock: t.Any, identify: bool = True) -> t.List[str]:
         for value in values:
             sql = (
                 value.sql(dialect="bigquery", identify=identify)
-                if isinstance(value, exp.Expression)
+                if isinstance(value, exp.Expr)
                 else str(value)
             )
             output.append(sql)

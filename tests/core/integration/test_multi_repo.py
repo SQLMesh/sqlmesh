@@ -21,6 +21,7 @@ from sqlmesh.core.config import (
 )
 from sqlmesh.core.console import get_console
 from sqlmesh.core.context import Context
+from sqlmesh.utils import yaml
 from sqlmesh.utils.date import now
 from tests.conftest import DuckDBMetadata
 from tests.utils.test_helpers import use_terminal_console
@@ -117,6 +118,71 @@ def test_multi(mocker):
     assert sorted_env_statements[1].after_all == [
         "CREATE TABLE IF NOT EXISTS after_2 AS select @dup()"
     ]
+
+
+def test_multi_repo_model_default_gateways(tmp_path: Path) -> None:
+    """Each project routes its models using its own default gateway."""
+    repo_one = tmp_path / "repo_one"
+    repo_two = tmp_path / "repo_two"
+    (repo_one / "models").mkdir(parents=True)
+    (repo_two / "models").mkdir(parents=True)
+
+    (repo_one / "models" / "default.sql").write_text(
+        "MODEL (name analytics.repo_one_default, kind FULL); SELECT @owner AS owner"
+    )
+    (repo_one / "models" / "override.sql").write_text(
+        "MODEL (name analytics.explicit_override, kind FULL, gateway 'repo-two'); "
+        "SELECT @owner AS owner"
+    )
+    (repo_two / "models" / "default.sql").write_text(
+        "MODEL (name analytics.repo_two_default, kind FULL); SELECT @owner AS owner"
+    )
+
+    def make_config(project: str, default_gateway: str) -> Config:
+        return Config(
+            project=project,
+            gateways={
+                "repo-one": GatewayConfig(
+                    connection=DuckDBConnectionConfig(database=str(tmp_path / "repo_one.duckdb")),
+                    variables={"owner": "repo-one-variable"},
+                ),
+                "repo-two": GatewayConfig(
+                    connection=DuckDBConnectionConfig(database=str(tmp_path / "repo_two.duckdb")),
+                    variables={"owner": "repo-two-variable"},
+                ),
+            },
+            default_gateway=default_gateway,
+            model_defaults=ModelDefaultsConfig(dialect="duckdb", gateway=default_gateway),
+            variables={"owner": "global-variable"},
+        )
+
+    context = Context(
+        paths=[repo_one, repo_two],
+        config={
+            repo_one: make_config("repo_one", "repo-one"),
+            repo_two: make_config("repo_two", "repo-two"),
+        },
+        gateway="repo-one",
+    )
+
+    repo_one_model = context.get_model("repo_one.analytics.repo_one_default")
+    repo_two_model = context.get_model("repo_two.analytics.repo_two_default")
+    override_model = context.get_model("repo_two.analytics.explicit_override")
+
+    assert repo_one_model.gateway == "repo-one"
+    assert repo_one_model.catalog == "repo_one"
+    assert repo_one_model.project == "repo_one"
+    assert context.render(repo_one_model.fqn).sql() == ("SELECT 'repo-one-variable' AS \"owner\"")
+
+    assert repo_two_model.gateway == "repo-two"
+    assert repo_two_model.catalog == "repo_two"
+    assert repo_two_model.project == "repo_two"
+    assert context.render(repo_two_model.fqn).sql() == ("SELECT 'repo-two-variable' AS \"owner\"")
+
+    assert override_model.gateway == "repo-two"
+    assert override_model.catalog == "repo_two"
+    assert override_model.project == "repo_one"
+    assert context.render(override_model.fqn).sql() == ("SELECT 'repo-two-variable' AS \"owner\"")
 
 
 @use_terminal_console
@@ -559,3 +625,58 @@ def test_engine_adapters_multi_repo_all_gateways_gathered(copy_to_temp_path):
     gathered_gateways = context.engine_adapters.keys()
     expected_gateways = {"local", "memory", "extra"}
     assert gathered_gateways == expected_gateways
+
+
+@use_terminal_console
+def test_multi_repo_create_external_models(copy_to_temp_path):
+    """create_external_models should not classify cross-repo models as external (sqlmesh#5326).
+
+    silver.c and silver.e (repo_2) depend on bronze.a (repo_1). When running
+    create_external_models with both repos loaded, bronze.a must NOT be treated
+    as an external model because it is an internal model defined in repo_1.
+
+    The observable symptom of the bug is a warning: "Unable to get schema for
+    'bronze.a'" — because SQLMesh tries to query the schema of what it wrongly
+    thinks is an external table.  A correct implementation never attempts this
+    lookup and therefore emits no such warning.
+    """
+    paths = copy_to_temp_path("examples/multi")
+    repo_1_path = f"{paths[0]}/repo_1"
+    repo_2_path = f"{paths[0]}/repo_2"
+
+    context = Context(paths=[repo_1_path, repo_2_path], gateway="memory")
+    context._new_state_sync().reset(default_catalog=context.default_catalog)
+
+    with patch.object(context.console, "log_warning") as mock_warning:
+        context.create_external_models()
+
+    warning_messages = [str(call) for call in mock_warning.call_args_list]
+    schema_lookup_warnings = [
+        msg
+        for msg in warning_messages
+        if "bronze" in msg and "a" in msg and "schema" in msg.lower()
+    ]
+    assert not schema_lookup_warnings, (
+        "bronze.a should not be looked up as an external model, but got warnings: "
+        + str(schema_lookup_warnings)
+    )
+
+    # repo_2's external_models.yaml must not contain bronze.a
+    repo_2_external = Path(repo_2_path) / c.EXTERNAL_MODELS_YAML
+    if repo_2_external.exists():
+        contents = yaml.load(repo_2_external)
+        external_names = [e["name"] for e in contents]
+        assert not any("bronze" in name and "a" in name for name in external_names), (
+            f"bronze.a should not be in repo_2's external models, but found: {external_names}"
+        )
+
+    # repo_1 has no external dependencies at all
+    repo_1_external = Path(repo_1_path) / c.EXTERNAL_MODELS_YAML
+    if repo_1_external.exists():
+        contents = yaml.load(repo_1_external)
+        assert len(contents) == 0, f"repo_1 should have no external models, got: {contents}"
+
+    # Plan should still resolve all 5 models as internal after create_external_models
+    context.load()
+    plan = context.plan_builder().build()
+    assert len(plan.new_snapshots) == 5
