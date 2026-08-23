@@ -1,3 +1,4 @@
+import ast
 import typing as t
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from sqlmesh.utils.metaprogramming import (
     Executable,
     ExecutableKind,
     _dict_sort,
+    _resolve_import_module,
     build_env,
     func_globals,
     normalize_source,
@@ -49,7 +51,7 @@ def test_print_exception(mocker: MockerFixture):
     except Exception as ex:
         print_exception(ex, test_env, out_mock)
 
-    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 48, in test_print_exception
+    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 50, in test_print_exception
     eval\("test_fun\(\)", env\).*
 
   File '/test/path.py' \(or imported file\), line 2, in test_fun
@@ -219,8 +221,7 @@ def test_func_globals() -> None:
 def test_normalize_source() -> None:
     assert (
         normalize_source(main_func)
-        == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
-    ):
+        == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2):
     sqlglot.parse_one('1')
     MyClass(47)
     DataClass(x=y)
@@ -270,8 +271,7 @@ def test_serialize_env() -> None:
             name="main_func",
             alias="MAIN",
             path="test_metaprogramming.py",
-            payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
-    ):
+            payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2):
     sqlglot.parse_one('1')
     MyClass(47)
     DataClass(x=y)
@@ -369,7 +369,8 @@ def sample_context_manager():
         "my_lambda": Executable(
             name="my_lambda",
             path="test_metaprogramming.py",
-            payload="my_lambda = lambda : print('z')",
+            # Match normalize_source output across Python versions
+            payload=ast.unparse(ast.parse("my_lambda = lambda: print('z')")).strip(),
         ),
         "normalize_model_name": Executable(
             payload="from sqlmesh.core.dialect import normalize_model_name",
@@ -638,3 +639,18 @@ def test_dict_sort_executable_integration():
     # non-deterministic repr should not change the payload
     exec3 = Executable.value(variables1)
     assert exec3.payload == "{'env': 'dev', 'debug': True, 'timeout': 30}"
+
+
+def test_resolve_import_module():
+    """Test that _resolve_import_module finds the shallowest public re-exporting module."""
+    # to_table lives in sqlglot.expressions.builders but is re-exported from sqlglot.expressions
+    assert _resolve_import_module(to_table, "to_table") == "sqlglot.expressions"
+
+    # Objects whose __module__ is already the public module should be returned as-is
+    assert _resolve_import_module(exp.Column, "Column") == "sqlglot.expressions"
+
+    # Objects not re-exported by any parent should return the original module
+    class _Local:
+        __module__ = "some.deep.internal.module"
+
+    assert _resolve_import_module(_Local, "_Local") == "some.deep.internal.module"

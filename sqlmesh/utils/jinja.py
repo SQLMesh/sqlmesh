@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import re
@@ -12,7 +13,8 @@ from traceback import walk_tb
 
 from jinja2 import Environment, Template, nodes, UndefinedError
 from jinja2.runtime import Macro
-from sqlglot import Dialect, Expression, Parser, TokenType
+from sqlglot import Dialect, Parser, TokenType
+from sqlglot.expressions import Expression
 
 from sqlmesh.core import constants as c
 from sqlmesh.core import dialect as d
@@ -27,11 +29,40 @@ if t.TYPE_CHECKING:
 SQLMESH_JINJA_PACKAGE = "sqlmesh.utils.jinja"
 
 
+def b64decode(value: t.Union[str, bytes]) -> str:
+    """Decode a base64-encoded value and return it as UTF-8 text.
+
+    Intended for base64-encoded string/JSON secrets (for example a service-account
+    key stored in an environment variable), not arbitrary binary payloads.
+    """
+    decoded = value.encode("utf-8") if isinstance(value, str) else value
+    return base64.b64decode(decoded).decode("utf-8")
+
+
+def b64encode(value: t.Union[str, bytes]) -> str:
+    """Base64-encode a value and return the encoding as UTF-8 text.
+
+    The input is treated as UTF-8 text, mirroring ``b64decode``; it is intended for
+    string/JSON secrets rather than arbitrary binary payloads.
+    """
+    encoded = value.encode("utf-8") if isinstance(value, str) else value
+    return base64.b64encode(encoded).decode("utf-8")
+
+
+def create_builtin_filters() -> t.Dict[str, t.Callable]:
+    return {
+        "b64decode": b64decode,
+        "b64encode": b64encode,
+    }
+
+
 def environment(**kwargs: t.Any) -> Environment:
     extensions = kwargs.pop("extensions", [])
     extensions.append("jinja2.ext.do")
     extensions.append("jinja2.ext.loopcontrols")
-    return Environment(extensions=extensions, **kwargs)
+    env = Environment(extensions=extensions, **kwargs)
+    env.filters.update(create_builtin_filters())
+    return env
 
 
 ENVIRONMENT = environment()
@@ -78,6 +109,11 @@ class MacroExtractor(Parser):
         self.reset()
         self.sql = jinja
         self._tokens = Dialect.get_or_raise(dialect).tokenize(jinja)
+
+        # guard for older sqlglot versions (before 30.0.3)
+        if hasattr(self, "_tokens_size"):
+            # keep the cached length in sync
+            self._tokens_size = len(self._tokens)
         self._index = -1
         self._advance()
 

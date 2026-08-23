@@ -56,7 +56,8 @@ class EnvironmentNamingInfo(PydanticModel):
     @classmethod
     def _validate_boolean_field(cls, v: t.Any, info: ValidationInfo) -> bool:
         if v is None:
-            return info.field_name == "normalize_name"
+            # Pydantic 2.13+ sets field_name to None during model_validate_json()
+            return (info.field_name or "") == "normalize_name"
         return bool(v)
 
     @t.overload

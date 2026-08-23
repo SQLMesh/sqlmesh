@@ -74,13 +74,13 @@ class model(registry_decorator):
 
         self.columns = {
             column_name: (
-                column_type
-                if isinstance(column_type, exp.DataType)
+                column_type  # Column types with macros (containing @) will be validated later after rendering
+                if isinstance(column_type, exp.DataType) or "@" in column_type
                 else exp.DataType.build(
                     str(column_type), dialect=self.kwargs.get("dialect", self._dialect)
                 )
             )
-            for column_name, column_type in self.kwargs.pop("columns", {}).items()
+            for column_name, column_type in self.kwargs.get("columns", {}).items()
         }
 
     def __call__(
@@ -125,8 +125,12 @@ class model(registry_decorator):
 
             blueprints = blueprints[0]
 
+        gateway = self.kwargs.get("gateway")
+        if isinstance(gateway, str) and gateway.lstrip().startswith("@"):
+            gateway = parse_one(gateway, dialect=dialect)
+
         return create_models_from_blueprints(
-            gateway=self.kwargs.get("gateway"),
+            gateway=gateway,
             blueprints=blueprints,
             get_variables=get_variables,
             loader=self.model,
@@ -193,8 +197,10 @@ class model(registry_decorator):
         )
 
         rendered_name = rendered_fields["name"]
-        if isinstance(rendered_name, exp.Expression):
+        if isinstance(rendered_name, exp.Expr):
             rendered_fields["name"] = rendered_name.sql(dialect=dialect)
+
+        rendered_columns = rendered_fields.get("columns")
 
         rendered_defaults = (
             render_model_defaults(
@@ -223,7 +229,7 @@ class model(registry_decorator):
             "default_catalog": default_catalog,
             "variables": variables,
             "dialect": dialect,
-            "columns": self.columns if self.columns else None,
+            "columns": rendered_columns if rendered_columns else None,
             "module_path": module_path,
             "macros": macros,
             "jinja_macros": jinja_macros,

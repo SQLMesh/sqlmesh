@@ -70,7 +70,7 @@ Reference = t.Annotated[
 
 
 def extract_references_from_query(
-    query: exp.Expression,
+    query: exp.Expr,
     context: t.Union["Context", "GenericContext[t.Any]"],
     document_path: Path,
     read_file: t.List[str],
@@ -95,7 +95,11 @@ def extract_references_from_query(
 
             # Check if this table reference is a CTE in the current scope
             if cte_scope := scope.cte_sources.get(table_name):
+                if cte_scope.expression is None:
+                    continue
                 cte = cte_scope.expression.parent
+                if cte is None:
+                    continue
                 alias = cte.args["alias"]
                 if isinstance(alias, exp.TableAlias):
                     identifier = alias.this

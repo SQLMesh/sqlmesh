@@ -49,7 +49,7 @@ class CsvSettings(PydanticModel):
     )
     @classmethod
     def _str_validator(cls, v: t.Any) -> t.Optional[str]:
-        if v is None or not isinstance(v, exp.Expression):
+        if v is None or not isinstance(v, exp.Expr):
             return v
 
         # SQLGlot parses escape sequences like \t as \\t for dialects that don't treat \ as
@@ -60,7 +60,7 @@ class CsvSettings(PydanticModel):
     @field_validator("na_values", mode="before")
     @classmethod
     def _na_values_validator(cls, v: t.Any) -> t.Optional[NaValues]:
-        if v is None or not isinstance(v, exp.Expression):
+        if v is None or not isinstance(v, exp.Expr):
             return v
 
         try:
@@ -113,7 +113,7 @@ class CsvSeedReader:
         batch_size = batch_size or df.size
         batch_start = 0
         while batch_start < df.shape[0]:
-            yield df.iloc[batch_start : batch_start + batch_size, :]
+            yield df.iloc[batch_start : batch_start + batch_size, :].copy()
             batch_start += batch_size
 
     def _get_df(self) -> pd.DataFrame:

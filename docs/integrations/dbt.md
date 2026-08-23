@@ -19,19 +19,19 @@ Therefore, SQLMesh is packaged with multiple "extras," which you may optionally 
 At minimum, using the SQLMesh dbt adapter requires installing the dbt extra:
 
 ```bash
-> pip install "sqlmesh[dbt]"
+pip install "sqlmesh[dbt]"
 ```
 
 If your project uses any SQL execution engine other than DuckDB, you must install the extra for that engine. For example, if your project runs on the Postgres SQL engine:
 
 ```bash
-> pip install "sqlmesh[dbt,postgres]"
+pip install "sqlmesh[dbt,postgres]"
 ```
 
 If you would like to use the [SQLMesh Browser UI](../guides/ui.md) to view column-level lineage, include the `web` extra:
 
 ```bash
-> pip install "sqlmesh[dbt,web]"
+pip install "sqlmesh[dbt,web]"
 ```
 
 Learn more about [SQLMesh installation and extras here](../installation.md#install-extras).
@@ -41,7 +41,7 @@ Learn more about [SQLMesh installation and extras here](../installation.md#insta
 Prepare an existing dbt project to be run by SQLMesh by executing the `sqlmesh init` command *within the dbt project root directory* and with the `dbt` template option:
 
 ```bash
-$ sqlmesh init -t dbt
+sqlmesh init -t dbt
 ```
 
 This will create a file called `sqlmesh.yaml` containing the [default model start date](../reference/model_configuration.md#model-defaults). This configuration file is a minimum starting point for enabling SQLMesh to work with your DBT project.
@@ -247,8 +247,8 @@ Instead, SQLMesh provides predefined time macro variables that can be used in th
 For example, the SQL `WHERE` clause with the "ds" column goes in a new jinja block gated by `{% if sqlmesh_incremental is defined %}` as follows:
 
 ```bash
->   WHERE
->     ds BETWEEN '{{ start_ds }}' AND '{{ end_ds }}'
+  WHERE
+    ds BETWEEN '{{ start_ds }}' AND '{{ end_ds }}'
 ```
 
 `{{ start_ds }}` and `{{ end_ds }}` are the jinja equivalents of SQLMesh's `@start_ds` and `@end_ds` predefined time macro variables. See all [predefined time variables](../concepts/macros/macro_variables.md) available in jinja.

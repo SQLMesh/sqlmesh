@@ -2,7 +2,7 @@ import typing as t
 from enum import Enum
 
 from sqlmesh.core.notification_target import BasicSMTPNotificationTarget, NotificationTarget
-from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator
+from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator, validation_data
 
 
 class UserRole(str, Enum):
@@ -42,7 +42,7 @@ class User(PydanticModel):
         v: t.List[NotificationTarget],
         info: ValidationInfo,
     ) -> t.List[NotificationTarget]:
-        email = info.data["email"]
+        email = validation_data(info).get("email")
         for target in v:
             if isinstance(target, BasicSMTPNotificationTarget) and target.recipients != {email}:
                 raise ValueError("Recipient emails do not match user email")

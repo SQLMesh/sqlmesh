@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textwrap import dedent
 import typing as t
 import logging
 
@@ -53,8 +54,8 @@ class MSSQLEngineAdapter(
     SUPPORTS_TUPLE_IN = False
     SUPPORTS_MATERIALIZED_VIEWS = False
     CURRENT_CATALOG_EXPRESSION = exp.func("db_name")
-    COMMENT_CREATION_TABLE = CommentCreationTable.UNSUPPORTED
-    COMMENT_CREATION_VIEW = CommentCreationView.UNSUPPORTED
+    COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
+    COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_REPLACE_TABLE = False
     MAX_IDENTIFIER_LENGTH = 128
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
@@ -176,7 +177,7 @@ class MSSQLEngineAdapter(
         schema_name: SchemaName,
         ignore_if_not_exists: bool = True,
         cascade: bool = False,
-        **drop_args: t.Dict[str, exp.Expression],
+        **drop_args: t.Dict[str, exp.Expr],
     ) -> None:
         """
         MsSql doesn't support CASCADE clause and drops schemas unconditionally.
@@ -205,9 +206,9 @@ class MSSQLEngineAdapter(
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        unique_key: t.Sequence[exp.Expression],
+        unique_key: t.Sequence[exp.Expr],
         when_matched: t.Optional[exp.Whens] = None,
-        merge_filter: t.Optional[exp.Expression] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **kwargs: t.Any,
     ) -> None:
@@ -401,7 +402,7 @@ class MSSQLEngineAdapter(
             for row in dataframe.itertuples()
         ]
 
-    def _to_sql(self, expression: exp.Expression, quote: bool = True, **kwargs: t.Any) -> str:
+    def _to_sql(self, expression: exp.Expr, quote: bool = True, **kwargs: t.Any) -> str:
         sql = super()._to_sql(expression, quote=quote, **kwargs)
         return f"{sql};"
 
@@ -448,7 +449,7 @@ class MSSQLEngineAdapter(
             **kwargs,
         )
 
-    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expression]) -> None:
+    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
         if where == exp.true():
             # "A TRUNCATE TABLE operation can be rolled back within a transaction."
             # ref: https://learn.microsoft.com/en-us/sql/t-sql/statements/truncate-table-transact-sql?view=sql-server-ver15#remarks
@@ -457,3 +458,83 @@ class MSSQLEngineAdapter(
             )
 
         return super().delete_from(table_name, where)
+
+    def _build_create_comment_table_exp(
+        self, table: exp.Table, table_comment: str, table_kind: str = "TABLE"
+    ) -> exp.Comment | str:
+        template = dedent("""
+            DECLARE @comment sql_variant = {comment};
+            DECLARE @property_name VARCHAR(128) = 'MS_Description';
+            DECLARE @schema_name VARCHAR(128) = {schema_name};
+            DECLARE @object_name VARCHAR(128) = {object_name};
+            DECLARE @object_kind VARCHAR(128) = '{object_kind}';
+            DECLARE @existing sql_variant;
+
+            SELECT TOP 1 @existing = CAST(VALUE AS NVARCHAR) FROM fn_listextendedproperty(@property_name, 'schema', @schema_name, @object_kind, @object_name, DEFAULT, DEFAULT);
+
+            IF @comment IS NULL
+                BEGIN
+                    IF @existing IS NOT NULL
+                        EXEC sp_dropextendedproperty @property_name, 'schema', @schema_name, @object_kind, @object_name;
+                END
+            ELSE
+                BEGIN
+                    IF @existing IS NULL
+                        EXEC sp_addextendedproperty @property_name,@comment, 'schema', @schema_name, @object_kind, @object_name;
+                    ELSE IF @existing != @comment
+                        EXEC sp_updateextendedproperty @property_name, @comment, 'schema', @schema_name, @object_kind, @object_name;
+                END
+        """)
+        tsql_text = template.format(
+            comment=exp.Literal.string(table_comment or "NULL").sql(
+                dialect=self.dialect, identify=False
+            ),
+            schema_name=exp.Literal.string(table.db or "dbo").sql(
+                dialect=self.dialect, identify=False
+            ),
+            object_name=exp.Literal.string(table.name).sql(dialect=self.dialect, identify=False),
+            object_kind=table_kind,
+        )
+        return tsql_text
+
+    def _build_create_comment_column_exp(
+        self, table: exp.Table, column_name: str, column_comment: str, table_kind: str = "TABLE"
+    ) -> exp.Comment | str:
+        template = dedent("""
+            DECLARE @comment sql_variant = {comment};
+            DECLARE @property_name VARCHAR(128) = 'MS_Description';
+            DECLARE @schema_name VARCHAR(128) = {schema_name};
+            DECLARE @object_name VARCHAR(128) = {object_name};
+            DECLARE @object_kind VARCHAR(128) = '{object_kind}';
+            DECLARE @column_name VARCHAR(128) = {column_name};
+            DECLARE @existing sql_variant;
+
+            SELECT TOP 1 @existing = CAST(VALUE AS NVARCHAR) FROM fn_listextendedproperty(@property_name, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name);
+
+            IF @comment IS NULL
+                BEGIN
+                    IF @existing IS NOT NULL
+                        EXEC sp_dropextendedproperty @property_name, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name;
+                END
+            ELSE
+                BEGIN
+                    IF @existing IS NULL
+                        EXEC sp_addextendedproperty @property_name,@comment, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name;
+                    ELSE IF @existing != @comment
+                        EXEC sp_updateextendedproperty @property_name, @comment, 'schema', @schema_name, @object_kind, @object_name, 'column', @column_name;
+                END
+        """)
+
+        tsql_text = template.format(
+            comment=exp.Literal.string(column_comment or "NULL").sql(
+                dialect=self.dialect, identify=False
+            ),
+            schema_name=exp.Literal.string(table.db or "dbo").sql(
+                dialect=self.dialect, identify=False
+            ),
+            object_name=exp.Literal.string(table.name).sql(dialect=self.dialect, identify=False),
+            object_kind=table_kind,
+            column_name=exp.Literal.string(column_name).sql(dialect=self.dialect, identify=False),
+        )
+
+        return tsql_text

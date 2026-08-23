@@ -4,7 +4,6 @@ import ast
 import typing as t
 from pathlib import Path
 
-from astor import to_source
 from difflib import get_close_matches
 from sqlglot import exp
 from sqlglot.helper import ensure_list
@@ -21,7 +20,13 @@ from sqlmesh.utils.metaprogramming import (
     prepare_env,
     serialize_env,
 )
-from sqlmesh.utils.pydantic import PydanticModel, ValidationInfo, field_validator, get_dialect
+from sqlmesh.utils.pydantic import (
+    PydanticModel,
+    ValidationInfo,
+    field_validator,
+    get_dialect,
+    validation_data,
+)
 
 if t.TYPE_CHECKING:
     from sqlglot.dialects.dialect import DialectType
@@ -33,8 +38,8 @@ if t.TYPE_CHECKING:
 
 def make_python_env(
     expressions: t.Union[
-        exp.Expression,
-        t.List[t.Union[exp.Expression, t.Tuple[exp.Expression, bool]]],
+        exp.Expr,
+        t.List[t.Union[exp.Expr, t.Tuple[exp.Expr, bool]]],
     ],
     jinja_macro_references: t.Optional[t.Set[MacroReference]],
     module_path: Path,
@@ -71,7 +76,7 @@ def make_python_env(
     visited_macro_funcs: t.Set[int] = set()
 
     def _is_metadata_var(
-        name: str, expression: exp.Expression, appears_in_metadata_expression: bool
+        name: str, expression: exp.Expr, appears_in_metadata_expression: bool
     ) -> t.Optional[bool]:
         is_metadata_so_far = used_variables.get(name, True)
         if is_metadata_so_far is False:
@@ -202,7 +207,7 @@ def make_python_env(
 
 
 def _extract_macro_func_variable_references(
-    macro_func: exp.Expression,
+    macro_func: exp.Expr,
     is_metadata: bool,
 ) -> t.Tuple[t.Set[str], t.Dict[int, bool], t.Set[int]]:
     var_references = set()
@@ -292,12 +297,12 @@ def _add_variables_to_python_env(
 
     if blueprint_variables:
         metadata_blueprint_variables = {
-            k: SqlValue(sql=v.sql(dialect=dialect)) if isinstance(v, exp.Expression) else v
+            k: SqlValue(sql=v.sql(dialect=dialect)) if isinstance(v, exp.Expr) else v
             for k, v in blueprint_variables.items()
             if k in metadata_used_variables
         }
         blueprint_variables = {
-            k.lower(): SqlValue(sql=v.sql(dialect=dialect)) if isinstance(v, exp.Expression) else v
+            k.lower(): SqlValue(sql=v.sql(dialect=dialect)) if isinstance(v, exp.Expr) else v
             for k, v in blueprint_variables.items()
             if k in non_metadata_used_variables
         }
@@ -381,7 +386,7 @@ def parse_dependencies(
                         )
 
                     try:
-                        expression = to_source(first_arg)
+                        expression = ast.unparse(t.cast(ast.expr, first_arg))
                         return eval(expression, env, local_env)
                     except Exception:
                         if strict_resolution:
@@ -469,9 +474,9 @@ def single_value_or_tuple(values: t.Sequence) -> exp.Identifier | exp.Tuple:
 
 def parse_expression(
     cls: t.Type,
-    v: t.Union[t.List[str], t.List[exp.Expression], str, exp.Expression, t.Callable, None],
+    v: t.Union[t.List[str], t.List[exp.Expr], str, exp.Expr, t.Callable, None],
     info: t.Optional[ValidationInfo],
-) -> t.List[exp.Expression] | exp.Expression | t.Callable | None:
+) -> t.List[exp.Expr] | exp.Expr | t.Callable | None:
     """Helper method to deserialize SQLGlot expressions in Pydantic Models."""
     if v is None:
         return None
@@ -479,11 +484,11 @@ def parse_expression(
     if callable(v):
         return v
 
-    dialect = info.data.get("dialect") if info else ""
+    dialect = validation_data(info).get("dialect") if info else ""
 
     if isinstance(v, list):
         return [
-            e if isinstance(e, exp.Expression) else d.parse_one(e, dialect=dialect)
+            e if isinstance(e, exp.Expr) else d.parse_one(e, dialect=dialect)  # type: ignore[misc]
             for e in v
             if not isinstance(e, exp.Semicolon)
         ]
@@ -498,7 +503,7 @@ def parse_expression(
 
 
 def parse_bool(v: t.Any) -> bool:
-    if isinstance(v, exp.Expression):
+    if isinstance(v, exp.Expr):
         if not isinstance(v, exp.Boolean):
             from sqlglot.optimizer.simplify import simplify
 
@@ -519,12 +524,12 @@ def parse_properties(
     if v is None:
         return v
 
-    dialect = info.data.get("dialect") if info else ""
+    dialect = validation_data(info).get("dialect") if info else ""
 
     if isinstance(v, str):
         v = d.parse_one(v, dialect=dialect)
     if isinstance(v, (exp.Array, exp.Paren, exp.Tuple)):
-        eq_expressions: t.List[exp.Expression] = (
+        eq_expressions: t.List[exp.Expr] = (
             [v.unnest()] if isinstance(v, exp.Paren) else v.expressions
         )
 
@@ -557,8 +562,9 @@ def default_catalog(cls: t.Type, v: t.Any) -> t.Optional[str]:
 
 
 def depends_on(cls: t.Type, v: t.Any, info: ValidationInfo) -> t.Optional[t.Set[str]]:
-    dialect = info.data.get("dialect")
-    default_catalog = info.data.get("default_catalog")
+    data = validation_data(info)
+    dialect = data.get("dialect")
+    default_catalog = data.get("default_catalog")
 
     if isinstance(v, exp.Paren):
         v = v.unnest()
@@ -665,18 +671,18 @@ class ParsableSql(PydanticModel):
     sql: str
     transaction: t.Optional[bool] = None
 
-    _parsed: t.Optional[exp.Expression] = None
+    _parsed: t.Optional[exp.Expr] = None
     _parsed_dialect: t.Optional[str] = None
 
-    def parse(self, dialect: str) -> exp.Expression:
+    def parse(self, dialect: str) -> exp.Expr:
         if self._parsed is None or self._parsed_dialect != dialect:
             self._parsed = d.parse_one(self.sql, dialect=dialect)
             self._parsed_dialect = dialect
-        return self._parsed
+        return self._parsed  # type: ignore[return-value]
 
     @classmethod
     def from_parsed_expression(
-        cls, parsed_expression: exp.Expression, dialect: str, use_meta_sql: bool = False
+        cls, parsed_expression: exp.Expr, dialect: str, use_meta_sql: bool = False
     ) -> ParsableSql:
         sql = (
             parsed_expression.meta.get("sql") or parsed_expression.sql(dialect=dialect)
@@ -697,7 +703,7 @@ class ParsableSql(PydanticModel):
                 return v
             if isinstance(v, str):
                 return ParsableSql(sql=v)
-            if isinstance(v, exp.Expression):
+            if isinstance(v, exp.Expr):
                 return ParsableSql.from_parsed_expression(
                     v, get_dialect(info.data), use_meta_sql=False
                 )
@@ -707,7 +713,7 @@ class ParsableSql(PydanticModel):
                     ParsableSql(sql=s)
                     if isinstance(s, str)
                     else ParsableSql.from_parsed_expression(s, dialect, use_meta_sql=False)
-                    if isinstance(s, exp.Expression)
+                    if isinstance(s, exp.Expr)
                     else ParsableSql.parse_obj(s)
                     for s in v
                 ]
