@@ -23,6 +23,7 @@ export interface GraphNodeData {
   label: string
   type: LineageNodeModelType
   withColumns: boolean
+  tags?: string[]
   [key: string]: any
 }
 
@@ -172,9 +173,14 @@ function getNodeMap({
 
   return modelNames.reduce((acc: Record<string, Node>, modelName: string) => {
     const model = models.get(modelName)
+    const tagsStr = model?.details?.tags
+    const tags = tagsStr
+      ? tagsStr.split(',').map(t => t.trim()).filter(Boolean)
+      : undefined
     const node = createGraphNode(modelName, {
       label: model?.displayName ?? modelName,
       withColumns,
+      tags,
       type: isNotNil(model)
         ? (model.type as LineageNodeModelType)
         : // If model name present in lineage but not in global models

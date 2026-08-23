@@ -413,6 +413,12 @@ def test_materialized_view(ctx_query_and_df: TestContext):
         )
     if ctx.engine_adapter.dialect == "snowflake":
         pytest.skip("Snowflake requires enterprise edition which we do not have setup")
+    if ctx.engine_adapter.dialect == "starrocks":
+        pytest.skip(
+            "StarRocks materialized views require a REFRESH clause (refresh_moment/refresh_scheme), "
+            "which this generic test does not provide; StarRocks MVs are covered by "
+            "test_integration_starrocks.py"
+        )
     input_data = pd.DataFrame(
         [
             {"id": 1, "ds": "2022-01-01"},
@@ -777,6 +783,8 @@ def test_insert_overwrite_by_time_partition(ctx_query_and_df: TestContext):
         ds_type = "datetime"
     if ctx.dialect == "tsql":
         ds_type = "varchar(max)"
+    if ctx.dialect == "starrocks":
+        ds_type = "datetime"
 
     ctx.columns_to_types = {"id": "int", "ds": ds_type}
     table = ctx.table("test_table")
@@ -865,6 +873,8 @@ def test_insert_overwrite_by_time_partition_source_columns(ctx_query_and_df: Tes
         ds_type = "datetime"
     if ctx.dialect == "tsql":
         ds_type = "varchar(max)"
+    if ctx.dialect == "starrocks":
+        ds_type = "datetime"
 
     ctx.columns_to_types = {"id": "int", "ds": ds_type}
     columns_to_types = {
@@ -1952,6 +1962,12 @@ def test_sushi(
         pytest.skip(
             "Sushi end-to-end tests only need to run once for Athena because sushi needs a hybrid of both Hive and Iceberg"
         )
+    if ctx.dialect == "starrocks":
+        pytest.skip(
+            "StarRocks requires incremental models to use a PRIMARY KEY table; the shared sushi "
+            "example uses cross-engine incremental/SCD models without a StarRocks primary_key, so "
+            "this end-to-end test does not apply to StarRocks"
+        )
 
     sushi_test_schema = ctx.add_test_suffix("sushi")
     sushi_state_schema = ctx.add_test_suffix("sushi_state")
@@ -2351,6 +2367,13 @@ def test_sushi(
 
 
 def test_init_project(ctx: TestContext, tmp_path: pathlib.Path):
+    if ctx.dialect == "starrocks":
+        pytest.skip(
+            "StarRocks requires incremental models to use a PRIMARY KEY table; the default example "
+            "project's incremental_model has no StarRocks primary_key, so this cross-engine test "
+            "does not apply to StarRocks"
+        )
+
     schema_name = ctx.add_test_suffix(TEST_SCHEMA)
     state_schema = ctx.add_test_suffix("sqlmesh_state")
 
@@ -2579,6 +2602,7 @@ def test_dialects(ctx: TestContext):
                 "mysql": pd.Timestamp("2020-01-01 00:00:00"),
                 "spark": pd.Timestamp("2020-01-01 00:00:00"),
                 "databricks": pd.Timestamp("2020-01-01 00:00:00"),
+                "starrocks": pd.Timestamp("2020-01-01 00:00:00"),
             },
         ),
         (
@@ -3647,6 +3671,12 @@ def test_janitor(
         and not ctx.engine_adapter.SUPPORTS_CREATE_DROP_CATALOG
     ):
         pytest.skip("Engine does not support catalog-based virtual environments")
+    if ctx.dialect == "starrocks":
+        pytest.skip(
+            "StarRocks requires incremental models to use a PRIMARY KEY table; the example project "
+            "used here has an incremental_model without a StarRocks primary_key, so this "
+            "cross-engine test does not apply to StarRocks"
+        )
 
     schema = ctx.schema()  # catalog.schema
     parsed_schema = d.to_schema(schema)
@@ -3785,6 +3815,12 @@ def test_materialized_view_evaluation(ctx: TestContext):
         pytest.skip(f"Skipping engine {dialect} as it does not support materialized views")
     elif dialect in ("snowflake", "databricks"):
         pytest.skip(f"Skipping {dialect} as they're not enabled on standard accounts")
+    elif dialect == "starrocks":
+        pytest.skip(
+            "StarRocks materialized views require a REFRESH clause (refresh_moment/refresh_scheme), "
+            "which this generic test does not provide; StarRocks MVs are covered by "
+            "test_integration_starrocks.py"
+        )
 
     model_name = ctx.table("test_tbl")
     mview_name = ctx.table("test_mview")

@@ -93,6 +93,7 @@ nav:
       - integrations/engines/risingwave.md
       - integrations/engines/snowflake.md
       - integrations/engines/spark.md
+      - integrations/engines/starrocks.md
       - integrations/engines/trino.md
   - Resources:
     - comparisons.md

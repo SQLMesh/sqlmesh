@@ -271,7 +271,7 @@ export function showTableDiff(
             if (workspaceFolders.length != 1) {
               throw new Error('Only one workspace folder is supported')
             }
-            const fullPath = vscode.Uri.parse(message.payload.uri)
+            const fullPath = vscode.Uri.file(message.payload.filePath)
             const document = await vscode.workspace.openTextDocument(fullPath)
             await vscode.window.showTextDocument(document)
             break

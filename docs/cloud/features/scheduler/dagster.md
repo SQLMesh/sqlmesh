@@ -48,7 +48,7 @@ dependencies = [
 And then install it into the Python environment used by your Dagster project:
 
 ```sh
-$ pip install -e '.[dev]'
+pip install -e '.[dev]'
 ```
 
 ### Connect Dagster to Tobiko Cloud

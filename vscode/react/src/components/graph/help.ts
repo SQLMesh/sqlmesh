@@ -562,6 +562,8 @@ export function getUpdatedEdges(
   withConnected: boolean = false,
   withImpacted: boolean = false,
   withSecondary: boolean = false,
+  withOnlyDirect: boolean = false,
+  directNeighbors: Set<string> = new Set(),
 ): Edge[] {
   const tempEdges = edges.map(edge => {
     const isActiveEdge = hasActiveEdge(activeEdges, [
@@ -593,10 +595,15 @@ export function getUpdatedEdges(
         hasEdge(selectedEdges, edge.id) &&
         activeNodes.has(edge.source) &&
         activeNodes.has(edge.target)
+      const shouldHideNonDirect =
+        withOnlyDirect &&
+        (isFalse(directNeighbors.has(edge.source)) ||
+          isFalse(directNeighbors.has(edge.target)))
 
       if (
         isFalse(shouldHideImpacted) &&
         isFalse(shouldHideSecondary) &&
+        isFalse(shouldHideNonDirect) &&
         (isFalse(hasSelections) || isVisibleEdge)
       ) {
         edge.hidden = false
@@ -653,6 +660,8 @@ export function getUpdatedNodes(
   withConnected: boolean,
   withImpacted: boolean,
   withSecondary: boolean,
+  withOnlyDirect: boolean = false,
+  directNeighbors: Set<string> = new Set(),
 ): Node[] {
   return nodes.map(node => {
     node.hidden = true
@@ -667,8 +676,14 @@ export function getUpdatedNodes(
       isFalse(withSecondary) && isFalse(hasSelections)
     const shouldHideSecondary = isSecondaryNode && withoutSecondaryNodes
     const shouldHideImpacted = isImpactedNode && withoutImpactedNodes
+    const shouldHideNonDirect =
+      withOnlyDirect && isFalse(directNeighbors.has(node.id))
 
-    if (isFalse(shouldHideImpacted) && isFalse(shouldHideSecondary)) {
+    if (
+      isFalse(shouldHideImpacted) &&
+      isFalse(shouldHideSecondary) &&
+      isFalse(shouldHideNonDirect)
+    ) {
       node.hidden = isFalse(isActiveNode)
     }
 

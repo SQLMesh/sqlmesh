@@ -378,7 +378,7 @@ def test_insert_overwrite_by_time_partition_date_type(
         ),  # note: columns_to_types_from_df() would infer this as TEXT but we need a DATE type
     }
 
-    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expression:
+    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expr:
         return exp.cast(exp.Literal.string(to_ds(time)), "date")
 
     engine_adapter.create_table(
@@ -440,7 +440,7 @@ def test_insert_overwrite_by_time_partition_datetime_type(
         ),  # note: columns_to_types_from_df() would infer this as TEXT but we need a DATETIME type
     }
 
-    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expression:
+    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expr:
         return exp.cast(exp.Literal.string(to_ts(time)), "datetime")
 
     engine_adapter.create_table(

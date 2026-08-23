@@ -1140,6 +1140,177 @@ def test_delete_expired_environments(state_sync: EngineAdapterStateSync, make_sn
     assert state_sync.get_environment_statements(env_a.name) == []
 
 
+def test_get_expired_environments_filtered_by_name(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select a, ds"),
+        ),
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    state_sync.push_snapshots([snapshot])
+
+    now_ts = now_timestamp()
+
+    env_a = Environment(
+        name="test_env_a",
+        snapshots=[snapshot.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        expiration_ts=now_ts - 1000,
+    )
+    env_b = env_a.copy(update={"name": "test_env_b", "expiration_ts": now_ts - 500})
+    env_c = env_a.copy(update={"name": "test_env_c", "expiration_ts": now_ts + 1000})
+
+    state_sync.promote(env_a)
+    state_sync.promote(env_b)
+    state_sync.promote(env_c)
+
+    # Both env_a and env_b are expired, but only env_a is returned when filtering by name
+    expired_all = state_sync.get_expired_environments(current_ts=now_ts)
+    assert {e.name for e in expired_all} == {"test_env_a", "test_env_b"}
+
+    expired_filtered = state_sync.get_expired_environments(current_ts=now_ts, name="test_env_a")
+    assert [e.name for e in expired_filtered] == ["test_env_a"]
+
+    expired_non_expired = state_sync.get_expired_environments(current_ts=now_ts, name="test_env_c")
+    assert expired_non_expired == []
+
+
+def test_delete_expired_environments_filtered_by_name(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select a, ds"),
+        ),
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    state_sync.push_snapshots([snapshot])
+
+    now_ts = now_timestamp()
+
+    env_a = Environment(
+        name="test_env_a",
+        snapshots=[snapshot.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        expiration_ts=now_ts - 1000,
+    )
+    env_b = env_a.copy(update={"name": "test_env_b", "expiration_ts": now_ts - 500})
+
+    state_sync.promote(env_a)
+    state_sync.promote(env_b)
+
+    # Delete only env_a by name; env_b should survive
+    deleted = state_sync.delete_expired_environments(name="test_env_a")
+    assert [e.name for e in deleted] == ["test_env_a"]
+
+    assert state_sync.get_environment("test_env_a") is None
+    assert state_sync.get_environment("test_env_b") is not None
+
+
+def test_get_expired_environments_nonexistent_name(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    """get_expired_environments with a name that does not exist returns an empty list without error."""
+    now_ts = now_timestamp()
+    result = state_sync.get_expired_environments(current_ts=now_ts, name="nonexistent_env")
+    assert result == []
+
+
+def test_delete_expired_environments_non_expired_name_is_not_deleted(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    """delete_expired_environments with a name whose expiration_ts is in the future does not delete it."""
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select a, ds"),
+        ),
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    state_sync.push_snapshots([snapshot])
+
+    now_ts = now_timestamp()
+
+    env = Environment(
+        name="non_expired_env",
+        snapshots=[snapshot.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        expiration_ts=now_ts + 100_000,  # far future
+    )
+    state_sync.promote(env)
+
+    deleted = state_sync.delete_expired_environments(current_ts=now_ts, name="non_expired_env")
+    assert deleted == []
+    assert state_sync.get_environment("non_expired_env") is not None
+
+
+def test_invalidate_environment_sync_does_not_delete_sibling_expired_envs(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    """invalidate_environment does not delete sibling environments that are already expired.
+
+    When sync=True, _cleanup_environments is called with name=<target> so only the
+    named environment is removed — other expired environments are left for the next
+    janitor run.
+    """
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            query=parse_one("select a, ds"),
+        ),
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    state_sync.push_snapshots([snapshot])
+
+    now_ts = now_timestamp()
+
+    # env_sibling is already expired before we even start
+    env_sibling = Environment(
+        name="sibling_env",
+        snapshots=[snapshot.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        expiration_ts=now_ts - 1000,
+    )
+    # env_target will be invalidated (expiration set to now) and then cleaned up
+    env_target = Environment(
+        name="target_env",
+        snapshots=[snapshot.table_info],
+        start_at="2022-01-01",
+        end_at="2022-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        expiration_ts=now_ts + 100_000,
+    )
+
+    state_sync.promote(env_sibling)
+    state_sync.promote(env_target)
+
+    # Simulate the sync=True path: invalidate then clean up only target_env
+    state_sync.invalidate_environment("target_env")
+    state_sync.delete_expired_environments(name="target_env")
+
+    # target_env is gone
+    assert state_sync.get_environment("target_env") is None
+    # sibling_env was already expired but was NOT touched by the targeted cleanup
+    assert state_sync.get_environment("sibling_env") is not None
+
+
 def test_delete_expired_snapshots(state_sync: EngineAdapterStateSync, make_snapshot: t.Callable):
     now_ts = now_timestamp()
 

@@ -6,7 +6,7 @@
   "version": "0.0.7",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tobikodata/sqlmesh"
+    "url": "https://github.com/SQLMesh/sqlmesh"
   },
   "main": "./dist/extension.js",
   "icon": "assets/logo.png",

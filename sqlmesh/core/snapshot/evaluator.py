@@ -249,7 +249,7 @@ class SnapshotEvaluator:
         query_or_df = next(queries_or_dfs)
         if isinstance(query_or_df, pd.DataFrame):
             return query_or_df.head(limit)
-        if not isinstance(query_or_df, exp.Expression):
+        if not isinstance(query_or_df, exp.Expr):
             # We assume that if this branch is reached, `query_or_df` is a pyspark / snowpark / bigframe dataframe,
             # so we use `limit` instead of `head` to get back a dataframe instead of List[Row]
             # https://spark.apache.org/docs/3.1.1/api/python/reference/api/pyspark.sql.DataFrame.head.html#pyspark.sql.DataFrame.head
@@ -528,12 +528,27 @@ class SnapshotEvaluator:
         target_snapshots = [
             t for t in target_snapshots if t.snapshot.is_model and not t.snapshot.is_symbolic
         ]
+        available_gateways = set(self.adapters.keys())
+        skipped = []
+        filtered_targets = []
+        for t in target_snapshots:
+            gw = t.snapshot.model_gateway
+            if gw and gw not in available_gateways:
+                skipped.append((t.snapshot.snapshot_id, gw))
+            else:
+                filtered_targets.append(t)
+        if skipped:
+            logger.warning(
+                "Skipping cleanup of %d snapshot(s) with unavailable gateway(s): %s",
+                len(skipped),
+                ", ".join(f"{sid} (gateway={gw})" for sid, gw in skipped),
+            )
         snapshots_to_dev_table_only = {
-            t.snapshot.snapshot_id: t.dev_table_only for t in target_snapshots
+            t.snapshot.snapshot_id: t.dev_table_only for t in filtered_targets
         }
         with self.concurrent_context():
-            concurrent_apply_to_snapshots(
-                [t.snapshot for t in target_snapshots],
+            errors, _ = concurrent_apply_to_snapshots(
+                [t.snapshot for t in filtered_targets],
                 lambda s: self._cleanup_snapshot(
                     s,
                     snapshots_to_dev_table_only[s.snapshot_id],
@@ -542,7 +557,11 @@ class SnapshotEvaluator:
                 ),
                 self.ddl_concurrent_tasks,
                 reverse_order=True,
+                raise_on_error=False,
             )
+        if errors:
+            errored_snapshots = "\n".join(f"  {e.node.name}: {e.__cause__}" for e in errors)
+            raise SQLMeshError(f"\n{errored_snapshots}")
 
     def audit(
         self,
@@ -940,7 +959,7 @@ class SnapshotEvaluator:
         snapshots: t.Dict[str, Snapshot],
         render_kwargs: t.Dict[str, t.Any],
         create_render_kwargs: t.Dict[str, t.Any],
-        rendered_physical_properties: t.Dict[str, exp.Expression],
+        rendered_physical_properties: t.Dict[str, exp.Expr],
         deployability_index: DeployabilityIndex,
         target_table_name: str,
         is_first_insert: bool,
@@ -1069,7 +1088,7 @@ class SnapshotEvaluator:
         snapshots: t.Dict[str, Snapshot],
         deployability_index: DeployabilityIndex,
         render_kwargs: t.Dict[str, t.Any],
-        rendered_physical_properties: t.Dict[str, exp.Expression],
+        rendered_physical_properties: t.Dict[str, exp.Expr],
         allow_destructive_snapshots: t.Set[str],
         allow_additive_snapshots: t.Set[str],
         run_pre_post_statements: bool = False,
@@ -1186,7 +1205,7 @@ class SnapshotEvaluator:
         snapshots: t.Dict[str, Snapshot],
         deployability_index: DeployabilityIndex,
         render_kwargs: t.Dict[str, t.Any],
-        rendered_physical_properties: t.Dict[str, exp.Expression],
+        rendered_physical_properties: t.Dict[str, exp.Expr],
         allow_destructive_snapshots: t.Set[str],
         allow_additive_snapshots: t.Set[str],
         run_pre_post_statements: bool = False,
@@ -1472,7 +1491,7 @@ class SnapshotEvaluator:
         is_table_deployable: bool,
         deployability_index: DeployabilityIndex,
         create_render_kwargs: t.Dict[str, t.Any],
-        rendered_physical_properties: t.Dict[str, exp.Expression],
+        rendered_physical_properties: t.Dict[str, exp.Expr],
         dry_run: bool,
         run_pre_post_statements: bool = True,
         skip_grants: bool = False,
@@ -2026,6 +2045,38 @@ class PromotableStrategy(EvaluationStrategy, abc.ABC):
         self.adapter.execute(snapshot.model.render_post_statements(**render_kwargs))
 
 
+def _adjust_physical_properties_for_engine(
+    adapter: EngineAdapter,
+    model: Model,
+    physical_properties: t.Optional[t.Dict[str, t.Any]],
+) -> t.Dict[str, t.Any]:
+    """Let the target engine adjust/validate physical properties for an incremental model.
+
+    The generic responsibility here is to determine, from the model kind, whether the table will
+    be the target of DELETE/MERGE statements (vs. append-only INSERTs) and whether its unique_key
+    may be promoted to an engine-specific key. The engine adapter decides what, if anything, to do
+    with that information (see ``EngineAdapter.adjust_physical_properties_for_incremental``).
+    """
+    kind = model.kind
+
+    # Only incremental kinds that issue DELETE/MERGE need a delete-capable table. Append-only
+    # INCREMENTAL_UNMANAGED (insert_overwrite=False) only does INSERT, so it does not.
+    requires_delete_capable_table = (
+        kind.is_incremental_by_time_range
+        or kind.is_incremental_by_unique_key
+        or kind.is_incremental_by_partition
+        or kind.is_scd_type_2
+        or (isinstance(kind, IncrementalUnmanagedKind) and kind.insert_overwrite)
+    )
+
+    return adapter.adjust_physical_properties_for_incremental(
+        dict(physical_properties or {}),
+        requires_delete_capable_table=requires_delete_capable_table,
+        unique_key=model.unique_key if kind.is_incremental_by_unique_key else None,
+        model_name=model.name,
+    )
+
+
 class MaterializableStrategy(PromotableStrategy, abc.ABC):
     def create(
         self,
@@ -2037,7 +2088,9 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
         **kwargs: t.Any,
     ) -> None:
         ctas_query = model.ctas_query(**render_kwargs)
-        physical_properties = kwargs.get("physical_properties", model.physical_properties)
+        physical_properties = _adjust_physical_properties_for_engine(
+            self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+        )
 
         logger.info("Creating table '%s'", table_name)
         if model.annotated:
@@ -2152,6 +2205,9 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
             except Exception:
                 columns_to_types, source_columns = None, None
 
+        physical_properties = _adjust_physical_properties_for_engine(
+            self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+        )
         self.adapter.replace_query(
             name,
             query_or_df,
@@ -2160,7 +2216,7 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
             partitioned_by=model.partitioned_by,
             partition_interval_unit=model.partition_interval_unit,
             clustered_by=model.clustered_by,
-            table_properties=kwargs.get("physical_properties", model.physical_properties),
+            table_properties=physical_properties,
             table_description=model.description,
             column_descriptions=model.column_descriptions,
             target_columns_to_types=columns_to_types,
@@ -2294,6 +2350,9 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
                 table_name,
                 render_kwargs=render_kwargs,
             )
+            physical_properties = _adjust_physical_properties_for_engine(
+                self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+            )
             self.adapter.merge(
                 table_name,
                 query_or_df,
@@ -2305,7 +2364,7 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
                     end=kwargs.get("end"),
                     execution_time=kwargs.get("execution_time"),
                 ),
-                physical_properties=kwargs.get("physical_properties", model.physical_properties),
+                physical_properties=physical_properties,
                 source_columns=source_columns,
             )
 
@@ -2320,6 +2379,9 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
         columns_to_types, source_columns = self._get_target_and_source_columns(
             model, table_name, render_kwargs=render_kwargs
         )
+        physical_properties = _adjust_physical_properties_for_engine(
+            self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+        )
         self.adapter.merge(
             table_name,
             query_or_df,
@@ -2331,7 +2393,7 @@ class IncrementalByUniqueKeyStrategy(IncrementalStrategy):
                 end=kwargs.get("end"),
                 execution_time=kwargs.get("execution_time"),
             ),
-            physical_properties=kwargs.get("physical_properties", model.physical_properties),
+            physical_properties=physical_properties,
             source_columns=source_columns,
         )
 
@@ -2526,6 +2588,9 @@ class SCDType2Strategy(IncrementalStrategy):
             columns_to_types = model.columns_to_types_or_raise
             if isinstance(model.kind, SCDType2ByTimeKind):
                 columns_to_types[model.kind.updated_at_name.name] = model.kind.time_data_type
+            physical_properties = _adjust_physical_properties_for_engine(
+                self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+            )
             self.adapter.create_table(
                 table_name,
                 target_columns_to_types=columns_to_types,
@@ -2534,7 +2599,7 @@ class SCDType2Strategy(IncrementalStrategy):
                 partitioned_by=model.partitioned_by,
                 partition_interval_unit=model.partition_interval_unit,
                 clustered_by=model.clustered_by,
-                table_properties=kwargs.get("physical_properties", model.physical_properties),
+                table_properties=physical_properties,
                 table_description=model.description if is_table_deployable else None,
                 column_descriptions=model.column_descriptions if is_table_deployable else None,
             )
@@ -2669,17 +2734,39 @@ class ViewStrategy(PromotableStrategy):
             is_materialized_view and is_first_insert
         )
 
+        # Some engines (e.g. StarRocks) maintain materialized views automatically (via auto/scheduled
+        # REFRESH) and can only recreate them via a destructive DROP + CREATE, which deletes the
+        # materialized data and forces a full rebuild. For those, an existing MV must not be recreated
+        # on routine evaluation (e.g. every `sqlmesh run`); only build it on the first insert (a new
+        # version) or when a rebuild is explicitly forced (intervals cleared by `should_force_rebuild`,
+        # which sets `is_first_insert`).
+        if (
+            is_materialized_view
+            and not is_first_insert
+            and not self.adapter.RECREATE_MATERIALIZED_VIEW_ON_EVALUATION
+        ):
+            must_recreate_view = False
+
         if self.adapter.table_exists(table_name) and not must_recreate_view:
             logger.info("Skipping creation of the view '%s'", table_name)
             return
 
         logger.info("Replacing view '%s'", table_name)
+        materialized_properties = None
+        if is_materialized_view:
+            materialized_properties = {
+                "partitioned_by": model.partitioned_by,
+                "partition_interval_unit": model.partition_interval_unit,
+                "clustered_by": model.clustered_by,
+                "has_audits": bool(model.audits_with_args),
+            }
         self.adapter.create_view(
             table_name,
             query_or_df,
             model.columns_to_types,
             replace=must_recreate_view,
             materialized=is_materialized_view,
+            materialized_properties=materialized_properties,
             view_properties=kwargs.get("physical_properties", model.physical_properties),
             table_description=model.description,
             column_descriptions=model.column_descriptions,
@@ -2730,6 +2817,7 @@ class ViewStrategy(PromotableStrategy):
                 "partitioned_by": model.partitioned_by,
                 "clustered_by": model.clustered_by,
                 "partition_interval_unit": model.partition_interval_unit,
+                "has_audits": bool(model.audits_with_args),
             }
         self.adapter.create_view(
             table_name,
@@ -2765,11 +2853,22 @@ class ViewStrategy(PromotableStrategy):
             execution_time=now(), snapshots=kwargs["snapshots"], engine_adapter=self.adapter
         )
 
+        is_materialized_view = self._is_materialized_view(model)
+        materialized_properties = None
+        if is_materialized_view:
+            materialized_properties = {
+                "partitioned_by": model.partitioned_by,
+                "clustered_by": model.clustered_by,
+                "partition_interval_unit": model.partition_interval_unit,
+                "has_audits": bool(model.audits_with_args),
+            }
+
         self.adapter.create_view(
             target_table_name,
             model.render_query_or_raise(**render_kwargs),
             model.columns_to_types,
-            materialized=self._is_materialized_view(model),
+            materialized=is_materialized_view,
+            materialized_properties=materialized_properties,
             view_properties=model.render_physical_properties(**render_kwargs),
             table_description=model.description,
             column_descriptions=model.column_descriptions,
@@ -3101,13 +3200,16 @@ class EngineManagedStrategy(MaterializableStrategy):
         if is_table_deployable and is_snapshot_deployable:
             # We could deploy this to prod; create a proper managed table
             logger.info("Creating managed table: %s", table_name)
+            physical_properties = _adjust_physical_properties_for_engine(
+                self.adapter, model, kwargs.get("physical_properties", model.physical_properties)
+            )
             self.adapter.create_managed_table(
                 table_name=table_name,
                 query=model.render_query_or_raise(**render_kwargs),
                 target_columns_to_types=model.columns_to_types,
                 partitioned_by=model.partitioned_by,
-                clustered_by=model.clustered_by,
-                table_properties=kwargs.get("physical_properties", model.physical_properties),
+                clustered_by=model.clustered_by,  # type: ignore[arg-type]
+                table_properties=physical_properties,
                 table_description=model.description,
                 column_descriptions=model.column_descriptions,
                 table_format=model.table_format,
@@ -3151,7 +3253,7 @@ class EngineManagedStrategy(MaterializableStrategy):
                 query=query_or_df,  # type: ignore
                 target_columns_to_types=model.columns_to_types,
                 partitioned_by=model.partitioned_by,
-                clustered_by=model.clustered_by,
+                clustered_by=model.clustered_by,  # type: ignore[arg-type]
                 table_properties=kwargs.get("physical_properties", model.physical_properties),
                 table_description=model.description,
                 column_descriptions=model.column_descriptions,
