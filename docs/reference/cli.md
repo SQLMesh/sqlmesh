@@ -15,6 +15,9 @@ Options:
   --debug              Enable debug mode.
   --log-to-stdout      Display logs in stdout.
   --log-file-dir TEXT  The directory to write log files to.
+  --dotenv PATH        Path to a custom .env file to load environment
+                       variables. Can also be set via SQLMESH_DOTENV_PATH
+                       environment variable.
   --help               Show this message and exit.
 
 Commands:
@@ -276,7 +279,8 @@ Options:
                        empty.
   --dlt-pipeline TEXT  DLT pipeline for which to generate a SQLMesh project.
                        Use alongside template: dlt
-  --dlt-path TEXT      The directory where the DLT pipeline resides. Use
+  --dlt-path TEXT      The DLT pipelines working directory, where DLT stores
+                       pipeline state (by default ~/.dlt/pipelines). Use
                        alongside template: dlt
   --help               Show this message and exit.
 ```
@@ -307,9 +311,17 @@ Usage: sqlmesh janitor [OPTIONS]
   The janitor cleans up old environments and expired snapshots.
 
 Options:
-  --ignore-ttl  Cleanup snapshots that are not referenced in any environment,
-                regardless of when they're set to expire
-  --help        Show this message and exit.
+  --ignore-ttl      Cleanup snapshots that are not referenced in any
+                    environment, regardless of when they're set to expire. Has
+                    no effect when --environment is specified.
+  --force-delete    Delete expired environment and snapshot state records even
+                    when the physical table or view drops fail. Any objects
+                    that could not be dropped become orphaned and must be
+                    removed manually.
+  -e, --environment TEXT
+                    Scope cleanup to a single expired environment. Global
+                    snapshot and interval compaction are skipped.
+  --help            Show this message and exit.
 ```
 
 ## migrate
@@ -638,6 +650,9 @@ Usage: sqlmesh lint [OPTIONS]
 
 Options:
   --model TEXT           A model to lint. Multiple models can be linted.  If no models are specified, every model will be linted.
+  --local                Lint using only locally loaded project files without loading state. In multi-repository setups, or when
+                         linting only a subset of projects, this may cause additional linting errors because SQLMesh will not resolve
+                         references or schemas from models that exist only in remote state.
   --help                 Show this message and exit.
 
 ```

@@ -41,6 +41,18 @@ SKIP_LOAD_COMMANDS = (
     "table_name",
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
+LOCAL_ONLY_COMMANDS = ("format",)
+
+
+class _SQLMeshGroup(click.Group):
+    def parse_args(self, ctx: click.Context, args: t.List[str]) -> t.List[str]:
+        rest = super().parse_args(ctx, args)
+        # Preserve the subcommand arguments because Click consumes them before invoking the group callback.
+        protected_args = getattr(ctx, "_protected_args", None)
+        if protected_args is None:
+            protected_args = ctx.protected_args
+        ctx.meta["subcommand_args"] = tuple(protected_args) + tuple(ctx.args)
+        return rest
 
 
 def _sqlmesh_version() -> str:
@@ -52,7 +64,7 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
-@click.group(no_args_is_help=True)
+@click.group(cls=_SQLMeshGroup, no_args_is_help=True)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
 @opt.config
@@ -115,6 +127,11 @@ def cli(
     configure_console(ignore_warnings=ignore_warnings)
 
     load = True
+    # Local-only gating must hold for any number of --paths, so it stays outside the block below.
+    load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
+    # The parent callback constructs Context before Click invokes `lint`, so inspect its parsed args here.
+    if ctx.invoked_subcommand == "lint" and "--local" in ctx.meta["subcommand_args"]:
+        load_state = False
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -135,6 +152,7 @@ def cli(
             config=configs,
             gateway=gateway,
             load=load,
+            load_state=load_state,
         )
     except Exception:
         if debug:
@@ -165,7 +183,7 @@ def cli(
 @click.option(
     "--dlt-path",
     type=str,
-    help="The directory where the DLT pipeline resides. Use alongside template: dlt",
+    help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines). Use alongside template: dlt",
 )
 @click.pass_context
 @error_handler
@@ -535,6 +553,7 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
 )
 @click.option(
     "--min-intervals",
+    type=int,
     default=None,
     help="For every model, ensure at least this many intervals are covered by a missing intervals check regardless of the plan start date",
 )
@@ -622,25 +641,43 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
 def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
     """Invalidate the target environment, forcing its removal during the next run of the janitor process."""
     context = ctx.obj
-    context.invalidate_environment(environment, **kwargs)
+    context.invalidate_environment(environment, must_exist=True, **kwargs)
 
 
 @cli.command("janitor")
 @click.option(
     "--ignore-ttl",
     is_flag=True,
-    help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire",
+    help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire. Has no effect when --environment is specified.",
+)
+@click.option(
+    "--force-delete",
+    is_flag=True,
+    help="Delete expired environment and snapshot state records even when the physical table or view drops fail. "
+    "Any objects that could not be dropped become orphaned and must be removed manually.",
+)
+@click.option(
+    "--environment",
+    "-e",
+    default=None,
+    help="Scope cleanup to a single expired environment. Global snapshot and interval compaction are skipped.",
 )
 @click.pass_context
 @error_handler
 @cli_analytics
-def janitor(ctx: click.Context, ignore_ttl: bool, **kwargs: t.Any) -> None:
+def janitor(
+    ctx: click.Context,
+    ignore_ttl: bool,
+    force_delete: bool,
+    environment: t.Optional[str],
+    **kwargs: t.Any,
+) -> None:
     """
     Run the janitor process on-demand.
 
     The janitor cleans up old environments and expired snapshots.
     """
-    ctx.obj.run_janitor(ignore_ttl, **kwargs)
+    ctx.obj.run_janitor(ignore_ttl, force_delete=force_delete, environment=environment, **kwargs)
 
 
 @cli.command("destroy")
@@ -1133,7 +1170,7 @@ def table_name(
 @click.option(
     "--dlt-path",
     type=str,
-    help="The directory where the DLT pipeline resides.",
+    help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines).",
 )
 @click.pass_context
 @error_handler
@@ -1171,6 +1208,12 @@ def environments(obj: Context) -> None:
     "--model",
     multiple=True,
     help="A model to lint. Multiple models can be linted. If no models are specified, every model will be linted.",
+)
+@click.option(
+    "--local",
+    is_flag=True,
+    expose_value=False,
+    help="Lint using only locally loaded project files without loading state.",
 )
 @click.pass_obj
 @error_handler

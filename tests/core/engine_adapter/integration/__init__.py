@@ -77,6 +77,7 @@ ENGINES = [
     IntegrationTestEngine("spark", native_dataframe_type="pyspark"),
     IntegrationTestEngine("clickhouse", catalog_types=["standalone", "cluster"]),
     IntegrationTestEngine("risingwave"),
+    IntegrationTestEngine("starrocks"),
     # Cloud engines that need paid accounts / special credentials
     IntegrationTestEngine("clickhouse_cloud", cloud=True),
     IntegrationTestEngine("redshift", cloud=True),
@@ -265,6 +266,7 @@ class TestContext:
             for k, v in self.columns_to_types.items()
             if v.sql().lower().startswith("timestamp")
             or (v.sql().lower() == "datetime" and self.dialect == "bigquery")
+            or (v.sql().lower() == "datetime" and self.dialect == "starrocks")
         ]
 
     @property
@@ -276,7 +278,7 @@ class TestContext:
         return lambda x, _: exp.Literal.string(to_ds(x))
 
     @property
-    def partitioned_by(self) -> t.List[exp.Expression]:
+    def partitioned_by(self) -> t.List[exp.Expr]:
         return [parse_one(self.time_column)]
 
     @property
@@ -305,6 +307,9 @@ class TestContext:
             return "hive" not in self.mark
 
         if self.dialect == "risingwave":
+            return False
+
+        if self.dialect == "starrocks":
             return False
 
         return True
@@ -388,8 +393,8 @@ class TestContext:
         )
 
     def physical_properties(
-        self, properties_for_dialect: t.Dict[str, t.Dict[str, str | exp.Expression]]
-    ) -> t.Dict[str, exp.Expression]:
+        self, properties_for_dialect: t.Dict[str, t.Dict[str, str | exp.Expr]]
+    ) -> t.Dict[str, exp.Expr]:
         if props := properties_for_dialect.get(self.dialect):
             return {k: exp.Literal.string(v) if isinstance(v, str) else v for k, v in props.items()}
         return {}
@@ -448,7 +453,7 @@ class TestContext:
                     AND pgc.relkind = '{"v" if table_kind == "VIEW" else "r"}'
                 ;
             """
-        elif self.dialect in ["mysql", "snowflake"]:
+        elif self.dialect in ["mysql", "snowflake", "starrocks"]:
             # Snowflake treats all identifiers as uppercase unless they are lowercase and quoted.
             # They are lowercase and quoted in sushi but not in the inline tests.
             if self.dialect == "snowflake" and snowflake_capitalize_ids:
@@ -458,6 +463,7 @@ class TestContext:
             comment_field_name = {
                 "mysql": "table_comment",
                 "snowflake": "comment",
+                "starrocks": "table_comment",
             }
 
             query = f"""
@@ -520,6 +526,14 @@ class TestContext:
                     AND c.relkind = '{"v" if table_kind == "VIEW" else "r"}'
                 ;
             """
+        elif self.dialect == "tsql":
+            kind = "table" if table_kind == "BASE TABLE" else "view"
+            query = f"""
+                SELECT 
+                	ep.name,
+                    CAST(ep.value AS NVARCHAR(MAX)) comment 
+                FROM fn_listextendedproperty('MS_Description', 'schema', '{schema_name}', '{kind}', '{table_name}', DEFAULT, DEFAULT) ep
+            """
 
         result = self.engine_adapter.fetchall(query)
 
@@ -563,7 +577,7 @@ class TestContext:
                     AND pgc.relkind = '{"v" if table_kind == "VIEW" else "r"}'
                 ;
             """
-        elif self.dialect in ["mysql", "snowflake", "trino"]:
+        elif self.dialect in ["mysql", "snowflake", "trino", "starrocks"]:
             # Snowflake treats all identifiers as uppercase unless they are lowercase and quoted.
             # They are lowercase and quoted in sushi but not in the inline tests.
             if self.dialect == "snowflake" and snowflake_capitalize_ids:
@@ -574,6 +588,7 @@ class TestContext:
                 "mysql": "column_comment",
                 "snowflake": "comment",
                 "trino": "comment",
+                "starrocks": "column_comment",
             }
 
             query = f"""
@@ -628,6 +643,16 @@ class TestContext:
                     AND c.relname = '{table_name}'
                     AND c.relkind = '{"v" if table_kind == "VIEW" else "r"}'
                 ;
+            """
+        elif self.dialect == "tsql":
+            kind = "table" if table_kind == "BASE TABLE" else "view"
+            query = f"""
+                SELECT
+                    col.COLUMN_NAME column_name,
+                    CAST(ep.value AS NVARCHAR(MAX)) comment 
+                FROM INFORMATION_SCHEMA.COLUMNS col
+                CROSS APPLY fn_listextendedproperty('MS_Description', 'schema', col.TABLE_SCHEMA, '{kind}', col.TABLE_NAME, 'column', col.COLUMN_NAME) ep
+                WHERE col.TABLE_SCHEMA = '{schema_name}' AND col.TABLE_NAME = '{table_name}'
             """
 
         result = self.engine_adapter.fetchall(query)

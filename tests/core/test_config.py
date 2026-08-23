@@ -532,6 +532,7 @@ def test_connection_config_serialization():
         "extensions": [],
         "pre_ping": False,
         "pretty_sql": False,
+        "shared_connection": True,
         "connector_config": {},
         "secrets": [],
         "filesystems": [],
@@ -544,6 +545,7 @@ def test_connection_config_serialization():
         "extensions": [],
         "pre_ping": False,
         "pretty_sql": False,
+        "shared_connection": True,
         "connector_config": {},
         "secrets": [],
         "filesystems": [],
@@ -570,7 +572,8 @@ def test_variables():
     assert config.get_gateway("local").variables == {"uppercase_var": 2}
 
     with pytest.raises(
-        ConfigError, match="Unsupported variable value type: <class 'sqlglot.expressions.Column'>"
+        ConfigError,
+        match=r"Unsupported variable value type: <class 'sqlglot\.expressions\.\w*\.?Column'>",
     ):
         Config(variables={"invalid_var": exp.column("sqlglot_expr")})
 
@@ -699,7 +702,7 @@ model_defaults:
         """
         )
 
-    with pytest.raises(TypeError, match=r"expected str instance, int found"):
+    with pytest.raises(ConfigError, match=r"Invalid field 'model_defaults\.pre_statements\.0"):
         config = load_config_from_paths(
             Config,
             project_paths=[config_path],
@@ -961,6 +964,84 @@ def test_gateway_model_defaults(tmp_path):
     )
 
     assert ctx.config.model_defaults == expected
+
+
+def test_model_defaults_gateway_from_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+gateways:
+  project_gateway:
+    connection:
+      type: duckdb
+
+model_defaults:
+  dialect: duckdb
+  gateway: project_gateway
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config_from_paths(Config, project_paths=[config_path])
+
+    assert config.model_defaults.gateway == "project_gateway"
+
+
+def test_model_defaults_cron_tz(tmp_path):
+    """Test that cron_tz can be set in model_defaults."""
+    import zoneinfo
+
+    config_path = tmp_path / "config_model_defaults_cron_tz.yaml"
+    with open(config_path, "w", encoding="utf-8") as fd:
+        fd.write(
+            """
+model_defaults:
+    dialect: duckdb
+    cron: '@daily'
+    cron_tz: 'America/Los_Angeles'
+        """
+        )
+
+    config = load_config_from_paths(
+        Config,
+        project_paths=[config_path],
+    )
+
+    assert config.model_defaults.cron == "@daily"
+    assert config.model_defaults.cron_tz == zoneinfo.ZoneInfo("America/Los_Angeles")
+    assert config.model_defaults.cron_tz.key == "America/Los_Angeles"
+
+
+def test_gateway_model_defaults_cron_tz(tmp_path):
+    """Test that cron_tz can be set in gateway-specific model_defaults."""
+    import zoneinfo
+
+    global_defaults = ModelDefaultsConfig(
+        dialect="snowflake", owner="foo", cron="@daily", cron_tz="UTC"
+    )
+    gateway_defaults = ModelDefaultsConfig(dialect="duckdb", cron_tz="America/New_York")
+
+    config = Config(
+        gateways={
+            "duckdb": GatewayConfig(
+                connection=DuckDBConnectionConfig(database="db.db"),
+                model_defaults=gateway_defaults,
+            )
+        },
+        model_defaults=global_defaults,
+        default_gateway="duckdb",
+    )
+
+    ctx = Context(paths=tmp_path, config=config, gateway="duckdb")
+
+    expected = ModelDefaultsConfig(
+        dialect="duckdb", owner="foo", cron="@daily", cron_tz="America/New_York"
+    )
+
+    assert ctx.config.model_defaults == expected
+    # Also verify the cron_tz is a ZoneInfo object
+    assert isinstance(ctx.config.model_defaults.cron_tz, zoneinfo.ZoneInfo)
+    assert ctx.config.model_defaults.cron_tz.key == "America/New_York"
 
 
 def test_redshift_merge_flag(tmp_path, mocker: MockerFixture):
@@ -1514,3 +1595,66 @@ model_defaults:
     # model_defaults
     assert config.model_defaults.dialect == "duckdb"  # from dbt profiles.yml
     assert config.model_defaults.start == "2020-01-01"  # from sqlmesh.yaml
+
+
+def test_canonicalize_sorts_sets() -> None:
+    from sqlmesh.core.config.root import _canonicalize
+
+    assert _canonicalize({3, 1, 2}) == [1, 2, 3]
+    assert _canonicalize(frozenset(["b", "a", "c"])) == ["a", "b", "c"]
+
+
+def test_canonicalize_recurses_into_containers() -> None:
+    from sqlmesh.core.config.root import _canonicalize
+
+    assert _canonicalize({"rules": {"z", "a"}, "nested": [{3, 1}, ("x", {"q", "b"})]}) == {
+        "rules": ["a", "z"],
+        "nested": [[1, 3], ("x", ["b", "q"])],
+    }
+
+
+def test_canonicalize_preserves_non_set_values_and_types() -> None:
+    from sqlmesh.core.config.root import _canonicalize
+
+    assert _canonicalize({"a": 1, "b": [1, 2, 3]}) == {"a": 1, "b": [1, 2, 3]}
+    # list/tuple types are preserved (not coerced into each other)
+    assert isinstance(_canonicalize((1, 2)), tuple)
+    assert isinstance(_canonicalize([1, 2]), list)
+
+
+def test_config_fingerprint_is_deterministic_across_processes() -> None:
+    """Config.fingerprint keys the on-disk model cache and must be stable across runs.
+
+    Set/frozenset iteration order depends on PYTHONHASHSEED, so a config containing a
+    set-valued field (e.g. linter.rules) would otherwise hash differently in each
+    process, silently invalidating the cache. Run the same config in two subprocesses
+    with different hash seeds and assert the fingerprint matches.
+    """
+    import subprocess
+    import sys
+
+    program = (
+        "from sqlmesh.core.config import Config, ModelDefaultsConfig\n"
+        "from sqlmesh.core.config.linter import LinterConfig\n"
+        "config = Config(\n"
+        "    model_defaults=ModelDefaultsConfig(dialect='duckdb'),\n"
+        "    linter=LinterConfig(\n"
+        "        enabled=True,\n"
+        "        rules={'ruleA', 'ruleB', 'ruleC', 'ruleD', 'ruleE', 'ruleF'},\n"
+        "    ),\n"
+        ")\n"
+        "print(config.fingerprint)\n"
+    )
+
+    def _fingerprint(hashseed: str) -> str:
+        env = {**os.environ, "PYTHONHASHSEED": hashseed}
+        result = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    assert _fingerprint("0") == _fingerprint("12345")

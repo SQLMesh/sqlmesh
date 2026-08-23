@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlmesh.cli.main import _sqlmesh_version
 from web.server import models
 from web.server.console import api_console
-from web.server.settings import Settings, get_settings
+from web.server.settings import Settings, get_context, get_settings
 
 router = APIRouter()
 
@@ -32,4 +32,13 @@ def get_api_meta(
         if not has_running_task and api_console.is_cancelling_plan():
             api_console.finish_plan_cancellation()
 
-    return models.Meta(version=_sqlmesh_version(), has_running_task=has_running_task)
+    node_colors: dict[str, str] = {}
+    context = get_context(settings)
+    if context:
+        node_colors = context.config.ui.node_colors
+
+    return models.Meta(
+        version=_sqlmesh_version(),
+        has_running_task=has_running_task,
+        node_colors=node_colors,
+    )

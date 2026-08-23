@@ -46,14 +46,21 @@ install-dev-dbt-%:
 		echo "Applying numpy<2 constraint for dbt $$version"; \
 		$(SED_INPLACE) 's/"numpy"/"numpy<2"/g' pyproject.toml; \
 	fi; \
-	$(MAKE) install-dev; \
+	if [ "$$version" = "1.6.0" ]; then \
+		echo "Installing without web/lsp for dbt 1.6.0 (fastapi>=0.136 needs pydantic v2; dbt 1.6 needs pydantic v1)"; \
+		$(PIP) install -e ".[dev,slack,dlt]" ./examples/custom_materializations; \
+	else \
+		$(MAKE) install-dev; \
+	fi; \
 	if [ "$$version" = "1.6.0" ]; then \
 		echo "Applying overrides for dbt 1.6.0"; \
-		$(PIP) install 'pydantic>=2.0.0' 'google-cloud-bigquery==3.30.0' 'databricks-sdk==0.28.0' --reinstall; \
+		$(PIP) install 'pydantic>=2.0.0' 'google-cloud-bigquery==3.30.0' 'databricks-sdk==0.28.0' \
+			'pyOpenSSL>=24.0.0' --reinstall; \
 	fi; \
 	if [ "$$version" = "1.7.0" ]; then \
 		echo "Applying overrides for dbt 1.7.0"; \
-		$(PIP) install 'databricks-sdk==0.28.0' --reinstall; \
+		$(PIP) install 'databricks-sdk==0.28.0' \
+			'pyOpenSSL>=24.0.0' --reinstall; \
 	fi; \
 	if [ "$$version" = "1.5.0" ]; then \
 		echo "Applying overrides for dbt 1.5.0"; \
@@ -61,7 +68,8 @@ install-dev-dbt-%:
 	fi; \
 	if [ "$$version" = "1.3.0" ]; then \
 		echo "Applying overrides for dbt $$version - upgrading google-cloud-bigquery"; \
-		$(PIP) install 'google-cloud-bigquery>=3.0.0' --upgrade; \
+		$(PIP) install 'google-cloud-bigquery>=3.0.0' \
+			'pyOpenSSL>=24.0.0' --upgrade; \
 	fi; \
 	mv pyproject.toml.backup pyproject.toml; \
 	echo "Restored original pyproject.toml"
@@ -211,6 +219,9 @@ trino-test: engine-trino-up
 
 risingwave-test: engine-risingwave-up
 	pytest -n auto -m "risingwave" --reruns 3 --junitxml=test-results/junit-risingwave.xml
+
+starrocks-test: engine-starrocks-up
+	pytest -n auto -m "starrocks" --reruns 3 --junitxml=test-results/junit-starrocks.xml
 
 #################
 # Cloud Engines #

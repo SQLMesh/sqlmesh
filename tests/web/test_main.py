@@ -415,7 +415,11 @@ def test_meta(client: TestClient) -> None:
 
     response = client.get("/api/meta")
     assert response.status_code == 200
-    assert response.json() == {"version": _sqlmesh_version(), "has_running_task": False}
+    assert response.json() == {
+        "version": _sqlmesh_version(),
+        "has_running_task": False,
+        "node_colors": {},
+    }
 
 
 def test_modules(client: TestClient) -> None:
