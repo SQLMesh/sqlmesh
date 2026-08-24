@@ -5,7 +5,7 @@ import re
 import typing as t
 from functools import cached_property
 
-from sqlglot import exp
+from sqlglot import exp, parse_one
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core.engine_adapter.base import EngineAdapter, _get_data_object_cache_key
@@ -50,6 +50,9 @@ class Db2EngineAdapter(
     SUPPORTS_INDEXES = True
     SUPPORTS_REPLACE_TABLE = False
     SUPPORTS_GRANTS = True
+    # Db2 CURRENT USER is a bare special register (no parentheses).
+    # exp.Var generates the identifier literally without function-call syntax.
+    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.Var(this="CURRENT USER")
     COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
@@ -330,8 +333,14 @@ class Db2EngineAdapter(
         Query SYSCAT.TABAUTH which stores per-privilege columns (SELECTAUTH, INSERTAUTH,
         etc.) with values 'Y' (granted) or 'G' (granted with grant option).
         Filter by GRANTOR = CURRENT USER to return only grants made by the connected user.
+
+        Schema extraction mirrors GrantsFromInfoSchemaMixin._get_grant_expression:
+        table.args.get("db") returns an exp.Identifier; use .this to extract the string.
         """
-        schema_name = (table.args.get("db") or self._get_current_schema()).upper()  # type: ignore
+        schema_identifier = table.args.get("db") or normalize_identifiers(
+            exp.to_identifier(self._get_current_schema(), quoted=True), dialect=self.dialect
+        )
+        schema_name = schema_identifier.this.upper()
         table_name = table.name.upper()
 
         rows = self.fetchall(
@@ -355,10 +364,10 @@ class Db2EngineAdapter(
                         exp.Literal.string(table_name)
                     ),
                     exp.column("GRANTOR").eq(
-                        exp.func("UPPER", exp.Anonymous(this="CURRENT USER", expressions=[]))
+                        exp.func("UPPER", self.CURRENT_USER_OR_ROLE_EXPRESSION)
                     ),
                     exp.column("GRANTEE").neq(
-                        exp.func("UPPER", exp.Anonymous(this="CURRENT USER", expressions=[]))
+                        exp.func("UPPER", self.CURRENT_USER_OR_ROLE_EXPRESSION)
                     ),
                 )
             )
@@ -385,27 +394,46 @@ class Db2EngineAdapter(
                         grants[priv].append(grantee)
         return grants
 
+    def _dcl_grants_config_expr(
+        self,
+        dcl_cmd: t.Type,
+        table: exp.Table,
+        grants_config: t.Dict[str, t.List[str]],
+        table_type: DataObjectType = DataObjectType.TABLE,
+    ) -> t.List[exp.Expr]:
+        """
+        Generate GRANT or REVOKE statements for Db2.
+        Mirrors GrantsFromInfoSchemaMixin._dcl_grants_config_expr — one statement
+        per (privilege, principal) pair with normalize_identifiers applied to each
+        principal so that quoting matches the Db2 dialect.
+        """
+        exprs: t.List[exp.Expr] = []
+        if not grants_config:
+            return exprs
+        for privilege, principals in grants_config.items():
+            for principal in principals:
+                exprs.append(
+                    dcl_cmd(
+                        privileges=[exp.GrantPrivilege(this=exp.Var(this=privilege))],
+                        kind=exp.Var(this="TABLE"),
+                        securable=table.copy(),
+                        principals=[
+                            normalize_identifiers(
+                                parse_one(principal, into=exp.GrantPrincipal, dialect=self.dialect),
+                                dialect=self.dialect,
+                            )
+                        ],
+                    )
+                )
+        return exprs
+
     def _apply_grants_config_expr(
         self,
         table: exp.Table,
         grants_config: t.Dict[str, t.List[str]],
         table_type: DataObjectType = DataObjectType.TABLE,
     ) -> t.List[exp.Expr]:
-        """Generate GRANT statements for Db2."""
-        exprs: t.List[exp.Expr] = []
-        for privilege, principals in grants_config.items():
-            for principal in principals:
-                exprs.append(
-                    exp.Grant(
-                        privileges=[exp.GrantPrivilege(this=exp.Var(this=privilege))],
-                        kind=exp.Var(this="TABLE"),
-                        securable=table.copy(),
-                        principals=[
-                            exp.GrantPrincipal(this=exp.Var(this=principal))
-                        ],
-                    )
-                )
-        return exprs
+        return self._dcl_grants_config_expr(exp.Grant, table, grants_config, table_type)
 
     def _revoke_grants_config_expr(
         self,
@@ -413,21 +441,7 @@ class Db2EngineAdapter(
         grants_config: t.Dict[str, t.List[str]],
         table_type: DataObjectType = DataObjectType.TABLE,
     ) -> t.List[exp.Expr]:
-        """Generate REVOKE statements for Db2."""
-        exprs: t.List[exp.Expr] = []
-        for privilege, principals in grants_config.items():
-            for principal in principals:
-                exprs.append(
-                    exp.Revoke(
-                        privileges=[exp.GrantPrivilege(this=exp.Var(this=privilege))],
-                        kind=exp.Var(this="TABLE"),
-                        securable=table.copy(),
-                        principals=[
-                            exp.GrantPrincipal(this=exp.Var(this=principal))
-                        ],
-                    )
-                )
-        return exprs
+        return self._dcl_grants_config_expr(exp.Revoke, table, grants_config, table_type)
 
     @property
     def catalog_support(self) -> CatalogSupport:
