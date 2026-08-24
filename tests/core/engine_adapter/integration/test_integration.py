@@ -2680,6 +2680,7 @@ def test_dialects(ctx: TestContext):
             {
                 "default": pd.Timestamp("2020-01-01 00:00:00+00:00"),
                 "clickhouse": pd.Timestamp("2020-01-01 00:00:00"),
+                "db2": pd.Timestamp("2020-01-01 00:00:00"),
                 "fabric": pd.Timestamp("2020-01-01 00:00:00"),
                 "mysql": pd.Timestamp("2020-01-01 00:00:00"),
                 "spark": pd.Timestamp("2020-01-01 00:00:00"),
@@ -2722,6 +2723,14 @@ def test_to_time_column(
 
         time_column = re.match(r"^(.*?)\+", time_column).group(1)
         time_column_type = exp.DataType.build("TIMESTAMP('UTC')", dialect="clickhouse")
+
+    if ctx.dialect == "db2" and time_column_type.is_type(exp.DataType.Type.TIMESTAMPTZ):
+        # Db2 has no native timezone-aware TIMESTAMP type (TIMESTAMPTZ maps to TIMESTAMP).
+        # CAST('2020-01-01 00:00:00+00:00' AS TIMESTAMP) is rejected with SQL0180N because
+        # Db2's TIMESTAMP literal format does not accept a UTC offset suffix.
+        # Strip the timezone offset and downcast to plain TIMESTAMP, same approach as Clickhouse.
+        time_column = re.match(r"^(.*?)\+", time_column).group(1)
+        time_column_type = exp.DataType.build("TIMESTAMP")
 
     time_column = to_time_column(time_column, time_column_type, ctx.dialect, time_column_format)
     df = ctx.engine_adapter.fetchdf(exp.select(time_column).as_("the_col"))
