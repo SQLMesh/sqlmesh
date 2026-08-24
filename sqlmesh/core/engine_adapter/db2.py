@@ -9,7 +9,10 @@ from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core.engine_adapter.base import EngineAdapter, _get_data_object_cache_key
-from sqlmesh.core.engine_adapter.mixins import PandasNativeFetchDFSupportMixin
+from sqlmesh.core.engine_adapter.mixins import (
+    GrantsFromInfoSchemaMixin,
+    PandasNativeFetchDFSupportMixin,
+)
 from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
     CommentCreationTable,
@@ -43,6 +46,7 @@ def is_db2_error(exception: Exception, error_code: str) -> bool:
 
 @set_catalog()
 class Db2EngineAdapter(
+    GrantsFromInfoSchemaMixin,
     PandasNativeFetchDFSupportMixin,
     EngineAdapter,
 ):
@@ -50,6 +54,8 @@ class Db2EngineAdapter(
     SUPPORTS_INDEXES = True
     SUPPORTS_REPLACE_TABLE = False
     SUPPORTS_GRANTS = True
+    # Db2 uses CURRENT USER special register to identify the grantor.
+    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.column("CURRENT USER")
     COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
@@ -323,6 +329,11 @@ class Db2EngineAdapter(
         }
         sqlglot_type = type_mapping.get(db2_type, f"VARCHAR({length})")
         return exp.DataType.build(sqlglot_type, dialect="db2")
+
+    @staticmethod
+    def _grant_object_kind(table_type: DataObjectType) -> t.Optional[str]:
+        """Db2 GRANT/REVOKE requires TABLE keyword for tables and views."""
+        return "TABLE"
 
     @property
     def catalog_support(self) -> CatalogSupport:

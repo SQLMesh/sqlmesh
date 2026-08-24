@@ -818,6 +818,10 @@ class TestContext:
             project_id = self.engine_adapter.get_current_catalog()
             service_account = f"sqlmesh-test-{role_name}@{project_id}.iam.gserviceaccount.com"
             return f"serviceAccount:{service_account}", None
+        if self.dialect == "db2":
+            # Db2 LUW uses OS-level users for authentication, but database roles
+            # work for GRANT/REVOKE testing without requiring OS user setup.
+            return username, f"CREATE ROLE {username}"
         raise ValueError(f"User creation not supported for dialect: {self.dialect}")
 
     def _create_user_or_role(self, username: str, password: t.Optional[str] = None) -> str:
@@ -883,7 +887,7 @@ class TestContext:
                 """)
                 self.engine_adapter.execute(f'DROP OWNED BY "{user_name}"')
                 self.engine_adapter.execute(f'DROP USER IF EXISTS "{user_name}"')
-            elif self.dialect == "snowflake":
+            elif self.dialect in ["snowflake", "db2"]:
                 self.engine_adapter.execute(f"DROP ROLE IF EXISTS {user_name}")
             elif self.dialect in ["databricks", "bigquery"]:
                 # For Databricks and BigQuery, we use pre-created accounts that should not be deleted
