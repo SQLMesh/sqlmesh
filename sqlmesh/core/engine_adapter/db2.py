@@ -85,11 +85,13 @@ class Db2EngineAdapter(
     def get_current_catalog(self) -> t.Optional[str]:
         """
         Db2 requires FROM SYSIBM.SYSDUMMY1 to read the CURRENT SERVER special register.
-        Returns uppercase to match the Db2 dialect's identifier normalisation.
+        Returns lowercase — the same convention as _get_current_schema() — so that all
+        catalog/schema tokens returned to callers are consistently lowercase.
+        SYSCAT queries apply UPPER() at point of use where uppercase is required.
         """
         result = self.fetchone("SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1")
         if result:
-            return result[0].upper() if result[0] else None
+            return result[0].lower() if result[0] else None
         return None
 
     def _build_schema_exp(

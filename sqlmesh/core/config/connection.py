@@ -2650,10 +2650,14 @@ class Db2ConnectionConfig(ConnectionConfig):
         )
 
     def get_catalog(self) -> t.Optional[str]:
-        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
-        passed to the adapter matches what get_current_catalog() returns at runtime."""
+        """Normalise the catalog name to lowercase so _default_catalog is consistent
+        with get_current_catalog() and _get_current_schema(), both of which return
+        lowercase.  SQLMesh model names built through a duckdb-dialect context arrive
+        as lowercase (DuckDB's LOWERCASE normalisation strategy), and the set_catalog()
+        decorator compares catalog_name == _default_catalog with plain ==, so both sides
+        must use the same case.  SYSCAT queries apply UPPER() at point of use."""
         catalog = super().get_catalog()
-        return catalog.upper() if catalog else None
+        return catalog.lower() if catalog else None
 
     @property
     def _connection_factory(self) -> t.Callable:
