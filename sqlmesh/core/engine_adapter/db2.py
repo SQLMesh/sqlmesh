@@ -789,6 +789,27 @@ class Db2EngineAdapter(
         """
         if isinstance(query, exp.Expression):
             query = query.copy()
+            # The db2_sqlglot generator injects FROM SYSIBM.SYSDUMMY1 via a
+            # preprocessor registered on exp.Select.  When the caller passes
+            # Alias(Select, alias=name) — e.g. exp.select(expr).as_("col") —
+            # the generator renders the inner Select (adding FROM SYSDUMMY1)
+            # and then appends AS name after the fully-rendered SQL, producing:
+            #   SELECT ... FROM SYSIBM.SYSDUMMY1 AS name   ← broken
+            # instead of:
+            #   SELECT ... AS name FROM SYSIBM.SYSDUMMY1   ← correct
+            # This is a db2_sqlglot dialect bug (the Alias wrapper is not
+            # SELECT-aware).  Work around it: when the top-level node is
+            # Alias(Select), move the alias onto the first selected expression
+            # so the generator only ever sees a bare Select node.
+            if isinstance(query, exp.Alias) and isinstance(query.this, exp.Select):
+                inner = query.this
+                alias_name = query.alias
+                inner.set(
+                    "expressions",
+                    [exp.Alias(this=inner.expressions[0], alias=exp.to_identifier(alias_name))]
+                    + inner.expressions[1:],
+                )
+                query = inner
             normalize_identifiers(query, dialect=self.dialect)
         return super()._fetch_native_df(query, quote_identifiers=True)
 

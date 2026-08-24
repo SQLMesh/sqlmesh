@@ -2726,7 +2726,8 @@ def test_to_time_column(
     time_column = to_time_column(time_column, time_column_type, ctx.dialect, time_column_format)
     df = ctx.engine_adapter.fetchdf(exp.select(time_column).as_("the_col"))
     expected = result.get(ctx.dialect, result.get("default"))
-    col_name = "THE_COL" if ctx.dialect == "snowflake" else "the_col"
+    # Db2 (UPPERCASE strategy) returns column names in uppercase, same as Snowflake
+    col_name = "THE_COL" if ctx.dialect in ("snowflake", "db2") else "the_col"
     if expected is pd.NaT or expected is None:
         assert df[col_name][0] is expected
     else:
