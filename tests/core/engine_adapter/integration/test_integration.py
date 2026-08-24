@@ -2465,6 +2465,13 @@ def test_init_project(ctx: TestContext, tmp_path: pathlib.Path):
             k: [_normalize_snowflake(name) for name in v] for k, v in object_names.items()
         }
 
+    # Db2 normalizes unquoted identifiers to uppercase. View names returned from
+    # the catalog are therefore uppercase. Only the views list needs adjusting —
+    # the schema entries in object_names are used as lookup keys passed to
+    # get_metadata_results or _schemas cleanup, not compared against DB values.
+    if ctx.dialect == "db2":
+        object_names["views"] = [v.upper() for v in object_names["views"]]
+
     init_example_project(tmp_path, ctx.engine_type, schema_name=schema_name)
 
     def _mutate_config(gateway: str, config: Config):
