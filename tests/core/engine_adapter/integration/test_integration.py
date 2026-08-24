@@ -2636,7 +2636,10 @@ def test_dialects(ctx: TestContext):
     """
     )
     df = ctx.engine_adapter.fetchdf(q)
-    expected_columns = ["W", "X", "Y", "Z"] if ctx.dialect == "snowflake" else ["w", "x", "y", "z"]
+    # Db2 (UPPERCASE strategy) returns uppercase column names regardless of alias case
+    expected_columns = (
+        ["W", "X", "Y", "Z"] if ctx.dialect in ("snowflake", "db2") else ["w", "x", "y", "z"]
+    )
     pd.testing.assert_frame_equal(
         df, pd.DataFrame([[1, 1, 1, 1]], columns=expected_columns), check_dtype=False
     )

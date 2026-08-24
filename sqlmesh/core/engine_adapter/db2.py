@@ -6,6 +6,7 @@ import typing as t
 from functools import cached_property
 
 from sqlglot import exp
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core.engine_adapter.base import EngineAdapter, _get_data_object_cache_key
 from sqlmesh.core.engine_adapter.mixins import PandasNativeFetchDFSupportMixin
@@ -776,9 +777,19 @@ class Db2EngineAdapter(
 
         Forcing quote_identifiers=True here ensures every SELECT issued by
         SQLMesh (evaluator, fetchdf, fetchall via execute) wraps identifiers in
-        double-quotes so Db2 matches them exactly as stored.  This mirrors the
-        same pattern used by Snowflake, BigQuery, and Athena.
+        double-quotes so Db2 matches them exactly as stored.
+
+        normalize_identifiers is applied first so that unquoted identifiers are
+        uppercased before quoting (e.g. unquoted `c` → `C` → `"C"`).  Quoted
+        identifiers (e.g. `"a"`, `"B"`) are intentionally left unchanged by
+        normalize_identifiers — they remain case-sensitive as the caller intended.
+        This prevents the mismatch where a CTE alias defined as unquoted `c` would
+        otherwise be emitted as `"c"` (lowercase) while a SELECT reference derived
+        from Db2's UPPERCASE normalisation strategy uses `"C"` (SQL0204N).
         """
+        if isinstance(query, exp.Expression):
+            query = query.copy()
+            normalize_identifiers(query, dialect=self.dialect)
         return super()._fetch_native_df(query, quote_identifiers=True)
 
     def _df_to_source_queries(
