@@ -2650,15 +2650,8 @@ class Db2ConnectionConfig(ConnectionConfig):
         )
 
     def get_catalog(self) -> t.Optional[str]:
-        """
-        Return the catalog (database) name uppercased.  Db2 stores all unquoted
-        identifiers in uppercase and CURRENT SERVER returns an uppercase string.
-        get_current_catalog() also returns uppercase, so _default_catalog and the
-        live catalog value are always in the same case.  The set_catalog() decorator's
-        REQUIRES_SET_CATALOG path compares catalog_name != get_current_catalog(); a
-        case mismatch (e.g. duckdb-dialect lowercase "testdb" vs "TESTDB") triggers
-        set_current_catalog() which is a no-op — so both cases are handled safely.
-        """
+        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
+        passed to the adapter matches what get_current_catalog() returns at runtime."""
         catalog = super().get_catalog()
         return catalog.upper() if catalog else None
 
