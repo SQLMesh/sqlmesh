@@ -85,13 +85,16 @@ class Db2EngineAdapter(
     def get_current_catalog(self) -> t.Optional[str]:
         """
         Db2 requires FROM SYSIBM.SYSDUMMY1 to read the CURRENT SERVER special register.
-        Returns lowercase — the same convention as _get_current_schema() — so that all
-        catalog/schema tokens returned to callers are consistently lowercase.
-        SYSCAT queries apply UPPER() at point of use where uppercase is required.
+        Returns the value uppercased to match the convention used by _default_catalog
+        (which comes from get_catalog() → database name as supplied in config, uppercased).
+        The set_catalog() decorator's REQUIRES_SET_CATALOG path compares
+        catalog_name != get_current_catalog() — normalising both to uppercase ensures
+        the comparison is consistent regardless of which dialect (db2 UPPERCASE vs
+        duckdb LOWERCASE) produced the catalog token in the model expression.
         """
         result = self.fetchone("SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1")
         if result:
-            return result[0].lower() if result[0] else None
+            return result[0].upper() if result[0] else None
         return None
 
     def _build_schema_exp(
@@ -328,7 +331,19 @@ class Db2EngineAdapter(
 
     @property
     def catalog_support(self) -> CatalogSupport:
-        return CatalogSupport.SINGLE_CATALOG_ONLY
+        # REQUIRES_SET_CATALOG is used instead of SINGLE_CATALOG_ONLY because the
+        # SINGLE_CATALOG_ONLY path in set_catalog() (shared.py:346) does a raw ==
+        # comparison between catalog_name and _default_catalog.  catalog_name comes
+        # from the model expression, whose case depends on the dialect that built it:
+        # db2 dialect → UPPERCASE, duckdb dialect → lowercase.  Either case can appear
+        # at runtime and we cannot control which, so a raw == would fail for one case.
+        #
+        # The REQUIRES_SET_CATALOG path instead calls get_current_catalog() for the
+        # right-hand side.  By returning uppercase from both get_catalog() (connection.py)
+        # and get_current_catalog(), and by making set_current_catalog() a no-op (Db2 has
+        # only one catalog — CONNECT TO cannot change it meaningfully), the mismatch is
+        # tolerated: lowercase "testdb" != "TESTDB" → set_current_catalog (no-op) → proceed.
+        return CatalogSupport.REQUIRES_SET_CATALOG
 
     def table_exists(self, table_name: TableName) -> bool:
         """
@@ -836,9 +851,18 @@ class Db2EngineAdapter(
         )
 
     def set_current_catalog(self, catalog: str) -> None:
-        """Switches the active catalog using Db2's CONNECT TO statement."""
-        self.execute(f"CONNECT TO {catalog}")
-        logger.debug("Switched to catalog: %s", catalog)
+        """
+        No-op for Db2 — there is only one catalog (the database name) and CONNECT TO
+        cannot switch to a different one in the middle of a session.  The set_catalog()
+        decorator calls this when catalog_name != get_current_catalog(), which happens
+        because model expressions built through a duckdb-dialect context carry lowercase
+        catalog names while get_current_catalog() returns uppercase.  The mismatch is
+        case-only and harmless, so we log it and return without executing any SQL.
+        """
+        logger.debug(
+            "set_current_catalog called with %r — no-op for Db2 (single-catalog engine)",
+            catalog,
+        )
 
     @cached_property
     def server_version(self) -> t.Tuple[int, int]:
