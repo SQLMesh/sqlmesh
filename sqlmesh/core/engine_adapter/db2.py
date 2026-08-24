@@ -357,12 +357,8 @@ class Db2EngineAdapter(
             .from_("SYSCAT.TABAUTH")
             .where(
                 exp.and_(
-                    exp.func("UPPER", exp.column("TABSCHEMA")).eq(
-                        exp.Literal.string(schema_name)
-                    ),
-                    exp.func("UPPER", exp.column("TABNAME")).eq(
-                        exp.Literal.string(table_name)
-                    ),
+                    exp.func("UPPER", exp.column("TABSCHEMA")).eq(exp.Literal.string(schema_name)),
+                    exp.func("UPPER", exp.column("TABNAME")).eq(exp.Literal.string(table_name)),
                     exp.column("GRANTOR").eq(
                         exp.func("UPPER", self.CURRENT_USER_OR_ROLE_EXPRESSION)
                     ),
