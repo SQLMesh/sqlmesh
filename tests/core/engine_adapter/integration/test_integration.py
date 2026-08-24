@@ -2531,9 +2531,13 @@ def test_init_project(ctx: TestContext, tmp_path: pathlib.Path):
 
     if ctx.engine_adapter.SUPPORTS_QUERY_EXECUTION_TRACKING:
         assert actual_execution_stats["incremental_model"].total_rows_processed == 7
-        # snowflake and redshift don't track rows for CTAS
+        # snowflake, redshift, and db2 don't track rows for CTAS (ibm_db_dbi returns -1 rowcount for DDL)
         assert actual_execution_stats["full_model"].total_rows_processed == (
-            None if ctx.mark.startswith("snowflake") or ctx.mark.startswith("redshift") else 3
+            None
+            if ctx.mark.startswith("snowflake")
+            or ctx.mark.startswith("redshift")
+            or ctx.mark.startswith("db2")
+            else 3
         )
         assert actual_execution_stats["seed_model"].total_rows_processed == (
             None if ctx.mark.startswith("snowflake") else 7
