@@ -9,10 +9,7 @@ from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core.engine_adapter.base import EngineAdapter, _get_data_object_cache_key
-from sqlmesh.core.engine_adapter.mixins import (
-    GrantsFromInfoSchemaMixin,
-    PandasNativeFetchDFSupportMixin,
-)
+from sqlmesh.core.engine_adapter.mixins import PandasNativeFetchDFSupportMixin
 from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
     CommentCreationTable,
@@ -46,7 +43,6 @@ def is_db2_error(exception: Exception, error_code: str) -> bool:
 
 @set_catalog()
 class Db2EngineAdapter(
-    GrantsFromInfoSchemaMixin,
     PandasNativeFetchDFSupportMixin,
     EngineAdapter,
 ):
@@ -54,8 +50,6 @@ class Db2EngineAdapter(
     SUPPORTS_INDEXES = True
     SUPPORTS_REPLACE_TABLE = False
     SUPPORTS_GRANTS = True
-    # Db2 uses CURRENT USER special register to identify the grantor.
-    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.column("CURRENT USER")
     COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
@@ -330,10 +324,110 @@ class Db2EngineAdapter(
         sqlglot_type = type_mapping.get(db2_type, f"VARCHAR({length})")
         return exp.DataType.build(sqlglot_type, dialect="db2")
 
-    @staticmethod
-    def _grant_object_kind(table_type: DataObjectType) -> t.Optional[str]:
-        """Db2 GRANT/REVOKE requires TABLE keyword for tables and views."""
-        return "TABLE"
+    def _get_current_grants_config(self, table: exp.Table) -> t.Dict[str, t.List[str]]:
+        """
+        Db2 does not have INFORMATION_SCHEMA.TABLE_PRIVILEGES.
+        Query SYSCAT.TABAUTH which stores per-privilege columns (SELECTAUTH, INSERTAUTH,
+        etc.) with values 'Y' (granted) or 'G' (granted with grant option).
+        Filter by GRANTOR = CURRENT USER to return only grants made by the connected user.
+        """
+        schema_name = (table.args.get("db") or self._get_current_schema()).upper()  # type: ignore
+        table_name = table.name.upper()
+
+        rows = self.fetchall(
+            exp.select(
+                exp.column("GRANTEE"),
+                exp.column("SELECTAUTH"),
+                exp.column("INSERTAUTH"),
+                exp.column("UPDATEAUTH"),
+                exp.column("DELETEAUTH"),
+                exp.column("ALTERAUTH"),
+                exp.column("INDEXAUTH"),
+                exp.column("CONTROLAUTH"),
+            )
+            .from_("SYSCAT.TABAUTH")
+            .where(
+                exp.and_(
+                    exp.func("UPPER", exp.column("TABSCHEMA")).eq(
+                        exp.Literal.string(schema_name)
+                    ),
+                    exp.func("UPPER", exp.column("TABNAME")).eq(
+                        exp.Literal.string(table_name)
+                    ),
+                    exp.column("GRANTOR").eq(
+                        exp.func("UPPER", exp.Anonymous(this="CURRENT USER", expressions=[]))
+                    ),
+                    exp.column("GRANTEE").neq(
+                        exp.func("UPPER", exp.Anonymous(this="CURRENT USER", expressions=[]))
+                    ),
+                )
+            )
+        )
+
+        # SYSCAT column name → SQL privilege name
+        col_to_priv = {
+            "SELECTAUTH": "SELECT",
+            "INSERTAUTH": "INSERT",
+            "UPDATEAUTH": "UPDATE",
+            "DELETEAUTH": "DELETE",
+            "ALTERAUTH": "ALTER",
+            "INDEXAUTH": "INDEX",
+            "CONTROLAUTH": "CONTROL",
+        }
+        grants: t.Dict[str, t.List[str]] = {}
+        for row in rows:
+            grantee = str(row[0]).strip()
+            for i, (_, priv) in enumerate(col_to_priv.items(), start=1):
+                val = str(row[i]).strip() if row[i] is not None else "N"
+                if val in ("Y", "G"):
+                    grants.setdefault(priv, [])
+                    if grantee not in grants[priv]:
+                        grants[priv].append(grantee)
+        return grants
+
+    def _apply_grants_config_expr(
+        self,
+        table: exp.Table,
+        grants_config: t.Dict[str, t.List[str]],
+        table_type: DataObjectType = DataObjectType.TABLE,
+    ) -> t.List[exp.Expr]:
+        """Generate GRANT statements for Db2."""
+        exprs: t.List[exp.Expr] = []
+        for privilege, principals in grants_config.items():
+            for principal in principals:
+                exprs.append(
+                    exp.Grant(
+                        privileges=[exp.GrantPrivilege(this=exp.Var(this=privilege))],
+                        kind=exp.Var(this="TABLE"),
+                        securable=table.copy(),
+                        principals=[
+                            exp.GrantPrincipal(this=exp.Var(this=principal))
+                        ],
+                    )
+                )
+        return exprs
+
+    def _revoke_grants_config_expr(
+        self,
+        table: exp.Table,
+        grants_config: t.Dict[str, t.List[str]],
+        table_type: DataObjectType = DataObjectType.TABLE,
+    ) -> t.List[exp.Expr]:
+        """Generate REVOKE statements for Db2."""
+        exprs: t.List[exp.Expr] = []
+        for privilege, principals in grants_config.items():
+            for principal in principals:
+                exprs.append(
+                    exp.Revoke(
+                        privileges=[exp.GrantPrivilege(this=exp.Var(this=privilege))],
+                        kind=exp.Var(this="TABLE"),
+                        securable=table.copy(),
+                        principals=[
+                            exp.GrantPrincipal(this=exp.Var(this=principal))
+                        ],
+                    )
+                )
+        return exprs
 
     @property
     def catalog_support(self) -> CatalogSupport:
