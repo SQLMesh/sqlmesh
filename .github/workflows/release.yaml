@@ -9,7 +9,7 @@ jobs:
   ui-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -21,7 +21,7 @@ jobs:
       - name: Build UI
         run: pnpm --prefix web/client run build
       - name: Upload UI build artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ui-dist
           path: web/client/dist/
@@ -31,9 +31,9 @@ jobs:
     needs: ui-build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Download UI build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ui-dist
           path: web/client/dist/
@@ -61,7 +61,7 @@ jobs:
   gh-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Create release on GitHub
