@@ -1026,6 +1026,49 @@ def test_column_descriptions_quoted_identifier():
     assert set(model.column_descriptions) <= set(model.columns_to_types)
 
 
+def test_column_descriptions_dotted_identifier():
+    # A nested field is looked up by its dotted path, so every part normalizes on its own.
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect bigquery,
+            column_descriptions (
+                record.`myField` = 'a nested field'
+            )
+        );
+
+        SELECT STRUCT(1 AS `myField`) AS record
+    """
+    )
+    model = load_sql_based_model(expressions, dialect="bigquery")
+
+    assert model.column_descriptions == {"record.myfield": "a nested field"}
+
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect snowflake,
+            column_descriptions (
+                nested.field = 'an unquoted path',
+                "MyStruct"."myField" = 'a quoted path'
+            )
+        );
+
+        SELECT 1 AS c
+    """
+    )
+    model = load_sql_based_model(expressions, dialect="snowflake")
+
+    assert model.column_descriptions == {
+        "NESTED.FIELD": "an unquoted path",
+        "MyStruct.myField": "a quoted path",
+    }
+
+
 def test_model_jinja_macro_reference_extraction():
     @macro()
     def test_macro(**kwargs) -> None:
