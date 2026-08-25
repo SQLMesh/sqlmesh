@@ -133,9 +133,16 @@ class DbtLoader(Loader):
         self._profiles_dir = profiles_dir
         super().__init__(context, path)
 
-    def load(self) -> LoadedProject:
+    def load(
+        self,
+        model_fqns: t.Optional[t.Set[str]] = None,
+        use_project_index: bool = False,
+    ) -> LoadedProject:
         self._projects = []
-        return super().load()
+        return super().load(
+            model_fqns=model_fqns,
+            use_project_index=use_project_index,
+        )
 
     def _load_scripts(self) -> t.Tuple[MacroRegistry, JinjaMacroRegistry]:
         macro_files = list(Path(self.config_path, "macros").glob("**/*.sql"))
@@ -156,7 +163,9 @@ class DbtLoader(Loader):
         gateway: t.Optional[str],
         audits: UniqueKeyDict[str, ModelAudit],
         signals: UniqueKeyDict[str, signal],
-    ) -> UniqueKeyDict[str, Model]:
+        model_fqns: t.Optional[t.Set[str]] = None,
+        use_project_index: bool = False,
+    ) -> t.Tuple[UniqueKeyDict[str, Model], t.Optional[t.Set[str]]]:
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
 
         def _to_sqlmesh(config: BMC, context: DbtContext) -> Model:
@@ -200,7 +209,7 @@ class DbtLoader(Loader):
 
             models.update(self._load_external_models(audits, cache))
 
-        return models
+        return models, None
 
     def _load_audits(
         self, macros: MacroRegistry, jinja_macros: JinjaMacroRegistry

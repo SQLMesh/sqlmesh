@@ -650,6 +650,9 @@ Usage: sqlmesh lint [OPTIONS]
 
 Options:
   --model TEXT           A model to lint. Multiple models can be linted.  If no models are specified, every model will be linted.
+  --use-project-index    Use the persistent project index. With --model, only the selected models and their upstream dependencies
+                         are loaded, resolved, and validated, so errors in unrelated models are not reported. Without --model,
+                         every model is still loaded and linted.
   --local                Lint using only locally loaded project files without loading state. In multi-repository setups, or when
                          linting only a subset of projects, this may cause additional linting errors because SQLMesh will not resolve
                          references or schemas from models that exist only in remote state.

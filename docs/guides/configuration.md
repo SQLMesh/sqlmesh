@@ -329,6 +329,16 @@ By default, the SQLMesh cache is stored in a `.cache` directory within your proj
 
 The cache directory is automatically created if it doesn't exist. You can clear the cache using the `sqlmesh clean` command.
 
+#### Project index
+
+The `--use-project-index` option on supported commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`.
+
+A full project load with the option enabled creates or refreshes the index. SQLMesh invalidates it when relevant configuration, gateway, macro, audit, or signal metadata changes, or when the set of model files changes. If the index is missing, invalid, or stale, SQLMesh safely falls back to a full project load and rebuilds it.
+
+For operations targeting selected models, the index allows SQLMesh to load only those models and their upstream dependencies.
+
+In multi-repository projects, dependencies that cross project boundaries may not be represented by an individual project's index. SQLMesh detects incomplete scoped loads and falls back to loading the full configured project set.
+
 ### Table/view storage locations
 
 SQLMesh creates schemas, physical tables, and views in the data warehouse/engine. Learn more about why and how SQLMesh creates schema in the ["Why does SQLMesh create schemas?" FAQ](../faq/faq.md#schema-question).
