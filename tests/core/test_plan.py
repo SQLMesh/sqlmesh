@@ -2026,6 +2026,7 @@ def test_added_forward_only_model(make_snapshot, mocker: MockerFixture):
     assert snapshot_b.change_category == SnapshotChangeCategory.BREAKING
 
 
+@time_machine.travel("2026-08-22 15:00:00 UTC")
 def test_disable_restatement(make_snapshot, mocker: MockerFixture):
     snapshot = make_snapshot(
         SqlModel(
