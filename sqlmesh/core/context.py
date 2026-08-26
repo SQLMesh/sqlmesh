@@ -418,6 +418,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
         self._load_state: bool = load_state
+        self._uncached_model_names: t.Set[str] = set()
         self._selector_cls = selector or NativeSelector
 
         self.path, self.config = t.cast(t.Tuple[Path, C], next(iter(self.configs.items())))
@@ -641,11 +642,31 @@ class GenericContext(BaseContext, t.Generic[C]):
         if any(loader.reload_needed() for loader in self._loaders):
             self.load()
 
-    def load(self, update_schemas: bool = True) -> GenericContext[C]:
-        """Load all files in the context's path."""
+    def load(
+        self,
+        update_schemas: bool = True,
+        model_fqns: t.Optional[t.Set[str]] = None,
+        use_project_index: bool = False,
+    ) -> GenericContext[C]:
+        """Load files in the context's path, optionally scoped to specific models.
+
+        Args:
+            update_schemas: Whether to update model schemas and validate model definitions.
+            model_fqns: If provided with ``use_project_index=True``, only the selected models
+                and their transitive upstream dependencies are loaded.
+            use_project_index: Whether to use and maintain the persistent project model index.
+                When ``model_fqns`` is not provided, all models are loaded and the index is
+                refreshed for future scoped loads.
+        """
         load_start_ts = time.perf_counter()
 
-        loaded_projects = [loader.load() for loader in self._loaders]
+        loaded_projects = [
+            loader.load(
+                model_fqns=model_fqns,
+                use_project_index=use_project_index,
+            )
+            for loader in self._loaders
+        ]
 
         self.dag = DAG()
         self._standalone_audits.clear()
@@ -688,6 +709,27 @@ class GenericContext(BaseContext, t.Generic[C]):
                 BUILTIN_RULES.union(project.user_rules), config.linter
             )
 
+        indexed_model_fqns = {
+            fqn for project in loaded_projects for fqn in (project.indexed_model_fqns or set())
+        }
+        if model_fqns and (
+            not model_fqns <= self._models.keys()
+            or any(
+                dependency in indexed_model_fqns and dependency not in self._models
+                for model in self._models.values()
+                for dependency in model.depends_on
+            )
+        ):
+            # A missing or stale index, a new model, or a dependency crossing project
+            # boundaries requires a full load to preserve existing behavior.
+            self.load(
+                update_schemas=False,
+                use_project_index=use_project_index,
+            )
+            if update_schemas:
+                self._update_model_schemas_and_validate(model_fqns)
+            return self
+
         # Load environment statements from state for projects not in current load
         if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
@@ -713,34 +755,13 @@ class GenericContext(BaseContext, t.Generic[C]):
                         else:
                             local_store[snapshot.name] = snapshot.node  # type: ignore
 
+        self._uncached_model_names = uncached
+
         for model in self._models.values():
             self.dag.add(model.fqn, model.depends_on)
 
         if update_schemas:
-            for fqn in self.dag:
-                model = self._models.get(fqn)  # type: ignore
-
-                if not model or fqn in uncached:
-                    continue
-
-                # make a copy of remote models that depend on local models or in the downstream chain
-                # without this, a SELECT * FROM local will not propogate properly because the downstream
-                # model will get mutated (schema changes) but the object is the same as the remote cache
-                if any(dep in uncached for dep in model.depends_on):
-                    uncached.add(fqn)
-                    self._models.update({fqn: model.copy(update={"mapping_schema": {}})})
-                    continue
-
-            update_model_schemas(
-                self.dag,
-                models=self._models,
-                cache_dir=self.cache_dir,
-            )
-
-            models = self.models.values()
-            for model in models:
-                # The model definition can be validated correctly only after the schema is set.
-                model.validate_definition()
+            self._update_model_schemas_and_validate(model_fqns or None)
 
         duplicates = set(self._models) & set(self._standalone_audits)
         if duplicates:
@@ -766,6 +787,53 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         self._loaded = True
         return self
+
+    def _update_model_schemas_and_validate(self, model_fqns: t.Optional[t.Set[str]] = None) -> None:
+        """Updates the mapping schemas of the given models (all models by default) and validates their definitions.
+
+        Args:
+            model_fqns: If provided, only these models and their transitive upstream
+                dependencies are processed.
+        """
+        if model_fqns is not None:
+            model_fqns = {
+                fqn for target in model_fqns for fqn in (target, *self.dag.upstream(target))
+            }
+
+        uncached = set(self._uncached_model_names)
+
+        for fqn in self.dag:
+            if model_fqns is not None and fqn not in model_fqns:
+                continue
+
+            model = self._models.get(fqn)
+
+            if not model or fqn in uncached:
+                continue
+
+            # make a copy of remote models that depend on local models or in the downstream chain
+            # without this, a SELECT * FROM local will not propogate properly because the downstream
+            # model will get mutated (schema changes) but the object is the same as the remote cache
+            if any(dep in uncached for dep in model.depends_on):
+                uncached.add(fqn)
+                self._models.update({fqn: model.copy(update={"mapping_schema": {}})})
+                continue
+
+        models = self._models
+        if model_fqns is not None:
+            models = UniqueKeyDict(
+                "models", {fqn: model for fqn, model in self._models.items() if fqn in model_fqns}
+            )
+
+        update_model_schemas(
+            self.dag,
+            models=models,
+            cache_dir=self.cache_dir,
+        )
+
+        for model in models.values():
+            # The model definition can be validated correctly only after the schema is set.
+            model.validate_definition()
 
     @python_api_analytics
     def run(
@@ -3435,7 +3503,42 @@ class GenericContext(BaseContext, t.Generic[C]):
         self,
         models: t.Optional[t.Iterable[t.Union[str, Model]]] = None,
         raise_on_error: bool = True,
+        use_project_index: t.Optional[bool] = None,
     ) -> t.List[AnnotatedRuleViolation]:
+        """Lint the selected models.
+
+        Args:
+            models: Models to lint. If omitted, all loaded models are linted.
+            raise_on_error: Whether to raise when an error-level violation is found.
+            use_project_index: Whether to use the persistent project index. If omitted, the
+                value of ``linter.use_project_index`` is used. Indexed linting of selected
+                models reloads an already-loaded context so the requested scope is applied.
+        """
+        models = list(models) if models is not None else []
+        use_project_index = (
+            self.config.linter.use_project_index if use_project_index is None else use_project_index
+        )
+
+        target_fqns = (
+            {
+                normalize_model_name(
+                    model,
+                    default_catalog=self.default_catalog,
+                    dialect=self.default_dialect,
+                )
+                if isinstance(model, str)
+                else model.fqn
+                for model in models
+            }
+            if models and use_project_index
+            else None
+        )
+
+        # An already-loaded context does not otherwise enter the loading path. Reload when
+        # indexed linting is requested for specific models so the scope is actually applied.
+        if not self._loaded or target_fqns is not None:
+            self.load(model_fqns=target_fqns, use_project_index=use_project_index)
+
         found_error = False
 
         model_list = (
