@@ -637,6 +637,43 @@ def test_missing_intervals_start_override_per_model(make_snapshot: t.Callable[..
         (to_timestamp("2023-02-07"), to_timestamp("2023-02-08")),
     ]
 
+def test__missing_intervals__deployable_snapshot_prod_intervals_returned(snapshot: Snapshot):
+    # Arrange
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=False)
+    snapshot.add_interval(start="2020-01-02", end="2020-01-02", is_dev=False)
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=True)
+    
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    deployability_index = DeployabilityIndex.create([snapshot])
+
+    # Act
+    missing_intervals = snapshot.missing_intervals(start="2020-01-01", end="2020-01-03", deployability_index=deployability_index)
+
+    # Assert
+    assert deployability_index.is_deployable(snapshot)
+    assert missing_intervals == [
+        (to_timestamp("2020-01-03"), to_timestamp("2020-01-04")),
+    ]
+    
+def test__missing_intervals__non_deployable_snapshot_dev_intervals_returned(snapshot: Snapshot):
+    # Arrange
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=False)
+    snapshot.add_interval(start="2020-01-02", end="2020-01-02", is_dev=False)
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=True)
+    
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    deployability_index = DeployabilityIndex.create([snapshot])
+
+    # Act
+    missing_intervals = snapshot.missing_intervals(start="2020-01-01", end="2020-01-03", deployability_index=deployability_index)
+
+    # Assert
+    assert not deployability_index.is_deployable(snapshot)
+    assert missing_intervals == [
+        (to_timestamp("2020-01-02"), to_timestamp("2020-01-03")), # Not missing from prod intervals
+        (to_timestamp("2020-01-03"), to_timestamp("2020-01-04")),
+    ]
+
 
 def test_incremental_time_self_reference(make_snapshot):
     snapshot = make_snapshot(
@@ -3962,3 +3999,4 @@ def test_snapshot_id_and_version_optional_kind_name():
     assert snapshot.model_kind_name
     assert snapshot.is_incremental_unmanaged
     assert snapshot.full_history_restatement_only
+

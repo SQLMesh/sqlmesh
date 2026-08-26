@@ -307,7 +307,7 @@ def test_runtime_stages(capsys, mocker, adapter_mock, make_snapshot):
     )
 
 
-def test_promote(mocker: MockerFixture, adapter_mock, make_snapshot):
+def test_promote__deployable__non_dev_physical(mocker: MockerFixture, adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock)
 
     model = SqlModel(
@@ -319,8 +319,13 @@ def test_promote(mocker: MockerFixture, adapter_mock, make_snapshot):
 
     snapshot = make_snapshot(model)
     snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    deployability_index = DeployabilityIndex.create([snapshot])
 
-    evaluator.promote([snapshot], EnvironmentNamingInfo(name="test_env"))
+    evaluator.promote(
+        target_snapshots=[snapshot],
+        environment_naming_info=EnvironmentNamingInfo(name="test_env"),
+        deployability_index=deployability_index
+    )
 
     adapter_mock.transaction.assert_called()
     adapter_mock.session.assert_called()
@@ -335,6 +340,39 @@ def test_promote(mocker: MockerFixture, adapter_mock, make_snapshot):
         view_properties={},
     )
 
+
+def test_promote__non_deployable__dev_physical(mocker: MockerFixture, adapter_mock, make_snapshot):
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="a"),
+        storage_format="parquet",
+        query=parse_one("SELECT a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+    )
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    deployability_index = DeployabilityIndex.create([snapshot])
+
+    evaluator.promote(
+        target_snapshots=[snapshot],
+        environment_naming_info=EnvironmentNamingInfo(name="test_env"),
+        deployability_index=deployability_index
+    )
+
+    adapter_mock.transaction.assert_called()
+    adapter_mock.session.assert_called()
+    adapter_mock.create_schema.assert_called_once_with(to_schema("test_schema__test_env"))
+    adapter_mock.create_view.assert_called_once_with(
+        "test_schema__test_env.test_model",
+        parse_one(
+            f"SELECT * FROM sqlmesh__test_schema.test_schema__test_model__{snapshot.version}__dev"
+        ),
+        table_description=None,
+        column_descriptions=None,
+        view_properties={},
+    )
 
 def test_demote(mocker: MockerFixture, adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock)

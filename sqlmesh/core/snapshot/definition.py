@@ -1048,7 +1048,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         intervals = (
-            self.intervals if deployability_index.is_representative(self) else self.dev_intervals
+            self.intervals if deployability_index.is_deployable(self) else self.dev_intervals
         )
 
         if not self.evaluatable or (self.is_seed and intervals):
