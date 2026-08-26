@@ -307,7 +307,7 @@ def test_runtime_stages(capsys, mocker, adapter_mock, make_snapshot):
     )
 
 
-def test_promote__deployable__non_dev_physical(mocker: MockerFixture, adapter_mock, make_snapshot):
+def test_promote__deployable__prod_physical(mocker: MockerFixture, adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock)
 
     model = SqlModel(
@@ -324,7 +324,7 @@ def test_promote__deployable__non_dev_physical(mocker: MockerFixture, adapter_mo
     evaluator.promote(
         target_snapshots=[snapshot],
         environment_naming_info=EnvironmentNamingInfo(name="test_env"),
-        deployability_index=deployability_index
+        deployability_index=deployability_index,
     )
 
     adapter_mock.transaction.assert_called()
@@ -358,7 +358,7 @@ def test_promote__non_deployable__dev_physical(mocker: MockerFixture, adapter_mo
     evaluator.promote(
         target_snapshots=[snapshot],
         environment_naming_info=EnvironmentNamingInfo(name="test_env"),
-        deployability_index=deployability_index
+        deployability_index=deployability_index,
     )
 
     adapter_mock.transaction.assert_called()
@@ -373,6 +373,7 @@ def test_promote__non_deployable__dev_physical(mocker: MockerFixture, adapter_mo
         column_descriptions=None,
         view_properties={},
     )
+
 
 def test_demote(mocker: MockerFixture, adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock)
