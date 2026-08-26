@@ -1,4 +1,5 @@
 import typing as t
+import uuid
 from contextlib import contextmanager
 import pytest
 from pytest import FixtureRequest
@@ -53,13 +54,14 @@ def create_users(
             _cleanup_user(engine_adapter, user_name)
 
         for role_name in role_names:
-            user_name = f"test_{role_name}"
+            random_suffix = uuid.uuid4().hex[:6]
+            user_name = f"test_{role_name}_{random_suffix}"
             password = random_id()
             engine_adapter.execute(f"CREATE USER \"{user_name}\" WITH PASSWORD '{password}'")
             engine_adapter.execute(f'GRANT USAGE ON SCHEMA public TO "{user_name}"')
             created_users.append(user_name)
             roles[role_name] = {"username": user_name, "password": password}
-
+            
         yield roles
 
     finally:
