@@ -287,7 +287,8 @@ Need help?
 @click.option(
     "--use-project-index",
     is_flag=True,
-    help="Use the persistent project index to load and render only the target model and its upstream dependencies.",
+    default=None,
+    help="Use the persistent project index to load and render only the target model and its upstream dependencies. Can also be enabled with render.use_project_index.",
 )
 @opt.format_options
 @click.pass_context
@@ -302,7 +303,7 @@ def render(
     expand: t.Optional[t.Union[bool, t.Iterable[str]]] = None,
     dialect: t.Optional[str] = None,
     no_format: bool = False,
-    use_project_index: bool = False,
+    use_project_index: t.Optional[bool] = None,
     **format_kwargs: t.Any,
 ) -> None:
     """Render a model's query, optionally expanding referenced models."""

@@ -1199,7 +1199,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         end: t.Optional[TimeLike] = None,
         execution_time: t.Optional[TimeLike] = None,
         expand: t.Union[bool, t.Iterable[str]] = False,
-        use_project_index: bool = False,
+        use_project_index: t.Optional[bool] = None,
         **kwargs: t.Any,
     ) -> exp.Expr:
         """Renders a model's query, expanding macros with provided kwargs, and optionally expanding referenced models.
@@ -1213,12 +1213,16 @@ class GenericContext(BaseContext, t.Generic[C]):
                 If True, all referenced models are expanded as raw queries.
                 If a list, only referenced models are expanded as raw queries.
             use_project_index: Whether to use the persistent project index to load and
-                render only the target model and its transitive upstream dependencies.
+                render only the target model and its transitive upstream dependencies. If
+                omitted, the value of ``render.use_project_index`` is used.
 
         Returns:
             The rendered expression.
         """
         execution_time = execution_time or now()
+        use_project_index = (
+            self.config.render.use_project_index if use_project_index is None else use_project_index
+        )
 
         if not self._loaded:
             target_fqns = (

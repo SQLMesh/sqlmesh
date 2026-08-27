@@ -90,6 +90,7 @@ The `config` sub-module API documentation describes the individual classes used 
     - [Connection configuration](https://sqlmesh.readthedocs.io/en/latest/_readthedocs/html/sqlmesh/core/config/connection.html) (separate classes for each supported database/engine)
     - [Scheduler configuration](https://sqlmesh.readthedocs.io/en/latest/_readthedocs/html/sqlmesh/core/config/scheduler.html) (separate classes for each supported scheduler)
 - [Plan change categorization configuration](https://sqlmesh.readthedocs.io/en/latest/_readthedocs/html/sqlmesh/core/config/categorizer.html#CategorizerConfig): `CategorizerConfig()`
+- [Render configuration](https://sqlmesh.readthedocs.io/en/latest/_readthedocs/html/sqlmesh/core/config/render.html): `RenderConfig()`
 - [User configuration](https://sqlmesh.readthedocs.io/en/latest/_readthedocs/html/sqlmesh/core/user.html#User): `User()`
 - [Notification configuration](https://sqlmesh.readthedocs.io/en/latest/_readthedocs/html/sqlmesh/core/notification_target.html) (separate classes for each notification target)
 
@@ -331,7 +332,7 @@ The cache directory is automatically created if it doesn't exist. You can clear 
 
 #### Project index
 
-The `--use-project-index` option on supported commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`.
+The `--use-project-index` option on the `lint` and `render` commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`. The option can be enabled by default for each command with `linter.use_project_index` or `render.use_project_index`, respectively.
 
 A full project load with the option enabled creates or refreshes the index. SQLMesh invalidates it when relevant configuration, gateway, macro, audit, or signal metadata changes, or when the set of model files changes. If the index is missing, invalid, or stale, SQLMesh safely falls back to a full project load and rebuilds it.
 
@@ -1502,6 +1503,35 @@ As demonstrated in these examples, the `schemas`  and `views` are available with
 SQLMesh provides a linter that checks for potential issues in your models' code. Enable it and specify which linting rules to apply in the configuration file's `linter` key.
 
 Learn more about linting configuration in the [linting guide](./linter.md).
+
+### Rendering
+
+By default, `sqlmesh render` loads every model in the project. In large projects, you can use the
+persistent project index to load only the model being rendered and its transitive upstream
+dependencies. Enable indexed rendering for an individual command with `--use-project-index`, or
+make it the project default with the `render.use_project_index` configuration option.
+
+=== "YAML"
+
+    ```yaml linenums="1"
+    render:
+      use_project_index: true
+    ```
+
+=== "Python"
+
+    ```python linenums="1"
+    from sqlmesh.core.config import Config, ModelDefaultsConfig, RenderConfig
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        render=RenderConfig(use_project_index=True),
+    )
+    ```
+
+`Context.render` uses the configured value when `use_project_index` is omitted. Passing
+`use_project_index=False` explicitly disables indexed rendering for that API call. See the
+[`render` CLI reference](../reference/cli.md#render) for the other rendering options.
 
 ### Debug mode
 

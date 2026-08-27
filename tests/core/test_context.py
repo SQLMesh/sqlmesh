@@ -30,6 +30,7 @@ from sqlmesh.core.config import (
     LinterConfig,
     ModelDefaultsConfig,
     PlanConfig,
+    RenderConfig,
     SnowflakeConnectionConfig,
 )
 from sqlmesh.core.context import Context
@@ -330,7 +331,10 @@ def test_render_only_loads_upstream_model_files(tmp_path: pathlib.Path) -> None:
         pathlib.Path("models", "c.sql"),
         "MODEL(name c, kind FULL); SELECT col FROM b;",
     )
-    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        render=RenderConfig(use_project_index=True),
+    )
 
     # Populate the persistent model path/dependency index.
     Context(config=config, paths=tmp_path, load=False).load(use_project_index=True)
@@ -342,7 +346,7 @@ def test_render_only_loads_upstream_model_files(tmp_path: pathlib.Path) -> None:
         "_load_sql_models",
         wraps=loader._load_sql_models,
     ) as load_sql_models_mock:
-        ctx.render("b", use_project_index=True)
+        ctx.render("b")
 
     selected_paths = load_sql_models_mock.call_args.kwargs["selected_paths"]
     assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
@@ -350,6 +354,18 @@ def test_render_only_loads_upstream_model_files(tmp_path: pathlib.Path) -> None:
         ctx.get_model("a", raise_if_missing=True).fqn,
         ctx.get_model("b", raise_if_missing=True).fqn,
     }
+
+    non_indexed_ctx = Context(config=config, paths=tmp_path, load=False)
+    non_indexed_loader = t.cast(SqlMeshLoader, non_indexed_ctx._loaders[0])
+    with patch.object(
+        non_indexed_loader,
+        "_load_sql_models",
+        wraps=non_indexed_loader._load_sql_models,
+    ) as load_sql_models_mock:
+        non_indexed_ctx.render("b", use_project_index=False)
+
+    assert load_sql_models_mock.call_args.kwargs["selected_paths"] is None
+    assert len(non_indexed_ctx.models) == 3
 
 
 @pytest.mark.slow
