@@ -3603,11 +3603,19 @@ def test_prompt_if_uncategorized_snapshot(mocker: MockerFixture, tmp_path: Path)
     assert context.config.plan.no_prompts == True
 
 
+def test_plan_skip_tests_and_test_changed_only(sushi_context: Context) -> None:
+    with pytest.raises(
+        PlanError,
+        match="Cannot combine --skip-tests with --test-changed-only.",
+    ):
+        sushi_context.plan("dev", skip_tests=True, test_changed_only=True, no_prompts=True)
+
+
 def test_plan_explain_skips_tests(sushi_context: Context, mocker: MockerFixture) -> None:
     sushi_context.console = TerminalConsole()
     spy = mocker.spy(sushi_context, "_run_plan_tests")
     sushi_context.plan(environment="dev", explain=True, no_prompts=True, include_unmodified=True)
-    spy.assert_called_once_with(skip_tests=True, all_tests=False, model_names=ANY)
+    spy.assert_called_once_with(skip_tests=True, test_changed_only=False, model_names=ANY)
 
 
 def test_dev_environment_virtual_update_with_environment_statements(tmp_path: Path) -> None:

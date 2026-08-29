@@ -1348,7 +1348,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         execution_time: t.Optional[TimeLike] = None,
         create_from: t.Optional[str] = None,
         skip_tests: t.Optional[bool] = None,
-        all_tests: t.Optional[bool] = None,
+        test_changed_only: t.Optional[bool] = None,
         restate_models: t.Optional[t.Iterable[str]] = None,
         no_gaps: t.Optional[bool] = None,
         skip_backfill: t.Optional[bool] = None,
@@ -1386,7 +1386,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             create_from: The environment to create the target environment from if it
                 doesn't exist. If not specified, the "prod" environment will be used.
             skip_tests: Unit tests are run by default so this will skip them if enabled
-            all_tests: Run every loaded unit test instead of only tests for models in the plan
+            test_changed_only: Run unit tests only for models included in the plan instead of all tests
             restate_models: A list of either internal or external models, or tags, that need to be restated
                 for the given plan interval. If the target environment is a production environment,
                 ALL snapshots that depended on these upstream tables will have their intervals deleted
@@ -1433,7 +1433,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             execution_time=execution_time,
             create_from=create_from,
             skip_tests=skip_tests,
-            all_tests=all_tests,
+            test_changed_only=test_changed_only,
             restate_models=restate_models,
             no_gaps=no_gaps,
             skip_backfill=skip_backfill,
@@ -1488,7 +1488,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         execution_time: t.Optional[TimeLike] = None,
         create_from: t.Optional[str] = None,
         skip_tests: t.Optional[bool] = None,
-        all_tests: t.Optional[bool] = None,
+        test_changed_only: t.Optional[bool] = None,
         restate_models: t.Optional[t.Iterable[str]] = None,
         no_gaps: t.Optional[bool] = None,
         skip_backfill: t.Optional[bool] = None,
@@ -1523,7 +1523,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             create_from: The environment to create the target environment from if it
                 doesn't exist. If not specified, the "prod" environment will be used.
             skip_tests: Unit tests are run by default so this will skip them if enabled
-            all_tests: Run every loaded unit test instead of only tests for models in the plan
+            test_changed_only: Run unit tests only for models included in the plan instead of all tests
             restate_models: A list of either internal or external models, or tags, that need to be restated
                 for the given plan interval. If the target environment is a production environment,
                 ALL snapshots that depended on these upstream tables will have their intervals deleted
@@ -1565,7 +1565,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             "execution_time": execution_time,
             "create_from": create_from,
             "skip_tests": skip_tests,
-            "all_tests": all_tests,
+            "test_changed_only": test_changed_only,
             "restate_models": list(restate_models) if restate_models is not None else None,
             "no_gaps": no_gaps,
             "skip_backfill": skip_backfill,
@@ -1595,9 +1595,11 @@ class GenericContext(BaseContext, t.Generic[C]):
         }
 
         skip_tests = explain or skip_tests or False
-        all_tests = all_tests or False
-        if skip_tests and all_tests:
-            raise PlanError("Cannot combine --all-tests with --skip-tests.")
+        test_changed_only = test_changed_only or False
+
+        if skip_tests and test_changed_only:
+            raise PlanError("Cannot combine --skip-tests with --test-changed-only.")
+
         no_gaps = no_gaps or False
         skip_backfill = skip_backfill or False
         empty_backfill = empty_backfill or False
@@ -1706,13 +1708,17 @@ class GenericContext(BaseContext, t.Generic[C]):
             *[s.name for s in context_diff.added],
         }
 
+        plan_test_model_names: t.Set[str] = {
+            *modified_model_names,
+            *(expanded_restate_models or set()),
+        }
+        if select_models and test_changed_only:
+            plan_test_model_names &= selected_fqns
+
         self._run_plan_tests(
             skip_tests=skip_tests,
-            all_tests=all_tests,
-            model_names={
-                *modified_model_names,
-                *(expanded_restate_models or set()),
-            },
+            test_changed_only=test_changed_only,
+            model_names=plan_test_model_names,
         )
 
         if (
@@ -2339,7 +2345,15 @@ class GenericContext(BaseContext, t.Generic[C]):
 
             pd.set_option("display.max_columns", None)
 
-        test_meta = self.select_tests(tests=tests, patterns=match_patterns, model_names=model_names)
+        baseline_meta = self.select_tests(tests=tests, patterns=match_patterns, model_names=None)
+        if model_names is not None:
+            test_meta = self.select_tests(
+                tests=tests, patterns=match_patterns, model_names=model_names
+            )
+            tests_skipped = len(baseline_meta) - len(test_meta)
+        else:
+            test_meta = baseline_meta
+            tests_skipped = 0
 
         result = run_tests(
             model_test_metadata=test_meta,
@@ -2353,6 +2367,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             default_catalog=self.default_catalog,
             default_catalog_dialect=self.config.dialect or "",
         )
+        result.tests_skipped = tests_skipped
 
         self.console.log_test_results(
             result,
@@ -2802,16 +2817,20 @@ class GenericContext(BaseContext, t.Generic[C]):
     def _run_plan_tests(
         self,
         skip_tests: bool = False,
-        all_tests: bool = False,
+        test_changed_only: bool = False,
         model_names: t.Optional[t.Collection[str]] = None,
     ) -> t.Optional[ModelTextTestResult]:
         if skip_tests:
             return None
 
-        if not all_tests and model_names is not None and not model_names:
-            return None
+        effective_names: t.Optional[t.Set[str]] = None
 
-        result = self.test(model_names=None if all_tests else model_names)
+        if test_changed_only:
+            effective_names = set(model_names or [])
+            if not effective_names:
+                return None
+
+        result = self.test(model_names=effective_names)
         if not result.wasSuccessful():
             raise PlanError(
                 "Cannot generate plan due to failing test(s). Fix test(s) and run again."

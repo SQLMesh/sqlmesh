@@ -102,7 +102,7 @@
     SQLMesh's default behavior is appropriate for most deployments, but you can override where SQLMesh creates physical tables and views with [schema configuration options](../guides/configuration.md#environment-schemas).
 
 ??? question "What's the difference between a `test` and an `audit`?"
-    A SQLMesh [`test`](../concepts/tests.md) is analogous to a "unit test" in software engineering. It tests *code* based on known inputs and outputs. In SQLMesh, the inputs and outputs are specified in a YAML file, and SQLMesh runs tests for models included in the plan when `sqlmesh plan` is executed (use `--all-tests` for the full suite).
+    A SQLMesh [`test`](../concepts/tests.md) is analogous to a "unit test" in software engineering. It tests *code* based on known inputs and outputs. In SQLMesh, the inputs and outputs are specified in a YAML file, and SQLMesh runs all unit tests when `sqlmesh plan` is executed (use `--test-changed-only` to run only tests for models in the plan).
 
     Writing YAML is annoying and error-prone, so SQLMesh's [`create_test` command](../concepts/tests.md#automatic-test-generation) allows you to automatically generate YAML test files based on queries of existing data tables.
 

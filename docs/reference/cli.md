@@ -357,8 +357,8 @@ Options:
                                   Default: prod.
   --skip-tests                    Skip tests prior to generating the plan if
                                   they are defined.
-  --all-tests                     Run all unit tests instead of only tests for
-                                  models included in the plan.
+  --test-changed-only             Run unit tests only for models included in
+                                  the plan instead of all tests.
   --skip-linter                   Skip linting prior to generating the plan if
                                   the linter is enabled.
   -r, --restate-model TEXT        Restate data for specified models and models
@@ -628,6 +628,8 @@ Options:
   -v, --verbose        Verbose output.
   --preserve-fixtures  Preserve the fixture tables in the testing database,
                        useful for debugging.
+  --select-model TEXT  Select specific models to run unit tests for. Can be
+                       specified multiple times.
   --help               Show this message and exit.
 ```
 

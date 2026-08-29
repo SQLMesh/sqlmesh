@@ -257,7 +257,7 @@ def test_pr_plan(github_client, make_controller):
     assert not controller.pr_plan.no_gaps
     assert not controller._context.apply.called
     assert controller._context._run_plan_tests.call_args == call(
-        skip_tests=True, all_tests=False, model_names=ANY
+        skip_tests=True, test_changed_only=False, model_names=ANY
     )
     assert (
         controller._pr_plan_builder._categorizer_config
@@ -281,7 +281,7 @@ def test_pr_plan_auto_categorization(github_client, make_controller):
     assert not controller.pr_plan.no_gaps
     assert not controller._context.apply.called
     assert controller._context._run_plan_tests.call_args == call(
-        skip_tests=True, all_tests=False, model_names=ANY
+        skip_tests=True, test_changed_only=False, model_names=ANY
     )
     assert controller._pr_plan_builder._categorizer_config == custom_categorizer_config
     assert controller.pr_plan.start == default_start_absolute
@@ -370,7 +370,7 @@ def test_prod_plan(github_client, make_controller):
     assert controller.prod_plan.no_gaps
     assert not controller._context.apply.called
     assert controller._context._run_plan_tests.call_args == call(
-        skip_tests=True, all_tests=False, model_names=ANY
+        skip_tests=True, test_changed_only=False, model_names=ANY
     )
     assert (
         controller._prod_plan_builder._categorizer_config
@@ -394,7 +394,7 @@ def test_prod_plan_auto_categorization(github_client, make_controller):
     assert controller.prod_plan.no_gaps
     assert not controller._context.apply.called
     assert controller._context._run_plan_tests.call_args == call(
-        skip_tests=True, all_tests=False, model_names=ANY
+        skip_tests=True, test_changed_only=False, model_names=ANY
     )
     assert controller._prod_plan_builder._categorizer_config == custom_categorizer_config
     # default PR start should be ignored for prod plans
@@ -413,7 +413,7 @@ def test_prod_plan_with_gaps(github_client, make_controller):
     assert not controller.prod_plan_with_gaps.no_gaps
     assert not controller._context.apply.called
     assert controller._context._run_plan_tests.call_args == call(
-        skip_tests=True, all_tests=False, model_names=ANY
+        skip_tests=True, test_changed_only=False, model_names=ANY
     )
 
 

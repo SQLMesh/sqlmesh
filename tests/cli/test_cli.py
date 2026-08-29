@@ -117,7 +117,7 @@ def init_prod_and_backfill(runner, temp_dir) -> None:
 
 
 def assert_duckdb_test(result) -> None:
-    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Successfully Ran 2 tests against duckdb" in result.output
 
 
 def assert_new_env(result, new_env="prod", from_env="prod", initialize=True) -> None:
@@ -188,74 +188,26 @@ def test_plan_skip_tests(runner, tmp_path):
         cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--skip-tests"], input="y\n"
     )
     assert result.exit_code == 0
-    assert "Successfully Ran 1 tests against duckdb" not in result.output
+    assert "Successfully Ran 2 tests against duckdb" not in result.output
     assert_new_env(result)
     assert_backfill_success(result)
 
 
-def test_plan_no_changes_skips_tests(runner, tmp_path):
+def test_plan_no_changes_runs_tests_by_default(runner, tmp_path):
     create_example_project(tmp_path)
     init_prod_and_backfill(runner, tmp_path)
 
-    # No model changes: unit tests should not run
     result = runner.invoke(
         cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
     )
     assert result.exit_code == 0
-    assert "Successfully Ran" not in result.output
+    assert "Successfully Ran 2 tests against duckdb" in result.output
     assert "No changes to plan" in result.output or "No changes" in result.output
 
 
-def test_plan_all_tests_with_no_changes(runner, tmp_path):
+def test_plan_test_changed_only_with_no_changes(runner, tmp_path):
     create_example_project(tmp_path)
     init_prod_and_backfill(runner, tmp_path)
-
-    result = runner.invoke(
-        cli,
-        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--all-tests", "--no-prompts"],
-        input="\n",
-    )
-    assert result.exit_code == 0
-    assert "Successfully Ran 1 tests against duckdb" in result.output
-
-
-def test_plan_runs_only_changed_model_tests(runner, tmp_path):
-    create_example_project(tmp_path)
-    init_prod_and_backfill(runner, tmp_path)
-
-    # Two unit tests total; changing full_model should run only its test
-    (tmp_path / "tests" / "test_incremental_model.yaml").write_text(
-        """test_example_incremental_model:
-  model: sqlmesh_example.incremental_model
-  vars:
-    start: 2020-01-01
-    end: 2020-01-02
-  inputs:
-    sqlmesh_example.seed_model:
-      rows:
-      - id: 1
-        item_id: 1
-        event_date: 2020-01-01
-  outputs:
-    query:
-      rows:
-      - id: 1
-        item_id: 1
-        event_date: 2020-01-01
-"""
-    )
-    full_model_path = tmp_path / "models" / "full_model.sql"
-    full_model_path.write_text(
-        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
-    )
-
-    result = runner.invoke(
-        cli,
-        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts", "--auto-apply"],
-    )
-    assert result.exit_code == 0
-    assert "Successfully Ran 1 tests against duckdb" in result.output
-    assert "Successfully Ran 2 tests against duckdb" not in result.output
 
     result = runner.invoke(
         cli,
@@ -265,13 +217,94 @@ def test_plan_runs_only_changed_model_tests(runner, tmp_path):
             "--paths",
             tmp_path,
             "plan",
-            "--all-tests",
+            "--test-changed-only",
             "--no-prompts",
         ],
         input="\n",
     )
     assert result.exit_code == 0
-    assert "Successfully Ran 2 tests against duckdb" in result.output
+    assert "Successfully Ran" not in result.output
+
+
+def test_plan_test_changed_only_runs_only_changed_model_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
+
+
+def test_plan_select_model_test_changed_only_scopes_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+    incremental_model_path = tmp_path / "models" / "incremental_model.sql"
+    incremental_model_path.write_text(
+        incremental_model_path.read_text().replace("'a' as new_col,", "'b' as new_col,")
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--select-model",
+            "sqlmesh_example.full_model",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
+
+
+def test_test_select_model(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "test",
+            "--select-model",
+            "sqlmesh_example.full_model",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
 
 
 def test_plan_skip_linter(runner, tmp_path):
@@ -343,7 +376,7 @@ def test_plan_skip_backfill(runner, tmp_path, flag):
     assert_virtual_layer_updated(result)
     assert "Model batches executed" not in result.output
     # Dry-run still runs plan-scoped unit tests
-    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Successfully Ran 2 tests against duckdb" in result.output
 
 
 def test_plan_min_intervals(runner, tmp_path):

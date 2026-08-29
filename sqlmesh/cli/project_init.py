@@ -286,6 +286,25 @@ WHERE
         num_orders: 1
   """
 
+    tests["test_incremental_model"] = f"""test_example_incremental_model:
+  model: {incremental_model_name}
+  vars:
+    start: 2020-01-01
+    end: 2020-01-02
+  inputs:
+    {seed_model_name}:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  outputs:
+    query:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  """
+
     return ExampleObjects(
         sql_models=sql_models,
         python_models=python_models,

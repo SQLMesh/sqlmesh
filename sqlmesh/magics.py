@@ -408,9 +408,9 @@ class SQLMeshMagics(Magics):
         help="Skip the unit tests defined for the model.",
     )
     @argument(
-        "--all-tests",
+        "--test-changed-only",
         action="store_true",
-        help="Run all unit tests instead of only tests for models included in the plan.",
+        help="Run unit tests only for models included in the plan instead of all tests.",
     )
     @argument(
         "--skip-linter",
@@ -538,7 +538,7 @@ class SQLMeshMagics(Magics):
             execution_time=args.execution_time,
             create_from=args.create_from,
             skip_tests=args.skip_tests,
-            all_tests=args.all_tests,
+            test_changed_only=args.test_changed_only,
             restate_models=args.restate_model,
             backfill_models=args.backfill_model,
             no_gaps=args.no_gaps,
@@ -1084,11 +1084,23 @@ class SQLMeshMagics(Magics):
         action="store_true",
         help="Preserve the fixture tables in the testing database, useful for debugging.",
     )
+    @argument(
+        "--select-model",
+        type=str,
+        nargs="*",
+        help="Select specific models to run unit tests for.",
+    )
     @line_magic
     @pass_sqlmesh_context
     def run_test(self, context: Context, line: str) -> None:
         """Run unit test(s)."""
         args = parse_argstring(self.run_test, line)
+
+        model_names = (
+            context._new_selector().expand_model_selections(args.select_model)
+            if args.select_model
+            else None
+        )
 
         context.test(
             match_patterns=args.pattern,
@@ -1096,6 +1108,7 @@ class SQLMeshMagics(Magics):
             verbosity=Verbosity(args.verbose),
             preserve_fixtures=args.preserve_fixtures,
             stream=StringIO(),  # consume the output instead of redirecting to stdout
+            model_names=model_names,
         )
 
     @magic_arguments()
