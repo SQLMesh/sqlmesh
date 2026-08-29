@@ -14,7 +14,12 @@ else
 endif
 
 install-dev:
-	$(PIP) install -e ".[dev,web,slack,dlt,lsp]" ./examples/custom_materializations
+	@for i in 1 2 3; do \
+		$(PIP) install -e ".[dev,web,slack,dlt,lsp]" ./examples/custom_materializations && exit 0; \
+		echo "install-dev failed (attempt $$i/3), retrying..."; \
+		sleep 5; \
+	done; \
+	exit 1
 
 install-doc:
 	$(PIP) install -r ./docs/requirements.txt
