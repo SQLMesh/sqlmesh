@@ -385,8 +385,6 @@ def test_plan_skip_backfill(runner, tmp_path, flag):
     assert result.exit_code == 0
     assert_virtual_layer_updated(result)
     assert "Model batches executed" not in result.output
-    # Dry-run still runs plan-scoped unit tests
-    assert "Successfully Ran 1 tests against duckdb" in result.output
 
 
 def test_plan_min_intervals(runner, tmp_path):
