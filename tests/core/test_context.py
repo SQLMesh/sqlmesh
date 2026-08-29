@@ -3592,7 +3592,9 @@ def test_prompt_if_uncategorized_snapshot(mocker: MockerFixture, tmp_path: Path)
     spy_plan = mocker.spy(mock_console, "plan")
     context.console = mock_console
 
-    context.plan()
+    # Skip tests: we break incremental_model above, which fails its example unit test
+    # and would raise PlanError before we reach the uncategorized-snapshot prompt logic.
+    context.plan(skip_tests=True)
 
     calls = spy_plan.mock_calls
     assert len(calls) == 1

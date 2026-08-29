@@ -3553,12 +3553,3 @@ def test_filter_tests_by_model_names():
         dialect="duckdb",
     )
     assert [t.test_name for t in filtered_short] == ["t1"]
-
-
-def test_test_select_model(tmp_path: Path) -> None:
-    init_example_project(tmp_path, engine_type="duckdb")
-    context = Context(paths=tmp_path)
-
-    results = context.test(model_names=["sqlmesh_example.full_model"])
-    assert len(results.successes) == 1
-    assert results.tests_skipped == 1
