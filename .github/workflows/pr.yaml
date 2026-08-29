@@ -16,6 +16,7 @@ jobs:
     outputs:
       python: ${{ steps.filter.outputs.python }}
       client: ${{ steps.filter.outputs.client }}
+      vscode: ${{ steps.filter.outputs.vscode }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v7
@@ -34,6 +35,8 @@ jobs:
               - 'pyproject.toml'
             client:
               - 'web/client/**'
+            vscode:
+              - 'vscode/**'
             ci:
               - '.github/**'
               - 'Makefile'
@@ -188,9 +191,10 @@ jobs:
 
   ui-style:
     needs: [changes]
-    if: false
-      # needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
-      # 'true' || github.ref == 'refs/heads/main'
+    if:
+      needs.changes.outputs.client == 'true' || needs.changes.outputs.vscode ==
+      'true' || needs.changes.outputs.ci == 'true' || github.ref ==
+      'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -393,10 +397,13 @@ jobs:
           retention-days: 7
 
   test-vscode:
+    needs: changes
+    if:
+      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
     runs-on: ubuntu-latest
-    if: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -410,10 +417,13 @@ jobs:
       - name: Run CI
         run: pnpm run ci
   test-vscode-e2e:
+    needs: changes
+    if:
+      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
     runs-on:
       labels: [ubuntu-2204-8]
     # As at 2026-01-12 this job flakes 100% of the time. It needs investigation
-    if: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
