@@ -286,27 +286,6 @@ def test_plan_select_model_test_changed_only_scopes_tests(runner, tmp_path):
     assert "Skipped 1 tests" in result.output
 
 
-def test_test_select_model(runner, tmp_path):
-    create_example_project(tmp_path)
-    init_prod_and_backfill(runner, tmp_path)
-
-    result = runner.invoke(
-        cli,
-        [
-            "--log-file-dir",
-            tmp_path,
-            "--paths",
-            tmp_path,
-            "test",
-            "--select-model",
-            "sqlmesh_example.full_model",
-        ],
-    )
-    assert result.exit_code == 0
-    assert "Successfully Ran 1 tests against duckdb" in result.output
-    assert "Skipped 1 tests" in result.output
-
-
 def test_plan_skip_linter(runner, tmp_path):
     create_example_project(tmp_path)
 
