@@ -2,7 +2,6 @@ import typing as t
 from unittest import mock
 
 import pytest
-import time_machine
 from pathlib import Path
 from sqlglot import exp
 from sqlglot.optimizer.qualify_columns import quote_identifiers
@@ -474,7 +473,6 @@ def test_plan_correlation_id_in_job_labels(ctx: TestContext):
     assert labels == {correlation_id.job_type.value.lower(): correlation_id.job_id}
 
 
-@time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_run_correlation_id_in_job_labels(ctx: TestContext):
     run_id = "test_run_id"
     model_name = ctx.table("run_test")
@@ -497,7 +495,7 @@ SELECT 1 AS col, '2023-01-07' AS event_ts
             )
         )
     )
-    sqlmesh.plan(auto_apply=True, no_prompts=True)
+    sqlmesh.plan(auto_apply=True, no_prompts=True, execution_time="2023-01-08 15:00:00")
 
     captured_evaluators: t.List = []
     original_scheduler = sqlmesh.scheduler
@@ -510,12 +508,9 @@ SELECT 1 AS col, '2023-01-07' AS event_ts
             captured_evaluators.append(snapshot_evaluator)
         return original_scheduler(environment=environment, snapshot_evaluator=snapshot_evaluator)
 
-    with time_machine.travel("2023-01-09 00:00:00 UTC"):
-        with mock.patch(
-            "sqlmesh.core.context.analytics.collector.on_run_start", return_value=run_id
-        ):
-            with mock.patch.object(sqlmesh, "scheduler", scheduler_wrapper):
-                sqlmesh.run()
+    with mock.patch("sqlmesh.core.context.analytics.collector.on_run_start", return_value=run_id):
+        with mock.patch.object(sqlmesh, "scheduler", scheduler_wrapper):
+            sqlmesh.run(execution_time="2023-01-09 00:00:00")
 
     assert captured_evaluators
     adapter = t.cast(BigQueryEngineAdapter, captured_evaluators[-1].adapter)
