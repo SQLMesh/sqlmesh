@@ -161,7 +161,7 @@ Reverting to a previous model version is a quick operation since no additional w
 
 SQLMesh automatically validates your models in order to ensure the quality and accuracy of your data. This is done via the following:
 
-* Running all unit tests when you execute the `plan` command (use `--test-changed-only` to run only tests for models in the plan, or `--skip-tests` to skip). This ensures changes applied to any environment are logically validated. Refer to [testing](../concepts/tests.md) for more information.
+* Running all unit tests when you execute the `plan` command (use `--test-changed-only` to run only tests for models in the plan). This ensures changes applied to any environment are logically validated. Refer to [testing](../concepts/tests.md) for more information.
 * Running audits whenever data is loaded to a table (either for backfill or loading on a cadence). This way you know all data present in any table has passed all defined audits. Refer to [auditing](../concepts/audits.md) for more information.
 
 SQLMesh also provides automatic validation via CI/CD by automatically creating a preview environment.
