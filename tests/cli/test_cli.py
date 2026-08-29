@@ -221,12 +221,13 @@ def test_plan_skip_tests(runner, tmp_path):
 def test_plan_no_changes_runs_tests_by_default(runner, tmp_path):
     create_example_project(tmp_path)
     init_prod_and_backfill(runner, tmp_path)
+    add_unchanged_incremental_model_test(tmp_path)
 
     result = runner.invoke(
         cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
     )
     assert result.exit_code == 0
-    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Successfully Ran 2 tests against duckdb" in result.output
     assert "No changes to plan" in result.output or "No changes" in result.output
 
 
