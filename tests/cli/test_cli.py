@@ -59,7 +59,7 @@ plan:
         )
 
 
-def add_unchanged_incremental_model_test(temp_dir) -> None:
+def add_incremental_model_test(temp_dir) -> None:
     with open(temp_dir / "tests" / "test_incremental_model.yaml", "w", encoding="utf-8") as f:
         f.write(
             """
@@ -221,7 +221,7 @@ def test_plan_skip_tests(runner, tmp_path):
 def test_plan_no_changes_runs_tests_by_default(runner, tmp_path):
     create_example_project(tmp_path)
     init_prod_and_backfill(runner, tmp_path)
-    add_unchanged_incremental_model_test(tmp_path)
+    add_incremental_model_test(tmp_path)
 
     result = runner.invoke(
         cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
@@ -255,7 +255,7 @@ def test_plan_test_changed_only_with_no_changes(runner, tmp_path):
 def test_plan_test_changed_only_runs_only_changed_model_tests(runner, tmp_path):
     create_example_project(tmp_path)
     init_prod_and_backfill(runner, tmp_path)
-    add_unchanged_incremental_model_test(tmp_path)
+    add_incremental_model_test(tmp_path)
 
     full_model_path = tmp_path / "models" / "full_model.sql"
     full_model_path.write_text(
@@ -283,7 +283,7 @@ def test_plan_test_changed_only_runs_only_changed_model_tests(runner, tmp_path):
 def test_plan_select_model_test_changed_only_scopes_tests(runner, tmp_path):
     create_example_project(tmp_path)
     init_prod_and_backfill(runner, tmp_path)
-    add_unchanged_incremental_model_test(tmp_path)
+    add_incremental_model_test(tmp_path)
 
     full_model_path = tmp_path / "models" / "full_model.sql"
     full_model_path.write_text(
