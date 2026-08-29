@@ -2622,13 +2622,13 @@ test_example_full_model:
         f"""Model '"invalid_model"' was not found at {wrong_test_file}"""
         in mock_logger.call_args[0][0]
     )
-    assert "Successfully Ran 2 tests" in output.stdout
+    assert "Successfully Ran 1 test" in output.stdout
 
 
 def test_number_of_tests_found(tmp_path: Path) -> None:
     init_example_project(tmp_path, engine_type="duckdb")
 
-    # Example project contains 2 tests and we add a new file with 2 tests
+    # Example project contains 1 test and we add a new file with 2 tests
     test_file = tmp_path / "tests" / "test_new.yaml"
     test_file.write_text(
         """
@@ -2674,9 +2674,9 @@ test_example_full_model2:
 
     context = Context(paths=tmp_path)
 
-    # Case 1: All 4 tests should run without any tests specified
+    # Case 1: All 3 tests should run without any tests specified
     results = context.test()
-    assert len(results.successes) == 4
+    assert len(results.successes) == 3
 
     # Case 2: The "new_test.yaml" should amount to 2 subtests
     results = context.test(tests=[f"{test_file}"])
