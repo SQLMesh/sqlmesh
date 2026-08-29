@@ -229,7 +229,7 @@ SELECT
 FROM
   {seed_model_name}
 WHERE
-  event_date BETWEEN @start_ds AND @end_ds
+  event_date BETWEEN @start_date AND @end_date
   """
 
     sql_models[seed_model_name] = f"""MODEL (
