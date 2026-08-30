@@ -418,16 +418,26 @@ def test_project_index_plan_matches_default_plan(sushi_context: Context) -> None
     sushi_context.config.plan = PlanConfig(use_project_index=True)
 
     def build_plan(use_project_index: t.Optional[bool] = None) -> Plan:
-        kwargs = {} if use_project_index is None else {"use_project_index": use_project_index}
-        return sushi_context.plan_builder(
-            "dev",
-            start="2023-01-01",
-            end="2023-01-07",
-            execution_time="2023-01-08",
-            skip_tests=True,
-            skip_linter=True,
-            **kwargs,
-        ).build()
+        if use_project_index is None:
+            plan_builder = sushi_context.plan_builder(
+                "dev",
+                start="2023-01-01",
+                end="2023-01-07",
+                execution_time="2023-01-08",
+                skip_tests=True,
+                skip_linter=True,
+            )
+        else:
+            plan_builder = sushi_context.plan_builder(
+                "dev",
+                start="2023-01-01",
+                end="2023-01-07",
+                execution_time="2023-01-08",
+                skip_tests=True,
+                skip_linter=True,
+                use_project_index=use_project_index,
+            )
+        return plan_builder.build()
 
     default_plan = build_plan(use_project_index=False)
     indexed_plan = build_plan()
