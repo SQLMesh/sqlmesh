@@ -7,7 +7,7 @@ import pyarrow as pa  # type: ignore
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx2 import ASGITransport, AsyncClient
 from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.core.context import Context
