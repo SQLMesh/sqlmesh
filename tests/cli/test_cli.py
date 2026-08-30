@@ -182,6 +182,14 @@ def test_plan(runner, tmp_path):
 @time_machine.travel(FREEZE_TIME)
 def test_plan_use_project_index(runner, tmp_path):
     create_example_project(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "plan:\n  no_prompts: false",
+            "plan:\n  no_prompts: false\n  use_project_index: true",
+        ),
+        encoding="utf-8",
+    )
 
     result = runner.invoke(
         cli,
@@ -191,7 +199,6 @@ def test_plan_use_project_index(runner, tmp_path):
             "--paths",
             tmp_path,
             "plan",
-            "--use-project-index",
         ],
         input="y\n",
     )

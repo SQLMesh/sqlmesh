@@ -1461,7 +1461,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         explain: t.Optional[bool] = None,
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
-        use_project_index: bool = False,
+        use_project_index: t.Optional[bool] = None,
     ) -> Plan:
         """Interactively creates a plan.
 
@@ -1513,7 +1513,8 @@ class GenericContext(BaseContext, t.Generic[C]):
                 on every model when checking for missing intervals
             use_project_index: Whether to refresh the persistent project index, reuse loaded
                 snapshot state, and scope plan graph work to changed or selected model lineage.
-                This optimization does not change the resulting plan.
+                If omitted, the value of ``plan.use_project_index`` is used. This optimization
+                does not change the resulting plan.
 
         Returns:
             The populated Plan object.
@@ -1603,7 +1604,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
         always_include_local_changes: t.Optional[bool] = None,
-        use_project_index: bool = False,
+        use_project_index: t.Optional[bool] = None,
     ) -> PlanBuilder:
         """Creates a plan builder.
 
@@ -1648,7 +1649,8 @@ class GenericContext(BaseContext, t.Generic[C]):
                 However, it can be desirable to deploy changes + restatements in the same plan, so this flag overrides the default behaviour.
             use_project_index: Whether to refresh the persistent project index, reuse loaded
                 snapshot state, and scope plan graph work to changed or selected model lineage.
-                This optimization does not change the resulting plan.
+                If omitted, the value of ``plan.use_project_index`` is used. This optimization
+                does not change the resulting plan.
 
         Returns:
             The plan builder.
@@ -1686,6 +1688,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         user_provided_flags: t.Dict[str, UserProvidedFlags] = {
             k: v for k, v in kwargs.items() if v is not None
         }
+
+        use_project_index = (
+            self.config.plan.use_project_index if use_project_index is None else use_project_index
+        )
 
         if not self._loaded:
             self.load(use_project_index=use_project_index)

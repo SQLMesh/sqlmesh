@@ -108,6 +108,7 @@ Configuration for the `sqlmesh plan` command.
 | `no_diff`                 | Don't show diffs for changed models (Default: False)                                                                                                                                                                                                    | boolean              | N        |
 | `no_prompts`              | Disables interactive prompts in CLI (Default: True)                                                                                                                                                                                                     | boolean              | N        |
 | `always_recreate_environment`              | Always recreates the target environment from the environment specified in `create_from` (by default `prod`) (Default: False)                                                                                                                                                                                                     | boolean              | N        |
+| `use_project_index`                        | Whether to refresh the persistent project index, reuse loaded snapshot state, and scope plan graph work to changed or selected model lineage without changing the plan result. (Default: `False`)                                                                                                                                | boolean              | N        |
 
 ## Run
 

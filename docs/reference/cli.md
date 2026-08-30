@@ -414,7 +414,8 @@ Options:
   --use-project-index             Refresh the persistent project index, reuse
                                   loaded snapshot state, and scope plan graph
                                   work to changed or selected model lineage
-                                  without changing the plan result.
+                                  without changing the plan result. Can also
+                                  be enabled with plan.use_project_index.
   -v, --verbose                   Verbose output. Use -vv for very verbose
                                   output.
   --help                          Show this message and exit.

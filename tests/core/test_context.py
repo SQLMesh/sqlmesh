@@ -386,6 +386,8 @@ def test_plan_builder_fetches_stored_snapshots_once(sushi_context: Context):
         if len(list(call_args.args[0])) >= snapshot_count
     ]
 
+    sushi_context.config.plan = PlanConfig(use_project_index=True)
+
     with patch.object(
         sushi_context.state_reader,
         "get_snapshots",
@@ -395,7 +397,6 @@ def test_plan_builder_fetches_stored_snapshots_once(sushi_context: Context):
             "dev",
             skip_tests=True,
             skip_linter=True,
-            use_project_index=True,
         )
 
     full_fetches = [
@@ -414,7 +415,10 @@ def test_plan_builder_fetches_stored_snapshots_once(sushi_context: Context):
 def test_project_index_plan_matches_default_plan(sushi_context: Context) -> None:
     sushi_context.upsert_model("sushi.customers", stamp="force a new snapshot version")
 
-    def build_plan(use_project_index: bool) -> Plan:
+    sushi_context.config.plan = PlanConfig(use_project_index=True)
+
+    def build_plan(use_project_index: t.Optional[bool] = None) -> Plan:
+        kwargs = {} if use_project_index is None else {"use_project_index": use_project_index}
         return sushi_context.plan_builder(
             "dev",
             start="2023-01-01",
@@ -422,11 +426,11 @@ def test_project_index_plan_matches_default_plan(sushi_context: Context) -> None
             execution_time="2023-01-08",
             skip_tests=True,
             skip_linter=True,
-            use_project_index=use_project_index,
+            **kwargs,
         ).build()
 
     default_plan = build_plan(use_project_index=False)
-    indexed_plan = build_plan(use_project_index=True)
+    indexed_plan = build_plan()
 
     assert indexed_plan.directly_modified == default_plan.directly_modified
     assert indexed_plan.indirectly_modified == default_plan.indirectly_modified

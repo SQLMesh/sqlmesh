@@ -576,7 +576,8 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
 @click.option(
     "--use-project-index",
     is_flag=True,
-    help="Refresh the persistent project index, reuse loaded snapshot state, and scope plan graph work to changed or selected model lineage without changing the plan result.",
+    default=None,
+    help="Refresh the persistent project index, reuse loaded snapshot state, and scope plan graph work to changed or selected model lineage without changing the plan result. Can also be enabled with plan.use_project_index.",
 )
 @opt.verbose
 @click.pass_context
@@ -599,7 +600,13 @@ def plan(
     use_project_index = kwargs.pop("use_project_index")
     setattr(get_console(), "verbosity", Verbosity(verbose))
 
-    context.load(use_project_index=use_project_index)
+    context.load(
+        use_project_index=(
+            context.config.plan.use_project_index
+            if use_project_index is None
+            else use_project_index
+        )
+    )
     _raise_if_no_models(context, context.path)
 
     context.plan(

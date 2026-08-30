@@ -332,13 +332,40 @@ The cache directory is automatically created if it doesn't exist. You can clear 
 
 #### Project index
 
-The `--use-project-index` option on the `lint` and `render` commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`. The option can be enabled by default for each command with `linter.use_project_index` or `render.use_project_index`, respectively.
+The `--use-project-index` option on the `lint`, `plan`, and `render` commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`. The option can be enabled by default for each command with `linter.use_project_index`, `plan.use_project_index`, or `render.use_project_index`, respectively.
 
 A full project load with the option enabled creates or refreshes the index. SQLMesh invalidates it when relevant configuration, gateway, macro, audit, or signal metadata changes, or when the set of model files changes. If the index is missing, invalid, or stale, SQLMesh safely falls back to a full project load and rebuilds it.
 
 For operations targeting selected models, the index allows SQLMesh to load only those models and their upstream dependencies.
 
 In multi-repository projects, dependencies that cross project boundaries may not be represented by an individual project's index. SQLMesh detects incomplete scoped loads and falls back to loading the full configured project set.
+
+#### Indexed planning
+
+Indexed planning also reuses snapshot state already loaded while building the plan and scopes graph
+work to changed or selected model lineage. It does not change the resulting plan. Enable it by
+default for the CLI and Python API with `plan.use_project_index`:
+
+=== "YAML"
+
+    ```yaml linenums="1"
+    plan:
+      use_project_index: true
+    ```
+
+=== "Python"
+
+    ```python linenums="1"
+    from sqlmesh.core.config import Config, ModelDefaultsConfig, PlanConfig
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        plan=PlanConfig(use_project_index=True),
+    )
+    ```
+
+`Context.plan` and `Context.plan_builder` use this configuration value when `use_project_index` is
+omitted. Passing `use_project_index=False` explicitly disables indexed planning for that API call.
 
 ### Table/view storage locations
 
