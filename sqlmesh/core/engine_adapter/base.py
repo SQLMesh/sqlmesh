@@ -1043,12 +1043,15 @@ class EngineAdapter:
     ) -> exp.Create:
         exists = False if replace else exists
         catalog_name = None
+        target_table: t.Optional[exp.Table] = None
         if not isinstance(table_name_or_schema, exp.Schema):
             table_name_or_schema = exp.to_table(table_name_or_schema)
             catalog_name = table_name_or_schema.catalog
+            target_table = table_name_or_schema
         else:
             if isinstance(table_name_or_schema.this, exp.Table):
                 catalog_name = table_name_or_schema.this.catalog
+                target_table = table_name_or_schema.this
 
         properties = (
             self._build_table_properties_exp(
@@ -1057,6 +1060,9 @@ class EngineAdapter:
                 target_columns_to_types=target_columns_to_types,
                 table_description=table_description,
                 table_kind=table_kind,
+                # Passed so an adapter can vary properties by target object, not just by
+                # connection. Additive: every override accepts **kwargs.
+                table=target_table,
             )
             if kwargs or table_description
             else None
@@ -1352,6 +1358,8 @@ class EngineAdapter:
                 else None
             ),
             physical_cluster=create_kwargs.pop("physical_cluster", None),
+            # See the note on the table-properties call site above.
+            table=exp.to_table(view_name),
         )
         if create_view_properties:
             for view_property in create_view_properties.expressions:
