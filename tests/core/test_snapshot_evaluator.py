@@ -444,6 +444,152 @@ def test_promote_forward_only(mocker: MockerFixture, adapter_mock, make_snapshot
     )
 
 
+def test_promote_with_owner(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """When owner is supplied, alter_schema_owner and alter_view_owner are called."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="a"),
+        storage_format="parquet",
+        query=parse_one("SELECT a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.promote(
+        [snapshot], EnvironmentNamingInfo(name="test_env"), owner="group:shared-developers"
+    )
+
+    adapter_mock.alter_schema_owner.assert_called_once_with(
+        to_schema("test_schema__test_env"), "group:shared-developers"
+    )
+    adapter_mock.alter_view_owner.assert_called_once_with(
+        "test_schema__test_env.test_model", "group:shared-developers"
+    )
+
+
+def test_promote_without_owner_skips_alter(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """When no owner is configured (the default), ownership DDL is never issued."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="a"),
+        storage_format="parquet",
+        query=parse_one("SELECT a FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.promote([snapshot], EnvironmentNamingInfo(name="test_env"))
+
+    adapter_mock.alter_schema_owner.assert_not_called()
+    adapter_mock.alter_view_owner.assert_not_called()
+
+
+def test_promote_owner_applied_per_view(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """alter_view_owner is called once per promoted snapshot."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    snapshots = []
+    for name in ("model_a", "model_b", "model_c"):
+        model = SqlModel(
+            name=f"test_schema.{name}",
+            kind=ViewKind(),
+            query=parse_one("SELECT 1"),
+        )
+        snapshot = make_snapshot(model)
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots.append(snapshot)
+
+    evaluator.promote(snapshots, EnvironmentNamingInfo(name="test_env"), owner="svc_prod_spn")
+
+    assert adapter_mock.alter_view_owner.call_count == 3
+    called_owners = {c.args[1] for c in adapter_mock.alter_view_owner.call_args_list}
+    assert called_owners == {"svc_prod_spn"}
+
+
+def test_create_with_physical_owner(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """alter_table_owner is called for each non-view table when physical owner is set."""
+    adapter_mock.get_data_objects.return_value = []
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        storage_format="parquet",
+        query=parse_one("SELECT a, ds FROM tbl WHERE ds BETWEEN @start_ds AND @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {}, owner="group:data-platform")
+
+    adapter_mock.alter_table_owner.assert_called_once()
+    call_args = adapter_mock.alter_table_owner.call_args
+    assert call_args.args[1] == "group:data-platform"
+
+
+def test_create_without_physical_owner_skips_alter(
+    mocker: MockerFixture, adapter_mock, make_snapshot
+):
+    """When no physical owner is set, alter_table_owner is never called."""
+    adapter_mock.get_data_objects.return_value = []
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        storage_format="parquet",
+        query=parse_one("SELECT a, ds FROM tbl WHERE ds BETWEEN @start_ds AND @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {})
+
+    adapter_mock.alter_table_owner.assert_not_called()
+
+
+def test_create_view_kind_skips_physical_owner(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """ViewKind snapshots skip alter_table_owner even when physical_owner is set."""
+    adapter_mock.get_data_objects.return_value = []
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model = SqlModel(
+        name="test_schema.test_view",
+        kind=ViewKind(),
+        query=parse_one("SELECT 1"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create([snapshot], {}, owner="group:data-platform")
+
+    adapter_mock.alter_table_owner.assert_not_called()
+
+
+def test_create_physical_schemas_with_owner(mocker: MockerFixture, adapter_mock, make_snapshot):
+    """create_physical_schemas passes owner to _create_schemas so alter_schema_owner is called."""
+    evaluator = SnapshotEvaluator(adapter_mock)
+    deployability_index = DeployabilityIndex.all_deployable()
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        storage_format="parquet",
+        query=parse_one("SELECT a, ds FROM tbl WHERE ds BETWEEN @start_ds AND @end_ds"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create_physical_schemas([snapshot], deployability_index, owner="svc_prod_spn")
+
+    adapter_mock.alter_schema_owner.assert_called_once()
+    assert adapter_mock.alter_schema_owner.call_args.args[1] == "svc_prod_spn"
+
+
 def test_cleanup(mocker: MockerFixture, adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock)
 

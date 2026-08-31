@@ -128,12 +128,15 @@ class BuiltInSchedulerConfig(_EngineAdapterStateSyncSchedulerConfig, BaseConfig)
     type_: t.Literal["builtin"] = Field(alias="type", default="builtin")
 
     def create_plan_evaluator(self, context: GenericContext) -> PlanEvaluator:
+        ownership = context.config.ownership
+        ownership_config = ownership if ownership.is_active else None
         return BuiltInPlanEvaluator(
             state_sync=context.state_sync,
             snapshot_evaluator=context.snapshot_evaluator,
             create_scheduler=context.create_scheduler,
             default_catalog=context.default_catalog,
             console=context.console,
+            ownership_config=ownership_config,
         )
 
     def get_default_catalog_per_gateway(self, context: GenericContext) -> t.Dict[str, str]:
