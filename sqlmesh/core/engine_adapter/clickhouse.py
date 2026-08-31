@@ -3,6 +3,7 @@ from __future__ import annotations
 import typing as t
 import logging
 import re
+from functools import cached_property
 from sqlglot import exp, maybe_parse
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import LogicalMergeMixin
@@ -29,6 +30,13 @@ if t.TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# `system.databases.engine` value for a Keeper-coordinated database. Object DDL inside one
+# must not carry `ON CLUSTER`: the database's own DDL log already propagates it to every
+# replica, so ClickHouse rejects the redundant second fan-out outright with code 80,
+# `It's not initial query. ON CLUSTER is not allowed for Replicated database.`
+# Matched as a prefix so engine variants are covered without another release.
+REPLICATED_DATABASE_ENGINE_PREFIX = "Replicated"
 
 
 class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
@@ -192,8 +200,14 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         from sqlmesh.utils.errors import SQLMeshError
 
         properties_copy = properties.copy()
+        # Always cluster-wide, deliberately. This is the statement that creates the
+        # database, including a `Replicated` one, so there is no database engine to
+        # consult yet and nothing for Keeper to propagate through.
         if self.engine_run_mode.is_cluster:
             properties_copy.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
+
+        # A database that previously resolved as absent may now exist, with an engine.
+        self._clear_database_engine_cache()
 
         # ClickHouse does not support catalogs. When a virtual catalog has been injected
         # (self._default_catalog is set), strip it from the schema name. This mirrors the
@@ -501,7 +515,8 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     ) -> None:
         """Create table with identical structure as source table"""
         self.execute(
-            f"CREATE TABLE {target_table_name}{self._on_cluster_sql()} AS {source_table_name}"
+            f"CREATE TABLE {target_table_name}{self._on_cluster_sql(target_table_name)}"
+            f" AS {source_table_name}"
         )
 
     def _get_partition_ids(
@@ -661,10 +676,14 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         old_table_sql = exp.to_table(old_table_name).sql(dialect=self.dialect, identify=True)
         new_table_sql = exp.to_table(new_table_name).sql(dialect=self.dialect, identify=True)
 
+        on_cluster_sql = (
+            self._on_cluster_sql(old_table_name)
+            if self._assert_same_on_cluster_scope("EXCHANGE TABLES", old_table_name, new_table_name)
+            else ""
+        )
+
         try:
-            self.execute(
-                f"EXCHANGE TABLES {old_table_sql} AND {new_table_sql}{self._on_cluster_sql()}"
-            )
+            self.execute(f"EXCHANGE TABLES {old_table_sql} AND {new_table_sql}{on_cluster_sql}")
         except DatabaseError as e:
             if "NOT_IMPLEMENTED" in str(e):
                 # If someone is using an old Clickhouse version, an OS that doesn't support atomic exchanges,
@@ -686,11 +705,18 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         old_table_sql = exp.to_table(old_table_name).sql(dialect=self.dialect, identify=True)
         new_table_sql = exp.to_table(new_table_name).sql(dialect=self.dialect, identify=True)
 
-        self.execute(f"RENAME TABLE {old_table_sql} TO {new_table_sql}{self._on_cluster_sql()}")
+        on_cluster_sql = (
+            self._on_cluster_sql(old_table_name)
+            if self._assert_same_on_cluster_scope("RENAME TABLE", old_table_name, new_table_name)
+            else ""
+        )
+
+        self.execute(f"RENAME TABLE {old_table_sql} TO {new_table_sql}{on_cluster_sql}")
 
     def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
-        delete_expr = exp.delete(self._strip_virtual_catalog(table_name), where)
-        if self.engine_run_mode.is_cluster:
+        target_table = self._strip_virtual_catalog(table_name)
+        delete_expr = exp.delete(target_table, where)
+        if self._should_use_on_cluster(target_table):
             delete_expr.set("cluster", exp.OnCluster(this=exp.to_identifier(self.cluster)))
         self.execute(delete_expr)
 
@@ -708,7 +734,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 if self._default_catalog and isinstance(alter_expression.this, exp.Table):
                     if alter_expression.this.catalog == self._default_catalog:
                         alter_expression.this.set("catalog", None)
-                if self.engine_run_mode.is_cluster:
+                # Decided per expression, not hoisted: one call can legitimately carry
+                # alters against both a Replicated and a non-Replicated database.
+                altered_table = (
+                    alter_expression.this if isinstance(alter_expression.this, exp.Table) else None
+                )
+                if self._should_use_on_cluster(altered_table):
                     alter_expression.set(
                         "cluster", exp.OnCluster(this=exp.to_identifier(self.cluster))
                     )
@@ -732,14 +763,24 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             kind: What kind of object to drop. Defaults to TABLE
             **drop_args: Any extra arguments to set on the Drop expression
         """
+        # Dropping the database itself is always cluster-wide: the Keeper-backed DDL log
+        # being dropped cannot propagate its own removal, and `name` here is a database
+        # rather than an object inside one.
+        is_database = kind.upper() in ("SCHEMA", "DATABASE")
+        use_on_cluster = (
+            self.engine_run_mode.is_cluster if is_database else self._should_use_on_cluster(name)
+        )
+
+        if is_database:
+            # Cheap to rebuild and easy to get wrong for one entry; drop the lot.
+            self._clear_database_engine_cache()
+
         super()._drop_object(
             name=name,
             exists=exists,
             kind=kind,
             cascade=cascade,
-            cluster=exp.OnCluster(this=exp.to_identifier(self.cluster))
-            if self.engine_run_mode.is_cluster
-            else None,
+            cluster=exp.OnCluster(this=exp.to_identifier(self.cluster)) if use_on_cluster else None,
             **drop_args,
         )
 
@@ -841,6 +882,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
         empty_ctas: bool = False,
+        table: t.Optional[exp.Table] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
         properties: t.List[exp.Expr] = []
@@ -919,7 +961,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         ):
             properties.append(partitioned_by_prop)
 
-        if self.engine_run_mode.is_cluster:
+        if self._should_use_on_cluster(table):
             properties.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
 
         if empty_ctas:
@@ -944,6 +986,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         self,
         view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         table_description: t.Optional[str] = None,
+        table: t.Optional[exp.Table] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
         """Creates a SQLGlot table properties expression for view"""
@@ -951,7 +994,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
         view_properties_copy = view_properties.copy() if view_properties else {}
 
-        if self.engine_run_mode.is_cluster:
+        if self._should_use_on_cluster(table):
             properties.append(exp.OnCluster(this=exp.to_identifier(self.cluster)))
 
         if view_properties_copy:
@@ -976,7 +1019,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         truncated_comment = self._truncate_table_comment(table_comment)
         comment_sql = exp.Literal.string(truncated_comment).sql(dialect=self.dialect)
 
-        return f"ALTER TABLE {table_sql}{self._on_cluster_sql()} MODIFY COMMENT {comment_sql}"
+        return f"ALTER TABLE {table_sql}{self._on_cluster_sql(table)} MODIFY COMMENT {comment_sql}"
 
     def _build_create_comment_column_exp(
         self,
@@ -992,10 +1035,159 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         truncated_comment = self._truncate_table_comment(column_comment)
         comment_sql = exp.Literal.string(truncated_comment).sql(dialect=self.dialect)
 
-        return f"ALTER TABLE {table_sql}{self._on_cluster_sql()} COMMENT COLUMN {column_sql} {comment_sql}"
+        return (
+            f"ALTER TABLE {table_sql}{self._on_cluster_sql(table)}"
+            f" COMMENT COLUMN {column_sql} {comment_sql}"
+        )
 
-    def _on_cluster_sql(self) -> str:
-        if self.engine_run_mode.is_cluster:
+    @cached_property
+    def _database_engine_cache(self) -> t.Dict[str, t.Optional[str]]:
+        return {}
+
+    @cached_property
+    def _has_replicated_database(self) -> bool:
+        """Whether this server hosts any Keeper-coordinated database at all.
+
+        One probe per connection, and the reason this change costs nothing on a
+        deployment that has no `Replicated` database: when the answer is no, every
+        `ON CLUSTER` decision short-circuits without resolving a target or querying
+        `system.databases` again.
+        """
+        try:
+            row = self.fetchone(
+                exp.select(exp.func("count"))
+                .from_("system.databases")
+                .where(
+                    exp.column("engine").like(
+                        exp.Literal.string(f"{REPLICATED_DATABASE_ENGINE_PREFIX}%")
+                    )
+                )
+            )
+        except Exception:
+            return False
+        return bool(row and row[0])
+
+    @cached_property
+    def _connection_database(self) -> t.Optional[str]:
+        """The database an unqualified object resolves to on this connection."""
+        try:
+            row = self.fetchone("SELECT currentDatabase()")
+        except Exception:
+            return None
+        return str(row[0]) if row and row[0] else None
+
+    def _clear_database_engine_cache(self, database: t.Optional[str] = None) -> None:
+        if database is None:
+            self._database_engine_cache.clear()
+        else:
+            self._database_engine_cache.pop(database, None)
+        # Creating or dropping a database can also change whether any Replicated one
+        # exists, which is what the short-circuit above depends on.
+        self.__dict__.pop("_has_replicated_database", None)
+
+    def _database_engine(self, database: str) -> t.Optional[str]:
+        """The engine of a ClickHouse database, or None when it cannot be resolved.
+
+        Deliberately connection-local rather than replica-wide: a `Replicated` database's
+        engine is uniform by construction, and `clusterAllReplicas` fails outright when any
+        host is down, which would turn an unrelated outage into a DDL failure.
+        """
+        cache = self._database_engine_cache
+        if database in cache:
+            return cache[database]
+
+        engine: t.Optional[str] = None
+        try:
+            row = self.fetchone(
+                exp.select("engine")
+                .from_("system.databases")
+                .where(exp.column("name").eq(exp.Literal.string(database)))
+            )
+            if row and row[0]:
+                engine = str(row[0])
+        except Exception:
+            # Unresolvable for any reason - absent, permission-denied, introspection
+            # failure. Cache the miss but let the caller fall back to emitting.
+            engine = None
+
+        cache[database] = engine
+        return engine
+
+    def _on_cluster_target_database(self, target: t.Optional[TableName]) -> t.Optional[str]:
+        """The database an object DDL statement targets, or None when unknown."""
+        if target is None:
+            return None
+
+        table = exp.to_table(target, dialect=self.dialect) if isinstance(target, str) else target
+        if not isinstance(table, exp.Table):
+            return None
+
+        table = self._strip_virtual_catalog(table)
+        database = table.db
+        # An unqualified name resolves to the connection's database, not to "unknown".
+        return database or self._connection_database
+
+    def _should_use_on_cluster(self, target: t.Optional[TableName] = None) -> bool:
+        """Whether object DDL for `target` should carry `ON CLUSTER`.
+
+        Inside a `Replicated` database Keeper already propagates object DDL, so adding
+        `ON CLUSTER` asks for a second, redundant fan-out and ClickHouse refuses the
+        statement with code 80 `INCORRECT_QUERY`. Without this, no object can be created
+        in such a database at all while the adapter is in cluster mode.
+        Suppression cannot be a connection-level flag: one connection can hold both an
+        Atomic and a `Replicated` database, and objects in the Atomic one still need
+        `ON CLUSTER`.
+
+        Fails open. An unknown target, an unresolvable database, or any introspection
+        failure keeps today's behaviour, so this is a no-op for every deployment that has
+        no `Replicated` database.
+        """
+        if not self.engine_run_mode.is_cluster:
+            return False
+
+        if not self._has_replicated_database:
+            return True
+
+        database = self._on_cluster_target_database(target)
+        if not database:
+            return True
+
+        engine = self._database_engine(database)
+        if engine is None:
+            return True
+
+        return not engine.startswith(REPLICATED_DATABASE_ENGINE_PREFIX)
+
+    def _on_cluster_sql(self, target: t.Optional[TableName] = None) -> str:
+        """Render the `ON CLUSTER` clause for object DDL against `target`.
+
+        Omitting `target` means "target unknown" and preserves the pre-existing
+        behaviour of always emitting in cluster mode.
+        """
+        if self._should_use_on_cluster(target):
             cluster_name = exp.to_identifier(self.cluster, quoted=True).sql(dialect=self.dialect)  #  type: ignore
             return f" ON CLUSTER {cluster_name} "
         return ""
+
+    def _assert_same_on_cluster_scope(
+        self, operation: str, first: TableName, second: TableName
+    ) -> bool:
+        """Resolve one `ON CLUSTER` decision for a two-table statement.
+
+        `RENAME` and `EXCHANGE` can span databases, and a single statement cannot be both
+        cluster-wide and Keeper-propagated. Refuse rather than pick one and be silently
+        half-correct on the other.
+        """
+        from sqlmesh.utils.errors import SQLMeshError
+
+        first_scope = self._should_use_on_cluster(first)
+        second_scope = self._should_use_on_cluster(second)
+        if first_scope != second_scope:
+            first_sql = exp.to_table(first, dialect=self.dialect).sql(dialect=self.dialect)
+            second_sql = exp.to_table(second, dialect=self.dialect).sql(dialect=self.dialect)
+            raise SQLMeshError(
+                f"Cannot {operation} between a Replicated database and a non-Replicated one: "
+                f"{first_sql} and {second_sql} disagree on whether object DDL carries "
+                "ON CLUSTER. Move both objects into databases with the same engine."
+            )
+        return first_scope
