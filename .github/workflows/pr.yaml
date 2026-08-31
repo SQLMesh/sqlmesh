@@ -453,6 +453,10 @@ jobs:
           path: vscode/extension/playwright-report/
           retention-days: 30
   test-dbt-versions:
+    needs: changes
+    if:
+      needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
