@@ -181,6 +181,6 @@ def _get_file_with_content(file_path: Path, relative_path: str) -> models.File:
 
     return models.File(
         name=file_path.name,
-        path=relative_path,
+        path=str(Path(relative_path).as_posix()),
         content=content,
     )
