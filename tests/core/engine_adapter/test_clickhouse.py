@@ -11,8 +11,21 @@ from datetime import datetime
 from pytest_mock.plugin import MockerFixture
 from sqlmesh.core import dialect as d
 from sqlglot.optimizer.qualify_columns import quote_identifiers
+from sqlmesh.utils.errors import SQLMeshError
 
 pytestmark = [pytest.mark.clickhouse, pytest.mark.engine]
+
+
+@pytest.fixture(autouse=True)
+def no_replicated_database_by_default(mocker) -> None:
+    """Default every adapter in this module to a server with no `Replicated` database.
+
+    That is the world these tests describe, and in it `ON CLUSTER` behaviour is exactly
+    what it was before the Replicated-aware policy existed. Seeding the probe keeps the
+    introspection query out of the asserted SQL and makes the assumption explicit.
+    `test_on_cluster_*` re-patches this to cover the other side.
+    """
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", False)
 
 
 @pytest.fixture
@@ -1637,3 +1650,226 @@ def test_create_view_source_rejects_unexpected_virtual_catalog(
             "__clickhouse_gw__.my_db.connection_test__dev",
             parse_one("SELECT * FROM unexpected_catalog.my_db.physical_view"),
         )
+
+
+# Replicated-aware ON CLUSTER policy.
+#
+# Inside a `Replicated` database Keeper already propagates object DDL, so emitting
+# `ON CLUSTER` fans the statement out a second time and double-applies it. The policy is
+# per target database, because one connection can hold both an Atomic and a `Replicated`
+# database and objects in the Atomic one still need `ON CLUSTER`.
+
+
+def _on_cluster_adapter(
+    make_mocked_engine_adapter: t.Callable,
+    mocker,
+    engines: t.Dict[str, t.Optional[str]],
+    connection_database: t.Optional[str] = "default",
+) -> ClickhouseEngineAdapter:
+    """An adapter on a cluster whose databases have the given engines."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
+    mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", connection_database)
+    mocker.patch.object(
+        ClickhouseEngineAdapter,
+        "_database_engine",
+        lambda self, database: engines.get(database),
+    )
+    return adapter
+
+
+def test_on_cluster_predicate(make_mocked_engine_adapter: t.Callable, mocker):
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        {"atomic_db": "Atomic", "replicated_db": "Replicated", "memory_db": "Memory"},
+    )
+
+    # A Replicated target is the only case that suppresses.
+    assert adapter._should_use_on_cluster(exp.to_table("atomic_db.t")) is True
+    assert adapter._should_use_on_cluster(exp.to_table("replicated_db.t")) is False
+    assert adapter._should_use_on_cluster(exp.to_table("memory_db.t")) is True
+
+    # Fails open: an unknown target or an unresolvable database keeps today's behaviour.
+    assert adapter._should_use_on_cluster(None) is True
+    assert adapter._should_use_on_cluster(exp.to_table("absent_db.t")) is True
+
+    # A bare name resolves to the connection's database rather than counting as unknown.
+    mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", "replicated_db")
+    assert adapter._should_use_on_cluster(exp.to_table("t")) is False
+
+
+def test_on_cluster_predicate_off_cluster_never_emits(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    assert adapter._should_use_on_cluster(exp.to_table("any_db.t")) is False
+
+
+def test_on_cluster_predicate_short_circuits_without_a_replicated_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    """The no-op guarantee: no Replicated database means no lookup and no behaviour change."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+
+    assert adapter._should_use_on_cluster(exp.to_table("any_db.t")) is True
+    assert to_sql_calls(adapter) == []
+
+
+def test_on_cluster_predicate_strips_the_virtual_catalog(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = _on_cluster_adapter(make_mocked_engine_adapter, mocker, {"my_db": "Replicated"})
+    adapter.inject_virtual_catalog("clickhouse_gw")
+
+    assert adapter._should_use_on_cluster(exp.to_table("__clickhouse_gw__.my_db.t")) is False
+
+
+def test_database_engine_lookup_is_cached_and_fails_open(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+
+    fetchone = mocker.patch.object(ClickhouseEngineAdapter, "fetchone", return_value=("Atomic",))
+    assert adapter._database_engine("some_db") == "Atomic"
+    assert adapter._database_engine("some_db") == "Atomic"
+    assert fetchone.call_count == 1, "engine lookup should be cached per database"
+
+    # An introspection failure resolves to None, which the predicate treats as "emit".
+    mocker.patch.object(ClickhouseEngineAdapter, "fetchone", side_effect=Exception("boom"))
+    assert adapter._database_engine("other_db") is None
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
+    mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", "default")
+    assert adapter._should_use_on_cluster(exp.to_table("other_db.t")) is True
+
+
+def test_on_cluster_suppressed_for_replicated_object_ddl(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """Per-site rendering: the same statement against Atomic and Replicated targets."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    adapter.delete_from(exp.to_table("a_db.t"), "x = 1")
+    adapter.delete_from(exp.to_table("r_db.t"), "x = 1")
+    adapter.drop_table("a_db.t")
+    adapter.drop_table("r_db.t")
+    adapter._create_table_like("a_db.copy", "a_db.t", exists=False)
+    adapter._create_table_like("r_db.copy", "r_db.t", exists=False)
+
+    assert to_sql_calls(adapter) == [
+        'DELETE FROM "a_db"."t" ON CLUSTER "my_cluster" WHERE "x" = 1',
+        'DELETE FROM "r_db"."t" WHERE "x" = 1',
+        'DROP TABLE IF EXISTS "a_db"."t" ON CLUSTER "my_cluster"',
+        'DROP TABLE IF EXISTS "r_db"."t"',
+        # The doubled space is pre-existing: _on_cluster_sql renders a padded clause.
+        'CREATE TABLE a_db.copy ON CLUSTER "my_cluster"  AS a_db.t',
+        "CREATE TABLE r_db.copy AS r_db.t",
+    ]
+
+
+def test_on_cluster_suppressed_for_replicated_create_table_and_view(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """Covers the two shared-code property builders, which get their target from base."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+    columns_to_types = {"id": exp.DataType.build("UInt64", dialect="clickhouse")}
+
+    adapter.create_table("a_db.t", columns_to_types)
+    adapter.create_table("r_db.t", columns_to_types)
+    adapter.create_view("a_db.v", parse_one("SELECT 1 AS id"))
+    adapter.create_view("r_db.v", parse_one("SELECT 1 AS id"))
+
+    calls = to_sql_calls(adapter)
+    assert 'ON CLUSTER "my_cluster"' in calls[0]
+    assert "ON CLUSTER" not in calls[1]
+    assert 'ON CLUSTER "my_cluster"' in calls[2]
+    assert "ON CLUSTER" not in calls[3]
+
+
+def test_on_cluster_suppressed_for_replicated_comments(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    assert 'ON CLUSTER "my_cluster"' in adapter._build_create_comment_table_exp(
+        exp.to_table("a_db.t"), "hi", "TABLE"
+    )
+    assert "ON CLUSTER" not in adapter._build_create_comment_table_exp(
+        exp.to_table("r_db.t"), "hi", "TABLE"
+    )
+    assert 'ON CLUSTER "my_cluster"' in adapter._build_create_comment_column_exp(
+        exp.to_table("a_db.t"), "id", "hi"
+    )
+    assert "ON CLUSTER" not in adapter._build_create_comment_column_exp(
+        exp.to_table("r_db.t"), "id", "hi"
+    )
+
+
+def test_database_ddl_is_always_on_cluster(make_mocked_engine_adapter: t.Callable, mocker):
+    """Carve-out. Creating or dropping the database itself is never Keeper-propagated.
+
+    `CREATE DATABASE` is how a `Replicated` database comes into existence, so there is no
+    engine to consult, and a database's own DDL log cannot propagate its own removal.
+    """
+    adapter = _on_cluster_adapter(make_mocked_engine_adapter, mocker, {"r_db": "Replicated"})
+
+    adapter.create_schema("r_db")
+    adapter.drop_schema("r_db")
+
+    for call in to_sql_calls(adapter):
+        assert 'ON CLUSTER "my_cluster"' in call, call
+
+
+def test_alter_table_decides_on_cluster_per_expression(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """One call can carry alters against both kinds of database; it cannot be hoisted."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    adapter.alter_table(
+        [
+            parse_one("ALTER TABLE a_db.t ADD COLUMN x UInt64", dialect="clickhouse"),
+            parse_one("ALTER TABLE r_db.t ADD COLUMN x UInt64", dialect="clickhouse"),
+        ]
+    )
+
+    calls = to_sql_calls(adapter)
+    assert 'ON CLUSTER "my_cluster"' in calls[0]
+    assert "ON CLUSTER" not in calls[1]
+
+
+def test_cross_engine_rename_and_exchange_are_refused(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """A single statement cannot be both cluster-wide and Keeper-propagated."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    with pytest.raises(SQLMeshError, match="RENAME TABLE between a Replicated database"):
+        adapter._rename_table("a_db.t", "r_db.t")
+
+    with pytest.raises(SQLMeshError, match="EXCHANGE TABLES between a Replicated database"):
+        adapter._exchange_tables("a_db.t", "r_db.t")
+
+
+def test_creating_a_database_invalidates_the_engine_cache(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """A database that resolved as absent may exist, with an engine, after CREATE."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+    adapter.__dict__["_has_replicated_database"] = True
+    adapter._database_engine_cache["new_db"] = None
+
+    adapter.create_schema("new_db")
+
+    assert "new_db" not in adapter._database_engine_cache
+    assert "_has_replicated_database" not in adapter.__dict__
