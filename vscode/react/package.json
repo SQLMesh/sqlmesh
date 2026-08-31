@@ -56,6 +56,6 @@
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
     "vitest": "^3.2.4",
-    "web-vitals": "^4.2.4"
+    "web-vitals": "^5.1.0"
   }
 }
