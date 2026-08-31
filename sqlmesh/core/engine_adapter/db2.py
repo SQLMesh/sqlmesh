@@ -448,6 +448,12 @@ class Db2EngineAdapter(
         Db2 doesn't support DESCRIBE so we query SYSCAT.TABLES directly.
         UPPER() is used for case-insensitive comparison since Db2 stores unquoted
         identifiers in uppercase but callers may pass lowercase names.
+
+        TYPE column is read so the cache entry stores the correct DataObjectType
+        ('T' = TABLE, 'V' = VIEW).  Previously hardcoding TABLE caused SQL0159N:
+        create_view(replace=True) called drop_data_object_on_type_mismatch which
+        compared cached TABLE against expected VIEW, found a mismatch, then called
+        drop_table() on an existing VIEW — rejected by Db2 with SQL0159N.
         """
         table = exp.to_table(table_name)
         data_object_cache_key = _get_data_object_cache_key(table.catalog, table.db, table.name)
@@ -462,6 +468,7 @@ class Db2EngineAdapter(
             exp.select(
                 exp.column("TABSCHEMA"),
                 exp.column("TABNAME"),
+                exp.column("TYPE"),
             )
             .from_("SYSCAT.TABLES")
             .where(
@@ -478,11 +485,16 @@ class Db2EngineAdapter(
         result = self.cursor.fetchone()
 
         if result is not None:
-            actual_schema, actual_table = result
+            actual_schema, actual_table, actual_type = result
+            object_type = (
+                DataObjectType.VIEW
+                if str(actual_type).strip() == "V"
+                else DataObjectType.TABLE
+            )
             self._data_object_cache[data_object_cache_key] = DataObject(
                 name=actual_table,
                 schema=actual_schema,
-                type=DataObjectType.TABLE,
+                type=object_type,
             )
 
         return result is not None
