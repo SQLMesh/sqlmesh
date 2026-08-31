@@ -487,9 +487,7 @@ class Db2EngineAdapter(
         if result is not None:
             actual_schema, actual_table, actual_type = result
             object_type = (
-                DataObjectType.VIEW
-                if str(actual_type).strip() == "V"
-                else DataObjectType.TABLE
+                DataObjectType.VIEW if str(actual_type).strip() == "V" else DataObjectType.TABLE
             )
             self._data_object_cache[data_object_cache_key] = DataObject(
                 name=actual_table,
