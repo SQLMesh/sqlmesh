@@ -114,15 +114,17 @@ def test_type_mapping_comprehensive(adapter: Db2EngineAdapter):
 
 
 def test_table_exists_found(adapter: Db2EngineAdapter):
-    """table_exists returns True and queries SYSCAT.TABLES with UPPER() wrapping."""
-    adapter.cursor.fetchone.return_value = ("TEST_SCHEMA", "TEST_TABLE")
+    """table_exists returns True and queries SYSCAT.TABLES with UPPER() wrapping.
+    TYPE column is now selected so the cache stores the correct DataObjectType.
+    """
+    adapter.cursor.fetchone.return_value = ("TEST_SCHEMA", "TEST_TABLE", "T")
 
     assert adapter.table_exists("test_schema.test_table") is True
 
     # Exact SQL: identifiers are quoted by quote_identifiers=True in execute().
     # SYSCAT.TABLES is a catalog reference so it renders as "SYSCAT"."TABLES".
     assert to_sql_calls(adapter) == [
-        'SELECT "TABSCHEMA", "TABNAME" FROM "SYSCAT"."TABLES" '
+        'SELECT "TABSCHEMA", "TABNAME", "TYPE" FROM "SYSCAT"."TABLES" '
         "WHERE UPPER(\"TABSCHEMA\") = 'TEST_SCHEMA' AND UPPER(\"TABNAME\") = 'TEST_TABLE'"
     ]
 
@@ -189,7 +191,7 @@ def test_create_table_primary_key_not_null(adapter: Db2EngineAdapter):
     # omitting it would cause Db2 to raise SQL0542N at CREATE TABLE time.
     assert to_sql_calls(adapter) == [
         # table_exists check
-        'SELECT "TABSCHEMA", "TABNAME" FROM "SYSCAT"."TABLES" '
+        'SELECT "TABSCHEMA", "TABNAME", "TYPE" FROM "SYSCAT"."TABLES" '
         "WHERE UPPER(\"TABSCHEMA\") = 'TEST_SCHEMA' AND UPPER(\"TABNAME\") = 'TEST_TABLE'",
         # CREATE TABLE
         'CREATE TABLE "test_schema"."test_table" '
@@ -441,7 +443,7 @@ def test_comments_on_table(adapter: Db2EngineAdapter):
     )
 
     assert to_sql_calls(adapter) == [
-        'SELECT "TABSCHEMA", "TABNAME" FROM "SYSCAT"."TABLES" '
+        'SELECT "TABSCHEMA", "TABNAME", "TYPE" FROM "SYSCAT"."TABLES" '
         "WHERE UPPER(\"TABSCHEMA\") = 'TEST_SCHEMA' AND UPPER(\"TABNAME\") = 'TEST_TABLE'",
         'CREATE TABLE "test_schema"."test_table" ("id" INTEGER, "name" VARCHAR(100))',
         'COMMENT ON TABLE "test_schema"."test_table" IS \'Test table\'',
