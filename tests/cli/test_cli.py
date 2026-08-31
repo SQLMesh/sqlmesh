@@ -1476,6 +1476,51 @@ def test_lint(runner, tmp_path):
     assert result.exit_code == 1
 
 
+def test_lint_no_models(runner, tmp_path):
+    with open(tmp_path / "config.yaml", "w", encoding="utf-8") as f:
+        f.write("model_defaults:\n  dialect: duckdb\n")
+
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint"])
+    assert result.exit_code == 1
+    assert "doesn't seem to have any models" in result.output
+
+
+def test_lint_model_scopes_validation_with_multiple_projects(runner, tmp_path):
+    project_a = tmp_path / "project_a"
+    project_b = tmp_path / "project_b"
+    for project in (project_a, project_b):
+        (project / "models").mkdir(parents=True)
+        with open(project / "config.yaml", "w", encoding="utf-8") as f:
+            f.write(
+                f"project: {project.name}\n"
+                "model_defaults:\n"
+                "  dialect: duckdb\n"
+                "linter:\n"
+                "  enabled: true\n"
+            )
+
+    with open(project_a / "models" / "selected.sql", "w", encoding="utf-8") as f:
+        f.write("MODEL(name selected); SELECT 1 AS col;")
+    with open(project_b / "models" / "unrelated.sql", "w", encoding="utf-8") as f:
+        f.write("MODEL(name unrelated, kind FULL, partitioned_by (col, col)); SELECT 1 AS col;")
+
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            project_a,
+            "--paths",
+            project_b,
+            "lint",
+            "--use-project-index",
+            "--model",
+            "selected",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
 def test_state_export(runner: CliRunner, tmp_path: Path) -> None:
     create_example_project(tmp_path)
 
