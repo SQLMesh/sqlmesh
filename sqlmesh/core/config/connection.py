@@ -2650,10 +2650,13 @@ class Db2ConnectionConfig(ConnectionConfig):
         )
 
     def get_catalog(self) -> t.Optional[str]:
-        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
-        passed to the adapter matches what get_current_catalog() returns at runtime."""
+        """Return the catalog name in lowercase so _default_catalog matches the value
+        returned by get_current_catalog() (which also returns lowercase) and the catalog
+        names produced by the DuckDB-dialect config parser (LOWERCASE normalisation).
+        The set_catalog decorator strips the catalog from all DDL before sending it to
+        Db2, so the case of this value never affects SQL sent to the engine."""
         catalog = super().get_catalog()
-        return catalog.upper() if catalog else None
+        return catalog.lower() if catalog else None
 
     @property
     def _connection_factory(self) -> t.Callable:
