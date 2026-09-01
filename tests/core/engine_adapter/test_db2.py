@@ -374,12 +374,15 @@ def test_merge_alias_replacement(adapter: Db2EngineAdapter):
 
 
 def test_get_current_catalog(adapter: Db2EngineAdapter):
-    """get_current_catalog reads CURRENT SERVER from SYSIBM.SYSDUMMY1 and returns uppercase."""
+    """get_current_catalog reads CURRENT SERVER from SYSIBM.SYSDUMMY1 and returns lowercase.
+    Lowercase is required so _default_catalog matches the catalog name produced by the
+    DuckDB-dialect config parser, which lowercases all identifiers.
+    """
     adapter.cursor.fetchone.return_value = ("TESTDB",)
 
     result = adapter.get_current_catalog()
 
-    assert result == "TESTDB"
+    assert result == "testdb"
     # Raw string because fetchone is called with a plain string, not an exp.Expr
     assert to_sql_calls(adapter) == ["SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1"]
 

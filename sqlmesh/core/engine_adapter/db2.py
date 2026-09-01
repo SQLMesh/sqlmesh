@@ -88,11 +88,16 @@ class Db2EngineAdapter(
     def get_current_catalog(self) -> t.Optional[str]:
         """
         Db2 requires FROM SYSIBM.SYSDUMMY1 to read the CURRENT SERVER special register.
-        Returns uppercase to match the Db2 dialect's identifier normalisation.
+        Returns lowercase so _default_catalog matches the catalog name produced by the
+        DuckDB-dialect config parser (which lowercases all identifiers via LOWERCASE
+        normalisation strategy). The set_catalog decorator always strips the catalog
+        from DDL before execution, so the case of this value never affects SQL sent to
+        Db2. Every other SINGLE_CATALOG_ONLY engine (Postgres, Redshift, MySQL) also
+        returns lowercase — this follows the same pattern.
         """
         result = self.fetchone("SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1")
         if result:
-            return result[0].upper() if result[0] else None
+            return result[0].lower() if result[0] else None
         return None
 
     def _build_schema_exp(

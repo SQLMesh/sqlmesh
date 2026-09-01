@@ -2744,15 +2744,6 @@ def test_to_time_column(
 
 
 def test_batch_size_on_incremental_by_unique_key_model(ctx: TestContext):
-    if ctx.dialect == "db2":
-        pytest.skip(
-            "Db2 SINGLE_CATALOG_ONLY uses a raw == comparison against _default_catalog "
-            "(shared.py:346). This test creates a SQLMesh context whose default_dialect "
-            "is 'duckdb', which lowercases catalog names ('testdb'). That does not match "
-            "_default_catalog 'TESTDB' and raises SQLMeshError. Fix requires either "
-            "case-insensitive catalog comparison in the framework or switching to "
-            "REQUIRES_SET_CATALOG with a no-op set_current_catalog — tracked separately."
-        )
     if not ctx.supports_merge:
         pytest.skip(f"{ctx.dialect} on {ctx.gateway} doesnt support merge")
 
@@ -2849,13 +2840,6 @@ def test_batch_size_on_incremental_by_unique_key_model(ctx: TestContext):
 
 
 def test_incremental_by_unique_key_model_when_matched(ctx: TestContext):
-    if ctx.dialect == "db2":
-        pytest.skip(
-            "Db2 SINGLE_CATALOG_ONLY uses a raw == comparison against _default_catalog "
-            "(shared.py:346). ctx.create_context() produces a duckdb-dialect context "
-            "which lowercases catalog names ('testdb'), not matching _default_catalog "
-            "'TESTDB'. Fix: switch to REQUIRES_SET_CATALOG with no-op set_current_catalog."
-        )
     if not ctx.supports_merge:
         pytest.skip(f"{ctx.dialect} on {ctx.gateway} doesnt support merge")
 
@@ -3582,13 +3566,6 @@ def test_table_diff_identical_dataset(ctx: TestContext):
 
 
 def test_state_migrate_from_scratch(ctx: TestContext):
-    if ctx.dialect == "db2":
-        pytest.skip(
-            "Db2 SINGLE_CATALOG_ONLY uses a raw == comparison against _default_catalog "
-            "(shared.py:346). ctx.create_context() produces a duckdb-dialect context "
-            "which lowercases catalog names ('testdb'), not matching _default_catalog "
-            "'TESTDB'. Fix: switch to REQUIRES_SET_CATALOG with no-op set_current_catalog."
-        )
     test_schema = ctx.add_test_suffix("state")
     ctx._schemas.append(test_schema)  # so it gets cleaned up when the test finishes
 
@@ -3623,14 +3600,6 @@ def test_state_migrate_from_scratch(ctx: TestContext):
 
 def test_python_model_column_order(ctx_df: TestContext, tmp_path: pathlib.Path):
     ctx = ctx_df
-    if ctx.dialect == "db2":
-        pytest.skip(
-            "Db2 SINGLE_CATALOG_ONLY uses a raw == comparison against _default_catalog "
-            "(shared.py:346). ctx.create_context() produces a duckdb-dialect context "
-            "which lowercases catalog names ('testdb'), not matching _default_catalog "
-            "'TESTDB'. Fix: switch to REQUIRES_SET_CATALOG with no-op set_current_catalog."
-        )
-
     model_name = ctx.table("TEST")
 
     (tmp_path / "models").mkdir()
@@ -3998,13 +3967,6 @@ def test_materialized_view_evaluation(ctx: TestContext):
 
 
 def test_unicode_characters(ctx: TestContext, tmp_path: Path):
-    if ctx.dialect == "db2":
-        pytest.skip(
-            "Db2 SINGLE_CATALOG_ONLY uses a raw == comparison against _default_catalog "
-            "(shared.py:346). ctx.create_context() produces a duckdb-dialect context "
-            "which lowercases catalog names ('testdb'), not matching _default_catalog "
-            "'TESTDB'. Fix: switch to REQUIRES_SET_CATALOG with no-op set_current_catalog."
-        )
     # Engines that don't quote identifiers in views are incompatible with unicode characters in model names
     # at the time of writing this is Spark/Trino and they do this for compatibility reasons.
     # I also think Spark may not support unicode in general but that would need to be verified.
@@ -4146,13 +4108,6 @@ def test_grants_case_insensitive_grantees(ctx: TestContext):
 
 
 def test_grants_plan(ctx: TestContext, tmp_path: Path):
-    if ctx.dialect == "db2":
-        pytest.skip(
-            "Db2 SINGLE_CATALOG_ONLY uses a raw == comparison against _default_catalog "
-            "(shared.py:346). ctx.create_context() produces a duckdb-dialect context "
-            "which lowercases catalog names ('testdb'), not matching _default_catalog "
-            "'TESTDB'. Fix: switch to REQUIRES_SET_CATALOG with no-op set_current_catalog."
-        )
     if not ctx.engine_adapter.SUPPORTS_GRANTS:
         pytest.skip(
             f"Skipping Test since engine adapter {ctx.engine_adapter.dialect} doesn't support grants"
