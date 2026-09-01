@@ -374,15 +374,16 @@ def test_merge_alias_replacement(adapter: Db2EngineAdapter):
 
 
 def test_get_current_catalog(adapter: Db2EngineAdapter):
-    """get_current_catalog reads CURRENT SERVER from SYSIBM.SYSDUMMY1 and returns lowercase.
-    Lowercase is required so _default_catalog matches the catalog name produced by the
-    DuckDB-dialect config parser, which lowercases all identifiers.
+    """get_current_catalog reads CURRENT SERVER from SYSIBM.SYSDUMMY1 and returns uppercase.
+    Uppercase matches the Db2 dialect's UPPERCASE normalisation strategy so the
+    REQUIRES_SET_CATALOG path compares equal catalog names (both UPPERCASE) for
+    same-catalog operations.
     """
     adapter.cursor.fetchone.return_value = ("TESTDB",)
 
     result = adapter.get_current_catalog()
 
-    assert result == "testdb"
+    assert result == "TESTDB"
     # Raw string because fetchone is called with a plain string, not an exp.Expr
     assert to_sql_calls(adapter) == ["SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1"]
 
@@ -425,8 +426,10 @@ def test_server_version(adapter: Db2EngineAdapter, mocker: MockerFixture):
 
 
 def test_catalog_support(adapter: Db2EngineAdapter):
-    """Db2 exposes only one catalog (the database itself)."""
-    assert adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
+    """Db2 uses REQUIRES_SET_CATALOG so the set_catalog decorator calls get_current_catalog()
+    at runtime instead of comparing against _default_catalog. This bypasses the case-sensitive
+    equality check that would fail when DuckDB-dialect contexts lowercase catalog names."""
+    assert adapter.catalog_support == CatalogSupport.REQUIRES_SET_CATALOG
 
 
 # ---------------------------------------------------------------------------

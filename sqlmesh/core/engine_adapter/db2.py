@@ -88,17 +88,25 @@ class Db2EngineAdapter(
     def get_current_catalog(self) -> t.Optional[str]:
         """
         Db2 requires FROM SYSIBM.SYSDUMMY1 to read the CURRENT SERVER special register.
-        Returns lowercase so _default_catalog matches the catalog name produced by the
-        DuckDB-dialect config parser (which lowercases all identifiers via LOWERCASE
-        normalisation strategy). The set_catalog decorator always strips the catalog
-        from DDL before execution, so the case of this value never affects SQL sent to
-        Db2. Every other SINGLE_CATALOG_ONLY engine (Postgres, Redshift, MySQL) also
-        returns lowercase — this follows the same pattern.
+        Returns uppercase because the Db2 sqlglot dialect uses UPPERCASE normalisation,
+        so all catalog identifiers in expressions are uppercased by the dialect. The
+        set_catalog decorator (REQUIRES_SET_CATALOG path) compares catalog_name from the
+        expression against the live get_current_catalog() return value — both uppercase
+        means they match for same-catalog operations.
         """
         result = self.fetchone("SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1")
         if result:
-            return result[0].lower() if result[0] else None
+            return result[0].upper() if result[0] else None
         return None
+
+    def set_current_catalog(self, catalog: str) -> None:
+        """
+        Db2 is a single-database engine; switching catalogs at runtime is not supported.
+        This is a no-op so that the REQUIRES_SET_CATALOG path in the set_catalog decorator
+        can call it without error when catalog_name != current_catalog (which can happen
+        when a DuckDB-dialect context lowercases identifiers). The catalog is always stripped
+        from DDL before it reaches Db2, so this never causes a SQL error.
+        """
 
     def _build_schema_exp(
         self,
@@ -446,7 +454,18 @@ class Db2EngineAdapter(
 
     @property
     def catalog_support(self) -> CatalogSupport:
-        return CatalogSupport.SINGLE_CATALOG_ONLY
+        # REQUIRES_SET_CATALOG is used instead of SINGLE_CATALOG_ONLY because the
+        # SINGLE_CATALOG_ONLY path in the set_catalog decorator does a raw case-sensitive
+        # == comparison between catalog_name (from the expression, uppercased by the Db2
+        # dialect) and _default_catalog (set at construction time). When ctx.create_context()
+        # is called with default_dialect="duckdb", model names are lowercased, causing a
+        # mismatch even though both refer to the same catalog.
+        #
+        # REQUIRES_SET_CATALOG bypasses _default_catalog entirely: it calls
+        # get_current_catalog() at runtime and compares against the live value. If they
+        # differ, set_current_catalog() is called — which is a no-op since Db2 cannot
+        # switch catalogs. In all cases the catalog is stripped from DDL before execution.
+        return CatalogSupport.REQUIRES_SET_CATALOG
 
     def table_exists(self, table_name: TableName) -> bool:
         """
