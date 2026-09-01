@@ -2931,6 +2931,46 @@ def test_timestamp_normalization() -> None:
     )
 
 
+def test_out_of_bounds_nanosecond_timestamp_comparison(mocker: MockerFixture) -> None:
+    # https://github.com/TobikoData/sqlmesh/issues/5929
+    # Engines like Redshift may return a TIMESTAMP column as an object-dtype
+    # series of python `datetime.datetime` instances. Values outside pandas'
+    # default `datetime64[ns]` range (1677-09-21..2262-04-11) - which SQL
+    # `TIMESTAMP` fully supports - previously raised `OutOfBoundsDatetime`
+    # while parsing the expected values, producing a "Failed to convert
+    # expected value into `datetime`" warning and a false mismatch on values
+    # whose repr survives str-coercion (the values below happen to compare
+    # equal via `str()`, so the mismatch was silent).
+    test = _create_test(
+        body=load_yaml(
+            """
+test_foo:
+  model: sushi.foo
+  outputs:
+    query:
+      - ts_col: "0001-01-01 00:00:00"
+      - ts_col: "9999-12-31 23:59:59"
+            """
+        ),
+        test_name="test_foo",
+        model=_create_model("SELECT ts_col FROM raw"),
+        context=Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))),
+    )
+    actual = pd.DataFrame(
+        {
+            "ts_col": pd.Series(
+                [datetime.datetime(1, 1, 1), datetime.datetime(9999, 12, 31, 23, 59, 59)],
+                dtype=object,
+            )
+        }
+    )
+    expected = pd.DataFrame({"ts_col": ["0001-01-01 00:00:00", "9999-12-31 23:59:59"]})
+    log_warning = mocker.spy(get_console(), "log_warning")
+    test.assert_equal(expected=expected, actual=actual, sort=False)
+    for call_args in log_warning.call_args_list:
+        assert "Failed to convert expected value" not in call_args.args[0]
+
+
 @use_terminal_console
 def test_disable_test_logging_if_no_tests_found(mocker: MockerFixture, tmp_path: Path) -> None:
     init_example_project(tmp_path, engine_type="duckdb")
