@@ -277,6 +277,34 @@ def test_render_seed_model(sushi_context, assert_exp_eq):
 
 
 @pytest.mark.slow
+def test_load_only_hydrates_remote_snapshots_missing_locally(sushi_context: Context) -> None:
+    prod = sushi_context.state_reader.get_environment("prod")
+    assert prod is not None
+
+    local_node_names = {*sushi_context.models, *sushi_context.standalone_audits}
+    expected_remote_names = {
+        snapshot_info.name
+        for snapshot_info in prod.snapshots
+        if snapshot_info.name not in local_node_names
+    }
+    assert len(expected_remote_names) < len(prod.snapshots)
+
+    with patch.object(
+        sushi_context.state_reader,
+        "get_snapshots",
+        wraps=sushi_context.state_reader.get_snapshots,
+    ) as get_snapshots_mock:
+        sushi_context.load(update_schemas=False)
+
+    load_snapshot_names = {
+        snapshot_info.name
+        for call_args in get_snapshots_mock.call_args_list
+        for snapshot_info in call_args.args[0]
+    }
+    assert load_snapshot_names == expected_remote_names
+
+
+@pytest.mark.slow
 def test_diff(sushi_context: Context, mocker: MockerFixture):
     mock_console = mocker.Mock()
     sushi_context.console = mock_console
