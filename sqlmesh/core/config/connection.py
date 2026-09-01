@@ -2650,10 +2650,8 @@ class Db2ConnectionConfig(ConnectionConfig):
         )
 
     def get_catalog(self) -> t.Optional[str]:
-        """Return the catalog name in uppercase to match the Db2 dialect's UPPERCASE
-        normalisation strategy. All catalog identifiers in SQL expressions are uppercased
-        by the Db2 sqlglot dialect, so _default_catalog must also be uppercase for the
-        default_catalog property to return a consistent value."""
+        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
+        passed to the adapter matches what get_current_catalog() returns at runtime."""
         catalog = super().get_catalog()
         return catalog.upper() if catalog else None
 
