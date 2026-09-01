@@ -753,10 +753,12 @@ class GenericContext(BaseContext, t.Generic[C]):
                 # Only hydrate names which are absent locally. These can be deleted nodes from
                 # this project or nodes from another project which must be merged into the
                 # context. The project field on the hydrated node disambiguates the two cases.
-                local_node_names = {*self._models, *self._standalone_audits}
                 remote_snapshot_infos = []
                 for snapshot_info in prod.snapshots:
-                    if snapshot_info.name in local_node_names:
+                    local_store = (
+                        self._standalone_audits if snapshot_info.is_audit else self._models
+                    )
+                    if snapshot_info.name in local_store:
                         uncached.add(snapshot_info.name)
                     else:
                         remote_snapshot_infos.append(snapshot_info)
