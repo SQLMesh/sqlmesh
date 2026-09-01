@@ -112,21 +112,49 @@ class OptimizedQueryCache:
         cache_entry = self._file_cache.get(name)
         if cache_entry:
             try:
-                # If the optimized rendered query is None, then there are likely adapter calls in the query
-                # that prevent us from rendering it at load time. This means that we can safely set the
-                # unoptimized cache to None as well to prevent attempts to render it downstream.
-                optimized = cache_entry.optimized_rendered_query is not None
-                model._query_renderer.update_cache(
-                    cache_entry.optimized_rendered_query,
-                    cache_entry.renderer_violations,
-                    optimized=optimized,
-                )
+                self.with_optimized_query_entry(model, cache_entry)
                 return True
             except Exception as ex:
                 logger.warning("Failed to load a cache entry '%s': %s", name, ex)
 
         self._put(name, model)
         return False
+
+    @staticmethod
+    def with_optimized_query_entry(
+        model: Model, cache_entry: OptimizedQueryCacheEntry
+    ) -> None:
+        """Adds an already-decoded optimized query cache entry to a model."""
+        if not isinstance(model, SqlModel):
+            return
+
+        # If the optimized rendered query is None, then there are likely adapter calls in the
+        # query that prevent us from rendering it at load time. This means that we can safely
+        # set the unoptimized cache to None as well to prevent attempts to render it downstream.
+        optimized = cache_entry.optimized_rendered_query is not None
+        model._query_renderer.update_cache(
+            cache_entry.optimized_rendered_query,
+            cache_entry.renderer_violations,
+            optimized=optimized,
+        )
+
+    def get_or_create_entry(
+        self, model: Model, name: t.Optional[str] = None
+    ) -> t.Optional[OptimizedQueryCacheEntry]:
+        """Returns one decoded cache entry, creating it when necessary."""
+        if not isinstance(model, SqlModel):
+            return None
+
+        name = self._entry_name(model) if name is None else name
+        cache_entry = self._file_cache.get(name)
+        if cache_entry:
+            try:
+                self.with_optimized_query_entry(model, cache_entry)
+                return cache_entry
+            except Exception as ex:
+                logger.warning("Failed to load a cache entry '%s': %s", name, ex)
+
+        return self._put(name, model)
 
     def put(self, model: Model) -> t.Optional[str]:
         if not isinstance(model, SqlModel):
@@ -140,7 +168,7 @@ class OptimizedQueryCache:
         self._put(name, model)
         return name
 
-    def _put(self, name: str, model: SqlModel) -> None:
+    def _put(self, name: str, model: SqlModel) -> OptimizedQueryCacheEntry:
         optimized_query = model.render_query()
 
         new_entry = OptimizedQueryCacheEntry(
@@ -148,6 +176,7 @@ class OptimizedQueryCache:
             renderer_violations=model.violated_rules_for_query,
         )
         self._file_cache.put(name, value=new_entry)
+        return new_entry
 
     @staticmethod
     def _entry_name(model: SqlModel) -> str:
@@ -197,7 +226,13 @@ def load_optimized_query(
 
 def load_optimized_query_and_mapping(
     model: Model, mapping: t.Dict
-) -> t.Tuple[str, t.Optional[str], str, str, t.Dict]:
+) -> t.Tuple[
+    str,
+    t.Optional[OptimizedQueryCacheEntry],
+    str,
+    str,
+    t.Dict,
+]:
     assert _optimized_query_cache
 
     schema = MappingSchema(normalize=False)
@@ -207,13 +242,13 @@ def load_optimized_query_and_mapping(
 
     if isinstance(model, SqlModel):
         entry_name = _optimized_query_cache._entry_name(model)
-        _optimized_query_cache.with_optimized_query(model, entry_name)
+        cache_entry = _optimized_query_cache.get_or_create_entry(model, entry_name)
     else:
-        entry_name = None
+        cache_entry = None
 
     return (
         model.fqn,
-        entry_name,
+        cache_entry,
         model.data_hash,
         model.metadata_hash,
         model.mapping_schema,
