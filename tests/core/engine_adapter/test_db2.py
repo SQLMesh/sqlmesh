@@ -1,14 +1,16 @@
 # type: ignore
+import importlib.util
 import sys
 import typing as t
 
 import pytest
 
-# Skip entire module if Python < 3.10 BEFORE any DB2 imports
-# DB2 adapter requires Python 3.10+ for db2-sqlglot-dialect dependency
-if sys.version_info < (3, 10):
+# Skip entire module if Python < 3.10 or db2-sqlglot-dialect is not installed.
+# The dialect package must be present before db2.py is imported because
+# class-level exp.DataType.build(dialect="db2") runs at import time.
+if sys.version_info < (3, 10) or importlib.util.find_spec("db2_sqlglot") is None:
     pytest.skip(
-        "DB2 adapter requires Python 3.10+ for db2-sqlglot-dialect", allow_module_level=True
+        "DB2 adapter requires Python 3.10+ and db2-sqlglot-dialect", allow_module_level=True
     )
 
 from pytest_mock.plugin import MockerFixture
