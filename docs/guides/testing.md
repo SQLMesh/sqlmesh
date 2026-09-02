@@ -12,11 +12,19 @@ OK
 ```
 As the unit tests run, SQLMesh will identify any that fail.
 
+By default, `sqlmesh plan` runs all unit tests. Use `--test-changed-only` to run tests only for models included in the plan (added, modified, or restated), or `--skip-tests` to run none. With both `--select-model` and `--test-changed-only`, tests run only for selected models that changed.
+
 For more information about tests, refer to [testing](../concepts/tests.md).
 
 ### Test changes to a specific model
 
-To run a specific model test, pass in the suite file name followed by `::` and the name of the test; for example: `sqlmesh test tests/test_suite.yaml::test_example_full_model`.
+To run unit tests for a specific model, use `--select-model`:
+
+```bash
+$ sqlmesh test --select-model sqlmesh_example.full_model
+```
+
+Alternatively, pass in the suite file name followed by `::` and the name of the test; for example: `sqlmesh test tests/test_suite.yaml::test_example_full_model`.
 
 ### Run a subset of tests
 
