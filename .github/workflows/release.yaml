@@ -17,7 +17,12 @@ jobs:
         with:
           version: latest
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          for i in 1 2 3; do
+            pnpm install --frozen-lockfile && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
       - name: Build UI
         run: pnpm --prefix web/client run build
       - name: Upload UI build artifact
@@ -44,7 +49,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Install build dependencies
-        run: pip install build twine setuptools_scm
+        run: |
+          for i in 1 2 3; do
+            pip install build twine setuptools_scm && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
       - name: Publish Python package
         run: make publish
         env:

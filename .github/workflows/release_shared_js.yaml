@@ -36,7 +36,12 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
       - name: Update npm
-        run: npm install -g npm@latest
+        run: |
+          for i in 1 2 3; do
+            npm install -g npm@latest && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
       - name: Print npm version
         run: npm --version
       - name: Install pnpm
@@ -44,7 +49,12 @@ jobs:
         with:
           version: 10
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          for i in 1 2 3; do
+            pnpm install --frozen-lockfile && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
       - name: Update package.json version
         working-directory: web/common
         run: |

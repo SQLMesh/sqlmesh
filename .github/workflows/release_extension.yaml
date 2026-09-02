@@ -36,7 +36,12 @@ jobs:
         with:
           version: 10
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          for i in 1 2 3; do
+            pnpm install --frozen-lockfile && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
       - name: Update package.json version
         working-directory: vscode/extension
         run: |
