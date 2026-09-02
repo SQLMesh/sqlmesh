@@ -64,6 +64,7 @@ class NotificationEvent(str, Enum):
     APPLY_FAILURE = "apply_failure"
     RUN_FAILURE = "run_failure"
     AUDIT_FAILURE = "audit_failure"
+    AUDIT_PASS = "audit_pass"
     MIGRATION_FAILURE = "migration_failure"
 
 
@@ -171,6 +172,21 @@ class BaseNotificationTarget(PydanticModel, frozen=True):
             audit_error: The AuditError object.
         """
         self.send(NotificationStatus.FAILURE, "Audit failure.", audit_error=audit_error)
+
+    def notify_audit_pass(
+        self, audit_name: str, model_name: t.Optional[str] = None, *args: t.Any, **kwargs: t.Any
+    ) -> None:
+        """Notify when an audit passes.
+
+        Args:
+            audit_name: The name of the audit that passed.
+            model_name: The name of the model the audit ran against, if any.
+        """
+        if model_name:
+            msg = f"Audit `{audit_name}` passed for model `{model_name}`."
+        else:
+            msg = f"Audit `{audit_name}` passed."
+        self.send(NotificationStatus.SUCCESS, msg)
 
     def notify_migration_failure(self, exc: str, *args: t.Any, **kwargs: t.Any) -> None:
         """Notify in the case of a migration failure.
