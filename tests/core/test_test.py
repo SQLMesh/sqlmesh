@@ -3527,3 +3527,29 @@ test_foo:
 
     assert "Ran 1 tests" in output
     assert "Failed tests (1)" in output
+
+
+def test_filter_tests_by_model_names():
+    from sqlmesh.core.test.discovery import ModelTestMetadata, filter_tests_by_model_names
+
+    tests = [
+        ModelTestMetadata(path=Path("a.yaml"), test_name="t1", body={"model": "sushi.a"}),
+        ModelTestMetadata(path=Path("b.yaml"), test_name="t2", body={"model": "sushi.b"}),
+        ModelTestMetadata(path=Path("c.yaml"), test_name="t3", body={"model": ""}),
+    ]
+
+    filtered = filter_tests_by_model_names(
+        tests,
+        {'"memory"."sushi"."a"'},
+        default_catalog="memory",
+        dialect="duckdb",
+    )
+    assert [t.test_name for t in filtered] == ["t1"]
+
+    filtered_short = filter_tests_by_model_names(
+        tests,
+        {"sushi.a"},
+        default_catalog="memory",
+        dialect="duckdb",
+    )
+    assert [t.test_name for t in filtered_short] == ["t1"]
