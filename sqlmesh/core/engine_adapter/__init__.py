@@ -29,10 +29,7 @@ from sqlmesh.core.engine_adapter.fabric import FabricEngineAdapter
 # class-level exp.DataType.build(dialect="db2") in db2.py raises
 # ValueError("Unknown dialect 'db2'") and crashes every non-db2 environment
 # (e.g. the dbt-1.6 test run which installs without the db2 extra).
-_DB2_AVAILABLE = (
-    sys.version_info >= (3, 10)
-    and importlib.util.find_spec("db2_sqlglot") is not None
-)
+_DB2_AVAILABLE = sys.version_info >= (3, 10) and importlib.util.find_spec("db2_sqlglot") is not None
 if _DB2_AVAILABLE:
     from sqlmesh.core.engine_adapter.db2 import Db2EngineAdapter
 
