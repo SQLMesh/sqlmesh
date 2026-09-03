@@ -3,30 +3,30 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
-import typing as t
 import time
+import typing as t
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 import pandas as pd  # noqa: TID253
 import pytest
+from _pytest.mark import MarkDecorator
+from _pytest.mark.structures import ParameterSet
 from sqlglot import exp, parse_one
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
+import sqlmesh.core.dialect as d
 from sqlmesh import Config, Context, EngineAdapter
 from sqlmesh.core.config import load_config_from_paths
 from sqlmesh.core.config.connection import AthenaConnectionConfig
 from sqlmesh.core.dialect import normalize_model_name
-import sqlmesh.core.dialect as d
-from sqlmesh.core.engine_adapter import SparkEngineAdapter, TrinoEngineAdapter, AthenaEngineAdapter
+from sqlmesh.core.engine_adapter import AthenaEngineAdapter, SparkEngineAdapter, TrinoEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject
 from sqlmesh.core.model.definition import SqlModel, load_sql_based_model
 from sqlmesh.utils import random_id
 from sqlmesh.utils.date import to_ds
 from sqlmesh.utils.pydantic import PydanticModel
 from tests.utils.pandas import compare_dataframes
-from dataclasses import dataclass
-from _pytest.mark import MarkDecorator
-from _pytest.mark.structures import ParameterSet
 
 if t.TYPE_CHECKING:
     from sqlmesh.core._typing import TableName, SchemaName

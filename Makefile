@@ -224,8 +224,7 @@ starrocks-test: engine-starrocks-up
 	pytest -n auto -m "starrocks" --reruns 3 --junitxml=test-results/junit-starrocks.xml
 	
 db2-test: engine-db2-up
-# 	pytest -n auto -m "db2" --reruns 3 --junitxml=test-results/junit-db2.xml
-	pytest -m "db2" -n 1 --reruns 0 -x -vv -o log_cli=true --log-cli-level=INFO
+	pytest -n auto -m "db2" --reruns 3 --junitxml=test-results/junit-db2.xml
 
 #################
 # Cloud Engines #
