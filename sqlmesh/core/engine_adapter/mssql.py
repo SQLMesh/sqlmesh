@@ -180,7 +180,10 @@ class MSSQLEngineAdapter(
         **drop_args: t.Dict[str, exp.Expr],
     ) -> None:
         """
-        MsSql doesn't support CASCADE clause and drops schemas unconditionally.
+        MsSql doesn't support CASCADE clause so objects are dropped individually.
+
+        SQL Server also forbids dropping the built-in ``dbo`` schema (error 15150).
+        Objects inside it are still dropped when cascade=True, but the schema itself is left in place.
         """
         if cascade:
             objects = self._get_data_objects(schema_name)
@@ -199,6 +202,11 @@ class MSSQLEngineAdapter(
                         object_table,
                         exists=ignore_if_not_exists,
                     )
+
+        schema = schema_name.db if isinstance(schema_name, exp.Table) else schema_name
+        if schema.lower() == "dbo":
+            return
+
         super().drop_schema(schema_name, ignore_if_not_exists=ignore_if_not_exists, cascade=False)
 
     def merge(
