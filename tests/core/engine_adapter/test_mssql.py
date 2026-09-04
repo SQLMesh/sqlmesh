@@ -714,6 +714,26 @@ def test_drop_schema(make_mocked_engine_adapter: t.Callable):
     ]
 
 
+def test_drop_schema_skips_dbo(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
+
+    adapter._get_data_objects = mock.Mock()
+    adapter._get_data_objects.return_value = [
+        DataObject(
+            catalog="test_catalog",
+            schema="dbo",
+            name="test_view",
+            type=DataObjectType.from_str("VIEW"),
+        )
+    ]
+
+    adapter.drop_schema("dbo", cascade=True)
+
+    sql_calls = to_sql_calls(adapter)
+    assert """DROP VIEW IF EXISTS [dbo].[test_view];""" in sql_calls
+    assert """DROP SCHEMA IF EXISTS [dbo];""" not in sql_calls
+
+
 def test_drop_schema_with_special_identifiers(make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
 
