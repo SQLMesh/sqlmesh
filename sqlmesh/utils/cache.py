@@ -136,11 +136,11 @@ class FileCache(t.Generic[T]):
             with os.fdopen(tmp_fd, "wb") as raw_fd:
                 with gzip.open(raw_fd, "wb", compresslevel=1) as fd:
                     pickle.dump(value, fd)
-            os.replace(tmp_name, self._cache_entry_path(name, entry_id))
-        except OSError as ex:
-            # Storing an entry is best-effort; e.g. on Windows os.replace fails if a
-            # concurrent reader still has the target file open.
-            logger.warning("Failed to store a cache entry '%s': %s", name, ex)
+            try:
+                os.replace(tmp_name, self._cache_entry_path(name, entry_id))
+            except OSError as ex:
+                # Windows os.replace fails if a concurrent reader still has the target file open.
+                logger.warning("Failed to store a cache entry '%s': %s", name, ex)
         finally:
             try:
                 os.unlink(tmp_name)
