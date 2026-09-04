@@ -86,6 +86,15 @@ class SnowflakeEngineAdapter(
     CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.func("CURRENT_ROLE")
     USE_CATALOG_IN_GRANTS = True
 
+    def _build_clustered_by_exp(
+        self,
+        clustered_by: t.List[exp.Expr],
+        **kwargs: t.Any,
+    ) -> t.Optional[exp.Cluster]:
+        # Snowflake requires the clustering key to be parenthesized. SQLGlot 30.17
+        # no longer adds parentheses when Cluster contains bare expressions.
+        return exp.Cluster(expressions=[exp.Tuple(expressions=[c.copy() for c in clustered_by])])
+
     @contextlib.contextmanager
     def session(self, properties: SessionProperties) -> t.Iterator[None]:
         warehouse = properties.get("warehouse")

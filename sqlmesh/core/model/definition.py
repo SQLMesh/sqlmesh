@@ -24,6 +24,7 @@ from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.macros import MacroRegistry, macro
 from sqlmesh.core.model.common import (
     ParsableSql,
+    gen_for_jinja,
     make_python_env,
     parse_dependencies,
     parse_strings_with_macro_refs,
@@ -835,7 +836,10 @@ class _Model(ModelMeta, frozen=True):
             # Transpile the time column format into the generic dialect
             formatted_time = format_time(
                 self.time_column.format,
-                d.Dialect.get_or_raise(self.dialect).TIME_MAPPING,
+                {
+                    token: value.removesuffix("strict")
+                    for token, value in d.Dialect.get_or_raise(self.dialect).TIME_MAPPING.items()
+                },
             )
             assert formatted_time is not None
             self.time_column.format = formatted_time
@@ -2660,7 +2664,7 @@ def _create_model(
         statements.append(kwargs["kind"].merge_filter)
 
     jinja_macro_references, referenced_variables = extract_macro_references_and_variables(
-        *(gen(e if isinstance(e, exp.Expr) else e[0]) for e in statements)
+        *(gen_for_jinja(e if isinstance(e, exp.Expr) else e[0]) for e in statements)
     )
 
     if jinja_macros:
