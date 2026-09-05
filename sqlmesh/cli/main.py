@@ -64,6 +64,13 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
+def _raise_if_no_models(context: Context, path: t.Any) -> None:
+    if not context.models:
+        raise click.ClickException(
+            f"`{path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
+        )
+
+
 @click.group(cls=_SQLMeshGroup, no_args_is_help=True)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
@@ -141,8 +148,8 @@ def cli(
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
 
-    # Unlike the other commands above, lint can scope its own load for multi-project contexts.
-    if ctx.invoked_subcommand == "lint":
+    # These commands can scope their own load for multi-project contexts.
+    if ctx.invoked_subcommand in ("lint", "plan", "render"):
         load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
@@ -163,10 +170,8 @@ def cli(
             logger.exception("Failed to initialize SQLMesh context")
         raise
 
-    if load and not context.models:
-        raise click.ClickException(
-            f"`{paths}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
-        )
+    if load:
+        _raise_if_no_models(context, paths)
 
     ctx.obj = context
 
@@ -284,6 +289,12 @@ Need help?
     help="The SQL dialect to render the query as.",
 )
 @click.option("--no-format", is_flag=True, help="Disable fancy formatting of the query.")
+@click.option(
+    "--use-project-index",
+    is_flag=True,
+    default=None,
+    help="Use the persistent project index to load and render only the target model and its upstream dependencies. Can also be enabled with render.use_project_index.",
+)
 @opt.format_options
 @click.pass_context
 @error_handler
@@ -297,19 +308,20 @@ def render(
     expand: t.Optional[t.Union[bool, t.Iterable[str]]] = None,
     dialect: t.Optional[str] = None,
     no_format: bool = False,
+    use_project_index: t.Optional[bool] = None,
     **format_kwargs: t.Any,
 ) -> None:
     """Render a model's query, optionally expanding referenced models."""
-    model = ctx.obj.get_model(model, raise_if_missing=True)
-
     rendered = ctx.obj.render(
         model,
         start=start,
         end=end,
         execution_time=execution_time,
         expand=expand,
+        use_project_index=use_project_index,
     )
 
+    model = ctx.obj.get_model(model, raise_if_missing=True)
     format_config = ctx.obj.config_for_node(model).format
     format_kwargs = {
         **format_config.generator_options,
@@ -567,6 +579,12 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     default=None,
     help="For every model, ensure at least this many intervals are covered by a missing intervals check regardless of the plan start date",
 )
+@click.option(
+    "--use-project-index",
+    is_flag=True,
+    default=None,
+    help="Refresh the persistent project index, reuse loaded snapshot state, and scope plan graph work to changed or selected model lineage without changing the plan result. Can also be enabled with plan.use_project_index.",
+)
 @opt.verbose
 @click.pass_context
 @error_handler
@@ -585,7 +603,17 @@ def plan(
     allow_additive_models = kwargs.pop("allow_additive_model") or None
     backfill_models = kwargs.pop("backfill_model") or None
     ignore_cron = kwargs.pop("ignore_cron") or None
+    use_project_index = kwargs.pop("use_project_index")
     setattr(get_console(), "verbosity", Verbosity(verbose))
+
+    context.load(
+        use_project_index=(
+            context.config.plan.use_project_index
+            if use_project_index is None
+            else use_project_index
+        )
+    )
+    _raise_if_no_models(context, context.path)
 
     context.plan(
         environment,
@@ -595,6 +623,7 @@ def plan(
         allow_additive_models=allow_additive_models,
         backfill_models=backfill_models,
         ignore_cron=ignore_cron,
+        use_project_index=use_project_index,
         **kwargs,
     )
 
@@ -1256,10 +1285,7 @@ def lint(
         use_project_index=use_project_index,
     )
 
-    if not obj.models:
-        raise click.ClickException(
-            f"`{obj.path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
-        )
+    _raise_if_no_models(obj, obj.path)
 
 
 @cli.group(no_args_is_help=True)

@@ -407,6 +407,17 @@ Options:
                                   versions of the models and standalone
                                   audits.
   --explain                       Explain the plan instead of applying it.
+  --ignore-cron                   Run all missing intervals, ignoring
+                                  individual cron schedules. Only applies if
+                                  --run is set.
+  --min-intervals TEXT            For every model, ensure at least this many
+                                  intervals are covered by a missing intervals
+                                  check regardless of the plan start date
+  --use-project-index             Refresh the persistent project index, reuse
+                                  loaded snapshot state, and scope plan graph
+                                  work to changed or selected model lineage
+                                  without changing the plan result. Can also
+                                  be enabled with plan.use_project_index.
   -v, --verbose                   Verbose output. Use -vv for very verbose
                                   output.
   --help                          Show this message and exit.
@@ -449,6 +460,10 @@ Options:
                               only they will be expanded as raw queries.
   --dialect TEXT              The SQL dialect to render the query as.
   --no-format                 Disable fancy formatting of the query.
+  --use-project-index         Use the persistent project index to load and
+                              render only the target model and its upstream
+                              dependencies. Can also be enabled with
+                              render.use_project_index.
   --max-text-width INTEGER    The max number of characters in a segment before
                               creating new lines in pretty mode.
   --leading-comma             Determines whether or not the comma is leading
