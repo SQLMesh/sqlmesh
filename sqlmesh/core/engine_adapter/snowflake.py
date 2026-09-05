@@ -24,6 +24,7 @@ from sqlmesh.core.engine_adapter.shared import (
     SourceQuery,
     set_catalog,
 )
+from sqlmesh.core.schema_diff import TableAlterOperation
 from sqlmesh.utils import optional_import, get_source_columns_to_types
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.pandas import columns_to_types_from_dtypes
@@ -667,6 +668,8 @@ class SnowflakeEngineAdapter(
         replace: bool = False,
         exists: bool = True,
         clone_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
+        table_format: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> None:
         # The Snowflake adapter should use the transient property to clone transient tables
@@ -675,13 +678,42 @@ class SnowflakeEngineAdapter(
             if isinstance(table_type, exp.TransientProperty):
                 kwargs["properties"] = exp.Properties(expressions=[table_type])
 
+        # Snowflake rejects `CREATE TABLE ... CLONE` for Iceberg tables, it requires
+        # `CREATE ICEBERG TABLE ... CLONE` instead
+        if table_format and not table_kind:
+            table_kind = f"{table_format.upper()} TABLE"
+
         super().clone_table(
             target_table_name,
             source_table_name,
             replace=replace,
             clone_kwargs=clone_kwargs,
+            table_kind=table_kind,
             **kwargs,
         )
+
+    def alter_table(
+        self,
+        alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
+    ) -> None:
+        # Snowflake rejects `ALTER TABLE` for Iceberg tables, it requires
+        # `ALTER ICEBERG TABLE` instead
+        if table_format:
+            table_kind = f"{table_format.upper()} TABLE"
+            resolved_expressions = []
+            for alter_expression in alter_expressions:
+                resolved_expression = (
+                    alter_expression.expression
+                    if isinstance(alter_expression, TableAlterOperation)
+                    else alter_expression.copy()
+                )
+                resolved_expression.set("kind", table_kind)
+                resolved_expressions.append(resolved_expression)
+
+            super().alter_table(resolved_expressions)
+        else:
+            super().alter_table(alter_expressions)
 
     @t.overload
     def _columns_to_types(

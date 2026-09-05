@@ -1943,6 +1943,7 @@ def test_create_clone_in_dev(mocker: MockerFixture, adapter_mock, make_snapshot)
         f"sqlmesh__test_schema.test_schema__test_model__{snapshot.dev_version}__dev",
         f"sqlmesh__test_schema.test_schema__test_model__{snapshot.version}",
         rendered_physical_properties={},
+        table_format=None,
     )
 
     adapter_mock.get_alter_operations.assert_called_once_with(
@@ -1952,7 +1953,7 @@ def test_create_clone_in_dev(mocker: MockerFixture, adapter_mock, make_snapshot)
         ignore_additive=False,
     )
 
-    adapter_mock.alter_table.assert_called_once_with([])
+    adapter_mock.alter_table.assert_called_once_with([], table_format=None)
 
     adapter_mock.drop_table.assert_called_once_with(
         f"sqlmesh__test_schema.test_schema__test_model__{snapshot.version}__dev_schema_tmp"
@@ -1992,6 +1993,7 @@ def test_drop_clone_in_dev_when_migration_fails(mocker: MockerFixture, adapter_m
         f"sqlmesh__test_schema.test_schema__test_model__{snapshot.version}__dev",
         f"sqlmesh__test_schema.test_schema__test_model__{snapshot.version}",
         rendered_physical_properties={},
+        table_format=None,
     )
 
     adapter_mock.get_alter_operations.assert_called_once_with(
@@ -2001,7 +2003,7 @@ def test_drop_clone_in_dev_when_migration_fails(mocker: MockerFixture, adapter_m
         ignore_additive=False,
     )
 
-    adapter_mock.alter_table.assert_called_once_with([])
+    adapter_mock.alter_table.assert_called_once_with([], table_format=None)
 
     adapter_mock.drop_table.assert_has_calls(
         [
