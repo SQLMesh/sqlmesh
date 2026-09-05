@@ -20,7 +20,7 @@ else
     rm packages-microsoft-prod.deb
 fi
 
-ALL_DEPENDENCIES="libpq-dev netcat-traditional unixodbc-dev default-jdk msodbcsql18"
+ALL_DEPENDENCIES="libpq-dev netcat-traditional unixodbc-dev default-jdk msodbcsql18 msopenjdk-21"
 sudo apt-get clean && sudo apt-get -y update && sudo ACCEPT_EULA='Y' apt-get -y install $ALL_DEPENDENCIES
 
 # Install Python dependencies
