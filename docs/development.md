@@ -68,6 +68,42 @@ Run more comprehensive tests that run on each commit:
 make slow-test
 ```
 
+### PostgreSQL Metrics acceptance
+
+The native Metrics suite loads a temporary SQLMesh project, applies its models to PostgreSQL, compiles queries with `Context.rewrite`, and checks results returned by PostgreSQL. It uses the existing `inttest_postgres` gateway and `postgres` / `docker` test markers. Only scheduling metadata uses an isolated in-memory DuckDB connection; model and metric SQL run on PostgreSQL. Temporary model schemas are cleaned up by the integration fixtures.
+
+With the project's PostgreSQL test service available (see `make engine-postgres-up`), run:
+
+```bash
+pytest tests/core/engine_adapter/integration/test_integration_metrics.py -q
+```
+
+On a Linux Docker host, a separate test container can instead be run without publishing a database port. After activating the development virtual environment:
+
+```bash
+(
+  set -eu
+  name="sqlmesh-metrics-pg-$$"
+  docker network create --internal "$name"
+  trap 'docker rm -f "$name" >/dev/null 2>&1 || true; docker network rm "$name" >/dev/null 2>&1 || true' EXIT
+  docker run -d --rm --name "$name" --network "$name" \
+    -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
+  ready=false
+  for attempt in $(seq 1 30); do
+    if docker exec "$name" pg_isready -h 127.0.0.1 -U postgres; then
+      ready=true
+      break
+    fi
+    sleep 1
+  done
+  "$ready"
+  export DOCKER_HOSTNAME="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")"
+  pytest tests/core/engine_adapter/integration/test_integration_metrics.py -q
+)
+```
+
+The trust-authenticated container is for disposable tests only: its internal network has no published host port or persistent data volume. Do not point this suite at a business database. Personal SQLMesh gateway overrides must not redirect `inttest_postgres` away from the intended test instance.
+
 ## Documentation
 
 In order to run the documentation server, you will need to install the dependencies by running the following command.
