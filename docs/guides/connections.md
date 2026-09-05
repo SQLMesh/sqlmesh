@@ -84,6 +84,7 @@ default_gateway: local_db
 * [BigQuery](../integrations/engines/bigquery.md)
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
+* [Db2](../integrations/engines/db2.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)

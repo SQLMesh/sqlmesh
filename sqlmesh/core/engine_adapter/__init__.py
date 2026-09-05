@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 import typing as t
 
 from sqlmesh.core.engine_adapter.base import (
@@ -22,6 +24,15 @@ from sqlmesh.core.engine_adapter.athena import AthenaEngineAdapter
 from sqlmesh.core.engine_adapter.risingwave import RisingwaveEngineAdapter
 from sqlmesh.core.engine_adapter.fabric import FabricEngineAdapter
 
+# DB2 adapter requires Python 3.10+ AND db2-sqlglot-dialect to be installed.
+# The dialect package registers "db2" with sqlglot at import time; without it,
+# class-level exp.DataType.build(dialect="db2") in db2.py raises
+# ValueError("Unknown dialect 'db2'") and crashes every non-db2 environment
+# (e.g. the dbt-1.6 test run which installs without the db2 extra).
+_DB2_AVAILABLE = sys.version_info >= (3, 10) and importlib.util.find_spec("db2_sqlglot") is not None
+if _DB2_AVAILABLE:
+    from sqlmesh.core.engine_adapter.db2 import Db2EngineAdapter
+
 DIALECT_TO_ENGINE_ADAPTER = {
     "hive": SparkEngineAdapter,
     "spark": SparkEngineAdapter,
@@ -40,6 +51,10 @@ DIALECT_TO_ENGINE_ADAPTER = {
     "fabric": FabricEngineAdapter,
     "starrocks": StarRocksEngineAdapter,
 }
+
+# Add DB2 to the registry only when the dialect package is present
+if _DB2_AVAILABLE:
+    DIALECT_TO_ENGINE_ADAPTER["db2"] = Db2EngineAdapter
 
 DIALECT_ALIASES = {
     "postgresql": "postgres",
