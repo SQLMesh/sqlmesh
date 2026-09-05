@@ -216,8 +216,12 @@ def pytest_collection_modifyitems(items, *args, **kwargs):
             if marker.name in test_type_markers:
                 break
         else:
-            # if no test type marker is found, assume fast test
-            item.add_marker("fast")
+            # If no test type marker is found, assume it is a fast or isolated test.
+            if "capsys" in item.fixturenames:
+                # capsys is not threadsafe, so the test must be isolated.
+                item.add_marker("isolated")
+            else:
+                item.add_marker("fast")
 
 
 # Ignore all local config files
