@@ -321,16 +321,18 @@ class ModelMeta(_Node):
         if isinstance(vs, (exp.Tuple, exp.Array)):
             vs = vs.expressions
 
-        raw_col_descriptions = (
-            vs
+        # Normalize each part while it is still an identifier, so that a quoted
+        # column keeps its case on dialects where quoting makes it significant.
+        col_descriptions = (
+            {normalize_identifiers(k, dialect=dialect).name: v for k, v in vs.items()}
             if isinstance(vs, dict)
-            else {".".join([part.this for part in v.this.parts]): v.expression.name for v in vs}
+            else {
+                ".".join(
+                    normalize_identifiers(part, dialect=dialect).name for part in v.this.parts
+                ): v.expression.name
+                for v in vs
+            }
         )
-
-        col_descriptions = {
-            normalize_identifiers(k, dialect=dialect).name: v
-            for k, v in raw_col_descriptions.items()
-        }
 
         columns_to_types = data.get("columns_to_types_")
         if columns_to_types:
