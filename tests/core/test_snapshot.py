@@ -638,6 +638,49 @@ def test_missing_intervals_start_override_per_model(make_snapshot: t.Callable[..
     ]
 
 
+def test__missing_intervals__deployable_snapshot_prod_intervals_returned(snapshot: Snapshot):
+    # Arrange
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=False)
+    snapshot.add_interval(start="2020-01-02", end="2020-01-02", is_dev=False)
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=True)
+
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    deployability_index = DeployabilityIndex.create([snapshot])
+
+    # Act
+    missing_intervals = snapshot.missing_intervals(
+        start="2020-01-01", end="2020-01-03", deployability_index=deployability_index
+    )
+
+    # Assert
+    assert deployability_index.is_deployable(snapshot)
+    assert missing_intervals == [
+        (to_timestamp("2020-01-03"), to_timestamp("2020-01-04")),
+    ]
+
+
+def test__missing_intervals__non_deployable_snapshot_dev_intervals_returned(snapshot: Snapshot):
+    # Arrange
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=False)
+    snapshot.add_interval(start="2020-01-02", end="2020-01-02", is_dev=False)
+    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=True)
+
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    deployability_index = DeployabilityIndex.create([snapshot])
+
+    # Act
+    missing_intervals = snapshot.missing_intervals(
+        start="2020-01-01", end="2020-01-03", deployability_index=deployability_index
+    )
+
+    # Assert
+    assert not deployability_index.is_deployable(snapshot)
+    assert missing_intervals == [
+        (to_timestamp("2020-01-02"), to_timestamp("2020-01-03")),  # Not missing from prod intervals
+        (to_timestamp("2020-01-03"), to_timestamp("2020-01-04")),
+    ]
+
+
 def test_incremental_time_self_reference(make_snapshot):
     snapshot = make_snapshot(
         SqlModel(
@@ -2407,63 +2450,101 @@ def test_earliest_start_date(sushi_context: Context):
 
 
 def test_deployability_index(make_snapshot):
-    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1")))
-    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    # Breaking change - should be both deployable / representative
+    snapshot_breaking = make_snapshot(SqlModel(name="breaking", query=parse_one("SELECT 1")))
+    snapshot_breaking.categorize_as(SnapshotChangeCategory.BREAKING)
 
-    snapshot_b = make_snapshot(SqlModel(name="b", query=parse_one("SELECT 1")))
-    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
-    snapshot_b.parents = (snapshot_a.snapshot_id,)
+    # Forward only breaking change - cannot be deployable / representative due to forward only
+    snapshot_breaking_forward_only = make_snapshot(
+        SqlModel(name="forward_only", query=parse_one("SELECT 1"))
+    )
+    snapshot_breaking_forward_only.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    snapshot_breaking_forward_only.parents = (snapshot_breaking.snapshot_id,)
 
-    snapshot_c = make_snapshot(SqlModel(name="c", query=parse_one("SELECT 1")))
-    snapshot_c.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
-    snapshot_c.parents = (snapshot_b.snapshot_id,)
+    # Indirect breaking - cannot be deployable / representative due to forward only non-representative parent
+    snapshot_indirect_breaking_non_representative_parent = make_snapshot(
+        SqlModel(name="indirect_breaking_non_representative_parent", query=parse_one("SELECT 1"))
+    )
+    snapshot_indirect_breaking_non_representative_parent.categorize_as(
+        SnapshotChangeCategory.INDIRECT_BREAKING
+    )
+    snapshot_indirect_breaking_non_representative_parent.parents = (
+        snapshot_breaking_forward_only.snapshot_id,
+    )
 
-    snapshot_d = make_snapshot(SqlModel(name="d", query=parse_one("SELECT 1")))
-    snapshot_d.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
-    snapshot_d.parents = (snapshot_b.snapshot_id, snapshot_a.snapshot_id)
+    # Indirect breaking - can be deployable / representative due to forward only representative parent
+    snapshot_indirect_breaking_representative_parent = make_snapshot(
+        SqlModel(name="indirect_breaking_representative_parent", query=parse_one("SELECT 1"))
+    )
+    snapshot_indirect_breaking_representative_parent.categorize_as(
+        SnapshotChangeCategory.INDIRECT_BREAKING
+    )
+    snapshot_indirect_breaking_representative_parent.parents = (snapshot_breaking.snapshot_id,)
 
-    snapshot_e = make_snapshot(SqlModel(name="e", query=parse_one("SELECT 1")))
-    snapshot_e.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+    # Non breaking - deployable / representative due to no breaking changes
+    snapshot_non_breaking = make_snapshot(
+        SqlModel(name="non_breaking", query=parse_one("SELECT 1"))
+    )
+    snapshot_non_breaking.categorize_as(SnapshotChangeCategory.NON_BREAKING)
 
-    snapshot_f = make_snapshot(SqlModel(name="f", query=parse_one("SELECT 1")))
-    snapshot_f.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING)
-    snapshot_f.parents = (snapshot_e.snapshot_id, snapshot_a.snapshot_id)
+    # Indirect non breaking - can be representative but not deployable
+    snapshot_indirect_non_breaking = make_snapshot(
+        SqlModel(name="indirect_non_breaking", query=parse_one("SELECT 1"))
+    )
+    snapshot_indirect_non_breaking.intervals = [
+        (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    ]
+    snapshot_indirect_non_breaking.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
+    snapshot_indirect_non_breaking.parents = (snapshot_non_breaking.snapshot_id,)
 
-    snapshot_g = make_snapshot(SqlModel(name="g", query=parse_one("SELECT 1")))
-    snapshot_g.intervals = [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
-    snapshot_g.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
-    snapshot_g.parents = (snapshot_e.snapshot_id,)
+    # Breaking with non-representative parent - cannot be deployable due to non-representative parent
+    snapshot_breaking_non_representative_parent = make_snapshot(
+        SqlModel(name="breaking_non_deployable_parents", query=parse_one("SELECT 1"))
+    )
+    snapshot_breaking_non_representative_parent.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_breaking_non_representative_parent.parents = (
+        snapshot_breaking_forward_only.snapshot_id,
+    )
 
     snapshots = {
         s.snapshot_id: s
         for s in [
-            snapshot_a,
-            snapshot_b,
-            snapshot_c,
-            snapshot_d,
-            snapshot_e,
-            snapshot_f,
-            snapshot_g,
+            snapshot_breaking,
+            snapshot_breaking_forward_only,
+            snapshot_indirect_breaking_non_representative_parent,
+            snapshot_indirect_breaking_representative_parent,
+            snapshot_non_breaking,
+            snapshot_indirect_non_breaking,
+            snapshot_breaking_non_representative_parent,
         ]
     }
 
     deployability_index = DeployabilityIndex.create(snapshots)
 
-    assert deployability_index.is_deployable(snapshot_a)
-    assert deployability_index.is_deployable(snapshot_e)
-    assert deployability_index.is_deployable(snapshot_f)
-    assert not deployability_index.is_deployable(snapshot_g)
-    assert not deployability_index.is_deployable(snapshot_b)
-    assert not deployability_index.is_deployable(snapshot_c)
-    assert not deployability_index.is_deployable(snapshot_d)
+    assert deployability_index.is_deployable(snapshot_breaking)
+    assert deployability_index.is_representative(snapshot_breaking)
 
-    assert deployability_index.is_representative(snapshot_a)
-    assert deployability_index.is_representative(snapshot_e)
-    assert deployability_index.is_representative(snapshot_f)
-    assert deployability_index.is_representative(snapshot_g)
-    assert not deployability_index.is_representative(snapshot_b)
-    assert not deployability_index.is_representative(snapshot_c)
-    assert not deployability_index.is_representative(snapshot_d)
+    assert not deployability_index.is_deployable(snapshot_breaking_forward_only)
+    assert not deployability_index.is_representative(snapshot_breaking_forward_only)
+
+    assert deployability_index.is_deployable(snapshot_non_breaking)
+    assert deployability_index.is_representative(snapshot_non_breaking)
+
+    assert not deployability_index.is_deployable(
+        snapshot_indirect_breaking_non_representative_parent
+    )
+    assert not deployability_index.is_representative(
+        snapshot_indirect_breaking_non_representative_parent
+    )
+
+    assert deployability_index.is_deployable(snapshot_indirect_breaking_representative_parent)
+    assert deployability_index.is_representative(snapshot_indirect_breaking_representative_parent)
+
+    assert not deployability_index.is_deployable(snapshot_indirect_non_breaking)
+    assert deployability_index.is_representative(snapshot_indirect_non_breaking)
+
+    assert not deployability_index.is_deployable(snapshot_breaking_non_representative_parent)
+    assert not deployability_index.is_representative(snapshot_breaking_non_representative_parent)
 
     all_deployable_index = deployability_index.all_deployable()
     assert all(all_deployable_index.is_deployable(s) for s in snapshots.values())

@@ -1048,7 +1048,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         intervals = (
-            self.intervals if deployability_index.is_representative(self) else self.dev_intervals
+            self.intervals if deployability_index.is_deployable(self) else self.dev_intervals
         )
 
         if not self.evaluatable or (self.is_seed and intervals):
@@ -1609,14 +1609,14 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         )
 
     def is_representative(self, snapshot: SnapshotIdLike) -> bool:
-        """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading, table mapping, and
-        computing missing intervals.
+        """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading.
 
         Note, that deployable snapshots are also representative, but the reverse is not always true.
 
         Unlike `is_deployable`, this variant also captures FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots that
-        are not deployable by their nature but are currently promoted in production. Therefore, it's safe to consider
-        them as such when constructing a plan, building a physical table mapping or computing missing intervals.
+        are not deployable by their nature but are currently promoted in production. This is used when constructing
+        a plan to determine prod promotion staging (e.g. which snapshots backfill before promote) and whether a
+        physical table needs to be created.
 
         Args:
             snapshot: The snapshot to check.
@@ -1720,6 +1720,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                     # Similarly, if the model depends on past and the start date is not aligned with the
                     # model's start, we should consider this snapshot non-deployable.
                     this_deployable = False
+
                     if not snapshot.is_paused or (
                         snapshot.is_indirect_non_breaking and snapshot.intervals
                     ):
@@ -1996,7 +1997,7 @@ def to_table_mapping(
 ) -> t.Dict[str, str]:
     deployability_index = deployability_index or DeployabilityIndex.all_deployable()
     return {
-        snapshot.name: snapshot.table_name(deployability_index.is_representative(snapshot))
+        snapshot.name: snapshot.table_name(deployability_index.is_deployable(snapshot))
         for snapshot in snapshots
         if snapshot.version and not snapshot.is_embedded and snapshot.is_model
     }
