@@ -127,15 +127,17 @@ class ReferenceGraph:
             ref_name = path[-1].name
 
             for model_name in sorted(self._ref_models[ref_name]):
+                if model_name == target:
+                    ref = self._model_refs[model_name][ref_name]
+                    if model_name not in visited and not (many and not ref.unique):
+                        return path + [ref]
+                    continue
                 for ref in self._model_refs[model_name].values():
                     # paths cannot have loops or contain many to many refs
                     if model_name in visited or (many and not ref.unique):
                         continue
 
                     new_path = path + [ref]
-
-                    if model_name == target:
-                        return new_path
 
                     if len(new_path) < max_depth:
                         queue.append(new_path)
