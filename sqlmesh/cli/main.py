@@ -428,6 +428,12 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     default=None,
 )
 @click.option(
+    "--test-changed-only",
+    is_flag=True,
+    help="Run unit tests only for models included in the plan instead of all tests.",
+    default=None,
+)
+@click.option(
     "--skip-linter",
     is_flag=True,
     help="Skip linting prior to generating the plan if the linter is enabled.",
@@ -799,6 +805,12 @@ def create_test(
     default=False,
     help="Preserve the fixture tables in the testing database, useful for debugging.",
 )
+@click.option(
+    "--select-model",
+    type=str,
+    multiple=True,
+    help="Select specific models to run unit tests for.",
+)
 @click.argument("tests", nargs=-1)
 @click.pass_obj
 @error_handler
@@ -808,14 +820,19 @@ def test(
     k: t.List[str],
     verbose: int,
     preserve_fixtures: bool,
+    select_model: t.List[str],
     tests: t.List[str],
 ) -> None:
     """Run model unit tests."""
+    model_names = (
+        obj._new_selector().expand_model_selections(select_model) if select_model else None
+    )
     result = obj.test(
         match_patterns=k,
         tests=tests,
         verbosity=Verbosity(verbose),
         preserve_fixtures=preserve_fixtures,
+        model_names=model_names,
     )
     if not result.wasSuccessful():
         exit(1)
