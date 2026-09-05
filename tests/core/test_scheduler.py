@@ -1,3 +1,4 @@
+import threading
 import typing as t
 
 import pytest
@@ -153,7 +154,7 @@ def test_incremental_by_unique_key_kind_dag(
             query=parse_one("SELECT id FROM VALUES (1), (2) AS t(id)"),
         ),
     )
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     mock_state_sync = mocker.MagicMock()
     scheduler = Scheduler(
         snapshots=[unique_by_key_snapshot],
@@ -195,7 +196,7 @@ def test_incremental_time_self_reference_dag(
     incremental_self_snapshot.add_interval("2023-01-02", "2023-01-02")
     incremental_self_snapshot.add_interval("2023-01-05", "2023-01-05")
 
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     scheduler = Scheduler(
         snapshots=[incremental_self_snapshot],
         snapshot_evaluator=snapshot_evaluator,
@@ -437,7 +438,7 @@ def test_incremental_batch_concurrency(
         ),
     )
 
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     mock_state_sync = mocker.MagicMock()
     scheduler = Scheduler(
         snapshots=[snapshot],
@@ -478,7 +479,7 @@ def test_intervals_with_end_date_on_model(
         )
     )
 
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     scheduler = Scheduler(
         snapshots=[snapshot],
         snapshot_evaluator=snapshot_evaluator,
@@ -764,7 +765,7 @@ def test_signal_intervals(mocker: MockerFixture, make_snapshot, get_batched_miss
         nodes={a.name: a.model, b.name: b.model, c.name: c.model},
     )
 
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     scheduler = Scheduler(
         snapshots=[a, b, c, d],
         snapshot_evaluator=snapshot_evaluator,
@@ -852,7 +853,7 @@ def test_signals_snapshots_out_of_order(
         nodes={snapshot_a.name: snapshot_a.model, snapshot_b.name: snapshot_b.model},
     )
 
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     scheduler = Scheduler(
         snapshots=[snapshot_c, snapshot_b, snapshot_a],  # reverse order
         snapshot_evaluator=snapshot_evaluator,
@@ -920,7 +921,7 @@ def test_scd_type_2_batch_size(
     snapshot = make_snapshot(model)
 
     # Setup scheduler
-    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), concurrent_tasks=1)
     scheduler = Scheduler(
         snapshots=[snapshot],
         snapshot_evaluator=snapshot_evaluator,
@@ -1213,3 +1214,504 @@ def test_dag_upstream_dependency_caching_with_complex_diamond(mocker: MockerFixt
         expected_g_node: {expected_a_node},
         expected_h_node: {expected_a_node},
     }
+
+
+@pytest.mark.fast
+def test_audit_only_uses_flat_concurrent_pool(mocker: MockerFixture, make_snapshot):
+    """When audit_only=True, all audits across all snapshots share a single flat thread pool.
+
+    Audits are read-only SELECT queries, so they can safely run concurrently even
+    across snapshots that have DAG dependencies. We verify that concurrent_apply_to_values
+    is called (flat pool) rather than concurrent_apply_to_dag (ordering-constrained pool).
+    """
+    import sqlmesh.core.scheduler as scheduler_module
+
+    spy = mocker.spy(scheduler_module, "concurrent_apply_to_values")
+
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    # snapshot_b depends on snapshot_a — they would be ordered in the DAG path
+    snapshot_b = make_snapshot(
+        SqlModel(name="b", query=parse_one("SELECT * FROM a")),
+        nodes={'"a"': snapshot_a.node},
+    )
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.return_value = []
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    mock_state_sync = mocker.MagicMock()
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mock_state_sync,
+        default_catalog=None,
+        max_workers=2,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+    }
+
+    errors, skipped = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    assert errors == []
+    assert skipped == []
+    # Both snapshots should have been audited
+    assert mock_evaluator.audit.call_count == 2
+    # concurrent_apply_to_values should have been called to run audits in a flat pool
+    spy.assert_called_once()
+    # The tasks_num arg should match max_workers
+    assert spy.call_args[0][2] == 2 or spy.call_args[1].get("tasks_num") == 2
+
+
+@pytest.mark.fast
+def test_audit_only_dag_path_does_not_use_flat_pool(mocker: MockerFixture, make_snapshot):
+    """When audit_only=False, the DAG-based executor is used (not concurrent_apply_to_values)."""
+    import sqlmesh.core.scheduler as scheduler_module
+
+    flat_pool_spy = mocker.spy(scheduler_module, "concurrent_apply_to_values")
+
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.evaluate.return_value = []
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    mock_state_sync = mocker.MagicMock()
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mock_state_sync,
+        default_catalog=None,
+        max_workers=2,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {snapshot_a: [interval]}
+
+    scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=False,
+    )
+
+    # For non-audit runs, the flat pool should NOT be used at the scheduler level
+    flat_pool_spy.assert_not_called()
+
+
+@pytest.mark.fast
+def test_audit_only_creates_missing_tables_before_auditing(
+    mocker: MockerFixture, make_snapshot
+):
+    call_order: t.List[str] = []
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="test.model",
+            kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds")),
+            query=parse_one("SELECT id, ds FROM raw.items"),
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    def record_create_snapshot(*args: t.Any, **kwargs: t.Any) -> None:
+        call_order.append("create")
+
+    def record_audit(*args: t.Any, **kwargs: t.Any) -> t.List[AuditResult]:
+        call_order.append("audit")
+        return []
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.create_snapshot.side_effect = record_create_snapshot
+    mock_evaluator.audit.side_effect = record_audit
+    mock_evaluator.get_snapshots_to_create.return_value = [snapshot]
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    scheduler = Scheduler(
+        snapshots=[snapshot],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        max_workers=1,
+    )
+
+    merged_intervals: SnapshotToIntervals = {
+        snapshot: [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
+    }
+
+    errors, skipped = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    assert errors == []
+    assert skipped == []
+    assert call_order == ["create", "audit"]
+    mock_evaluator.create_snapshot.assert_called_once()
+    mock_evaluator.audit.assert_called_once()
+
+
+@pytest.mark.fast
+def test_audit_only_errors_do_not_stop_other_audits(mocker: MockerFixture, make_snapshot):
+    """When one audit fails, other audits should still run (no short-circuiting)."""
+    audit_calls: t.List[str] = []
+    audit_lock = threading.Lock()
+
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    snapshot_b = make_snapshot(SqlModel(name="b", query=parse_one("SELECT 2 as id")))
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    def fake_audit(snapshot: Snapshot, **kwargs: t.Any) -> t.List[AuditResult]:
+        with audit_lock:
+            audit_calls.append(snapshot.name)
+        if snapshot.name == '"a"':
+            raise ValueError("Audit failed for snapshot a")
+        return []
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.side_effect = fake_audit
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    mock_state_sync = mocker.MagicMock()
+    mock_console = mocker.MagicMock()
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mock_state_sync,
+        default_catalog=None,
+        max_workers=2,
+        console=mock_console,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+    }
+
+    errors, skipped = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    # Errors should be collected but not re-raised, and other audits should still run
+    assert len(errors) == 1
+    assert skipped == []
+    # Both snapshots should have been audited despite one failing
+    assert len(audit_calls) == 2
+    assert '"a"' in audit_calls
+    assert '"b"' in audit_calls
+
+
+@pytest.mark.fast
+def test_audit_only_progress_reporting(mocker: MockerFixture, make_snapshot):
+    """When audit_only=True, console progress methods are called correctly per snapshot."""
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    snapshot_b = make_snapshot(
+        SqlModel(name="b", query=parse_one("SELECT * FROM a")),
+        nodes={'"a"': snapshot_a.node},
+    )
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.return_value = []
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    mock_state_sync = mocker.MagicMock()
+    mock_console = mocker.MagicMock()
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mock_state_sync,
+        default_catalog=None,
+        max_workers=2,
+        console=mock_console,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+    }
+
+    errors, _ = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    assert errors == []
+    # start_evaluation_progress should be called once at the beginning
+    mock_console.start_evaluation_progress.assert_called_once()
+    # stop_evaluation_progress should be called once at the end
+    mock_console.stop_evaluation_progress.assert_called_once_with(success=True)
+    # start_snapshot_evaluation_progress should be called once per snapshot
+    assert mock_console.start_snapshot_evaluation_progress.call_count == 2
+    # update_snapshot_evaluation_progress should be called once per snapshot
+    assert mock_console.update_snapshot_evaluation_progress.call_count == 2
+
+
+@pytest.mark.fast
+def test_audit_only_dependent_snapshots_run_concurrently(mocker: MockerFixture, make_snapshot):
+    """With audit_only=True, even dependent snapshots can run concurrently.
+
+    Unlike regular evaluation where DAG ordering is required (b depends on a),
+    audits are read-only so they can all run in parallel regardless of dependencies.
+    """
+    audit_call_thread_ids: t.List[int] = []
+    audit_lock = threading.Lock()
+
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    # snapshot_b depends on snapshot_a in the DAG
+    snapshot_b = make_snapshot(
+        SqlModel(name="b", query=parse_one("SELECT * FROM a")),
+        nodes={'"a"': snapshot_a.node},
+    )
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    def fake_audit(snapshot: Snapshot, **kwargs: t.Any) -> t.List[AuditResult]:
+        with audit_lock:
+            audit_call_thread_ids.append(threading.get_ident())
+        return []
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.side_effect = fake_audit
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        max_workers=2,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+    }
+
+    errors, skipped = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    assert errors == []
+    assert skipped == []
+    assert mock_evaluator.audit.call_count == 2
+    # Both audits should run on worker threads (not the main thread), meaning they
+    # were dispatched to a thread pool
+    main_thread_id = threading.get_ident()
+    assert len(audit_call_thread_ids) == 2
+    assert all(tid != main_thread_id for tid in audit_call_thread_ids), (
+        "Both audits should run on worker threads regardless of DAG dependencies"
+    )
+
+
+@pytest.mark.fast
+def test_audit_only_circuit_breaker_stops_remaining_tasks(mocker: MockerFixture, make_snapshot):
+    """When the circuit breaker fires, remaining audit tasks are skipped and CircuitBreakerError is raised."""
+    audit_calls: t.List[str] = []
+    audit_lock = threading.Lock()
+
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    snapshot_b = make_snapshot(SqlModel(name="b", query=parse_one("SELECT 2 as id")))
+    snapshot_c = make_snapshot(SqlModel(name="c", query=parse_one("SELECT 3 as id")))
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_c.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    def fake_audit(snapshot: Snapshot, **kwargs: t.Any) -> t.List[AuditResult]:
+        with audit_lock:
+            audit_calls.append(snapshot.name)
+        return []
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.side_effect = fake_audit
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    # Circuit breaker fires immediately on the first check
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b, snapshot_c],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        max_workers=1,  # Sequential so we can reason about ordering
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+        snapshot_c: [interval],
+    }
+
+    with pytest.raises(CircuitBreakerError):
+        scheduler.run_merged_intervals(
+            merged_intervals=merged_intervals,
+            deployability_index=DeployabilityIndex.all_deployable(),
+            environment_naming_info=EnvironmentNamingInfo(),
+            audit_only=True,
+            circuit_breaker=lambda: True,
+        )
+
+    # With circuit breaker always-true, no audits should run
+    assert len(audit_calls) == 0
+
+
+@pytest.mark.fast
+def test_audit_only_blocking_audit_error_collected(mocker: MockerFixture, make_snapshot):
+    """When a blocking audit fails (raises NodeAuditsErrors), the error is collected and other audits still run."""
+    audit_calls: t.List[str] = []
+    audit_lock = threading.Lock()
+
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    snapshot_b = make_snapshot(SqlModel(name="b", query=parse_one("SELECT 2 as id")))
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    def fake_audit(snapshot: Snapshot, **kwargs: t.Any) -> t.List[AuditResult]:
+        with audit_lock:
+            audit_calls.append(snapshot.name)
+        if snapshot.name == '"a"':
+            from sqlmesh.utils.errors import AuditError
+            from sqlglot import exp
+
+            audit_error = AuditError(
+                audit_name="not_null",
+                audit_args={},
+                model=snapshot.model_or_none,
+                count=5,
+                query=exp.select("1"),
+                adapter_dialect="duckdb",
+            )
+            raise NodeAuditsErrors([audit_error])
+        return []
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.side_effect = fake_audit
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    mock_console = mocker.MagicMock()
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        max_workers=2,
+        console=mock_console,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+    }
+
+    errors, skipped = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    # The NodeAuditsErrors should be collected as an error, not re-raised
+    assert len(errors) == 1
+    assert isinstance(errors[0].__cause__, NodeAuditsErrors)
+    assert skipped == []
+    # Both audits should have been attempted despite one failing
+    assert len(audit_calls) == 2
+    assert '"a"' in audit_calls
+    assert '"b"' in audit_calls
+
+
+@pytest.mark.fast
+def test_audit_only_no_nested_concurrency(mocker: MockerFixture, make_snapshot):
+    """With scheduler max_workers > 1, each evaluator audit call uses sequential execution (audit_concurrent_tasks=1).
+
+    This prevents nested thread pool multiplication: max_workers * concurrent_tasks threads hitting
+    the DB at the same time.
+    """
+    snapshot_a = make_snapshot(SqlModel(name="a", query=parse_one("SELECT 1 as id")))
+    snapshot_b = make_snapshot(SqlModel(name="b", query=parse_one("SELECT 2 as id")))
+    snapshot_a.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot_b.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.audit.return_value = []
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.concurrent_context.return_value.__enter__ = mocker.Mock(return_value=None)
+    mock_evaluator.concurrent_context.return_value.__exit__ = mocker.Mock(return_value=False)
+
+    scheduler = Scheduler(
+        snapshots=[snapshot_a, snapshot_b],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        max_workers=2,
+    )
+
+    interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    merged_intervals: SnapshotToIntervals = {
+        snapshot_a: [interval],
+        snapshot_b: [interval],
+    }
+
+    errors, skipped = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=DeployabilityIndex.all_deployable(),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    assert errors == []
+    assert skipped == []
+    assert mock_evaluator.audit.call_count == 2
+
+    # Verify that audit_concurrent_tasks=1 was passed to each audit call to prevent nested pools
+    for call in mock_evaluator.audit.call_args_list:
+        assert call.kwargs.get("audit_concurrent_tasks") == 1, (
+            "audit_concurrent_tasks=1 must be passed to prevent nested thread pool multiplication"
+        )

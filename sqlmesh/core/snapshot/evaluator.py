@@ -121,14 +121,15 @@ class SnapshotEvaluator:
             the key is the gateway name. When a dictionary is provided, and not an
             explicit default gateway its first item is treated as the default
             adapter and used for the virtual layer.
-        ddl_concurrent_tasks: The number of concurrent tasks used for DDL
-            operations (table / view creation, deletion, etc). Default: 1.
+        concurrent_tasks: The number of concurrent tasks used for DDL
+            operations (table / view creation, deletion, etc) and for running
+            audits within a single snapshot. Default: 1.
     """
 
     def __init__(
         self,
         adapters: EngineAdapter | t.Dict[str, EngineAdapter],
-        ddl_concurrent_tasks: int = 1,
+        concurrent_tasks: int = 1,
         selected_gateway: t.Optional[str] = None,
     ):
         self.adapters = (
@@ -145,7 +146,7 @@ class SnapshotEvaluator:
             else self.adapters[selected_gateway]
         )
         self.selected_gateway = selected_gateway
-        self.ddl_concurrent_tasks = ddl_concurrent_tasks
+        self.concurrent_tasks = concurrent_tasks
 
     def evaluate(
         self,
@@ -326,7 +327,7 @@ class SnapshotEvaluator:
                     deployability_index=deployability_index,  # type: ignore
                     on_complete=on_complete,
                 ),
-                self.ddl_concurrent_tasks,
+                self.concurrent_tasks,
             )
 
     def demote(
@@ -354,7 +355,7 @@ class SnapshotEvaluator:
                     on_complete=on_complete,
                     table_mapping=table_mapping,
                 ),
-                self.ddl_concurrent_tasks,
+                self.concurrent_tasks,
             )
 
     def create(
@@ -464,7 +465,7 @@ class SnapshotEvaluator:
                     allow_additive_snapshots=allow_additive_snapshots,
                     on_complete=on_complete,
                 ),
-                self.ddl_concurrent_tasks,
+                self.concurrent_tasks,
                 raise_on_error=False,
             )
             if errors:
@@ -511,7 +512,7 @@ class SnapshotEvaluator:
                     self.get_adapter(s.model_gateway),
                     deployability_index,
                 ),
-                self.ddl_concurrent_tasks,
+                self.concurrent_tasks,
             )
 
     def cleanup(
@@ -555,7 +556,7 @@ class SnapshotEvaluator:
                     self.get_adapter(s.model_gateway),
                     on_complete,
                 ),
-                self.ddl_concurrent_tasks,
+                self.concurrent_tasks,
                 reverse_order=True,
                 raise_on_error=False,
             )
@@ -573,6 +574,7 @@ class SnapshotEvaluator:
         execution_time: t.Optional[TimeLike] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
         wap_id: t.Optional[str] = None,
+        audit_concurrent_tasks: t.Optional[int] = None,
         **kwargs: t.Any,
     ) -> t.List[AuditResult]:
         """Execute a snapshot's node's audit queries.
@@ -585,6 +587,8 @@ class SnapshotEvaluator:
             execution_time: The date/time time reference to use for execution time.
             deployability_index: Determines snapshots that are deployable in the context of this evaluation.
             wap_id: The WAP ID if applicable, None otherwise.
+            audit_concurrent_tasks: The number of concurrent audit queries to run for this snapshot.
+                Defaults to sequential execution unless explicitly overridden by the caller.
             kwargs: Additional kwargs to pass to the renderer.
         """
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
@@ -612,8 +616,6 @@ class SnapshotEvaluator:
             kwargs["table_mapping"] = table_mapping
             kwargs["this_model"] = exp.to_table(wap_table_name, dialect=adapter.dialect)
 
-        results = []
-
         audits_with_args = snapshot.node.audits_with_args
 
         force_non_blocking = False
@@ -627,26 +629,37 @@ class SnapshotEvaluator:
                 # when run on only a subset of data, so we switch all audits to non blocking and the user can decide if they still want to proceed
                 force_non_blocking = True
 
+        prepared_audits = []
         for audit, audit_args in audits_with_args:
             if force_non_blocking:
                 # remove any blocking indicator on the model itself
                 audit_args.pop("blocking", None)
                 # so that we can fall back to the audit's setting, which we override to blocking: False
                 audit = audit.model_copy(update={"blocking": False})
+            prepared_audits.append((audit, audit_args))
 
-            results.append(
-                self._audit(
-                    audit=audit,
-                    audit_args=audit_args,
-                    snapshot=snapshot,
-                    snapshots=snapshots,
-                    start=start,
-                    end=end,
-                    execution_time=execution_time,
-                    deployability_index=deployability_index,
-                    **kwargs,
-                )
+        def _run_audit(
+            audit_and_args: t.Tuple[Audit, t.Dict[t.Any, t.Any]],
+        ) -> AuditResult:
+            audit, audit_args = audit_and_args
+            return self._audit(
+                audit=audit,
+                audit_args=audit_args,
+                snapshot=snapshot,
+                snapshots=snapshots,
+                start=start,
+                end=end,
+                execution_time=execution_time,
+                deployability_index=deployability_index,
+                **kwargs,
             )
+
+        tasks_num = audit_concurrent_tasks if audit_concurrent_tasks is not None else 1
+        results = concurrent_apply_to_values(
+            prepared_audits,
+            _run_audit,
+            tasks_num,
+        )
 
         if wap_id is not None:
             logger.info(
@@ -689,8 +702,8 @@ class SnapshotEvaluator:
                 gateway: adapter.with_settings(correlation_id=correlation_id)
                 for gateway, adapter in self.adapters.items()
             },
-            self.ddl_concurrent_tasks,
-            self.selected_gateway,
+            concurrent_tasks=self.concurrent_tasks,
+            selected_gateway=self.selected_gateway,
         )
 
     def _evaluate_snapshot(
@@ -1473,7 +1486,7 @@ class SnapshotEvaluator:
             concurrent_apply_to_values(
                 list(unique_schemas),
                 lambda item: _create_schema(item[0], item[1], item[2]),
-                self.ddl_concurrent_tasks,
+                self.concurrent_tasks,
             )
 
     def get_adapter(self, gateway: t.Optional[str] = None) -> EngineAdapter:
@@ -1647,7 +1660,7 @@ class SnapshotEvaluator:
                     lambda s: _get_data_objects_in_schema(
                         schema=s, object_names=tables_by_schema.get(s), gateway=gateway
                     ),
-                    self.ddl_concurrent_tasks,
+                    self.concurrent_tasks,
                 )
 
                 for schema, objs in zip(schema_list, results):

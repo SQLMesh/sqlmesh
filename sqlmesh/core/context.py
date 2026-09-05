@@ -500,7 +500,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                     gateway: adapter.with_settings(execute_log_level=logging.INFO)
                     for gateway, adapter in self.engine_adapters.items()
                 },
-                ddl_concurrent_tasks=self.concurrent_tasks,
+                concurrent_tasks=self.concurrent_tasks,
                 selected_gateway=self.selected_gateway,
             )
         return self._snapshot_evaluator
