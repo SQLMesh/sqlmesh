@@ -303,6 +303,7 @@ class SQLMeshMagics(Magics):
             expressions,
             model.dialect,
             rewrite_casts=not config.format.no_rewrite_casts,
+            transpile_meta=config.format.transpile_meta,
             **config.format.generator_options,
         )
 

@@ -77,7 +77,10 @@ async def write_file(
             try:
                 expressions = parse(content, default_dialect=default_dialect)
                 content = format_model_expressions(
-                    expressions, dialect, **config.format.generator_options
+                    expressions,
+                    dialect,
+                    transpile_meta=config.format.transpile_meta,
+                    **config.format.generator_options,
                 )
                 if config.format.append_newline:
                     content += "\n"
