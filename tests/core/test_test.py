@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import typing as t
 import io
+import threading
 from pathlib import Path
 import unittest
 from unittest.mock import call, patch
@@ -1358,6 +1359,68 @@ test_foo:
             context=Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))),
         ).run()
     )
+
+
+def test_freeze_time_does_not_patch_shared_generator() -> None:
+    from sqlglot.dialects.dialect import Dialect
+    from sqlglot.generator import _DISPATCH_CACHE
+
+    duckdb = Dialect.get_or_raise("duckdb")
+    exp.select("1").sql("duckdb")  # make sure the shared dispatch table exists
+    shared_transforms = dict(duckdb.generator_class.TRANSFORMS)
+    shared_dispatch = dict(_DISPATCH_CACHE[duckdb.generator_class])
+
+    test = _create_test(
+        body=load_yaml(
+            """
+test_foo:
+  model: xyz
+  outputs:
+    query:
+      - cur_date: 2023-01-01
+  vars:
+    execution_time: "2023-01-01 12:05:03+00:00"
+            """
+        ),
+        test_name="test_foo",
+        model=_create_model("SELECT CURRENT_DATE AS cur_date"),
+        context=Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))),
+    )
+    test.concurrency = True
+
+    rendered: t.List[str] = []
+    errors: t.List[BaseException] = []
+
+    def render_ddl_through_shared_dialect() -> None:
+        # Mimics another test creating its fixture views while this test's frozen render
+        # context is active; both go through the dialect's shared generator class.
+        try:
+            for _ in range(200):
+                rendered.append(
+                    exp.Create(
+                        this=exp.to_table("s.v"), kind="VIEW", expression=exp.select("1")
+                    ).sql("duckdb")
+                )
+                rendered.append(exp.CurrentDate().sql("duckdb"))
+        except BaseException as e:  # pragma: no cover
+            errors.append(e)
+
+    with test._concurrent_render_context():
+        other = threading.Thread(target=render_ddl_through_shared_dialect)
+        other.start()
+        other.join()
+
+        # this test renders the frozen time...
+        assert test._generate_sql(exp.CurrentDate()) == "CAST('2023-01-01 12:05:03+00:00' AS DATE)"
+        # ...while the shared dialect is untouched, even inside the frozen context
+        assert exp.CurrentDate().sql("duckdb") == "CURRENT_DATE"
+
+    assert not errors
+    assert set(rendered) == {"CREATE VIEW s.v AS SELECT 1", "CURRENT_DATE"}
+    assert duckdb.generator_class.TRANSFORMS == shared_transforms
+    assert _DISPATCH_CACHE[duckdb.generator_class] == shared_dispatch
+
+    _check_successful_or_raise(test.run())
 
 
 def test_freeze_time(mocker: MockerFixture) -> None:
