@@ -173,16 +173,8 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         track_rows_processed: bool = True,
         **kwargs: t.Any,
     ) -> None:
-        catalog = self.get_current_catalog()
-        catalog_type_tuple = self.fetchone(
-            exp.select("type")
-            .from_("duckdb_databases()")
-            .where(exp.column("database_name").eq(catalog))
-        )
-        catalog_type = catalog_type_tuple[0] if catalog_type_tuple else None
-
         partitioned_by_exps = None
-        if catalog_type == "ducklake":
+        if self._get_catalog_type(self.get_current_catalog()) == "ducklake":
             partitioned_by_exps = kwargs.pop("partitioned_by", None)
 
         super()._create_table(
@@ -214,6 +206,35 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
                 expr.sql(dialect=self.dialect) for expr in partitioned_by_exps
             )
             self.execute(f"ALTER TABLE {table_name_str} SET PARTITIONED BY ({partitioned_by_str});")
+
+    def _drop_object(
+        self,
+        name: TableName | SchemaName,
+        exists: bool = True,
+        kind: str = "TABLE",
+        cascade: bool = False,
+        **drop_args: t.Any,
+    ) -> None:
+        # DuckLake catalogs do not implement DROP TABLE / DROP VIEW ... CASCADE and raise
+        # "Cascade Drop not supported in DuckLake". Views in DuckDB are late-binding, so
+        # dropping the underlying table without CASCADE is safe there.
+        if cascade and kind.upper() in ("TABLE", "VIEW"):
+            catalog = exp.to_table(name).catalog or self.get_current_catalog()
+            if self._get_catalog_type(catalog) == "ducklake":
+                cascade = False
+
+        super()._drop_object(name=name, exists=exists, kind=kind, cascade=cascade, **drop_args)
+
+    def _get_catalog_type(self, catalog: t.Optional[str]) -> t.Optional[str]:
+        """Returns the type of the given catalog (e.g. 'duckdb', 'ducklake') as reported by duckdb_databases()."""
+        if not catalog:
+            return None
+        catalog_type_tuple = self.fetchone(
+            exp.select("type")
+            .from_("duckdb_databases()")
+            .where(exp.column("database_name").eq(catalog))
+        )
+        return catalog_type_tuple[0] if catalog_type_tuple else None
 
     @property
     def _is_motherduck(self) -> bool:
