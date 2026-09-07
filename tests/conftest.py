@@ -212,16 +212,14 @@ def pytest_collection_modifyitems(items, *args, **kwargs):
         "dialect_isolated",
     }
     for item in items:
+        if "capsys" in item.fixturenames:
+            # capsys is not threadsafe, so the test must be isolated.
+            item.add_marker("isolated")
         for marker in item.iter_markers():
             if marker.name in test_type_markers:
                 break
         else:
-            # If no test type marker is found, assume it is a fast or isolated test.
-            if "capsys" in item.fixturenames:
-                # capsys is not threadsafe, so the test must be isolated.
-                item.add_marker("isolated")
-            else:
-                item.add_marker("fast")
+            item.add_marker("fast")
 
 
 # Ignore all local config files
