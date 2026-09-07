@@ -1,6 +1,8 @@
 # Testing
 
-Testing allows you to protect your project from regression by continuously verifying that the output of each model matches your expectations. Unlike [audits](audits.md), tests are executed either on demand (for example, as part of a CI/CD job) or every time a new [plan](plans.md) is created.
+Testing allows you to protect your project from regression by continuously verifying that the output of each model matches your expectations. Unlike [audits](audits.md), tests are executed either on demand (for example, as part of a CI/CD job or via [`sqlmesh test`](../reference/cli.md#test)) or when a new [plan](plans.md) is created.
+
+By default, `sqlmesh plan` runs all unit tests. Use `--test-changed-only` to run tests only for models included in the plan (added, modified, or restated), or `--skip-tests` to run none. With both `--select-model` and `--test-changed-only`, tests run only for selected models that changed.
 
 Similar to unit testing in software development, SQLMesh evaluates the model's logic against predefined inputs and then compares the output to expected outcomes provided as part of each test.
 

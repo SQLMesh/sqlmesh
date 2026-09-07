@@ -33,7 +33,7 @@ install-dev-dbt-%:
 	echo "Installing dbt version: $$version"; \
 	cp pyproject.toml pyproject.toml.backup; \
 	$(SED_INPLACE) 's/"pydantic>=2.0.0"/"pydantic"/g' pyproject.toml; \
-	if [ "$$version" = "1.10.0" ] || [ "$$version" = "1.11.0" ]; then \
+	if [ "$$version" = "1.10.0" ] || [ "$$version" = "1.11.0" ] || [ "$$version" = "1.12.0" ]; then \
 		echo "Applying special handling for dbt $$version"; \
 		$(SED_INPLACE) -E 's/"(dbt-core)[^"]*"/"\1~='"$$version"'"/g' pyproject.toml; \
 		$(SED_INPLACE) -E 's/"(dbt-(bigquery|duckdb|snowflake|athena-community|clickhouse|redshift|trino))[^"]*"/"\1"/g' pyproject.toml; \
