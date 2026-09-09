@@ -59,6 +59,8 @@ ClickHouse Cloud automates ClickHouse's cluster controls, which sometimes constr
 
 Aside from those constraints, ClickHouse Cloud mode is similar to single server mode - you run standard SQL commands/queries, and ClickHouse Cloud executes them.
 
+SQLMesh enables this mode automatically when your connection's `host` contains `clickhouse.cloud`. Some self-hosted deployments have the same constraints without a ClickHouse Cloud host name - the [replicated database engine](https://clickhouse.com/docs/en/engines/database-engines/replicated), for example, also cannot create a table with a `SELECT` command in one step. Set the `cloud_mode` connection option to `true` to enable the mode for those deployments, or to `false` to disable it on a ClickHouse Cloud host.
+
 ## Permissions
 
 In the default SQLMesh configuration, users must have sufficient permissions to create new ClickHouse databases.
@@ -480,6 +482,7 @@ With this configuration, ClickHouse models will appear as `ch_virtual.mydb.mytab
 | `password`                | ClickHouse user password                                                                                                                                                                                                                                                        | string |    N     |
 | `port`                    | The ClickHouse HTTP or HTTPS port (Default: `8123`)                                                                                                                                                                                                                             |  int   |    N     |
 | `cluster`                 | ClickHouse cluster name                                                                                                                                                                                                                                                         | string |    N     |
+| `cloud_mode`              | Force [ClickHouse Cloud mode](#clickhouse-cloud-mode) on or off. Defaults to detecting it from the host name, so most projects do not need to set this. Set to `true` for self-hosted deployments that share Cloud's constraints, such as those using the replicated database engine. |  bool  |    N     |
 | `connect_timeout`         | Connection timeout in seconds (Default: `10`)                                                                                                                                                                                                                                   |  int   |    N     |
 | `send_receive_timeout`    | Send/receive timeout in seconds (Default: `300`)                                                                                                                                                                                                                                |  int   |    N     |
 | `query_limit`             | Query result limit (Default: `0` - no limit)                                                                                                                                                                                                                                    |  int   |    N     |

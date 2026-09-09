@@ -29,6 +29,7 @@ from sqlmesh.core.config.connection import (
     _connection_config_validator,
     _get_engine_import_validator,
 )
+from sqlmesh.core.engine_adapter.shared import EngineRunMode
 from sqlmesh.utils.errors import ConfigError
 from sqlmesh.utils.pydantic import PydanticModel
 
@@ -1285,6 +1286,65 @@ def test_clickhouse(make_config):
 
     assert not config3.use_compression
     assert not config3._static_connection_kwargs["compress"]
+
+
+def test_clickhouse_cloud_mode(make_config):
+    """Cloud mode falls back to host detection but can be set explicitly.
+
+    These assertions deliberately go through `_extra_engine_config` and the adapter's
+    run mode rather than reading the `cloud_mode` field back. The field only matters
+    insofar as it reaches the adapter and selects the two-step CTAS that Cloud requires,
+    so asserting on the field alone would still pass if that wiring were broken.
+    """
+
+    def run_mode(**kwargs) -> EngineRunMode:
+        config = make_config(type="clickhouse", username="default", **kwargs)
+        assert isinstance(config, ClickhouseConnectionConfig)
+        adapter = config.create_engine_adapter()
+        # this dict is the contract between the connection config and the adapter
+        assert config._extra_engine_config["cloud_mode"] is adapter.engine_run_mode.is_cloud
+        return adapter.engine_run_mode
+
+    # An existing Cloud project that has never set `cloud_mode` must keep working.
+    assert run_mode(host="foo.clickhouse.cloud").is_cloud
+
+    # A self-hosted host must not be silently treated as Cloud.
+    assert run_mode(host="localhost").is_standalone
+
+    # Self-hosted deployments that share Cloud's CTAS constraint can opt in.
+    assert run_mode(host="localhost", cloud_mode=True).is_cloud
+
+    # An explicit setting wins over the host name in both directions.
+    assert run_mode(host="foo.clickhouse.cloud", cloud_mode=False).is_standalone
+    assert run_mode(host="localhost", cloud_mode=False).is_standalone
+
+    # `cluster` enables the replication settings independently of cloud mode, so opting
+    # out of cloud mode must not drop them for a cluster deployment.
+    config = make_config(
+        type="clickhouse",
+        host="foo.clickhouse.cloud",
+        username="default",
+        cluster="cluster1",
+        cloud_mode=False,
+    )
+    assert config._static_connection_kwargs["insert_quorum"] == "auto"
+    assert (
+        config._static_connection_kwargs["database_replicated_enforce_synchronous_settings"] == "1"
+    )
+
+    # Cloud mode on its own must enable them too, with no cluster configured.
+    cloud_only = make_config(
+        type="clickhouse", host="localhost", username="default", cloud_mode=True
+    )
+    assert cloud_only._static_connection_kwargs["insert_quorum"] == "auto"
+    assert (
+        cloud_only._static_connection_kwargs["database_replicated_enforce_synchronous_settings"]
+        == "1"
+    )
+
+    # ...and a standalone deployment with cloud mode off should not get them at all.
+    standalone = make_config(type="clickhouse", host="localhost", username="default")
+    assert "insert_quorum" not in standalone._static_connection_kwargs
 
 
 def test_athena(make_config):
