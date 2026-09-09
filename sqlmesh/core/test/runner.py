@@ -125,9 +125,11 @@ def run_tests(
     # Ensure workers are not greater than the number of tests
     num_workers = min(len(model_test_metadata) or 1, default_test_connection.concurrent_tasks)
 
-    def _run_single_test(
-        metadata: ModelTestMetadata, engine_adapter: EngineAdapter
-    ) -> t.Optional[ModelTextTestResult]:
+    # Build ModelTest instances on the calling thread before workers start. create_test()
+    # can call to_datetime() / ttl_cache (time.time()), which races with another worker's
+    # time_machine freeze when execution_time is set under concurrent_tasks > 1.
+    tests: list[ModelTest] = []
+    for metadata, engine_adapter in metadata_to_adapter.items():
         test = ModelTest.create_test(
             body=metadata.body,
             test_name=metadata.test_name,
@@ -140,10 +142,10 @@ def run_tests(
             concurrency=num_workers > 1,
             verbosity=verbosity,
         )
+        if test:
+            tests.append(test)
 
-        if not test:
-            return None
-
+    def _run_single_test(test: ModelTest) -> ModelTextTestResult:
         result = t.cast(
             ModelTextTestResult,
             ModelTextTestRunner().run(t.cast(unittest.TestCase, test)),
@@ -159,10 +161,7 @@ def run_tests(
     start_time = time.perf_counter()
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            futures = [
-                pool.submit(_run_single_test, metadata=metadata, engine_adapter=engine_adapter)
-                for metadata, engine_adapter in metadata_to_adapter.items()
-            ]
+            futures = [pool.submit(_run_single_test, test) for test in tests]
 
             for future in concurrent.futures.as_completed(futures):
                 test_results.append(future.result())
