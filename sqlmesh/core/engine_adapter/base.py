@@ -833,7 +833,9 @@ class EngineAdapter:
             and self.COMMENT_CREATION_TABLE.is_comment_command_only
             and self.comments_enabled
         ):
-            self._create_column_comments(table_name, column_descriptions)
+            self._create_column_comments(
+                table_name, column_descriptions, table_format=kwargs.get("table_format")
+            )
 
     def _build_schema_exp(
         self,
@@ -990,7 +992,9 @@ class EngineAdapter:
         ):
             self._create_table_comment(table_name, table_description)
         if column_descriptions and schema is None and self.comments_enabled:
-            self._create_column_comments(table_name, column_descriptions)
+            self._create_column_comments(
+                table_name, column_descriptions, table_format=kwargs.get("table_format")
+            )
 
     def _create_table(
         self,
@@ -3058,7 +3062,18 @@ class EngineAdapter:
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
         materialized_view: bool = False,
+        table_format: t.Optional[str] = None,
     ) -> None:
+        """Registers column comments with a post-creation command.
+
+        Args:
+            table_name: The name of the table or view.
+            column_comments: Mapping between the column name and its comment.
+            table_kind: The kind of object being commented on, `TABLE` or `VIEW`.
+            materialized_view: Whether the view is materialized.
+            table_format: The table format of the table, if any. Engines that require
+                format-specific DDL to alter a table use it to derive `table_kind`.
+        """
         table = exp.to_table(table_name)
 
         for col, comment in column_comments.items():
