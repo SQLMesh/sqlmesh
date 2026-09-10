@@ -8,6 +8,7 @@ from functools import cached_property
 from sqlglot import exp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_result
 from sqlmesh.core.engine_adapter.mssql import MSSQLEngineAdapter
+from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.shared import (
     CommentCreationTable,
     CommentCreationView,
@@ -83,6 +84,14 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
             or self._default_catalog
             or self._extra_config.get("database")
             or "<default>"
+        )
+
+    def _resolved_catalog(self) -> t.Optional[str]:
+        return (
+            self.get_current_catalog()
+            or self._normalize_catalog(self._connected_catalog)
+            or self._default_catalog
+            or self._extra_config.get("database")
         )
 
     @property
@@ -224,18 +233,18 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
 
         self._target_catalog = target_catalog
 
-    def _get_data_objects(
-        self, schema_name: t.Union[str, exp.Table], object_names: t.Optional[t.Set[str]] = None
+    def get_data_objects(
+        self,
+        schema_name: t.Union[str, exp.Table],
+        object_names: t.Optional[t.Set[str]] = None,
+        safe_to_cache: bool = False,
     ) -> t.List[DataObject]:
-        objects = super()._get_data_objects(schema_name, object_names)
         # Fabric uses None as "default catalog" so we skip reconnects. Other engines
-        # return a real warehouse name here; fill it in so this listing matches them
-        # and so the data-object cache key matches lookups that use that name.
-        catalog = (
-            self.get_current_catalog()
-            or self._default_catalog
-            or self._extra_config.get("database")
-        )
+        # return a real warehouse name here.
+        # Cache on schema.table due to @set_catalog stripping the catalog. Then put a
+        # warehouse name on the returned objects so listing matches other engines.
+        objects = super().get_data_objects(schema_name, object_names, safe_to_cache)
+        catalog = to_schema(schema_name).catalog or self._resolved_catalog()
         if not catalog:
             return objects
         return [
