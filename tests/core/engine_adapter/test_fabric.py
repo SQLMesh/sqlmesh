@@ -39,6 +39,7 @@ def _conflict_response(mocker: MockerFixture, error_code: str) -> t.Any:
     resp.json.return_value = {"errorCode": error_code}
     resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
     return resp
+
 def _record_catalogs_at_execute(adapter: FabricEngineAdapter) -> t.List[t.Optional[str]]:
     catalogs: t.List[t.Optional[str]] = []
     real_execute = adapter.execute
