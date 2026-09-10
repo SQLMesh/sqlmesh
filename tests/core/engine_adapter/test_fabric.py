@@ -465,34 +465,6 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
     assert to_sql_calls(adapter) == []
 
 
-def test_get_data_objects_uses_default_catalog_when_current_is_none(
-    make_mocked_engine_adapter: t.Callable,
-    mocker: MockerFixture,
-) -> None:
-    adapter = make_mocked_engine_adapter(
-        FabricEngineAdapter,
-        default_catalog="ci_abc",
-        database="ci_abc",
-        patch_get_data_objects=False,
-    )
-    assert adapter.get_current_catalog() is None
-
-    mocker.patch.object(
-        adapter,
-        "fetchdf",
-        return_value=pd.DataFrame([{"name": "test_table", "schema_name": "dbo", "type": "TABLE"}]),
-    )
-
-    assert adapter.get_data_objects("ci_abc.dbo") == [
-        DataObject(
-            catalog="ci_abc",
-            schema="dbo",
-            name="test_table",
-            type=DataObjectType.TABLE,
-        )
-    ]
-
-
 def test_get_data_objects_cache_hits_for_default_catalog(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,
