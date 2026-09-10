@@ -15,6 +15,7 @@ if t.TYPE_CHECKING:
 
 class ModelTextTestResult(unittest.TextTestResult):
     successes: t.List[unittest.TestCase]
+    tests_skipped: int
 
     def __init__(self, *args: t.Any, **kwargs: t.Any):
         self.console = kwargs.pop("console", None)
@@ -24,6 +25,7 @@ class ModelTextTestResult(unittest.TextTestResult):
         self.failure_tables: t.List[t.Tuple[t.Any, ...]] = []
         self.original_errors: t.List[t.Tuple[unittest.TestCase, ErrorType]] = []
         self.duration: t.Optional[float] = None
+        self.tests_skipped = 0
 
     def addSubTest(
         self,
@@ -123,6 +125,7 @@ class ModelTextTestResult(unittest.TextTestResult):
             self.addSkip(skipped_args[0], skipped_args[1])
 
         self.testsRun += other.testsRun
+        self.tests_skipped += other.tests_skipped
 
     def get_fail_and_error_tests(self) -> t.List[ModelTest]:
         # If tests contain failed subtests (e.g testing CTE outputs) we don't want
