@@ -99,6 +99,7 @@ from sqlmesh.core.snapshot import (
     Snapshot,
     SnapshotEvaluator,
     SnapshotFingerprint,
+    SnapshotId,
     missing_intervals,
     to_table_mapping,
 )
@@ -731,21 +732,18 @@ class GenericContext(BaseContext, t.Generic[C]):
                 self._update_model_schemas_and_validate(model_fqns)
             return self
 
-        # Load environment statements from state for projects not in current load
-        if self._load_state and any(self._projects):
-            prod = self.state_reader.get_environment(c.PROD)
-            if prod:
-                existing_statements = self.state_reader.get_environment_statements(c.PROD)
-                for stmt in existing_statements:
-                    if stmt.project and stmt.project not in self._projects:
-                        self._environment_statements.append(stmt)
-
         uncached = set()
 
         if self._load_state and any(self._projects):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:
+                # Load environment statements from state for projects not in current load
+                existing_statements = self.state_reader.get_environment_statements(c.PROD)
+                for stmt in existing_statements:
+                    if stmt.project and stmt.project not in self._projects:
+                        self._environment_statements.append(stmt)
+
                 for snapshot in self.state_reader.get_snapshots(prod.snapshots).values():
                     if snapshot.node.project in self._projects:
                         uncached.add(snapshot.name)
@@ -1200,6 +1198,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         end: t.Optional[TimeLike] = None,
         execution_time: t.Optional[TimeLike] = None,
         expand: t.Union[bool, t.Iterable[str]] = False,
+        use_project_index: t.Optional[bool] = None,
         **kwargs: t.Any,
     ) -> exp.Expr:
         """Renders a model's query, expanding macros with provided kwargs, and optionally expanding referenced models.
@@ -1212,11 +1211,23 @@ class GenericContext(BaseContext, t.Generic[C]):
             expand: Whether or not to use expand materialized models, defaults to False.
                 If True, all referenced models are expanded as raw queries.
                 If a list, only referenced models are expanded as raw queries.
+            use_project_index: Whether to use the persistent project index to load and
+                render only the target model and its transitive upstream dependencies. If
+                omitted, the value of ``render.use_project_index`` is used.
 
         Returns:
             The rendered expression.
         """
         execution_time = execution_time or now()
+        use_project_index = (
+            self.config.render.use_project_index if use_project_index is None else use_project_index
+        )
+
+        if not self._loaded:
+            target_fqns = (
+                {self._node_or_snapshot_to_fqn(model_or_snapshot)} if use_project_index else None
+            )
+            self.load(model_fqns=target_fqns, use_project_index=use_project_index)
 
         model = self.get_model(model_or_snapshot, raise_if_missing=True)
 
@@ -1246,7 +1257,19 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
             return next(pandas_to_sql(t.cast(pd.DataFrame, df), model.columns_to_types))
 
-        snapshots = self.snapshots
+        if use_project_index:
+            # Only the target model and its transitive upstream dependencies can be referenced
+            # by the rendered query, so there is no need to create snapshots for the rest.
+            upstream_fqns = {model.fqn, *self.dag.upstream(model.fqn)}
+            upstream_models: UniqueKeyDict[str, Model] = UniqueKeyDict(
+                "models", {fqn: m for fqn, m in self._models.items() if fqn in upstream_fqns}
+            )
+            snapshots = self._snapshots(
+                upstream_models,
+                include_standalone_audits=False,
+            )
+        else:
+            snapshots = self.snapshots
         deployability_index = DeployabilityIndex.create(snapshots.values(), start=start)
 
         return model.render_query_or_raise(
@@ -1441,6 +1464,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         explain: t.Optional[bool] = None,
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
+        use_project_index: t.Optional[bool] = None,
     ) -> Plan:
         """Interactively creates a plan.
 
@@ -1491,6 +1515,10 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain: Whether to explain the plan instead of applying it.
             min_intervals: Adjust the plan start date on a per-model basis in order to ensure at least this many intervals are covered
                 on every model when checking for missing intervals
+            use_project_index: Whether to refresh the persistent project index, reuse loaded
+                snapshot state, and scope plan graph work to changed or selected model lineage.
+                If omitted, the value of ``plan.use_project_index`` is used. This optimization
+                does not change the resulting plan.
 
         Returns:
             The populated Plan object.
@@ -1523,6 +1551,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain=explain,
             ignore_cron=ignore_cron,
             min_intervals=min_intervals,
+            use_project_index=use_project_index,
         )
 
         plan = plan_builder.build()
@@ -1581,6 +1610,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
         always_include_local_changes: t.Optional[bool] = None,
+        use_project_index: t.Optional[bool] = None,
     ) -> PlanBuilder:
         """Creates a plan builder.
 
@@ -1624,6 +1654,10 @@ class GenericContext(BaseContext, t.Generic[C]):
                 on every model when checking for missing intervals
             always_include_local_changes: Usually when restatements are present, local changes in the filesystem are ignored.
                 However, it can be desirable to deploy changes + restatements in the same plan, so this flag overrides the default behaviour.
+            use_project_index: Whether to refresh the persistent project index, reuse loaded
+                snapshot state, and scope plan graph work to changed or selected model lineage.
+                If omitted, the value of ``plan.use_project_index`` is used. This optimization
+                does not change the resulting plan.
 
         Returns:
             The plan builder.
@@ -1662,6 +1696,13 @@ class GenericContext(BaseContext, t.Generic[C]):
         user_provided_flags: t.Dict[str, UserProvidedFlags] = {
             k: v for k, v in kwargs.items() if v is not None
         }
+
+        use_project_index = (
+            self.config.plan.use_project_index if use_project_index is None else use_project_index
+        )
+
+        if not self._loaded:
+            self.load(use_project_index=use_project_index)
 
         skip_tests = explain or skip_tests or False
         test_changed_only = test_changed_only or False
@@ -1762,7 +1803,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         else:
             force_no_diff = not always_include_local_changes
 
-        snapshots = self._snapshots(models_override)
+        snapshots, stored_snapshot_ids = self._snapshots_and_stored_ids(models_override)
         context_diff = self._context_diff(
             environment or c.PROD,
             snapshots=snapshots,
@@ -1771,6 +1812,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             ensure_finalized_snapshots=self.config.plan.use_finalized_state,
             diff_rendered=diff_rendered,
             always_recreate_environment=self.config.plan.always_recreate_environment,
+            stored_snapshot_ids=stored_snapshot_ids if use_project_index else None,
         )
         modified_model_names = {
             *context_diff.modified_snapshots,
@@ -1905,6 +1947,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             },
             explain=explain or False,
             ignore_cron=ignore_cron or False,
+            scope_to_changed_lineage=use_project_index,
         )
 
     def apply(
@@ -3056,9 +3099,24 @@ class GenericContext(BaseContext, t.Generic[C]):
         return self.engine_adapter
 
     def _snapshots(
-        self, models_override: t.Optional[UniqueKeyDict[str, Model]] = None
+        self,
+        models_override: t.Optional[UniqueKeyDict[str, Model]] = None,
+        include_standalone_audits: bool = True,
     ) -> t.Dict[str, Snapshot]:
-        nodes = {**(models_override or self._models), **self._standalone_audits}
+        return self._snapshots_and_stored_ids(
+            models_override,
+            include_standalone_audits=include_standalone_audits,
+        )[0]
+
+    def _snapshots_and_stored_ids(
+        self,
+        models_override: t.Optional[UniqueKeyDict[str, Model]] = None,
+        include_standalone_audits: bool = True,
+    ) -> t.Tuple[t.Dict[str, Snapshot], t.Set[SnapshotId]]:
+        """Returns the snapshots along with the IDs of those that exist in the state."""
+        nodes: t.Dict[str, Node] = dict(models_override or self._models)
+        if include_standalone_audits:
+            nodes.update(self._standalone_audits)
         snapshots = self._nodes_to_snapshots(nodes)
         stored_snapshots = self.state_reader.get_snapshots(snapshots.values())
 
@@ -3083,7 +3141,10 @@ class GenericContext(BaseContext, t.Generic[C]):
             # Keep the original model instance to preserve the query cache.
             snapshot.node = snapshots[snapshot.name].node
 
-        return {name: stored_snapshots.get(s.snapshot_id, s) for name, s in snapshots.items()}
+        merged_snapshots = {
+            name: stored_snapshots.get(s.snapshot_id, s) for name, s in snapshots.items()
+        }
+        return merged_snapshots, set(stored_snapshots)
 
     def _context_diff(
         self,
@@ -3094,6 +3155,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         ensure_finalized_snapshots: bool = False,
         diff_rendered: bool = False,
         always_recreate_environment: bool = False,
+        stored_snapshot_ids: t.Optional[t.Set[SnapshotId]] = None,
     ) -> ContextDiff:
         environment = Environment.sanitize_name(environment)
         if force_no_diff:
@@ -3112,6 +3174,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             gateway_managed_virtual_layer=self.config.gateway_managed_virtual_layer,
             infer_python_dependencies=self.config.infer_python_dependencies,
             always_recreate_environment=always_recreate_environment,
+            stored_snapshot_ids=stored_snapshot_ids,
         )
 
     def _destroy(self) -> bool:
