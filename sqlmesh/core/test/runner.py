@@ -125,26 +125,6 @@ def run_tests(
     # Ensure workers are not greater than the number of tests
     num_workers = min(len(model_test_metadata) or 1, default_test_connection.concurrent_tasks)
 
-    # Build ModelTest instances on the calling thread before workers start. create_test()
-    # can call to_datetime() / ttl_cache (time.time()), which races with another worker's
-    # time_machine freeze when execution_time is set under concurrent_tasks > 1.
-    tests: list[ModelTest] = []
-    for metadata, engine_adapter in metadata_to_adapter.items():
-        test = ModelTest.create_test(
-            body=metadata.body,
-            test_name=metadata.test_name,
-            models=models,
-            engine_adapter=engine_adapter,
-            dialect=dialect,
-            path=metadata.path,
-            default_catalog=default_catalog,
-            preserve_fixtures=preserve_fixtures,
-            concurrency=num_workers > 1,
-            verbosity=verbosity,
-        )
-        if test:
-            tests.append(test)
-
     def _run_single_test(test: ModelTest) -> ModelTextTestResult:
         result = t.cast(
             ModelTextTestResult,
@@ -160,6 +140,28 @@ def run_tests(
 
     start_time = time.perf_counter()
     try:
+        # Build ModelTest instances on the calling thread before workers start. create_test()
+        # can call to_datetime() / ttl_cache (time.time()), which races with another worker's
+        # time_machine freeze when execution_time is set under concurrent_tasks > 1.
+        # NOTE: We can run create_tests in a separate parallel stage for a future optimization.
+        # We just can't overlap runs/creations.
+        tests: list[ModelTest] = []
+        for metadata, engine_adapter in metadata_to_adapter.items():
+            test = ModelTest.create_test(
+                body=metadata.body,
+                test_name=metadata.test_name,
+                models=models,
+                engine_adapter=engine_adapter,
+                dialect=dialect,
+                path=metadata.path,
+                default_catalog=default_catalog,
+                preserve_fixtures=preserve_fixtures,
+                concurrency=num_workers > 1,
+                verbosity=verbosity,
+            )
+            if test:
+                tests.append(test)
+
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
             futures = [pool.submit(_run_single_test, test) for test in tests]
 
