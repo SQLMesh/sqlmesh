@@ -1836,14 +1836,48 @@ def test_alter_table_decides_on_cluster_per_expression(
 
     adapter.alter_table(
         [
-            parse_one("ALTER TABLE a_db.t ADD COLUMN x UInt64", dialect="clickhouse"),
-            parse_one("ALTER TABLE r_db.t ADD COLUMN x UInt64", dialect="clickhouse"),
+            parse_one("ALTER TABLE a_db.t ADD COLUMN x UInt64", dialect="clickhouse").assert_is(
+                exp.Alter
+            ),
+            parse_one("ALTER TABLE r_db.t ADD COLUMN x UInt64", dialect="clickhouse").assert_is(
+                exp.Alter
+            ),
         ]
     )
 
     calls = to_sql_calls(adapter)
     assert 'ON CLUSTER "my_cluster"' in calls[0]
     assert "ON CLUSTER" not in calls[1]
+
+
+@pytest.mark.parametrize("cluster", [None, "my_cluster"])
+@pytest.mark.parametrize("database_engine", ["Atomic", "Replicated"])
+@pytest.mark.parametrize("operation", ["drop", "replace", "both"])
+def test_alter_partition_keeps_on_cluster(
+    make_mocked_engine_adapter: t.Callable, mocker, cluster, database_engine, operation
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster=cluster)
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
+    mocker.patch.object(ClickhouseEngineAdapter, "_database_engine", return_value=database_engine)
+
+    # Use the same AST builder as incremental partition overwrites.
+    alter = adapter._build_alter_partition_exp(
+        exp.to_table("my_db.target"),
+        exp.to_table("my_db.source"),
+        {"1"} if operation in ("replace", "both") else set(),
+        {"2"} if operation in ("drop", "both") else set(),
+    )
+    adapter.alter_table([alter])
+
+    actions = []
+    if operation in ("replace", "both"):
+        actions.append('REPLACE PARTITION ID \'1\' FROM "my_db"."source"')
+    if operation in ("drop", "both"):
+        actions.append("DROP PARTITION ID '2'")
+    cluster_sql = ' ON CLUSTER "my_cluster"' if cluster else ""
+    assert to_sql_calls(adapter) == [
+        f'ALTER TABLE "my_db"."target"{cluster_sql} {", ".join(actions)}'
+    ]
 
 
 def test_cross_engine_rename_and_exchange_are_refused(

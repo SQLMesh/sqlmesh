@@ -739,7 +739,17 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 altered_table = (
                     alter_expression.this if isinstance(alter_expression.this, exp.Table) else None
                 )
-                if self._should_use_on_cluster(altered_table):
+                # Replicated databases propagate metadata ALTERs, but not partition
+                # operations. Partition overwrites must still reach every shard.
+                alters_partitions = any(
+                    isinstance(action, (exp.DropPartition, exp.ReplacePartition))
+                    for action in alter_expression.args.get("actions", [])
+                )
+                if (
+                    self.engine_run_mode.is_cluster
+                    if alters_partitions
+                    else self._should_use_on_cluster(altered_table)
+                ):
                     alter_expression.set(
                         "cluster", exp.OnCluster(this=exp.to_identifier(self.cluster))
                     )
