@@ -2964,7 +2964,9 @@ test_foo:
             )
         }
     )
-    expected = pd.DataFrame({"ts_col": ["0001-01-01 00:00:00", "9999-12-31 23:59:59"]})
+    # Use T separator so a string-only comparison (broken path) would mismatch
+    # against str(datetime.datetime(1, 1, 1)) == "0001-01-01 00:00:00".
+    expected = pd.DataFrame({"ts_col": ["0001-01-01T00:00:00", "9999-12-31T23:59:59"]})
     log_warning = mocker.spy(get_console(), "log_warning")
     test.assert_equal(expected=expected, actual=actual, sort=False)
     for call_args in log_warning.call_args_list:
