@@ -343,7 +343,13 @@ class SnowflakeEngineAdapter(
             # if we are creating a non-dynamic table; remove any properties that are only valid for dynamic tables
             # this is necessary because we create "normal" tables from the same managed model definition for dev previews and the "normal" tables dont support these parameters
             if "DYNAMIC" not in (table_kind or "").upper():
-                for prop in {"WAREHOUSE", "TARGET_LAG", "REFRESH_MODE", "INITIALIZE"}:
+                for prop in {
+                    "WAREHOUSE",
+                    "TARGET_LAG",
+                    "REFRESH_MODE",
+                    "INITIALIZE",
+                    "INITIALIZATION_WAREHOUSE",
+                }:
                     table_properties.pop(prop, None)
 
             table_type = self._pop_creatable_type_from_properties(table_properties)
