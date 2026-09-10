@@ -361,7 +361,7 @@ class FabricHttpClient:
 
         if (
             if_not_exists
-            and response.status_code == 400
+            and response.status_code in (400, 409)
             and (errorCode := response.json().get("errorCode", None))
         ):
             if errorCode == "ItemDisplayNameAlreadyInUse":
