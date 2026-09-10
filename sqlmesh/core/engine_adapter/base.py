@@ -2624,12 +2624,17 @@ class EngineAdapter:
 
                 sql = self._attach_correlation_id(sql)
 
-                self._log_sql(
-                    sql,
-                    expression=e if isinstance(e, exp.Expr) else None,
-                    quote_identifiers=quote_identifiers,
-                )
-                self._execute(sql, track_rows_processed, **kwargs)
+                # The rendered statement and correlation comment are finalized
+                # here; observe the exact invocation, including driver errors.
+                from sqlmesh.core.execution_observation import action
+
+                with action("query", "execute", engine=self.dialect):
+                    self._log_sql(
+                        sql,
+                        expression=e if isinstance(e, exp.Expr) else None,
+                        quote_identifiers=quote_identifiers,
+                    )
+                    self._execute(sql, track_rows_processed, **kwargs)
 
     def _attach_correlation_id(self, sql: str) -> str:
         if self.ATTACH_CORRELATION_ID and self.correlation_id:

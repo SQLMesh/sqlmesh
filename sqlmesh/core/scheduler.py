@@ -8,6 +8,11 @@ from datetime import datetime
 from sqlglot import exp
 from sqlmesh.core import constants as c
 from sqlmesh.core.console import Console, get_console
+from sqlmesh.core.execution_observation import (
+    action,
+    console_observer_scope,
+    execution_context_factory,
+)
 from sqlmesh.core.environment import EnvironmentNamingInfo, execute_environment_statements
 from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.model.definition import AuditResult
@@ -518,6 +523,21 @@ class Scheduler:
         )
 
         def run_node(node: SchedulingUnit) -> None:
+            if isinstance(node, EvaluateNode):
+                with action(
+                    "model",
+                    "audit_only" if audit_only else "evaluate",
+                    snapshot=self.snapshots_by_name[node.snapshot_name],
+                    interval=node.interval,
+                    batch_index=node.batch_index,
+                    execution_time=execution_time,
+                    audit_only=audit_only,
+                ):
+                    execute_node(node)
+            else:
+                execute_node(node)
+
+        def execute_node(node: SchedulingUnit) -> None:
             if circuit_breaker and circuit_breaker():
                 raise CircuitBreakerError()
             if isinstance(node, DummyNode):
@@ -596,12 +616,13 @@ class Scheduler:
                 )
 
         try:
-            with self.snapshot_evaluator.concurrent_context():
+            with console_observer_scope(self.console), self.snapshot_evaluator.concurrent_context():
                 errors, skipped_intervals = concurrent_apply_to_dag(
                     dag,
                     run_node,
                     self.max_workers,
                     raise_on_error=False,
+                    context_factory=execution_context_factory(),
                 )
                 self.console.stop_evaluation_progress(success=not errors)
 

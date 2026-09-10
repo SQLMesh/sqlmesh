@@ -28,6 +28,7 @@ from sqlmesh.core.engine_adapter.shared import (
 from sqlmesh.core.environment import EnvironmentNamingInfo
 from sqlmesh.core.macros import RuntimeStage, macro, MacroEvaluator, MacroFunc
 from sqlmesh.core.model import (
+    AuditResult,
     Model,
     FullKind,
     IncrementalByTimeRangeKind,
@@ -3283,6 +3284,26 @@ def test_standalone_audit(mocker: MockerFixture, adapter_mock, make_snapshot):
     adapter_mock.session.assert_not_called()
 
 
+def _audit_observed(
+    evaluator: SnapshotEvaluator,
+    snapshot: Snapshot,
+    *,
+    observe_result: t.Callable[[AuditResult], None],
+    **kwargs: t.Any,
+) -> t.List[AuditResult]:
+    """Exercise the generic hook at the real per-audit evaluator boundary."""
+    from sqlmesh.core.execution_observation import observer_scope
+
+    def observer(
+        phase: str, facts: t.Mapping[str, t.Any], error: t.Optional[BaseException]
+    ) -> None:
+        if phase == "finish" and facts["kind"] == "audit" and "audit_result" in facts:
+            observe_result(facts["audit_result"])
+
+    with observer_scope(observer):
+        return evaluator.audit(snapshot, **kwargs)
+
+
 def test_audit_wap(adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]) -> None:
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -3308,8 +3329,15 @@ def test_audit_wap(adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot])
     expected_table_name = f"spark_catalog.test_schema.test_table.branch_wap_{wap_id}"
     adapter_mock.wap_table_name.return_value = expected_table_name
     adapter_mock.fetchone.return_value = (0,)
+    observed_results: t.List[AuditResult] = []
 
-    evaluator.audit(snapshot, snapshots={}, wap_id=wap_id)
+    _audit_observed(
+        evaluator,
+        snapshot,
+        snapshots={},
+        wap_id=wap_id,
+        observe_result=observed_results.append,
+    )
 
     call_args = adapter_mock.fetchone.call_args_list
     assert len(call_args) == 2
@@ -3328,6 +3356,123 @@ def test_audit_wap(adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot])
 
     adapter_mock.wap_table_name.assert_called_once_with(snapshot.table_name(), wap_id)
     adapter_mock.wap_publish.assert_called_once_with(snapshot.table_name(), wap_id)
+    assert [result.audit.name for result in observed_results] == ["not_null", "test_audit"]
+
+
+def test_audit_observer_preserves_completed_results_when_a_later_audit_fails(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    evaluator = SnapshotEvaluator(adapter_mock)
+    model = SqlModel(
+        name="test_schema.test_table",
+        kind=FullKind(),
+        query=parse_one("SELECT a::int FROM tbl"),
+        audits=[
+            ("not_null", {"columns": exp.to_column("a")}),
+            ("unique_values", {"columns": exp.convert(["a"])}),
+        ],
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    observed_results: t.List[AuditResult] = []
+    fetch_count = 0
+
+    def fetch_audit_result(*args: t.Any, **kwargs: t.Any) -> t.Tuple[int]:
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            assert [result.audit.name for result in observed_results] == ["not_null"]
+            raise RuntimeError("second audit failed")
+        return (0,)
+
+    adapter_mock.fetchone.side_effect = fetch_audit_result
+
+    with pytest.raises(RuntimeError, match="second audit failed"):
+        _audit_observed(
+            evaluator,
+            snapshot,
+            snapshots={},
+            observe_result=observed_results.append,
+        )
+
+    assert [result.audit.name for result in observed_results] == ["not_null"]
+
+
+def test_audit_observer_failure_does_not_abort_remaining_audits(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    evaluator = SnapshotEvaluator(adapter_mock)
+    model = SqlModel(
+        name="test_schema.test_table",
+        kind=FullKind(),
+        query=parse_one("SELECT a::int, b::int FROM tbl"),
+        audits=[
+            ("not_null", {"columns": exp.to_column("a")}),
+            ("not_null", {"columns": exp.to_column("b")}),
+        ],
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    adapter_mock.fetchone.return_value = (0,)
+
+    def fail_observer(_result: AuditResult) -> None:
+        raise RuntimeError("observer unavailable")
+
+    results = _audit_observed(
+        evaluator,
+        snapshot,
+        snapshots={},
+        observe_result=fail_observer,
+    )
+
+    assert len(results) == adapter_mock.fetchone.call_count == 2
+
+
+def test_audit_observer_reports_failed_skipped_and_repeated_results_once_in_order(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    evaluator = SnapshotEvaluator(adapter_mock)
+    skipped_audit = ModelAudit(
+        name="skipped_audit",
+        query="SELECT * FROM test_schema.test_table",
+        skip=True,
+    )
+    model = SqlModel(
+        name="test_schema.test_table",
+        kind=FullKind(),
+        query=parse_one("SELECT a::int, b::int FROM tbl"),
+        audits=[
+            ("not_null", {"columns": exp.to_column("a")}),
+            ("skipped_audit", {}),
+            ("not_null", {"columns": exp.to_column("b")}),
+        ],
+        audit_definitions={skipped_audit.name: skipped_audit},
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    adapter_mock.fetchone.side_effect = [(2,), (0,)]
+    observed_results: t.List[AuditResult] = []
+
+    returned_results = _audit_observed(
+        evaluator,
+        snapshot,
+        snapshots={},
+        observe_result=observed_results.append,
+    )
+
+    assert observed_results == returned_results
+    assert [result.audit.name for result in observed_results] == [
+        "not_null",
+        "skipped_audit",
+        "not_null",
+    ]
+    assert [result.count for result in observed_results] == [2, None, 0]
+    assert [result.skipped for result in observed_results] == [False, True, False]
+    assert [observed_results[index].audit_args["columns"].sql() for index in (0, 2)] == [
+        "a",
+        "b",
+    ]
+    assert adapter_mock.fetchone.call_count == 2
 
 
 def test_audit_with_datetime_macros(adapter_mock, make_snapshot):
@@ -5050,12 +5195,24 @@ def test_wap_publish_failure(adapter_mock: Mock, make_snapshot: t.Callable[..., 
     adapter_mock.wap_table_name.return_value = expected_wap_table_name
     adapter_mock.fetchone.return_value = (0,)
 
-    # Mock WAP publish to raise an exception
-    adapter_mock.wap_publish.side_effect = Exception("WAP publish failed")
+    observed_results: t.List[AuditResult] = []
 
-    # Execute audit with WAP ID and expect it to raise the exception
-    with pytest.raises(Exception, match="WAP publish failed"):
-        evaluator.audit(snapshot, snapshots={}, wap_id=wap_id)
+    def fail_wap_publish(*args: t.Any, **kwargs: t.Any) -> None:
+        assert [result.audit.name for result in observed_results] == ["not_null"]
+        raise RuntimeError("WAP publish failed")
+
+    adapter_mock.wap_publish.side_effect = fail_wap_publish
+
+    with pytest.raises(RuntimeError, match="WAP publish failed"):
+        _audit_observed(
+            evaluator,
+            snapshot,
+            snapshots={},
+            wap_id=wap_id,
+            observe_result=observed_results.append,
+        )
+
+    assert [result.audit.name for result in observed_results] == ["not_null"]
 
 
 def test_properties_are_preserved_in_both_create_statements(
@@ -5654,3 +5811,50 @@ def test_grants_in_production_with_dev_only_vde(
         # Should still apply grants to physical table when target layer is ALL or PHYSICAL
         sync_grants_mock.assert_called_once()
         assert sync_grants_mock.call_args[0][1] == {"select": ["user1"], "insert": ["role1"]}
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("operation", ["create", "promote", "demote", "migrate"])
+def test_observation_propagates_through_snapshot_dispatch(
+    mocker, adapter_mock, snapshot, workers, operation
+):
+    from contextvars import ContextVar
+    from sqlmesh.core.execution_observation import observer_scope
+
+    evaluator = SnapshotEvaluator(adapter_mock, ddl_concurrent_tasks=workers)
+    consumer = ContextVar("snapshot_dispatch_consumer", default=None)
+    events = []
+
+    def observer(phase, facts, error):
+        assert consumer.get() == "admission"
+        assert facts["snapshot"] is snapshot
+        events.append((phase, facts["action"], error))
+
+    naming = EnvironmentNamingInfo(name="test")
+    mocker.patch.object(evaluator, "_get_virtual_data_objects", return_value={})
+    mocker.patch.object(
+        evaluator, "_get_physical_data_objects", return_value={snapshot.snapshot_id: mocker.Mock()}
+    )
+    mocker.patch.object(evaluator, "_create_schemas")
+    token = consumer.set("admission")
+    try:
+        with observer_scope(observer):
+            if operation == "create":
+                evaluator._create_snapshots(
+                    [snapshot],
+                    {snapshot.name: snapshot},
+                    DeployabilityIndex.all_deployable(),
+                    None,
+                    set(),
+                    set(),
+                )
+            elif operation == "promote":
+                evaluator.promote([snapshot], naming)
+            elif operation == "demote":
+                evaluator.demote([snapshot], naming)
+            else:
+                evaluator.migrate([snapshot], {snapshot.snapshot_id: snapshot})
+    finally:
+        consumer.reset(token)
+    action = "schema_migration" if operation == "migrate" else operation
+    assert events == [("start", action, None), ("finish", action, None)]
