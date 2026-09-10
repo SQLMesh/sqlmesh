@@ -7,6 +7,7 @@ from pathlib import Path
 from difflib import get_close_matches
 from sqlglot import exp
 from sqlglot.helper import ensure_list
+from sqlglot.optimizer.simplify import gen
 
 from sqlmesh.core import constants as c
 from sqlmesh.core import dialect as d
@@ -34,6 +35,13 @@ if t.TYPE_CHECKING:
     from sqlmesh.utils.jinja import MacroReference
 
     MacroCallable = t.Union[Executable, registry_decorator]
+
+
+def gen_for_jinja(expression: exp.Expr, **kwargs: t.Any) -> str:
+    """Generate source text without escaping quotes inside Jinja expressions."""
+    if isinstance(expression, d.Jinja):
+        return expression.this.this
+    return gen(expression, **kwargs)
 
 
 def make_python_env(
