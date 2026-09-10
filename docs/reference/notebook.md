@@ -96,7 +96,7 @@ options:
 #### plan
 ```
 %plan [--start START] [--end END] [--execution-time EXECUTION_TIME]
-            [--create-from CREATE_FROM] [--skip-tests]
+            [--create-from CREATE_FROM] [--skip-tests] [--test-changed-only]
             [--restate-model [RESTATE_MODEL ...]] [--no-gaps]
             [--skip-backfill, --dry-run] [--forward-only]
             [--effective-from EFFECTIVE_FROM] [--no-prompts] [--auto-apply]
@@ -120,6 +120,8 @@ options:
                         The environment to create the target environment from
                         if it doesn't exist. Default: prod.
   --skip-tests, -t      Skip the unit tests defined for the model.
+  --test-changed-only   Run unit tests only for models included in the plan
+                        instead of all tests.
   --restate-model <[RESTATE_MODEL ...]>, -r <[RESTATE_MODEL ...]>
                         Restate data for specified models (and models
                         downstream from the one specified). For production
@@ -131,7 +133,8 @@ options:
                         comparing to existing snapshots for matching models in
                         the target environment.
   --skip-backfill, --dry-run
-                        Skip the backfill step and only create a virtual update for the plan.
+                        Skip the backfill step and only create a virtual
+                        update for the plan.
   --forward-only        Create a plan for forward-only changes.
   --effective-from EFFECTIVE_FROM
                         The effective date from which to apply forward-only
@@ -430,7 +433,8 @@ options:
 
 #### run_test
 ```
-%run_test [--pattern [PATTERN ...]] [--verbose] [--preserve-fixtures] [tests ...]
+%run_test [--pattern [PATTERN ...]] [--verbose] [--preserve-fixtures]
+          [--select-model [SELECT_MODEL ...]] [tests ...]
 
 Run unit test(s).
 
@@ -443,6 +447,8 @@ options:
   --verbose, -v         Verbose output.
   --preserve-fixtures   Preserve the fixture tables in the testing database,
                         useful for debugging.
+  --select-model <[SELECT_MODEL ...]>
+                        Select specific models to run unit tests for.
 ```
 
 #### audit

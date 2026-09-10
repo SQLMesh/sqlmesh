@@ -13,6 +13,7 @@ from sqlmesh.core.engine_adapter.shared import (
     DataObjectType,
     EngineRunMode,
     SourceQuery,
+    CommentCreationTable,
     CommentCreationView,
     InsertOverwriteStrategy,
 )
@@ -36,6 +37,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     SUPPORTS_TRANSACTIONS = False
     SUPPORTS_VIEW_SCHEMA = False
     SUPPORTS_REPLACE_TABLE = False
+    COMMENT_CREATION_TABLE = CommentCreationTable.COMMENT_COMMAND_ONLY
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
 
     SCHEMA_DIFFER_KWARGS = {}
