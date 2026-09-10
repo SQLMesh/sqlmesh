@@ -31,6 +31,11 @@ class FormatConfig(BaseConfig):
         max_text_width: The maximum text width in a segment before creating new lines.
         append_newline: Whether to append a newline to the end of the file or not.
         no_rewrite_casts: Preserve the existing casts, without rewriting them to use the :: syntax.
+        transpile_meta: Whether to render the MODEL/AUDIT/METRIC header with the model's
+            dialect instead of keeping it dialect-agnostic.  Headers are dialect-agnostic
+            by default because SQLMesh properties are not warehouse SQL, but projects that
+            author headers in their warehouse dialect can opt in to preserve
+            dialect-specific values such as column types.
     """
 
     normalize: bool = False
@@ -41,6 +46,7 @@ class FormatConfig(BaseConfig):
     max_text_width: int = 80
     append_newline: bool = False
     no_rewrite_casts: bool = False
+    transpile_meta: bool = False
 
     @property
     def generator_options(self) -> t.Dict[str, t.Any]:
@@ -49,4 +55,4 @@ class FormatConfig(BaseConfig):
         Returns:
             The generator options.
         """
-        return self.dict(exclude={"append_newline", "no_rewrite_casts"})
+        return self.dict(exclude={"append_newline", "no_rewrite_casts", "transpile_meta"})

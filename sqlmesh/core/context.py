@@ -1377,6 +1377,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         transpile: t.Optional[str] = None,
         rewrite_casts: t.Optional[bool] = None,
         append_newline: t.Optional[bool] = None,
+        transpile_meta: t.Optional[bool] = None,
         **kwargs: t.Any,
     ) -> str:
         expressions = parse(before, default_dialect=self.config_for_node(target).dialect)
@@ -1396,6 +1397,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             transpile or target.dialect,
             rewrite_casts=(
                 rewrite_casts if rewrite_casts is not None else not format_config.no_rewrite_casts
+            ),
+            transpile_meta=(
+                transpile_meta if transpile_meta is not None else format_config.transpile_meta
             ),
             **{**format_config.generator_options, **kwargs},
         )
