@@ -6,7 +6,7 @@ import sys
 import typing as t
 import time
 from contextlib import contextmanager
-
+import uuid
 import pandas as pd  # noqa: TID253
 import pytest
 from sqlglot import exp, parse_one
@@ -205,7 +205,7 @@ class TestContext:
         self.mark = mark
         self.gateway = gateway
         self._columns_to_types = columns_to_types
-        self.test_id = random_id(short=True)
+        self.test_id = f"{self.mark}_{uuid.uuid4().hex[:8]}" 
         self._context: t.Optional[Context] = None
         self.is_remote = is_remote
         self._schemas: t.List[
@@ -684,7 +684,7 @@ class TestContext:
                 private_sqlmesh_dir / "config.yml",
                 private_sqlmesh_dir / "config.yaml",
             ],
-            variables={"tmp_path": str(path or self.tmp_path)},
+            variables={"tmp_path": (path or self.tmp_path).as_posix()},
         )
         if config_mutator:
             config_mutator(self.gateway, config)

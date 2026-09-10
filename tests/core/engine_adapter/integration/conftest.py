@@ -35,7 +35,7 @@ def config(tmp_path: pathlib.Path) -> Config:
             pathlib.Path(os.path.join(os.path.dirname(__file__), "config.yaml")),
         ],
         personal_paths=[(SQLMESH_PATH / "config.yaml").expanduser()],
-        variables={"tmp_path": str(tmp_path)},
+        variables={"tmp_path": tmp_path.as_posix()},
     )
 
 
@@ -78,7 +78,9 @@ def create_engine_adapter(
         if engine_name == "duckdb":
             assert isinstance(connection_config, DuckDBConnectionConfig)
             for raw_path in [
-                v for v in (connection_config.catalogs or {}).values() if isinstance(v, str)
+                v
+                for v in (connection_config.catalogs or {}).values()
+                if isinstance(v, str) and v != ":memory:"
             ]:
                 pathlib.Path(raw_path).unlink(missing_ok=True)
 
