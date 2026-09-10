@@ -11,13 +11,13 @@ from sqlmesh.core.engine_adapter.mssql import MSSQLEngineAdapter
 from sqlmesh.core.engine_adapter.shared import (
     CommentCreationTable,
     CommentCreationView,
+    DataObject,
     InsertOverwriteStrategy,
 )
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.connection_pool import ConnectionPool
 from sqlmesh.core.schema_diff import TableAlterOperation
 from sqlmesh.utils import random_id
-
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +223,31 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
             )
 
         self._target_catalog = target_catalog
+
+    def _get_data_objects(
+        self, schema_name: t.Union[str, exp.Table], object_names: t.Optional[t.Set[str]] = None
+    ) -> t.List[DataObject]:
+        objects = super()._get_data_objects(schema_name, object_names)
+        # Fabric uses None as "default catalog" so we skip reconnects. Other engines
+        # return a real warehouse name here; fill it in so this listing matches them
+        # and so the data-object cache key matches lookups that use that name.
+        catalog = (
+            self.get_current_catalog()
+            or self._default_catalog
+            or self._extra_config.get("database")
+        )
+        if not catalog:
+            return objects
+        return [
+            DataObject(
+                catalog=obj.catalog or catalog,
+                schema=obj.schema_name,
+                name=obj.name,
+                type=obj.type,
+                clustering_key=obj.clustering_key,
+            )
+            for obj in objects
+        ]
 
     def alter_table(
         self, alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]]
