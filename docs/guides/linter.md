@@ -127,6 +127,29 @@ Error: Linter detected errors in the code. Please fix them before proceeding.
 
 Use `sqlmesh lint --help` for more information.
 
+Models can be selected by name with `--model`, by model file path, or by both at once. Selecting by
+path lets `sqlmesh lint` be wired up to path-based tooling such as [pre-commit](https://pre-commit.com/),
+which passes the names of the changed files:
+
+``` bash
+$ sqlmesh lint models/full_model.sql models/incremental_model.sql
+```
+
+``` yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: sqlmesh-lint
+        name: sqlmesh lint
+        entry: sqlmesh lint --local --use-project-index
+        language: system
+        files: ^models/.*\.(sql|py)$
+```
+
+SQLMesh errors if a path doesn't define any models, so a stale or mistyped path fails loudly instead
+of silently linting the whole project.
+
 You can pass `--local` to run lint without loading state from the configured state connection:
 
 ``` bash
@@ -136,9 +159,9 @@ $ sqlmesh lint --local
 This can make linting faster in repositories where all referenced models are loaded from local files. In multi-repository setups, or when linting only a subset of projects, `--local` may cause additional linting errors because SQLMesh will not resolve references or schemas from models that exist only in remote state.
 
 For faster targeted linting, enable the persistent project index with `--use-project-index`. When
-models are selected with `--model`, SQLMesh loads, resolves, and validates only those models and
-their transitive upstream dependencies. The same behavior can be enabled by default for the
-Python API and CLI with the `linter.use_project_index` configuration option:
+models are selected with `--model` or by file path, SQLMesh loads, resolves, and validates only those
+models and their transitive upstream dependencies. The same behavior can be enabled by default for
+the Python API and CLI with the `linter.use_project_index` configuration option:
 
 ```yaml
 linter:
@@ -148,7 +171,8 @@ linter:
 
 `Context.lint_models` uses this configuration value when `use_project_index` is omitted. Passing
 `use_project_index=False` explicitly disables it for that call. If a context was already loaded,
-an indexed lint of selected models reloads the context so the requested scope is applied.
+an indexed lint of selected models reloads the context so the requested scope is applied. Model
+file paths can be passed to `Context.lint_models` with the `paths` argument.
 
 
 ## Applying linting rules
