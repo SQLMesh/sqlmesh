@@ -746,7 +746,25 @@ class GenericContext(BaseContext, t.Generic[C]):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:
-                for snapshot in self.state_reader.get_snapshots(prod.snapshots).values():
+                # Environment snapshot infos already contain the names we need to distinguish
+                # local nodes from nodes owned by another project. Hydrating local snapshots
+                # here is wasteful: their payloads are not used, and a large remote state can
+                # spend most of Context.load() decoding those model object graphs.
+                #
+                # Only hydrate names which are absent locally. These can be deleted nodes from
+                # this project or nodes from another project which must be merged into the
+                # context. The project field on the hydrated node disambiguates the two cases.
+                remote_snapshot_infos = []
+                for snapshot_info in prod.snapshots:
+                    local_store = (
+                        self._standalone_audits if snapshot_info.is_audit else self._models
+                    )
+                    if snapshot_info.name in local_store:
+                        uncached.add(snapshot_info.name)
+                    else:
+                        remote_snapshot_infos.append(snapshot_info)
+
+                for snapshot in self.state_reader.get_snapshots(remote_snapshot_infos).values():
                     if snapshot.node.project in self._projects:
                         uncached.add(snapshot.name)
                     else:
