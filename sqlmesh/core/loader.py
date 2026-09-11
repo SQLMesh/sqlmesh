@@ -667,7 +667,13 @@ class SqlMeshLoader(Loader):
         if current_paths != indexed_paths:
             return None
 
+        # The caller resolves the paths it selects with, so the index side is keyed by a
+        # resolved path too. Resolving the project root once keeps that to a single
+        # filesystem call instead of one per indexed model.
+        resolved_config_path = self.config_path.resolve() if model_paths else self.config_path
+
         model_to_path: t.Dict[str, Path] = {}
+        fqns_by_resolved_path: t.Dict[Path, t.Set[str]] = defaultdict(set)
         dependencies: t.Dict[str, t.Set[str]] = {}
         for relative_path, file_models in indexed_files.items():
             path = self.config_path / relative_path
@@ -680,11 +686,23 @@ class SqlMeshLoader(Loader):
                     return None
                 model_to_path[fqn] = path
                 dependencies[fqn] = set(depends_on)
+                if model_paths:
+                    fqns_by_resolved_path[resolved_config_path / relative_path].add(fqn)
 
         selected = {fqn for fqn in model_fqns if fqn in model_to_path}
-        if model_paths:
+        unmatched_paths = set()
+        for model_path in model_paths or set():
+            matched = fqns_by_resolved_path.get(model_path)
+            if matched:
+                selected.update(matched)
+            else:
+                unmatched_paths.add(model_path)
+        if unmatched_paths:
+            # Joining onto the resolved project root misses a model file that is itself a
+            # symlink, so fall back to resolving each indexed path for the few that are
+            # still unaccounted for.
             selected.update(
-                fqn for fqn, path in model_to_path.items() if path.resolve() in model_paths
+                fqn for fqn, path in model_to_path.items() if path.resolve() in unmatched_paths
             )
         stack = list(selected)
         while stack:

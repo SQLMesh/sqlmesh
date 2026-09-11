@@ -650,7 +650,9 @@ Options:
 ## lint
 ```
 Usage: sqlmesh lint [OPTIONS] [PATHS]...
-  Run linter for the target model(s). Models can be selected by name with --model, by model file path, or by both.
+  Run the linter for the target model(s).
+
+  Models can be selected by name with --model, by model file path, or by both.
 
 Options:
   --model TEXT           A model to lint. Multiple models can be linted.  If no models or paths are specified, every model will be

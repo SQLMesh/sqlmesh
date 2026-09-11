@@ -1252,7 +1252,10 @@ def lint(
     models: t.Iterator[str],
     use_project_index: t.Optional[bool],
 ) -> None:
-    """Run the linter for the target model(s)."""
+    """Run the linter for the target model(s).
+
+    Models can be selected by name with --model, by model file path, or by both.
+    """
     obj.lint_models(
         models,
         use_project_index=use_project_index,
