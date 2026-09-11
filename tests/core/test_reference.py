@@ -52,3 +52,15 @@ def test_models_for_column(sushi_context_pre_scheduling):
         "sushi.raw_marketing",
     ]
     assert graph.models_for_column("sushi.orders", "event_date") == ["sushi.orders"]
+
+
+def test_target_grain_does_not_override_nonunique_join_reference(make_model):
+    graph = ReferenceGraph(
+        [
+            make_model("fact", [("org", False)]),
+            make_model("dimension", [("dimension_id", True), ("org", False)]),
+        ]
+    )
+
+    with pytest.raises(SQLMeshError):
+        graph.find_path("fact", "dimension")
