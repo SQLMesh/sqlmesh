@@ -53,6 +53,9 @@ RECOMMENDED_STATE_SYNC_ENGINES = {
     "mssql",
     "azuresql",
 }
+# Note: Db2 is excluded because it doesn't allow table names starting with underscore (_)
+# which SQLMesh uses for state tables (_versions, _snapshots, _environments, _intervals).
+# Use a separate state_connection (e.g., DuckDB) for Db2 gateways.
 FORBIDDEN_STATE_SYNC_ENGINES = {
     # Do not support row-level operations
     "spark",
@@ -2601,6 +2604,91 @@ _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {
     ConnectionConfig,  # type: ignore[type-abstract]
     BaseDuckDBConnectionConfig,  # type: ignore[type-abstract]
 }
+
+
+class Db2ConnectionConfig(ConnectionConfig):
+    host: str
+    port: int = 50000
+    database: str
+    db2_schema: str
+    username: str
+    password: str
+    ssl: bool = False
+    ssl_cert: t.Optional[str] = None
+    ssl_key: t.Optional[str] = None
+    ssl_ca: t.Optional[str] = None
+    connect_timeout: int = 30
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    pre_ping: bool = True
+
+    type_: t.Literal["db2"] = Field(alias="type", default="db2")
+    DIALECT: t.ClassVar[t.Literal["db2"]] = "db2"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Db2"]] = "Db2"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[19]] = 19
+
+    _engine_import_validator = _get_engine_import_validator("ibm_db", "db2")
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        return {
+            "host",
+            "port",
+            "database",
+            "db2_schema",
+            "username",
+            "password",
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        # DB2 adapter requires Python 3.10+ for db2-sqlglot-dialect
+        # Use getattr to avoid mypy errors on Python 3.9
+        return t.cast(
+            t.Type[EngineAdapter], getattr(engine_adapter, "Db2EngineAdapter", EngineAdapter)
+        )
+
+    def get_catalog(self) -> t.Optional[str]:
+        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
+        passed to the adapter matches what get_current_catalog() returns at runtime."""
+        catalog = super().get_catalog()
+        return catalog.upper() if catalog else None
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        import ibm_db_dbi  # type: ignore
+
+        ssl = self.ssl
+        ssl_cert = self.ssl_cert
+        ssl_key = self.ssl_key
+        ssl_ca = self.ssl_ca
+        connect_timeout = self.connect_timeout
+
+        def connect_db2(**kwargs: t.Any) -> t.Any:
+            conn_str_parts = [
+                f"DATABASE={kwargs['database']}",
+                f"HOSTNAME={kwargs['host']}",
+                f"PORT={kwargs['port']}",
+                "PROTOCOL=TCPIP",
+                f"UID={kwargs['username']}",
+                f"PWD={kwargs['password']}",
+                f"CURRENTSCHEMA={kwargs['db2_schema']}",
+                f"CONNECTTIMEOUT={connect_timeout}",
+            ]
+            if ssl:
+                conn_str_parts.append("SECURITY=SSL")
+                if ssl_cert:
+                    conn_str_parts.append(f"SSLClientCertificate={ssl_cert}")
+                if ssl_key:
+                    conn_str_parts.append(f"SSLClientKey={ssl_key}")
+                if ssl_ca:
+                    conn_str_parts.append(f"SSLServerCertificate={ssl_ca}")
+            conn_str = ";".join(conn_str_parts) + ";"
+            return ibm_db_dbi.connect(conn_str, "", "")
+
+        return connect_db2
+
 
 CONNECTION_CONFIG_TO_TYPE = {
     # Map all subclasses of ConnectionConfig to the value of their `type_` field.

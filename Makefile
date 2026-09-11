@@ -14,7 +14,7 @@ else
 endif
 
 install-dev:
-	$(PIP) install -e ".[dev,web,slack,dlt,lsp]" ./examples/custom_materializations
+	$(PIP) install -e ".[dev,web,slack,dlt,lsp,db2]" ./examples/custom_materializations
 
 install-doc:
 	$(PIP) install -r ./docs/requirements.txt
@@ -222,6 +222,9 @@ risingwave-test: engine-risingwave-up
 
 starrocks-test: engine-starrocks-up
 	pytest -n auto -m "starrocks" --reruns 3 --junitxml=test-results/junit-starrocks.xml
+	
+db2-test: engine-db2-up
+	pytest -n auto -m "db2" --reruns 3 --junitxml=test-results/junit-db2.xml
 
 #################
 # Cloud Engines #
