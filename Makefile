@@ -33,8 +33,8 @@ install-dev-dbt-%:
 	echo "Installing dbt version: $$version"; \
 	cp pyproject.toml pyproject.toml.backup; \
 	$(SED_INPLACE) 's/"pydantic>=2.0.0"/"pydantic"/g' pyproject.toml; \
-	if [ "$$version" = "1.10.0" ]; then \
-		echo "Applying special handling for dbt 1.10.0"; \
+	if [ "$$version" = "1.10.0" ] || [ "$$version" = "1.11.0" ] || [ "$$version" = "1.12.0" ]; then \
+		echo "Applying special handling for dbt $$version"; \
 		$(SED_INPLACE) -E 's/"(dbt-core)[^"]*"/"\1~='"$$version"'"/g' pyproject.toml; \
 		$(SED_INPLACE) -E 's/"(dbt-(bigquery|duckdb|snowflake|athena-community|clickhouse|redshift|trino))[^"]*"/"\1"/g' pyproject.toml; \
 		$(SED_INPLACE) -E 's/"(dbt-databricks)[^"]*"/"\1~='"$$version"'"/g' pyproject.toml; \
@@ -132,13 +132,13 @@ engine-up: engine-clickhouse-up engine-mssql-up engine-mysql-up engine-postgres-
 engine-down: engine-clickhouse-down engine-mssql-down engine-mysql-down engine-postgres-down engine-spark-down engine-trino-down
 
 fast-test:
-	pytest -n auto -m "fast and not cicdonly" --junitxml=test-results/junit-fast-test.xml && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
+	pytest -n auto -m "fast and not cicdonly and not isolated" --junitxml=test-results/junit-fast-test.xml && pytest -m "isolated and not slow" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
 
 slow-test:
-	pytest -n auto -m "(fast or slow) and not cicdonly" && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
+	pytest -n auto -m "(fast or slow) and not cicdonly and not isolated" && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
 
 cicd-test:
-	pytest -n auto -m "(fast or slow) and not pyspark" --junitxml=test-results/junit-cicd.xml && pytest -m "pyspark" && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
+	pytest -n auto -m "(fast or slow) and not pyspark and not isolated" --junitxml=test-results/junit-cicd.xml && pytest -m "pyspark" && pytest -m "isolated and not pyspark" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
 
 core-fast-test:
 	pytest -n auto -m "fast and not web and not github and not dbt and not jupyter"

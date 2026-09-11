@@ -1,10 +1,11 @@
+import json
 import logging
 import pathlib
 import typing as t
 import re
 from datetime import date, timedelta, datetime
 from tempfile import TemporaryDirectory
-from unittest.mock import PropertyMock, call, patch
+from unittest.mock import ANY, PropertyMock, call, patch
 
 import time_machine
 import pytest
@@ -36,9 +37,10 @@ from sqlmesh.core.console import create_console, get_console
 from sqlmesh.core.dialect import parse, schema_
 from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.environment import Environment, EnvironmentNamingInfo, EnvironmentStatements
+from sqlmesh.core.loader import SqlMeshLoader
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
-from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model
+from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model, update_model_schemas
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.cache import OptimizedQueryCache
 from sqlmesh.core.snapshot import SnapshotChangeCategory
@@ -3288,6 +3290,189 @@ def test_model_linting(tmp_path: pathlib.Path, sushi_context) -> None:
             sushi_context.plan(environment="dev", auto_apply=True, no_prompts=True)
 
 
+def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a); SELECT 1 AS col FROM raw.unregistered_source;",
+    )
+    create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT * FROM b;")
+    create_temp_file(tmp_path, pathlib.Path("models", "d.sql"), "MODEL(name d); SELECT 2 AS col;")
+
+    # Case: Without the opt-in, linting a specific model preserves the full-load behavior.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        violations = ctx.lint_models(["b"])
+
+    assert violations == []
+    assert schemas_mock.call_count == 1
+    assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+    # Case: The project-index opt-in scopes schema resolution to the target and its
+    # upstream dependencies. The initial full file load also creates the index.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        violations = ctx.lint_models(["b"], use_project_index=True)
+
+    assert violations == []
+    assert schemas_mock.call_count == 1
+    updated_models = schemas_mock.call_args.kwargs["models"]
+    assert set(updated_models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+    # Case: Once a full load has populated the model index, an edited target still
+    # loads only its file and upstream dependencies. If the edit introduces a new
+    # dependency outside this set, Context.load safely retries with a full load.
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col + 1 AS col FROM a;",
+    )
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert ctx.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_count == 1
+    selected_paths = load_sql_models_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(ctx.models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+    # Case: A newly introduced dependency that is known to the index triggers a safe
+    # full reload instead of leaving the context incomplete.
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col FROM d;",
+    )
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert ctx.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_count == 2
+    assert set(ctx.models) == {
+        ctx.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b", "c", "d")
+    }
+
+    # Case: Violations are still detected when linting specific models.
+    with pytest.raises(
+        LinterError, match="Linter detected errors in the code. Please fix them before proceeding."
+    ):
+        create_context().lint_models(["c"], use_project_index=True)
+
+    # Case: Linting without a model selection triggers a full load and lints every model.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        with pytest.raises(
+            LinterError,
+            match="Linter detected errors in the code. Please fix them before proceeding.",
+        ):
+            ctx.lint_models()
+
+    assert schemas_mock.call_count == 1
+    assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+
+def test_lint_models_project_index_reloads_loaded_context(tmp_path: pathlib.Path) -> None:
+    create_temp_file(tmp_path, pathlib.Path("models", "a.sql"), "MODEL(name a); SELECT 1 AS col;")
+    create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT 2 AS col;")
+
+    context = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            linter=LinterConfig(enabled=True, use_project_index=True),
+        ),
+        paths=tmp_path,
+    )
+    context.load(use_project_index=True)
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        assert context.lint_models(["b"]) == []
+
+    assert load_mock.call_count == 1
+    selected_paths = load_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(context.models) == {
+        context.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b")
+    }
+
+
+@pytest.mark.parametrize("invalid_files_shape", ["file_list", "model_list"])
+def test_invalid_model_index_falls_back_to_full_load(
+    tmp_path: pathlib.Path, invalid_files_shape: str
+) -> None:
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a); SELECT 1 AS col;",
+    )
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col FROM a;",
+    )
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+
+    indexed_context = Context(config=config, paths=tmp_path, load=False)
+    indexed_context.load(use_project_index=True)
+    indexed_loader = t.cast(SqlMeshLoader, indexed_context._loaders[0])
+    index = json.loads(indexed_loader._model_index_path.read_text(encoding="utf-8"))
+    if invalid_files_shape == "file_list":
+        index["files"] = list(index["files"])
+    else:
+        relative_path = next(iter(index["files"]))
+        index["files"][relative_path] = []
+    indexed_loader._model_index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    context = Context(config=config, paths=tmp_path, load=False)
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert context.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_args.kwargs["selected_paths"] is None
+    assert set(context.models) == {
+        context.get_model("a", raise_if_missing=True).fqn,
+        context.get_model("b", raise_if_missing=True).fqn,
+    }
+
+
 def test_plan_selector_expression_no_match(sushi_context: Context) -> None:
     with pytest.raises(
         PlanError,
@@ -3603,11 +3788,19 @@ def test_prompt_if_uncategorized_snapshot(mocker: MockerFixture, tmp_path: Path)
     assert context.config.plan.no_prompts == True
 
 
+def test_plan_skip_tests_and_test_changed_only(sushi_context: Context) -> None:
+    with pytest.raises(
+        PlanError,
+        match="Cannot combine --skip-tests with --test-changed-only.",
+    ):
+        sushi_context.plan("dev", skip_tests=True, test_changed_only=True, no_prompts=True)
+
+
 def test_plan_explain_skips_tests(sushi_context: Context, mocker: MockerFixture) -> None:
     sushi_context.console = TerminalConsole()
     spy = mocker.spy(sushi_context, "_run_plan_tests")
     sushi_context.plan(environment="dev", explain=True, no_prompts=True, include_unmodified=True)
-    spy.assert_called_once_with(skip_tests=True)
+    spy.assert_called_once_with(skip_tests=True, test_changed_only=False, model_names=ANY)
 
 
 def test_dev_environment_virtual_update_with_environment_statements(tmp_path: Path) -> None:

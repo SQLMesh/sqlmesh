@@ -78,7 +78,7 @@ dev = [
     "google-auth",
     "google-cloud-bigquery",
     "google-cloud-bigquery-storage",
-    "httpx",
+    "httpx2",
     "mypy~=1.13.0",
     "numpy",
     "pandas-stubs",

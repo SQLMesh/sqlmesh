@@ -54,13 +54,16 @@ Other extras are required to use specific SQL engines, like Bigquery or Postgres
     | Bigquery      | `pip install "sqlmesh[bigquery]"`    |
     | ClickHouse    | `pip install "sqlmesh[clickhouse]"`  |
     | Databricks    | `pip install "sqlmesh[databricks]"`  |
+    | Fabric        | `pip install "sqlmesh[fabric]"`      |
     | GCP Postgres  | `pip install "sqlmesh[gcppostgres]"` |
     | MS SQL Server | `pip install "sqlmesh[mssql]"`       |
+    | MotherDuck    | `pip install "sqlmesh[motherduck]"`  |
     | MySQL         | `pip install "sqlmesh[mysql]"`       |
     | Postgres      | `pip install "sqlmesh[postgres]"`    |
     | Redshift      | `pip install "sqlmesh[redshift]"`    |
     | RisingWave    | `pip install "sqlmesh[risingwave]"`  |
     | Snowflake     | `pip install "sqlmesh[snowflake]"`   |
+    | StarRocks     | `pip install "sqlmesh[starrocks]"`   |
     | Trino         | `pip install "sqlmesh[trino]"`       |
 
 Multiple extras can be installed at once, as in `pip install "sqlmesh[github,slack]"`.
