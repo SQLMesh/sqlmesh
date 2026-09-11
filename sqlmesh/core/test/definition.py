@@ -34,6 +34,7 @@ if t.TYPE_CHECKING:
     import pandas as pd
 
     from sqlglot.dialects.dialect import DialectType
+    from sqlglot.generator import Generator
 
     Row = t.Dict[str, t.Any]
 
@@ -46,6 +47,54 @@ TIME_KWARG_KEYS = {
     # all built-in datetime macro var names
     *date_dict(execution_time="1970-01-01", start="1970-01-01", end="1970-01-01").keys(),
 }
+
+
+_FROZEN_TIME_GENERATORS: t.Dict[
+    t.Tuple[t.Type[Generator], str, t.Optional[str]], t.Type[Generator]
+] = {}
+_FROZEN_TIME_GENERATORS_LOCK = threading.Lock()
+
+
+def _frozen_time_generator_class(
+    generator_class: t.Type[Generator], execution_time: str, dialect: t.Optional[str]
+) -> t.Type[Generator]:
+    """Returns a subclass of `generator_class` whose CURRENT_* transforms render `execution_time`.
+
+    SQLGlot caches one dispatch table per generator class, so a subclass gets its own table and
+    the dialect's shared generator class is never modified. Subclasses are cached per
+    (generator, execution time, dialect) so tests that share an execution time share a table.
+    """
+    key = (generator_class, execution_time, dialect)
+    with _FROZEN_TIME_GENERATORS_LOCK:
+        klass = _FROZEN_TIME_GENERATORS.get(key)
+        if klass is None:
+            exec_time = exp.Literal.string(execution_time)
+            klass = t.cast(
+                t.Type["Generator"],
+                type(
+                    f"{generator_class.__name__}FrozenTime",
+                    (generator_class,),
+                    {
+                        "TRANSFORMS": {
+                            **generator_class.TRANSFORMS,
+                            exp.CurrentDate: lambda self, _: self.sql(
+                                exp.cast(exec_time, "date", dialect=dialect)
+                            ),
+                            exp.CurrentDatetime: lambda self, _: self.sql(
+                                exp.cast(exec_time, "datetime", dialect=dialect)
+                            ),
+                            exp.CurrentTime: lambda self, _: self.sql(
+                                exp.cast(exec_time, "time", dialect=dialect)
+                            ),
+                            exp.CurrentTimestamp: lambda self, _: self.sql(
+                                exp.cast(exec_time, "timestamp", dialect=dialect)
+                            ),
+                        }
+                    },
+                ),
+            )
+            _FROZEN_TIME_GENERATORS[key] = klass
+        return klass
 
 
 class ModelTest(unittest.TestCase):
@@ -116,31 +165,22 @@ class ModelTest(unittest.TestCase):
         )
         self._qualified_fixture_schema = schema_(self._fixture_schema, self._fixture_catalog)
 
-        self._transforms = self._test_adapter_dialect.generator_class.TRANSFORMS
         self._execution_time = str(self.body.get("vars", {}).get("execution_time") or "")
 
         if self._execution_time:
             # Normalizes the execution time by converting it into UTC timezone
             self._execution_time = str(to_datetime(self._execution_time))
 
-        # When execution_time is set, we mock the CURRENT_* SQL expressions so they always return it
+        # When execution_time is set, the CURRENT_* SQL expressions must render as that time. The
+        # overrides live on a per-test generator subclass rather than on the dialect's shared
+        # generator class: SQLGlot caches one dispatch table per generator class, so patching the
+        # shared one is visible to every other thread that renders SQL (e.g. a concurrent test
+        # creating its fixture views) and races with the patch's restoration.
+        self._generator_class = self._test_adapter_dialect.generator_class
         if self._execution_time:
-            exec_time = exp.Literal.string(self._execution_time)
-            self._transforms = {
-                **self._transforms,
-                exp.CurrentDate: lambda self, _: self.sql(
-                    exp.cast(exec_time, "date", dialect=dialect)
-                ),
-                exp.CurrentDatetime: lambda self, _: self.sql(
-                    exp.cast(exec_time, "datetime", dialect=dialect)
-                ),
-                exp.CurrentTime: lambda self, _: self.sql(
-                    exp.cast(exec_time, "time", dialect=dialect)
-                ),
-                exp.CurrentTimestamp: lambda self, _: self.sql(
-                    exp.cast(exec_time, "timestamp", dialect=dialect)
-                ),
-            }
+            self._generator_class = _frozen_time_generator_class(
+                self._generator_class, self._execution_time, dialect
+            )
 
         super().__init__()
 
@@ -603,15 +643,18 @@ class ModelTest(unittest.TestCase):
         return normalized_name
 
     @contextmanager
-    def _concurrent_render_context(self) -> t.Iterator[None]:
+    def _concurrent_render_context(self, patch_shared_dialect: bool = False) -> t.Iterator[None]:
         """
         Context manager that ensures that the tests are executed safely in a concurrent environment.
-        This is needed in case `execution_time` is set, as we'd then have to:
-        - Freeze time through `time_machine` (not thread safe)
-        - Globally patch the SQLGlot dialect so that any date/time nodes are evaluated at the `execution_time` during generation
+        This is needed in case `execution_time` is set, as we'd then have to freeze time through
+        `time_machine`, which is not thread safe.
+
+        SQL model tests render through `self._generator_class`, so the shared dialect is never
+        modified. Python model tests may run arbitrary SQL through the engine adapter, whose
+        generator cannot be swapped per test, so they additionally patch the shared generator's
+        transforms (`patch_shared_dialect=True`) while holding the lock.
         """
         import time_machine
-        from sqlglot.generator import _DISPATCH_CACHE
 
         lock_ctx: AbstractContextManager = (
             self.CONCURRENT_RENDER_LOCK if self.concurrency else nullcontext()
@@ -621,18 +664,29 @@ class ModelTest(unittest.TestCase):
         dispatch_patch_ctx: AbstractContextManager = nullcontext()
 
         if self._execution_time:
-            generator_class = self._test_adapter_dialect.generator_class
             time_ctx = time_machine.travel(self._execution_time, tick=False)
-            dialect_patch_ctx = patch.dict(generator_class.TRANSFORMS, self._transforms)
+
+        if self._execution_time and patch_shared_dialect:
+            from sqlglot.generator import _DISPATCH_CACHE
+
+            generator_class = self._test_adapter_dialect.generator_class
+            transforms = self._generator_class.TRANSFORMS
+            dialect_patch_ctx = patch.dict(generator_class.TRANSFORMS, transforms)
 
             # sqlglot caches a dispatch table per generator class, so we need to patch
             # it as well to ensure the overridden transforms are actually used
             dispatch = _DISPATCH_CACHE.get(generator_class)
             if dispatch is not None:
-                dispatch_patch_ctx = patch.dict(dispatch, self._transforms)
+                dispatch_patch_ctx = patch.dict(dispatch, transforms)
 
         with lock_ctx, time_ctx, dialect_patch_ctx, dispatch_patch_ctx:
             yield
+
+    def _generate_sql(self, expression: exp.Expr) -> str:
+        """Generates SQL for the testing engine, rendering CURRENT_* at `execution_time` when set."""
+        return self._generator_class(
+            dialect=self._test_adapter_dialect, pretty=self.engine_adapter._pretty_sql
+        ).generate(expression)
 
     def _execute(self, query: exp.Query | str) -> pd.DataFrame:
         """Executes the given query using the testing engine adapter and returns a DataFrame."""
@@ -701,9 +755,7 @@ class SqlModelTest(ModelTest):
                 with self._concurrent_render_context():
                     # Similar to the model's query, we render the CTE query under the locked context
                     # so that the execution (fetchdf) can continue concurrently between the threads
-                    sql = cte_query.sql(
-                        self._test_adapter_dialect, pretty=self.engine_adapter._pretty_sql
-                    )
+                    sql = self._generate_sql(cte_query)
 
                 actual = self._execute(sql)
                 expected = self._create_df(values, columns=cte_query.named_selects, partial=partial)
@@ -715,7 +767,7 @@ class SqlModelTest(ModelTest):
             # Render the model's query and generate the SQL under the locked context so that
             # execution (fetchdf) can continue concurrently between the threads
             query = self._render_model_query()
-            sql = query.sql(self._test_adapter_dialect, pretty=self.engine_adapter._pretty_sql)
+            sql = self._generate_sql(query)
 
         with_clause = query.args.get("with_")
 
@@ -820,7 +872,7 @@ class PythonModelTest(ModelTest):
         """Executes the python model and returns a DataFrame."""
         import pandas as pd
 
-        with self._concurrent_render_context():
+        with self._concurrent_render_context(patch_shared_dialect=True):
             variables = self.body.get("vars", {}).copy()
             time_kwargs = {key: variables.pop(key) for key in TIME_KWARG_KEYS if key in variables}
             df = next(self.model.render(context=self.context, variables=variables, **time_kwargs))
