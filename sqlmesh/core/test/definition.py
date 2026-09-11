@@ -1032,7 +1032,11 @@ def _parse_expected_datetime_column(series: pd.Series, target_type: type) -> pd.
         return parsed.dt.date
     if target_type is datetime.time:
         return parsed.dt.time
-    return parsed.dt.to_pydatetime()
+    # `Series.dt.to_pydatetime()` returns an `ndarray` in pandas 2.x. Wrap it in a
+    # Series with ``dtype=object`` so pandas does not coerce the values back to
+    # ``pd.Timestamp`` (which would reintroduce the nanosecond overflow this
+    # function exists to avoid).
+    return pd.Series(parsed.dt.to_pydatetime(), index=parsed.index, dtype="object")
 
 
 def _normalize_df_value(value: t.Any) -> t.Any:
