@@ -995,6 +995,38 @@ def test_conditional_statement():
     assert q.sql(dialect="tsql") == "@IF(@runtime_stage = 'evaluating', SELECT 1)"
 
 
+def test_tsql_alter_column_nullability():
+    # Issue #5932: T-SQL spells nullability right after the type in ALTER COLUMN. Without support
+    # for it the statement falls back to a Command, so any macros it contains go unresolved.
+    for sql, expected in [
+        (
+            "ALTER TABLE x ALTER COLUMN y INT NOT NULL",
+            "ALTER TABLE x ALTER COLUMN y INTEGER NOT NULL",
+        ),
+        ("ALTER TABLE x ALTER COLUMN y INT NULL", "ALTER TABLE x ALTER COLUMN y INTEGER NULL"),
+        ("ALTER TABLE x ALTER COLUMN y INT", "ALTER TABLE x ALTER COLUMN y INTEGER"),
+    ]:
+        e = parse_one(sql, read="tsql")
+        assert isinstance(e, exp.Alter)
+        assert e.sql(dialect="tsql") == expected
+
+    # The macro must survive parsing so that it can be resolved later
+    e = parse_one(
+        "@IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INT NOT NULL);",
+        read="tsql",
+    )
+    assert (
+        e.sql(dialect="tsql")
+        == "@IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INTEGER NOT NULL)"
+    )
+
+    # Statements that don't carry a type are unaffected
+    assert (
+        parse_one("ALTER TABLE x ALTER COLUMN y DROP NOT NULL", read="tsql").sql(dialect="tsql")
+        == "ALTER TABLE x ALTER COLUMN y DROP NOT NULL"
+    )
+
+
 def test_model_name_cannot_be_string():
     with pytest.raises(ParseError) as parse_error:
         parse(
@@ -1185,3 +1217,17 @@ def test_pipe_syntax():
         ast.sql("bigquery")
         == "SELECT * FROM (WITH __tmp1 AS (SELECT id FROM t2) SELECT * FROM __tmp1)"
     )
+
+
+def test_extend_sqlglot_is_idempotent():
+    # extend_sqlglot() runs at import time; calling it again must not re-wrap the
+    # already-installed overrides, otherwise they call themselves (RecursionError).
+    from sqlglot.generator import Generator
+
+    before = Generator.UNWRAPPED_INTERVAL_VALUES
+
+    d.extend_sqlglot()
+
+    assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
+    # The class-level registries must not grow on repeated calls.
+    assert Generator.UNWRAPPED_INTERVAL_VALUES == before

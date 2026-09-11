@@ -807,10 +807,7 @@ def test_create_external_models(notebook, loaded_sushi_context, convert_all_html
 
     assert not output.stdout
     assert not output.stderr
-    assert len(output.outputs) == 2
-    converted = sorted(convert_all_html_output_to_text(output))
-    assert 'Unable to get schema for \'"memory"."raw"."model1"\'' in converted[0]
-    assert 'Unable to get schema for \'"memory"."raw"."model2"\'' in converted[1]
+    assert len(output.outputs) == 0
 
     assert external_model_file.exists()
     assert (

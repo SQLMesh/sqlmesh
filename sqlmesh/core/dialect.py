@@ -551,6 +551,36 @@ def _parse_table_parts(
     return table
 
 
+# Only needed for T-SQL: it spells a column's nullability right after its type, e.g.
+# ALTER TABLE t ALTER COLUMN c INT NOT NULL. Without this the trailing clause is left
+# over, so the whole statement falls back to a Command and any macros it contains (such as
+# @this_model) are no longer resolved, which means they reach the engine verbatim.
+#
+# See: https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-table-transact-sql
+def _parse_alter_table_alter(self: Parser) -> t.Optional[exp.Expr]:
+    alter_column = self.__parse_alter_table_alter()  # type: ignore
+
+    if isinstance(alter_column, exp.AlterColumn) and alter_column.args.get("dtype"):
+        if self._match_pair(TokenType.NOT, TokenType.NULL):
+            alter_column.set("allow_null", False)
+        elif self._match(TokenType.NULL):
+            alter_column.set("allow_null", True)
+
+    return alter_column
+
+
+def altercolumn_sql(self: Generator, expression: exp.AlterColumn) -> str:
+    sql = self._altercolumn_sql(expression)  # type: ignore
+
+    # sqlglot's generator returns as soon as it renders the type, so the nullability parsed
+    # above has to be appended here
+    allow_null = expression.args.get("allow_null")
+    if expression.args.get("dtype") and allow_null is not None:
+        sql = f"{sql} NULL" if allow_null else f"{sql} NOT NULL"
+
+    return sql
+
+
 def _parse_if(self: Parser) -> t.Optional[exp.Expr]:
     # If we fail to parse an IF function with expressions as arguments, we then try
     # to parse a statement / command to support the macro @IF(condition, statement)
@@ -780,8 +810,12 @@ def _parse_interval_span(self: Parser, this: exp.Expr) -> exp.Interval:
     return interval
 
 
-def _override(klass: t.Type[Tokenizer | Parser], func: t.Callable) -> None:
+def _override(klass: t.Type[Tokenizer | Parser | Generator], func: t.Callable) -> None:
     name = func.__name__
+    if getattr(klass, name, None) is func:
+        # Already overridden. Re-applying would save the override itself as the
+        # "original", making the wrapper call itself and recurse infinitely.
+        return
     setattr(klass, f"_{name}", getattr(klass, name))
     setattr(klass, name, func)
 
@@ -1170,11 +1204,12 @@ def extend_sqlglot() -> None:
                 MacroDef,
             )
 
-        generator.UNWRAPPED_INTERVAL_VALUES = (
-            *generator.UNWRAPPED_INTERVAL_VALUES,
-            MacroStrReplace,
-            MacroVar,
-        )
+        if MacroVar not in generator.UNWRAPPED_INTERVAL_VALUES:
+            generator.UNWRAPPED_INTERVAL_VALUES = (
+                *generator.UNWRAPPED_INTERVAL_VALUES,
+                MacroStrReplace,
+                MacroVar,
+            )
 
     _override(Parser, _parse_select)
     _override(Parser, _parse_statement)
@@ -1194,6 +1229,8 @@ def extend_sqlglot() -> None:
     _override(Parser, _parse_interval_span)
     _override(Parser, _warn_unsupported)
     _override(Snowflake.Parser, _parse_table_parts)
+    _override(TSQL.Parser, _parse_alter_table_alter)
+    _override(TSQL.Generator, altercolumn_sql)
 
     # DuckDB's prefix absolute power operator `@` clashes with the macro syntax
     DuckDB.Parser.NO_PAREN_FUNCTION_PARSERS.pop("@", None)
