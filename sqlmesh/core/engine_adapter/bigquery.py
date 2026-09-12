@@ -818,6 +818,7 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
         materialized_view: bool = False,
+        table_format: t.Optional[str] = None,
     ) -> None:
         if not (table_kind == "VIEW" and materialized_view):
             table = self._get_table(table_name)

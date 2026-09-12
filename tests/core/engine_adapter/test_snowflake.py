@@ -246,6 +246,38 @@ def test_multiple_column_comments(make_mocked_engine_adapter: t.Callable, mocker
     ]
 
 
+def test_column_comments_iceberg(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    adapter._create_column_comments(
+        "test_table",
+        {"a": "a column description", "b": "b column description"},
+        table_format="iceberg",
+    )
+
+    assert to_sql_calls(adapter) == [
+        """ALTER ICEBERG TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
+    ]
+
+
+def test_ctas_column_comments_iceberg(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    # The column types are unknown, so the comments can't be inlined into the CTAS
+    # schema definition and are registered with a post-creation ALTER instead
+    adapter.ctas(
+        "test_table",
+        parse_one("SELECT a, b FROM source_table"),
+        table_format="iceberg",
+        column_descriptions={"a": "a column description"},
+    )
+
+    assert to_sql_calls(adapter) == [
+        """CREATE ICEBERG TABLE IF NOT EXISTS "test_table" AS SELECT "a", "b" FROM "source_table\"""",
+        """ALTER ICEBERG TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description'""",
+    ]
+
+
 def test_sync_grants_config(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
     relation = normalize_identifiers(

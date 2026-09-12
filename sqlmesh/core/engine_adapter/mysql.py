@@ -131,6 +131,7 @@ class MySQLEngineAdapter(
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
         materialized_view: bool = False,
+        table_format: t.Optional[str] = None,
     ) -> None:
         table = exp.to_table(table_name)
         table_sql = table.sql(dialect=self.dialect, identify=True)
