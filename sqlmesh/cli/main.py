@@ -823,7 +823,12 @@ def test(
     select_model: t.List[str],
     tests: t.List[str],
 ) -> None:
-    """Run model unit tests."""
+    """Run model unit tests.
+
+    TESTS are test files, `file.yaml::test_name` selectors, or model files, in which case the
+    tests for those models are run. They are unioned, and a test selected more than once still
+    only runs once.
+    """
     model_names = (
         obj._new_selector().expand_model_selections(select_model) if select_model else None
     )
@@ -833,6 +838,7 @@ def test(
         verbosity=Verbosity(verbose),
         preserve_fixtures=preserve_fixtures,
         model_names=model_names,
+        raise_on_unknown_paths=True,
     )
     if not result.wasSuccessful():
         exit(1)

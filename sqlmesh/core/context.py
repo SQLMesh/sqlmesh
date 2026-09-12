@@ -36,6 +36,7 @@ from __future__ import annotations
 import abc
 import collections
 import logging
+import os.path
 import sys
 import time
 import traceback
@@ -119,7 +120,7 @@ from sqlmesh.core.test import (
     filter_tests_by_patterns,
 )
 from sqlmesh.core.user import User
-from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity
+from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity, unique
 from sqlmesh.utils.concurrency import concurrent_apply_to_values
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -2407,6 +2408,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         preserve_fixtures: bool = False,
         stream: t.Optional[t.TextIO] = None,
         model_names: t.Optional[t.Collection[str]] = None,
+        raise_on_unknown_paths: bool = False,
     ) -> ModelTextTestResult:
         """Discover and run model tests"""
         if verbosity >= Verbosity.VERBOSE:
@@ -2414,10 +2416,18 @@ class GenericContext(BaseContext, t.Generic[C]):
 
             pd.set_option("display.max_columns", None)
 
-        baseline_meta = self.select_tests(tests=tests, patterns=match_patterns, model_names=None)
+        baseline_meta = self.select_tests(
+            tests=tests,
+            patterns=match_patterns,
+            model_names=None,
+            raise_on_unknown_paths=raise_on_unknown_paths,
+        )
         if model_names is not None:
             test_meta = self.select_tests(
-                tests=tests, patterns=match_patterns, model_names=model_names
+                tests=tests,
+                patterns=match_patterns,
+                model_names=model_names,
+                raise_on_unknown_paths=raise_on_unknown_paths,
             )
             tests_skipped = len(baseline_meta) - len(test_meta)
         else:
@@ -3611,30 +3621,96 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         return all_violations
 
+    def _tests_by_absolute_model_path(self) -> t.Dict[str, t.List[ModelTestMetadata]]:
+        """Map each model file to the tests that target the model(s) defined in it."""
+        tests_by_model_name: t.Dict[str, t.List[ModelTestMetadata]] = collections.defaultdict(list)
+        for metadata in self._model_test_metadata:
+            if metadata.model_name:
+                tests_by_model_name[
+                    normalize_model_name(
+                        metadata.model_name,
+                        default_catalog=self.default_catalog,
+                        dialect=self.default_dialect,
+                    )
+                ].append(metadata)
+
+        # A path is made absolute rather than resolved, so this costs no syscalls per model.
+        tests_by_path: t.Dict[str, t.List[ModelTestMetadata]] = {}
+        for fqn, model in self._models.items():
+            if model._path is not None:
+                tests_by_path.setdefault(os.path.abspath(model._path), []).extend(
+                    tests_by_model_name.get(fqn, [])
+                )
+
+        return tests_by_path
+
+    def _select_tests_by_test_path(self, selector: str) -> t.Optional[t.List[ModelTestMetadata]]:
+        """Resolve a selector against the test files, or return None if it matches none of them.
+
+        The selector is a test file path or a `path::test_name`. Paths are matched as given
+        first, so an unchanged selector never pays for normalization.
+        """
+        if "::" in selector:
+            metadata = self._model_test_metadata_fully_qualified_name_index.get(selector)
+            if metadata is None:
+                path, _, test_name = selector.rpartition("::")
+                metadata = self._model_test_metadata_fully_qualified_name_index.get(
+                    f"{os.path.abspath(path)}::{test_name}"
+                )
+            return [metadata] if metadata is not None else None
+
+        for path in (Path(selector), Path(os.path.abspath(selector))):
+            matched = self._model_test_metadata_path_index.get(path)
+            if matched is not None:
+                return list(matched)
+
+        return None
+
     def select_tests(
         self,
         tests: t.Optional[t.List[str]] = None,
         patterns: t.Optional[t.List[str]] = None,
         model_names: t.Optional[t.Collection[str]] = None,
+        raise_on_unknown_paths: bool = False,
     ) -> t.List[ModelTestMetadata]:
-        """Filter pre-loaded test metadata based on tests and patterns."""
+        """Filter pre-loaded test metadata based on tests and patterns.
+
+        Args:
+            tests: Test selectors. Each one is a test file path, a `path::test_name`, or the path
+                of a model file, in which case that model's tests are selected. Selectors are
+                unioned and the result is deduplicated, so a model file and a test file that
+                resolve to the same test run it once rather than twice.
+            patterns: Patterns matched against fully qualified test names.
+            model_names: If given, narrows the selection to tests targeting these models.
+            raise_on_unknown_paths: Whether to raise when a selector matches neither a known test
+                nor a known model file. Off by default so that callers which probe arbitrary
+                documents, such as the LSP, keep getting an empty result instead of an error.
+        """
 
         test_meta = self._model_test_metadata
 
         if tests:
-            filtered_tests = []
-            for test in tests:
-                if "::" in test:
-                    if test in self._model_test_metadata_fully_qualified_name_index:
-                        filtered_tests.append(
-                            self._model_test_metadata_fully_qualified_name_index[test]
-                        )
-                else:
-                    test_path = Path(test)
-                    if test_path in self._model_test_metadata_path_index:
-                        filtered_tests.extend(self._model_test_metadata_path_index[test_path])
+            filtered_tests: t.List[ModelTestMetadata] = []
+            # Built at most once, and only if a selector turns out not to be a test file.
+            tests_by_model_path: t.Optional[t.Dict[str, t.List[ModelTestMetadata]]] = None
 
-            test_meta = filtered_tests
+            for test in tests:
+                matched = self._select_tests_by_test_path(test)
+                if matched is None and "::" not in test:
+                    if tests_by_model_path is None:
+                        tests_by_model_path = self._tests_by_absolute_model_path()
+                    # A known model with no tests matches an empty list, which is not the same
+                    # as a selector that resolves to nothing at all.
+                    matched = tests_by_model_path.get(os.path.abspath(test))
+                if matched is None:
+                    if raise_on_unknown_paths:
+                        raise SQLMeshError(f"'{test}' is not a known model or test file.")
+                    continue
+                filtered_tests.extend(matched)
+
+            # Selectors can overlap, e.g. a model file and the test file holding its tests, so
+            # the union is deduplicated to avoid running the same test more than once.
+            test_meta = unique(filtered_tests)
 
         if patterns:
             test_meta = filter_tests_by_patterns(test_meta, patterns)

@@ -463,6 +463,20 @@ You can also run tests that match a pattern or substring using a glob pathname e
 $ sqlmesh test tests/test_*
 ```
 
+Passing the path of a model file runs the tests for that model, which is useful for commit hooks and other tools that work with changed files rather than test names:
+
+```
+$ sqlmesh test models/full_model.sql
+```
+
+Model files and test files can be mixed, and the results are unioned. A test selected by more than one argument still runs only once, so the following runs each of `full_model`'s tests a single time even though both arguments cover them:
+
+```
+$ sqlmesh test models/full_model.sql tests/test_full_model.yaml
+```
+
+An argument that is neither a known model file nor a known test file is an error, so a mistyped or stale path fails instead of quietly running no tests. A model that simply has no tests is not an error.
+
 ### Testing using notebooks
 
 You can execute tests on demand using the `%run_test` notebook magic as follows:
