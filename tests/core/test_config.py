@@ -16,6 +16,7 @@ from sqlmesh.core.config import (
     ModelDefaultsConfig,
     BigQueryConnectionConfig,
     MotherDuckConnectionConfig,
+    RenderConfig,
     BuiltInSchedulerConfig,
     EnvironmentSuffixTarget,
     TableNamingConvention,
@@ -68,6 +69,13 @@ config = Config(gateways=GatewayConfig(connection=DuckDBConnectionConfig()), mod
         """
         )
     return config_path
+
+
+def test_render_config() -> None:
+    config = Config.parse_obj({"render": {"use_project_index": True}})
+
+    assert config.render == RenderConfig(use_project_index=True)
+    assert Config().update_with(config).render.use_project_index is True
 
 
 def test_update_with_gateways():

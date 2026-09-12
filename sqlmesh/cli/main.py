@@ -141,8 +141,8 @@ def cli(
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
 
-    # Unlike the other commands above, lint can scope its own load for multi-project contexts.
-    if ctx.invoked_subcommand == "lint":
+    # These commands can scope their own load for multi-project contexts.
+    if ctx.invoked_subcommand in ("lint", "render"):
         load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
@@ -284,6 +284,12 @@ Need help?
     help="The SQL dialect to render the query as.",
 )
 @click.option("--no-format", is_flag=True, help="Disable fancy formatting of the query.")
+@click.option(
+    "--use-project-index",
+    is_flag=True,
+    default=None,
+    help="Use the persistent project index to load and render only the target model and its upstream dependencies. Can also be enabled with render.use_project_index.",
+)
 @opt.format_options
 @click.pass_context
 @error_handler
@@ -297,19 +303,20 @@ def render(
     expand: t.Optional[t.Union[bool, t.Iterable[str]]] = None,
     dialect: t.Optional[str] = None,
     no_format: bool = False,
+    use_project_index: t.Optional[bool] = None,
     **format_kwargs: t.Any,
 ) -> None:
     """Render a model's query, optionally expanding referenced models."""
-    model = ctx.obj.get_model(model, raise_if_missing=True)
-
     rendered = ctx.obj.render(
         model,
         start=start,
         end=end,
         execution_time=execution_time,
         expand=expand,
+        use_project_index=use_project_index,
     )
 
+    model = ctx.obj.get_model(model, raise_if_missing=True)
     format_config = ctx.obj.config_for_node(model).format
     format_kwargs = {
         **format_config.generator_options,
