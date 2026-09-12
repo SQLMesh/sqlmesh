@@ -42,6 +42,8 @@ SKIP_LOAD_COMMANDS = (
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
 LOCAL_ONLY_COMMANDS = ("format",)
+# Commands that are local-only when they're passed --local.
+OPTIONAL_LOCAL_COMMANDS = ("lint", "test")
 
 
 class _SQLMeshGroup(click.Group):
@@ -129,8 +131,12 @@ def cli(
     load = True
     # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
-    # The parent callback constructs Context before Click invokes `lint`, so inspect its parsed args here.
-    if ctx.invoked_subcommand == "lint" and "--local" in ctx.meta["subcommand_args"]:
+    # The parent callback constructs Context before Click invokes the subcommand, so inspect its
+    # parsed args here.
+    if (
+        ctx.invoked_subcommand in OPTIONAL_LOCAL_COMMANDS
+        and "--local" in ctx.meta["subcommand_args"]
+    ):
         load_state = False
 
     if len(paths) == 1:
@@ -810,6 +816,12 @@ def create_test(
     type=str,
     multiple=True,
     help="Select specific models to run unit tests for.",
+)
+@click.option(
+    "--local",
+    is_flag=True,
+    expose_value=False,
+    help="Run tests using only locally loaded project files without loading state.",
 )
 @click.argument("tests", nargs=-1)
 @click.pass_obj

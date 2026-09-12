@@ -463,6 +463,14 @@ You can also run tests that match a pattern or substring using a glob pathname e
 $ sqlmesh test tests/test_*
 ```
 
+You can pass `--local` to run tests without loading state from the configured state connection:
+
+``` bash
+$ sqlmesh test --local
+```
+
+This keeps offline runs and commit hooks from opening a connection to the state backend. As with [`sqlmesh lint --local`](../guides/linter.md), in multi-repository setups, or when running tests for only a subset of projects, `--local` may cause errors because SQLMesh will not resolve references or schemas from models that exist only in remote state.
+
 ### Testing using notebooks
 
 You can execute tests on demand using the `%run_test` notebook magic as follows:

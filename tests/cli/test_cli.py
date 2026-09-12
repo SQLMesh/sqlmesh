@@ -2530,6 +2530,59 @@ def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker
     mock.assert_not_called()
 
 
+def test_test_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `test` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "test"])
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `test`"
+        )
+    assert mock.called, "state-sync was never accessed during `test`"
+
+
+def test_test_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is False, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `test --local`"
+        )
+    mock.assert_not_called()
+
+
+def test_test_local_runs_without_state_multiple_paths(
+    runner: CliRunner, tmp_path: Path, mocker
+) -> None:
+    """`--local` gating must hold for any number of --paths, matching `lint --local`."""
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    _create_local_only_project(project_a, "proj_a")
+    _create_local_only_project(project_b, "proj_b")
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli, ["--paths", str(project_a), "--paths", str(project_b), "test", "--local"]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
 @pytest.mark.parametrize("command", ["format"])
 def test_local_only_commands_skip_state_multiple_paths(
     runner: CliRunner, tmp_path: Path, mocker, command: str
