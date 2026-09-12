@@ -1224,17 +1224,18 @@ def environments(obj: Context) -> None:
 
 
 @cli.command("lint")
+@click.argument("paths", nargs=-1)
 @click.option(
     "--models",
     "--model",
     multiple=True,
-    help="A model to lint. Multiple models can be linted. If no models are specified, every model will be linted.",
+    help="A model to lint. Multiple models can be linted. If no models or paths are specified, every model will be linted.",
 )
 @click.option(
     "--use-project-index",
     is_flag=True,
     default=None,
-    help="Use the persistent project index. With --model, only the selected models and their upstream dependencies are loaded, resolved, and validated, so errors in unrelated models are not reported. Without --model, every model is still loaded and linted. Can also be enabled with linter.use_project_index.",
+    help="Use the persistent project index. With --model or model file paths, only the selected models and their upstream dependencies are loaded, resolved, and validated, so errors in unrelated models are not reported. Without a selection, every model is still loaded and linted. Can also be enabled with linter.use_project_index.",
 )
 @click.option(
     "--local",
@@ -1247,13 +1248,18 @@ def environments(obj: Context) -> None:
 @cli_analytics
 def lint(
     obj: Context,
+    paths: t.Tuple[str, ...],
     models: t.Iterator[str],
     use_project_index: t.Optional[bool],
 ) -> None:
-    """Run the linter for the target model(s)."""
+    """Run the linter for the target model(s).
+
+    Models can be selected by name with --model, by model file path, or by both.
+    """
     obj.lint_models(
         models,
         use_project_index=use_project_index,
+        paths=paths,
     )
 
     if not obj.models:

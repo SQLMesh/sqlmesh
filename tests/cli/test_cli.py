@@ -1476,6 +1476,117 @@ def test_lint(runner, tmp_path):
     assert result.exit_code == 1
 
 
+def test_lint_paths(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    with open(tmp_path / "config.yaml", "a", encoding="utf-8") as f:
+        f.write(
+            """linter:
+    enabled: True
+    rules: "ALL"
+"""
+        )
+
+    # A single model file only lints that model.
+    result = runner.invoke(
+        cli, ["--paths", tmp_path, "lint", str(tmp_path / "models" / "seed_model.sql")]
+    )
+    assert result.output.count("Linter errors for") == 1
+    assert "seed_model.sql" in result.output
+    assert result.exit_code == 1
+
+    # Multiple model files can be passed, as pre-commit does.
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            tmp_path,
+            "lint",
+            str(tmp_path / "models" / "seed_model.sql"),
+            str(tmp_path / "models" / "incremental_model.sql"),
+        ],
+    )
+    assert result.output.count("Linter errors for") == 2
+    assert result.exit_code == 1
+
+    # Paths and --model can be combined, and overlapping selections lint once.
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            tmp_path,
+            "lint",
+            "--model",
+            "sqlmesh_example.seed_model",
+            str(tmp_path / "models" / "seed_model.sql"),
+            str(tmp_path / "models" / "incremental_model.sql"),
+        ],
+    )
+    assert result.output.count("Linter errors for") == 2
+    assert result.exit_code == 1
+
+    # `--local` and `--use-project-index` keep working alongside paths.
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            tmp_path,
+            "lint",
+            "--local",
+            "--use-project-index",
+            str(tmp_path / "models" / "seed_model.sql"),
+        ],
+    )
+    assert result.output.count("Linter errors for") == 1
+    assert result.exit_code == 1
+
+
+def test_lint_relative_path(runner, tmp_path, monkeypatch):
+    create_example_project(tmp_path)
+
+    with open(tmp_path / "config.yaml", "a", encoding="utf-8") as f:
+        f.write(
+            """linter:
+    enabled: True
+    rules: "ALL"
+"""
+        )
+
+    # Path-based tools such as pre-commit pass paths relative to the project root.
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint", "models/seed_model.sql"])
+    assert result.output.count("Linter errors for") == 1
+    assert "seed_model.sql" in result.output
+    assert result.exit_code == 1
+
+
+def test_lint_unknown_path(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    with open(tmp_path / "config.yaml", "a", encoding="utf-8") as f:
+        f.write(
+            """linter:
+    enabled: True
+    rules: "ALL"
+"""
+        )
+
+    # An unknown path errors out instead of falling back to linting the whole project.
+    result = runner.invoke(
+        cli, ["--paths", tmp_path, "lint", str(tmp_path / "models" / "missing.sql")]
+    )
+    assert result.exit_code == 1
+    assert "No models were found at the following path(s)" in result.output
+    assert "Linter errors for" not in result.output
+
+    # A file that exists but defines no models is an error too.
+    audit_path = tmp_path / "audits" / "assert_positive_order_ids.sql"
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint", str(audit_path)])
+    assert result.exit_code == 1
+    assert "No models were found at the following path(s)" in result.output
+    assert "Linter errors for" not in result.output
+
+
 def test_lint_no_models(runner, tmp_path):
     with open(tmp_path / "config.yaml", "w", encoding="utf-8") as f:
         f.write("model_defaults:\n  dialect: duckdb\n")
@@ -1515,6 +1626,22 @@ def test_lint_model_scopes_validation_with_multiple_projects(runner, tmp_path):
             "--use-project-index",
             "--model",
             "selected",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    # Selecting the same model by path scopes the load the same way.
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            project_a,
+            "--paths",
+            project_b,
+            "lint",
+            "--use-project-index",
+            str(project_a / "models" / "selected.sql"),
         ],
     )
 

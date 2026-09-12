@@ -196,6 +196,7 @@ class Loader(abc.ABC):
         self,
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
+        model_paths: t.Optional[t.Set[Path]] = None,
     ) -> LoadedProject:
         """
         Loads all macros and models in the context's path.
@@ -204,6 +205,8 @@ class Loader(abc.ABC):
             model_fqns: Optional model names to load. Loaders that support partial loading
                 also include these models' transitive upstream dependencies.
             use_project_index: Whether to use and maintain the persistent project model index.
+            model_paths: Optional resolved model file paths to load, treated the same way as
+                `model_fqns` by loaders that support partial loading.
 
         Returns:
             A loaded project object.
@@ -249,6 +252,7 @@ class Loader(abc.ABC):
                 signals,
                 model_fqns,
                 use_project_index,
+                model_paths,
             )
 
             metrics = self._load_metrics()
@@ -304,6 +308,7 @@ class Loader(abc.ABC):
         signals: UniqueKeyDict[str, signal],
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
+        model_paths: t.Optional[t.Set[Path]] = None,
     ) -> t.Tuple[UniqueKeyDict[str, Model], t.Optional[t.Set[str]]]:
         """Loads all models."""
 
@@ -557,6 +562,7 @@ class SqlMeshLoader(Loader):
         signals: UniqueKeyDict[str, signal],
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
+        model_paths: t.Optional[t.Set[Path]] = None,
     ) -> t.Tuple[UniqueKeyDict[str, Model], t.Optional[t.Set[str]]]:
         """
         Loads all of the models within the model directory with their associated
@@ -564,7 +570,9 @@ class SqlMeshLoader(Loader):
         """
         cache = SqlMeshLoader._Cache(self, self.config_path)
         selected_model_index = (
-            self._selected_model_paths(model_fqns) if use_project_index and model_fqns else None
+            self._selected_model_paths(model_fqns or set(), model_paths)
+            if use_project_index and (model_fqns or model_paths)
+            else None
         )
         selected_paths, indexed_model_fqns = selected_model_index or (None, None)
 
@@ -634,7 +642,7 @@ class SqlMeshLoader(Loader):
         return paths
 
     def _selected_model_paths(
-        self, model_fqns: t.Set[str]
+        self, model_fqns: t.Set[str], model_paths: t.Optional[t.Set[Path]] = None
     ) -> t.Optional[t.Tuple[t.Set[Path], t.Set[str]]]:
         try:
             index = json.loads(self._model_index_path.read_text(encoding="utf-8"))
@@ -659,7 +667,13 @@ class SqlMeshLoader(Loader):
         if current_paths != indexed_paths:
             return None
 
+        # The caller resolves the paths it selects with, so the index side is keyed by a
+        # resolved path too. Resolving the project root once keeps that to a single
+        # filesystem call instead of one per indexed model.
+        resolved_config_path = self.config_path.resolve() if model_paths else self.config_path
+
         model_to_path: t.Dict[str, Path] = {}
+        fqns_by_resolved_path: t.Dict[Path, t.Set[str]] = defaultdict(set)
         dependencies: t.Dict[str, t.Set[str]] = {}
         for relative_path, file_models in indexed_files.items():
             path = self.config_path / relative_path
@@ -672,8 +686,24 @@ class SqlMeshLoader(Loader):
                     return None
                 model_to_path[fqn] = path
                 dependencies[fqn] = set(depends_on)
+                if model_paths:
+                    fqns_by_resolved_path[resolved_config_path / relative_path].add(fqn)
 
         selected = {fqn for fqn in model_fqns if fqn in model_to_path}
+        unmatched_paths = set()
+        for model_path in model_paths or set():
+            matched = fqns_by_resolved_path.get(model_path)
+            if matched:
+                selected.update(matched)
+            else:
+                unmatched_paths.add(model_path)
+        if unmatched_paths:
+            # Joining onto the resolved project root misses a model file that is itself a
+            # symlink, so fall back to resolving each indexed path for the few that are
+            # still unaccounted for.
+            selected.update(
+                fqn for fqn, path in model_to_path.items() if path.resolve() in unmatched_paths
+            )
         stack = list(selected)
         while stack:
             fqn = stack.pop()
