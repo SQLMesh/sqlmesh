@@ -173,7 +173,12 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         track_rows_processed: bool = True,
         **kwargs: t.Any,
     ) -> None:
-        catalog = self.get_current_catalog()
+        table_name = (
+            table_name_or_schema.this
+            if isinstance(table_name_or_schema, exp.Schema)
+            else table_name_or_schema
+        )
+        catalog = exp.to_table(table_name).catalog or self.get_current_catalog()
         catalog_type_tuple = self.fetchone(
             exp.select("type")
             .from_("duckdb_databases()")
@@ -182,8 +187,22 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         catalog_type = catalog_type_tuple[0] if catalog_type_tuple else None
 
         partitioned_by_exps = None
+        insert_expression = None
         if catalog_type == "ducklake":
             partitioned_by_exps = kwargs.pop("partitioned_by", None)
+            if (
+                partitioned_by_exps
+                and expression is not None
+                and (replace or not exists or not self.table_exists(table_name))
+            ):
+                insert_expression = expression.copy()
+                query = t.cast(exp.Query, expression)
+                expression = (
+                    exp.select("*")
+                    .from_(query.subquery("_sqlmesh_schema_only", copy=False))
+                    .where(exp.false())
+                    .limit(0)
+                )
 
         super()._create_table(
             table_name_or_schema,
@@ -199,12 +218,6 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         )
 
         if partitioned_by_exps:
-            # Schema object contains column definitions, so we extract Table
-            table_name = (
-                table_name_or_schema.this
-                if isinstance(table_name_or_schema, exp.Schema)
-                else table_name_or_schema
-            )
             table_name_str = (
                 table_name.sql(dialect=self.dialect)
                 if isinstance(table_name, exp.Table)
@@ -214,6 +227,12 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
                 expr.sql(dialect=self.dialect) for expr in partitioned_by_exps
             )
             self.execute(f"ALTER TABLE {table_name_str} SET PARTITIONED BY ({partitioned_by_str});")
+
+            if insert_expression is not None:
+                self.execute(
+                    exp.insert(insert_expression, exp.to_table(table_name)),
+                    track_rows_processed=track_rows_processed,
+                )
 
     @property
     def _is_motherduck(self) -> bool:
