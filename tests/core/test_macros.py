@@ -1302,14 +1302,66 @@ def test_generate_surrogate_key_hash_semantics() -> None:
         render("athena", "MYHASH")
         == "SELECT MYHASH(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR)) FROM foo"
     )
-
-    # The fallback is scoped to the Presto family: dialects whose bare
-    # SHA256(varchar) already returns a hex string are left to sqlglot.
     from sqlmesh.core.macros import _sha2_renders_binary
 
     assert not _sha2_renders_binary("duckdb")
     assert not _sha2_renders_binary("bigquery")
+    # Snowflake's parser also hands back Anonymous for SHA256, and SHA2 is its
+    # only spelling (digest size optional there, defaulting to 256), so the
+    # mapped form is what the engine accepts.
     assert (
         render("snowflake", "SHA256")
-        == "SELECT SHA256(CONCAT(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_'))) FROM foo"
+        == "SELECT SHA2(CONCAT(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_')), 256) FROM foo"
+    )
+
+
+def test_generate_surrogate_key_hex_string_on_mysql_tsql_starrocks() -> None:
+    """The hex-string invariant on dialects whose parsers hand back Anonymous
+    for the SHA-2 functions and whose engines spell them differently.
+
+    MySQL and StarRocks only accept SHA2(expr, digest_length): a bare
+    SHA256(...) is ERROR 1305 (function does not exist) on MySQL 8.4. T-SQL
+    (MSSQL, Fabric) renders every hash as HASHBYTES, which returns VARBINARY,
+    so the key must be converted to the lowercase hex string the other
+    dialects return (CONVERT style 2, verified byte-identical to DuckDB).
+    """
+
+    def render(dialect: str, hash_function: str) -> str:
+        sql = f"SELECT @GENERATE_SURROGATE_KEY(a, hash_function := '{hash_function}') FROM foo"
+        rendered = MacroEvaluator(dialect=dialect).transform(parse_one(sql, dialect=dialect))
+        assert isinstance(rendered, exp.Expr)
+        return rendered.sql(dialect)
+
+    # MySQL and StarRocks: the untyped SHA256/SHA512 names must render as
+    # SHA2(expr, digest_length), the only spelling those engines accept.
+    assert (
+        render("mysql", "SHA256")
+        == "SELECT SHA2(CONCAT(COALESCE(CAST(a AS CHAR), '_sqlmesh_surrogate_key_null_')), 256) FROM foo"
+    )
+    assert (
+        render("mysql", "SHA512")
+        == "SELECT SHA2(CONCAT(COALESCE(CAST(a AS CHAR), '_sqlmesh_surrogate_key_null_')), 512) FROM foo"
+    )
+    assert (
+        render("starrocks", "SHA256")
+        == "SELECT SHA2(CONCAT(COALESCE(CAST(a AS STRING), '_sqlmesh_surrogate_key_null_')), 256) FROM foo"
+    )
+
+    # T-SQL family (MSSQL, Fabric): HASHBYTES returns VARBINARY, so the key is
+    # converted to lowercase hex, with the VARCHAR sized to the digest width.
+    assert (
+        render("tsql", "MD5")
+        == "SELECT LOWER(CONVERT(VARCHAR(32), HASHBYTES('MD5', COALESCE(CAST(a AS VARCHAR(MAX)), '_sqlmesh_surrogate_key_null_')), 2)) FROM foo"
+    )
+    assert (
+        render("tsql", "SHA1")
+        == "SELECT LOWER(CONVERT(VARCHAR(40), HASHBYTES('SHA1', COALESCE(CAST(a AS VARCHAR(MAX)), '_sqlmesh_surrogate_key_null_')), 2)) FROM foo"
+    )
+    assert (
+        render("tsql", "SHA256")
+        == "SELECT LOWER(CONVERT(VARCHAR(64), HASHBYTES('SHA2_256', COALESCE(CAST(a AS VARCHAR(MAX)), '_sqlmesh_surrogate_key_null_')), 2)) FROM foo"
+    )
+    assert (
+        render("fabric", "SHA512")
+        == "SELECT LOWER(CONVERT(VARCHAR(128), HASHBYTES('SHA2_512', COALESCE(CAST(a AS VARCHAR(MAX)), '_sqlmesh_surrogate_key_null_')), 2)) FROM foo"
     )
