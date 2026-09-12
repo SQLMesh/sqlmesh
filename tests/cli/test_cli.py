@@ -2611,3 +2611,24 @@ model_defaults:
     result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
     assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
     mock.assert_not_called()
+
+
+def test_test_accepts_model_paths(runner: CliRunner, tmp_path: Path) -> None:
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "full_model.sql")]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Ran 1 test" in result.output
+
+
+def test_test_unknown_path_fails(runner: CliRunner, tmp_path: Path) -> None:
+    """A staged file that resolves to nothing must fail rather than silently run no tests."""
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output

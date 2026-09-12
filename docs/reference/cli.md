@@ -623,6 +623,10 @@ Usage: sqlmesh test [OPTIONS] [TESTS]...
 
   Run model unit tests.
 
+  TESTS are test files, `file.yaml::test_name` selectors, or model files, in
+  which case the tests for those models are run. They are unioned, and a test
+  selected more than once still only runs once.
+
 Options:
   -k TEXT              Only run tests that match the pattern of substring.
   -v, --verbose        Verbose output.
