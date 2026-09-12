@@ -1270,7 +1270,7 @@ class SnapshotEvaluator:
             if environment_naming_info.gateway_managed
             else self.adapter
         )
-        table_name = snapshot.table_name(deployability_index.is_representative(snapshot))
+        table_name = snapshot.table_name(deployability_index.is_deployable(snapshot))
         view_name = snapshot.qualified_view_name.for_environment(
             environment_naming_info, dialect=adapter.dialect
         )
