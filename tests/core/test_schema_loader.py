@@ -389,6 +389,54 @@ def test_no_internal_model_conversion(tmp_path: Path, mocker: MockerFixture):
         create_external_model(**row, dialect="bigquery")
 
 
+def test_create_external_models_quotes_case_sensitive_columns(
+    tmp_path: Path, mocker: MockerFixture
+):
+    engine_adapter_mock = mocker.Mock()
+    engine_adapter_mock.columns.return_value = {
+        "ID": exp.DataType.build("bigint"),
+        "ORGANID": exp.DataType.build("text"),
+        "CDATE": exp.DataType.build("date"),
+        "billno": exp.DataType.build("text"),
+        "_sync_row_hash": exp.DataType.build("text"),
+    }
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.nodes_exist.return_value = set()
+
+    model_a = SqlModel(name="a", query=parse_one("select * FROM raw_fruits"))
+
+    filename = tmp_path / c.EXTERNAL_MODELS_YAML
+    create_external_models_file(
+        filename,
+        {"a": model_a},  # type: ignore
+        engine_adapter_mock,
+        state_reader_mock,
+        "postgres",
+    )
+
+    schema = yaml.load(filename)
+    assert len(schema) == 1
+    # only identifiers that would be case-folded by the dialect are quoted
+    assert list(schema[0]["columns"]) == [
+        '"ID"',
+        '"ORGANID"',
+        '"CDATE"',
+        "billno",
+        "_sync_row_hash",
+    ]
+
+    # the quoted keys must round-trip through the model loader without being folded to lowercase
+    external_model = create_external_model(**schema[0], dialect="postgres")
+    assert list(external_model.columns_to_types) == [
+        "ID",
+        "ORGANID",
+        "CDATE",
+        "billno",
+        "_sync_row_hash",
+    ]
+
+
 def test_missing_table(tmp_path: Path):
     config = Config(gateways=GatewayConfig(connection=DuckDBConnectionConfig()))
     context = Context(paths=[str(tmp_path.absolute())], config=config)
