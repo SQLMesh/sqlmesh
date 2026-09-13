@@ -60,5 +60,5 @@ export const test = base.extend<
   ],
 })
 
-// Export expect and Page from Playwright for convenience
-export { expect, Page } from '@playwright/test'
+// Export expect and commonly used Playwright types for convenience
+export { expect, FrameLocator, Page } from '@playwright/test'
