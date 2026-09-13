@@ -49,7 +49,7 @@ from types import MappingProxyType
 from datetime import datetime
 
 from sqlglot import Dialect, exp
-from sqlglot.helper import first
+from sqlglot.helper import first, seq_get
 from sqlglot.lineage import GraphHTML
 
 from sqlmesh.core import analytics
@@ -67,6 +67,8 @@ from sqlmesh.core.config.root import RegexKeyDict
 from sqlmesh.core.console import get_console
 from sqlmesh.core.context_diff import ContextDiff
 from sqlmesh.core.dialect import (
+    Audit as AuditMeta,
+    Model as ModelMeta,
     format_model_expressions,
     is_meta_expression,
     normalize_model_name,
@@ -119,7 +121,7 @@ from sqlmesh.core.test import (
     filter_tests_by_patterns,
 )
 from sqlmesh.core.user import User
-from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity
+from sqlmesh.utils import CorrelationId, UniqueKeyDict, Verbosity, str_to_bool
 from sqlmesh.utils.concurrency import concurrent_apply_to_values
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -162,6 +164,16 @@ if t.TYPE_CHECKING:
     NodeOrSnapshot = t.Union[str, Model, StandaloneAudit, Snapshot]
 
 logger = logging.getLogger(__name__)
+
+
+class FormatTarget(t.NamedTuple):
+    """A single file to format, with everything needed to format it already resolved."""
+
+    path: Path
+    config: Config
+    dialect: t.Optional[str]
+    before: str
+    expressions: t.List[exp.Expr]
 
 
 class BaseContext(abc.ABC):
@@ -1323,41 +1335,38 @@ class GenericContext(BaseContext, t.Generic[C]):
         paths: t.Optional[t.Tuple[t.Union[str, Path], ...]] = None,
         **kwargs: t.Any,
     ) -> bool:
-        """Format all SQL models and audits."""
-        filtered_targets = [
-            target
-            for target in chain(self._models.values(), self._audits.values())
-            if target._path is not None
-            and target._path.suffix == ".sql"
-            and (not paths or any(target._path.samefile(p) for p in paths))
-        ]
+        """Format SQL models and audits.
+
+        Args:
+            paths: Files to format. When given, the project is not loaded: formatting a file
+                only needs its own text, its project's config, and the dialect and formatting
+                flag off its MODEL/AUDIT header. Without them, every SQL model and audit in the
+                project is formatted, loading it first if necessary.
+        """
+        if paths:
+            targets = self._format_targets_for_paths(paths)
+        else:
+            if not self._loaded:
+                self.load()
+            targets = self._format_targets_for_project()
+
         unformatted_file_paths = []
 
-        for target in filtered_targets:
-            if (
-                target._path is None or target.formatting is False
-            ):  # introduced to satisfy type checker as still want to pull filter out as many targets as possible before loop
-                continue
+        for path, config, dialect, before, expressions in targets:
+            after = self._format_expressions(
+                expressions,
+                config=config,
+                dialect=dialect,
+                transpile=transpile,
+                rewrite_casts=rewrite_casts,
+                append_newline=append_newline,
+                **kwargs,
+            )
 
-            mode = "r" if check else "r+"
-            with open(target._path, mode, encoding="utf-8") as file:
-                before = file.read()
-
-                after = self._format(
-                    target,
-                    before,
-                    transpile=transpile,
-                    rewrite_casts=rewrite_casts,
-                    append_newline=append_newline,
-                    **kwargs,
-                )
-
-                if not check:
-                    file.seek(0)
-                    file.write(after)
-                    file.truncate()
-                elif before != after:
-                    unformatted_file_paths.append(target._path)
+            if not check:
+                path.write_text(after, encoding="utf-8")
+            elif before != after:
+                unformatted_file_paths.append(path)
 
         if unformatted_file_paths:
             for path in unformatted_file_paths:
@@ -1369,31 +1378,107 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         return True
 
+    def _format_targets_for_project(self) -> t.Iterator[FormatTarget]:
+        """Every SQL model and audit in the loaded project."""
+        for target in chain(self._models.values(), self._audits.values()):
+            if target._path is None or target._path.suffix != ".sql":
+                continue
+            if target.formatting is False:
+                continue
+
+            config = self.config_for_node(target)
+            before = target._path.read_text(encoding="utf-8")
+            yield FormatTarget(
+                path=target._path,
+                config=config,
+                dialect=target.dialect,
+                before=before,
+                expressions=parse(before, default_dialect=config.dialect),
+            )
+
+    def _format_targets_for_paths(
+        self, paths: t.Tuple[t.Union[str, Path], ...]
+    ) -> t.Iterator[FormatTarget]:
+        """The given files, resolved without loading the project.
+
+        The dialect and the formatting flag are read off the file's own MODEL/AUDIT header,
+        falling back to the model defaults of the config that owns the path. Anything that is
+        not a SQL model or audit file is skipped, which leaves macros and other SQL alone.
+        """
+        for path in (Path(p) for p in paths):
+            if path.suffix != ".sql":
+                continue
+
+            config = self.config_for_path(path)[0]
+            before = path.read_text(encoding="utf-8")
+            expressions = parse(before, default_dialect=config.dialect)
+
+            meta = seq_get(expressions, 0)
+            if not isinstance(meta, (ModelMeta, AuditMeta)):
+                continue
+
+            properties = {prop.name.lower(): prop.args.get("value") for prop in meta.expressions}
+
+            formatting = properties.get("formatting")
+            if isinstance(formatting, exp.Boolean):
+                formatting = formatting.this
+            else:
+                # Model defaults are not passed through a model's bool validator here, so a
+                # configured string has to be coerced the same way that validator would.
+                formatting = config.model_defaults.formatting
+                if isinstance(formatting, str):
+                    formatting = str_to_bool(formatting)
+            if formatting is False:
+                continue
+
+            dialect = properties.get("dialect")
+            yield FormatTarget(
+                path=path,
+                config=config,
+                dialect=dialect.name if isinstance(dialect, exp.Literal) else config.dialect,
+                before=before,
+                expressions=expressions,
+            )
+
     def _format(
         self,
         target: Model | Audit,
         before: str,
+        **kwargs: t.Any,
+    ) -> str:
+        config = self.config_for_node(target)
+        return self._format_expressions(
+            parse(before, default_dialect=config.dialect),
+            config=config,
+            dialect=target.dialect,
+            **kwargs,
+        )
+
+    def _format_expressions(
+        self,
+        expressions: t.List[exp.Expr],
         *,
+        config: Config,
+        dialect: t.Optional[str],
         transpile: t.Optional[str] = None,
         rewrite_casts: t.Optional[bool] = None,
         append_newline: t.Optional[bool] = None,
         **kwargs: t.Any,
     ) -> str:
-        expressions = parse(before, default_dialect=self.config_for_node(target).dialect)
         if transpile and is_meta_expression(expressions[0]):
             for prop in expressions[0].expressions:
                 if prop.name.lower() == "dialect":
                     prop.replace(
                         exp.Property(
                             this="dialect",
-                            value=exp.Literal.string(transpile or target.dialect),
+                            value=exp.Literal.string(transpile or dialect),
                         )
                     )
 
-        format_config = self.config_for_node(target).format
+        format_config = config.format
         after = format_model_expressions(
             expressions,
-            transpile or target.dialect,
+            transpile or dialect,
             rewrite_casts=(
                 rewrite_casts if rewrite_casts is not None else not format_config.no_rewrite_casts
             ),

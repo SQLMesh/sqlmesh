@@ -141,8 +141,9 @@ def cli(
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
 
-    # Unlike the other commands above, lint can scope its own load for multi-project contexts.
-    if ctx.invoked_subcommand == "lint":
+    # Unlike the other commands above, lint and format scope their own load: lint for
+    # multi-project contexts, format because it needs nothing loaded when given file paths.
+    if ctx.invoked_subcommand in ("lint", "format"):
         load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
@@ -395,7 +396,12 @@ def evaluate(
 def format(
     ctx: click.Context, paths: t.Optional[t.Tuple[str, ...]] = None, **kwargs: t.Any
 ) -> None:
-    """Format all SQL models and audits."""
+    """Format all SQL models and audits.
+
+    PATHS are SQL model or audit files. When given, only those files are formatted and the
+    project is not loaded. Paths that are not SQL models or audits, such as macros, are left
+    alone.
+    """
     if not ctx.obj.format(**{k: v for k, v in kwargs.items() if v is not None}, paths=paths):
         ctx.exit(1)
 
