@@ -1047,6 +1047,13 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             return []
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
+        # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
+        # ever refer to the prod physical table, and so should never have any missing intervals.
+        if deployability_index.is_representative(self) and not deployability_index.is_deployable(
+            self
+        ):
+            return []
+
         intervals = (
             self.intervals if deployability_index.is_representative(self) else self.dev_intervals
         )
@@ -2061,6 +2068,13 @@ def missing_intervals(
 
     for snapshot in snapshots.values():
         if not snapshot.evaluatable:
+            continue
+
+        # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
+        # ever refer to the prod physical table, and so should never have any missing intervals.
+        if deployability_index.is_representative(
+            snapshot
+        ) and not deployability_index.is_deployable(snapshot):
             continue
 
         snapshot_start_date = start_override_per_model.get(snapshot.name, start_dt)
