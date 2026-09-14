@@ -400,6 +400,40 @@ def test_remove_interval_missing_snapshot(
     ]
 
 
+def test_remove_interval_no_matching_intervals(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+) -> None:
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            cron="@daily",
+            query=parse_one("select 1, ds"),
+        ),
+        version="a",
+    )
+    state_sync.push_snapshots([snapshot])
+
+    # The snapshot has never been backfilled, so there are no rows to expand the shared versions from
+    state_sync.remove_intervals(
+        [(snapshot, snapshot.inclusive_exclusive("2020-01-15", "2020-01-17"))],
+        remove_shared_versions=True,
+    )
+
+    remove_records_count = state_sync.engine_adapter.fetchone(
+        "SELECT COUNT(*) FROM sqlmesh._intervals WHERE name = '\"a\"' AND version = 'a' AND is_removed"
+    )[0]  # type: ignore
+    assert remove_records_count == 0
+
+    assert not state_sync.get_snapshots([snapshot])[snapshot.snapshot_id].intervals
+
+
+def test_remove_interval_empty_input(state_sync: EngineAdapterStateSync) -> None:
+    state_sync.remove_intervals([])
+    state_sync.remove_intervals([], remove_shared_versions=True)
+
+    assert state_sync.engine_adapter.fetchone("SELECT COUNT(*) FROM sqlmesh._intervals")[0] == 0  # type: ignore
+
+
 def test_refresh_snapshot_intervals(
     state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
 ) -> None:
