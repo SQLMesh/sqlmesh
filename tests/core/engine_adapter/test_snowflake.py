@@ -1007,6 +1007,48 @@ def test_table_format_iceberg(snowflake_mocked_engine_adapter: SnowflakeEngineAd
     ]
 
 
+def test_clone_table_iceberg(mocker: MockerFixture, make_mocked_engine_adapter: t.Callable):
+    mocker.patch("sqlmesh.core.engine_adapter.snowflake.SnowflakeEngineAdapter.set_current_catalog")
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter, default_catalog="test_catalog")
+
+    # Snowflake rejects `CREATE TABLE ... CLONE` for Iceberg tables
+    adapter.clone_table("target_table", "source_table", table_format="iceberg")
+    adapter.cursor.execute.assert_called_once_with(
+        'CREATE ICEBERG TABLE IF NOT EXISTS "target_table" CLONE "source_table"'
+    )
+
+    # Engines that don't need format-specific DDL are unaffected
+    adapter = make_mocked_engine_adapter(EngineAdapter, default_catalog="test_catalog")
+    adapter.SUPPORTS_CLONING = True
+    adapter.clone_table("target_table", "source_table", table_format="iceberg")
+    adapter.cursor.execute.assert_called_once_with(
+        'CREATE TABLE IF NOT EXISTS "target_table" CLONE "source_table"'
+    )
+
+
+def test_alter_table_iceberg(mocker: MockerFixture, make_mocked_engine_adapter: t.Callable):
+    mocker.patch("sqlmesh.core.engine_adapter.snowflake.SnowflakeEngineAdapter.set_current_catalog")
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter, default_catalog="test_catalog")
+
+    current_table = {"a": "INT"}
+    target_table = {"a": "INT", "b": "INT"}
+    adapter.columns = lambda table_name, **kwargs: {
+        k: exp.DataType.build(v)
+        for k, v in (current_table if table_name == "test_table" else target_table).items()
+    }
+
+    alter_operations = adapter.get_alter_operations("test_table", "target_table")
+
+    # Snowflake rejects `ALTER TABLE` for Iceberg tables
+    adapter.alter_table(alter_operations, table_format="iceberg")
+    assert to_sql_calls(adapter) == ['ALTER ICEBERG TABLE "test_table" ADD "b" INT']
+
+    # Without a table format the regular `ALTER TABLE` is used
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter, default_catalog="test_catalog")
+    adapter.alter_table(alter_operations)
+    assert to_sql_calls(adapter) == ['ALTER TABLE "test_table" ADD "b" INT']
+
+
 def test_create_view_with_schema_and_grants(
     snowflake_mocked_engine_adapter: SnowflakeEngineAdapter,
 ):
