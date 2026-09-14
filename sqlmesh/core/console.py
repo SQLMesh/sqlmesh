@@ -3279,7 +3279,8 @@ class CaptureTerminalConsole(TerminalConsole):
             super().log_skipped_models(snapshot_names)
 
     def log_failed_models(self, errors: t.List[NodeExecutionFailedError]) -> None:
-        self._errors.extend([str(ex) for ex in errors if str(ex) not in self._errors])
+        failed_model_errors = [_format_failed_model_error(error) for error in errors]
+        self._errors.extend(error for error in failed_model_errors if error not in self._errors)
         super().log_failed_models(errors)
 
     def _print(self, value: t.Any, **kwargs: t.Any) -> None:
@@ -3624,6 +3625,8 @@ class MarkdownConsole(CaptureTerminalConsole):
 
     def log_failed_models(self, errors: t.List[NodeExecutionFailedError]) -> None:
         if errors:
+            failed_model_errors = [_format_failed_model_error(error) for error in errors]
+            self._errors.extend(error for error in failed_model_errors if error not in self._errors)
             self._print("**Failed models**")
 
             error_messages = _format_node_errors(errors)
@@ -4195,11 +4198,7 @@ def _format_node_errors(errors: t.List[NodeExecutionFailedError]) -> t.Dict[str,
 
     num_fails = len(errors)
     for i, error in enumerate(errors):
-        node_name = ""
-        if isinstance(error.node, SnapshotId):
-            node_name = error.node.name
-        elif hasattr(error.node, "snapshot_name"):
-            node_name = error.node.snapshot_name
+        node_name = _node_name(error)
 
         msg = _format_node_error(error)
         msg = "  " + msg.replace("\n", "\n  ")
@@ -4209,6 +4208,18 @@ def _format_node_errors(errors: t.List[NodeExecutionFailedError]) -> t.Dict[str,
         error_messages[node_name] = msg
 
     return error_messages
+
+
+def _node_name(error: NodeExecutionFailedError) -> str:
+    if isinstance(error.node, SnapshotId):
+        return error.node.name
+    if hasattr(error.node, "snapshot_name"):
+        return error.node.snapshot_name
+    return str(error.node)
+
+
+def _format_failed_model_error(error: NodeExecutionFailedError) -> str:
+    return f"{_node_name(error)}: {error.__cause__ or error}"
 
 
 def _format_audits_errors(error: NodeAuditsErrors) -> str:
