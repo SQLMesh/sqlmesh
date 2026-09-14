@@ -1617,7 +1617,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
 
     def is_representative(self, snapshot: SnapshotIdLike) -> bool:
         """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading, table mapping, and
-        computing missing intervals.
+        computing missing intervals (if the snapshot is also deployable).
 
         Note, that deployable snapshots are also representative, but the reverse is not always true.
 
