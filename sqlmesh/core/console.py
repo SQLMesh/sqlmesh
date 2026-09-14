@@ -4207,6 +4207,10 @@ def _format_node_errors(errors: t.List[NodeExecutionFailedError]) -> t.Dict[str,
             node_name = error.node.name
         elif hasattr(error.node, "snapshot_name"):
             node_name = error.node.snapshot_name
+        elif hasattr(error.node, "name"):
+            node_name = error.node.name
+        else:
+            node_name = str(error.node)
 
         msg = _format_node_error(error)
         msg = "  " + msg.replace("\n", "\n  ")
