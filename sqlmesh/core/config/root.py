@@ -35,6 +35,7 @@ from sqlmesh.core.config.model import ModelDefaultsConfig
 from sqlmesh.core.config.naming import NameInferenceConfig as NameInferenceConfig
 from sqlmesh.core.config.linter import LinterConfig as LinterConfig
 from sqlmesh.core.config.plan import PlanConfig
+from sqlmesh.core.config.render import RenderConfig
 from sqlmesh.core.config.run import RunConfig
 from sqlmesh.core.config.dbt import DbtConfig
 from sqlmesh.core.config.scheduler import (
@@ -141,6 +142,7 @@ class Config(BaseConfig):
         format: The formatting options for SQL code.
         ui: The UI configuration for SQLMesh.
         plan: The plan configuration.
+        render: The render configuration.
         migration: The migration configuration.
         variables: A dictionary of variables that can be used in models / macros.
         disable_anonymized_analytics: Whether to disable the anonymized analytics collection.
@@ -183,6 +185,7 @@ class Config(BaseConfig):
     format: FormatConfig = FormatConfig()
     ui: UIConfig = UIConfig()
     plan: PlanConfig = PlanConfig()
+    render: RenderConfig = RenderConfig()
     migration: MigrationConfig = MigrationConfig()
     model_naming: NameInferenceConfig = NameInferenceConfig()
     variables: t.Dict[str, t.Any] = {}
@@ -208,6 +211,7 @@ class Config(BaseConfig):
         "ui": UpdateStrategy.NESTED_UPDATE,
         "loader_kwargs": UpdateStrategy.KEY_UPDATE,
         "plan": UpdateStrategy.NESTED_UPDATE,
+        "render": UpdateStrategy.NESTED_UPDATE,
         "before_all": UpdateStrategy.EXTEND,
         "after_all": UpdateStrategy.EXTEND,
         "linter": UpdateStrategy.NESTED_UPDATE,
