@@ -25,7 +25,7 @@
     "@tanstack/react-router-devtools": "^1.131.26",
     "@tanstack/react-virtual": "^3.13.12",
     "@tanstack/router-plugin": "^1.129.8",
-    "apache-arrow": "^19.0.1",
+    "apache-arrow": "^21.1.0",
     "clsx": "^2.1.1",
     "elkjs": "^0.8.2",
     "orval": "^7.10.0",
