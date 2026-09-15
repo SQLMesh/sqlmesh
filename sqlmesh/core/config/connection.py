@@ -53,9 +53,6 @@ RECOMMENDED_STATE_SYNC_ENGINES = {
     "mssql",
     "azuresql",
 }
-# Note: Db2 is excluded because it doesn't allow table names starting with underscore (_)
-# which SQLMesh uses for state tables (_versions, _snapshots, _environments, _intervals).
-# Use a separate state_connection (e.g., DuckDB) for Db2 gateways.
 FORBIDDEN_STATE_SYNC_ENGINES = {
     # Do not support row-level operations
     "spark",
@@ -63,6 +60,9 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Nullable types are problematic
     "clickhouse",
     "starrocks",
+    # Db2 rejects table names starting with underscore (_versions, _snapshots,
+    # _environments, _intervals). Use a separate state_connection (e.g., DuckDB).
+    "db2",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
