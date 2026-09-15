@@ -1104,6 +1104,7 @@ class SnapshotEvaluator:
                 target_table_name,
                 snapshot.table_name(),
                 rendered_physical_properties=rendered_physical_properties,
+                table_format=snapshot.model.table_format,
             )
             self._migrate_target_table(
                 target_table_name=target_table_name,
@@ -2161,7 +2162,7 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
         _check_additive_schema_change(
             snapshot, alter_operations, kwargs["allow_additive_snapshots"]
         )
-        self.adapter.alter_table(alter_operations)
+        self.adapter.alter_table(alter_operations, table_format=snapshot.model.table_format)
 
         # Apply grants after schema migration
         deployability_index = kwargs.get("deployability_index")
