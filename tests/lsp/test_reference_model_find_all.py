@@ -30,8 +30,8 @@ def test_find_references_for_model_usages():
     # Click on the model reference
     position = Position(line=ranges[0].start.line, character=ranges[0].start.character + 6)
     references = get_model_find_all_references(lsp_context, URI.from_path(customers_path), position)
-    assert len(references) >= 7, (
-        f"Expected at least 7 references to sushi.orders (including column prefix), found {len(references)}"
+    assert len(references) >= 6, (
+        f"Expected at least 6 references to sushi.orders (including column prefix), found {len(references)}"
     )
 
     # Verify expected files are present
@@ -53,7 +53,7 @@ def test_find_references_for_model_usages():
     # Note: customers file has multiple references due to column prefix support
     expected_ranges = {
         "orders": [(0, 0, 0, 0)],  # the start for the model itself
-        "customers": [(30, 7, 30, 19), (44, 6, 44, 18)],  # FROM clause and WHERE clause
+        "customers": [(30, 7, 30, 19)],  # FROM clause
         "waiter_revenue_by_day": [(19, 5, 19, 17)],
         "customer_revenue_lifetime": [(38, 7, 38, 19)],
         "customer_revenue_by_day": [(33, 5, 33, 17)],

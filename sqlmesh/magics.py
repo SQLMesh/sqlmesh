@@ -95,6 +95,14 @@ def pass_sqlmesh_context(func: t.Callable) -> t.Callable:
     return wrapper
 
 
+def parse_expand(value: str) -> t.Union[bool, t.List[str]]:
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    return [name.strip() for name in value.split(",") if name.strip()]
+
+
 def format_arguments(func: t.Callable) -> t.Callable:
     """Decorator to add common format arguments to magic commands."""
     func = argument(
@@ -224,7 +232,7 @@ class SQLMeshMagics(Magics):
     @argument(
         "--dlt-path",
         type=str,
-        help="The directory where the DLT pipeline resides. Use alongside template: dlt",
+        help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines). Use alongside template: dlt",
     )
     @line_magic
     def init(self, line: str) -> None:
@@ -400,6 +408,11 @@ class SQLMeshMagics(Magics):
         help="Skip the unit tests defined for the model.",
     )
     @argument(
+        "--test-changed-only",
+        action="store_true",
+        help="Run unit tests only for models included in the plan instead of all tests.",
+    )
+    @argument(
         "--skip-linter",
         action="store_true",
         help="Skip the linter for the model.",
@@ -525,6 +538,7 @@ class SQLMeshMagics(Magics):
             execution_time=args.execution_time,
             create_from=args.create_from,
             skip_tests=args.skip_tests,
+            test_changed_only=args.test_changed_only,
             restate_models=args.restate_model,
             backfill_models=args.backfill_model,
             no_gaps=args.no_gaps,
@@ -633,8 +647,8 @@ class SQLMeshMagics(Magics):
     @argument("--execution-time", type=str, help="Execution time.")
     @argument(
         "--expand",
-        type=t.Union[bool, t.Iterable[str]],
-        help="Whether or not to use expand materialized models, defaults to False. If True, all referenced models are expanded as raw queries. If a list, only referenced models are expanded as raw queries.",
+        type=parse_expand,
+        help="Whether or not to use expand materialized models, defaults to False. If 'true', all referenced models are expanded as raw queries. If a comma-separated list of model names, only those models are expanded as raw queries.",
     )
     @argument("--dialect", type=str, help="SQL dialect to render.")
     @argument("--no-format", action="store_true", help="Disable fancy formatting of the query.")
@@ -647,6 +661,7 @@ class SQLMeshMagics(Magics):
         render_opts = vars(parse_argstring(self.render, line))
         model = render_opts.pop("model")
         dialect = render_opts.pop("dialect", None)
+        expand = render_opts.pop("expand", False)
 
         model = context.get_model(model, raise_if_missing=True)
 
@@ -655,7 +670,7 @@ class SQLMeshMagics(Magics):
             start=render_opts.pop("start", None),
             end=render_opts.pop("end", None),
             execution_time=render_opts.pop("execution_time", None),
-            expand=render_opts.pop("expand", False),
+            expand=expand,
         )
 
         no_format = render_opts.pop("no_format", False)
@@ -877,7 +892,7 @@ class SQLMeshMagics(Magics):
     @argument(
         "--dlt-path",
         type=str,
-        help="The directory where the DLT pipeline resides.",
+        help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines).",
     )
     @line_magic
     @pass_sqlmesh_context
@@ -974,7 +989,7 @@ class SQLMeshMagics(Magics):
     def invalidate(self, context: Context, line: str) -> None:
         """Invalidate the target environment, forcing its removal during the next run of the janitor process."""
         args = parse_argstring(self.invalidate, line)
-        context.invalidate_environment(args.environment)
+        context.invalidate_environment(args.environment, must_exist=True)
 
     @magic_arguments()
     @argument(
@@ -1069,11 +1084,23 @@ class SQLMeshMagics(Magics):
         action="store_true",
         help="Preserve the fixture tables in the testing database, useful for debugging.",
     )
+    @argument(
+        "--select-model",
+        type=str,
+        nargs="*",
+        help="Select specific models to run unit tests for.",
+    )
     @line_magic
     @pass_sqlmesh_context
     def run_test(self, context: Context, line: str) -> None:
         """Run unit test(s)."""
         args = parse_argstring(self.run_test, line)
+
+        model_names = (
+            context._new_selector().expand_model_selections(args.select_model)
+            if args.select_model
+            else None
+        )
 
         context.test(
             match_patterns=args.pattern,
@@ -1081,6 +1108,7 @@ class SQLMeshMagics(Magics):
             verbosity=Verbosity(args.verbose),
             preserve_fixtures=args.preserve_fixtures,
             stream=StringIO(),  # consume the output instead of redirecting to stdout
+            model_names=model_names,
         )
 
     @magic_arguments()

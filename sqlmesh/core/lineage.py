@@ -16,7 +16,7 @@ if t.TYPE_CHECKING:
     from sqlmesh.core.model import Model
 
 
-CACHE: t.Dict[str, t.Tuple[int, exp.Expression, Scope]] = {}
+CACHE: t.Dict[str, t.Tuple[int, exp.Expr, Scope]] = {}
 
 
 def lineage(
@@ -25,8 +25,8 @@ def lineage(
     trim_selects: bool = True,
     **kwargs: t.Any,
 ) -> Node:
-    query = None
-    scope = None
+    query: t.Optional[exp.Expr] = None
+    scope: t.Optional[Scope] = None
 
     if model.name in CACHE:
         obj_id, query, scope = CACHE[model.name]

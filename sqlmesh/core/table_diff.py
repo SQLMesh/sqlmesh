@@ -224,9 +224,9 @@ class TableDiff:
         adapter: EngineAdapter,
         source: TableName,
         target: TableName,
-        on: t.List[str] | exp.Condition,
+        on: t.List[str] | exp.Expr,
         skip_columns: t.List[str] | None = None,
-        where: t.Optional[str | exp.Condition] = None,
+        where: t.Optional[str | exp.Expr] = None,
         limit: int = 20,
         source_alias: t.Optional[str] = None,
         target_alias: t.Optional[str] = None,
@@ -255,12 +255,13 @@ class TableDiff:
         self.source_alias = source_alias
         self.target_alias = target_alias
 
+        cols: t.List[str] = ensure_list(skip_columns)
         self.skip_columns = {
             normalize_identifiers(
-                exp.parse_identifier(t.cast(str, col)),
+                exp.parse_identifier(col),
                 dialect=self.model_dialect or self.dialect,
             ).name
-            for col in ensure_list(skip_columns)
+            for col in cols
         }
 
         self._on = on
@@ -305,18 +306,18 @@ class TableDiff:
         return s_index, t_index, index_cols
 
     @property
-    def source_key_expression(self) -> exp.Expression:
+    def source_key_expression(self) -> exp.Expr:
         s_index, _, _ = self.key_columns
         return self._key_expression(s_index, self.source_schema)
 
     @property
-    def target_key_expression(self) -> exp.Expression:
+    def target_key_expression(self) -> exp.Expr:
         _, t_index, _ = self.key_columns
         return self._key_expression(t_index, self.target_schema)
 
     def _key_expression(
         self, cols: t.List[exp.Column], schema: t.Dict[str, exp.DataType]
-    ) -> exp.Expression:
+    ) -> exp.Expr:
         # if there is a single column, dont do anything fancy to it in order to allow existing indexes to be hit
         if len(cols) == 1:
             return exp.to_column(cols[0].name)
@@ -363,7 +364,7 @@ class TableDiff:
             s_index_names = [c.name for c in s_index]
             t_index_names = [t.name for t in t_index]
 
-            def _column_expr(name: str, table: str) -> exp.Expression:
+            def _column_expr(name: str, table: str) -> exp.Expr:
                 column_type = matched_columns[name]
                 qualified_column = exp.column(name, table)
 
@@ -678,9 +679,9 @@ class TableDiff:
     def _fetch_sample(
         self,
         sample_table: exp.Table,
-        s_selects: t.Dict[str, exp.Alias],
+        s_selects: t.Dict[str, exp.Expr],
         s_index: t.List[exp.Column],
-        t_selects: t.Dict[str, exp.Alias],
+        t_selects: t.Dict[str, exp.Expr],
         t_index: t.List[exp.Column],
         limit: int,
     ) -> pd.DataFrame:
@@ -742,5 +743,5 @@ class TableDiff:
         return self.adapter.fetchdf(query, quote_identifiers=True)
 
 
-def name(e: exp.Expression) -> str:
+def name(e: exp.Expr) -> str:
     return e.args["alias"].sql(identify=True)

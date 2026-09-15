@@ -170,6 +170,16 @@ The examples specify a Snowflake connection whose password is stored in an envir
           account: <account>
     ```
 
+    !!! tip "Base64-encoded secrets"
+
+        If a secret is distributed base64-encoded in a single environment variable (for example a BigQuery service-account key), pipe the variable through the built-in `b64decode` filter to decode it to text inline:
+
+        ```yaml
+        keyfile_json: {{ env_var('BIGQUERY_KEY_B64') | b64decode }}
+        ```
+
+        A matching `b64encode` filter is also available. Both return UTF-8 text, so they are intended for string/JSON secrets rather than arbitrary binary data.
+
 === "Python"
 
     Python accesses environment variables via the `os` library's `environ` dictionary.
@@ -269,7 +279,7 @@ gateways:
 We can override the `dummy_pw` value with the true password `real_pw` by creating the environment variable. This example demonstrates creating the variable with the bash `export` function:
 
 ```bash
-$ export SQLMESH__GATEWAYS__MY_GATEWAY__CONNECTION__PASSWORD="real_pw"
+export SQLMESH__GATEWAYS__MY_GATEWAY__CONNECTION__PASSWORD="real_pw"
 ```
 
 After the initial string `SQLMESH__`, the environment variable name components move down the key hierarchy in the YAML specification: `GATEWAYS` --> `MY_GATEWAY` --> `CONNECTION` --> `PASSWORD`.
@@ -318,6 +328,16 @@ By default, the SQLMesh cache is stored in a `.cache` directory within your proj
     ```
 
 The cache directory is automatically created if it doesn't exist. You can clear the cache using the `sqlmesh clean` command.
+
+#### Project index
+
+The `--use-project-index` option on supported commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`.
+
+A full project load with the option enabled creates or refreshes the index. SQLMesh invalidates it when relevant configuration, gateway, macro, audit, or signal metadata changes, or when the set of model files changes. If the index is missing, invalid, or stale, SQLMesh safely falls back to a full project load and rebuilds it.
+
+For operations targeting selected models, the index allows SQLMesh to load only those models and their upstream dependencies.
+
+In multi-repository projects, dependencies that cross project boundaries may not be represented by an individual project's index. SQLMesh detects incomplete scoped loads and falls back to loading the full configured project set.
 
 ### Table/view storage locations
 
@@ -909,18 +929,22 @@ Example snowflake connection configuration:
 These pages describe the connection configuration options for each execution engine.
 
 * [Athena](../integrations/engines/athena.md)
+* [Azure SQL](../integrations/engines/azuresql.md)
 * [BigQuery](../integrations/engines/bigquery.md)
+* [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)
-* [MySQL](../integrations/engines/mysql.md)
 * [MSSQL](../integrations/engines/mssql.md)
+* [MySQL](../integrations/engines/mysql.md)
 * [Postgres](../integrations/engines/postgres.md)
 * [GCP Postgres](../integrations/engines/gcp-postgres.md)
 * [Redshift](../integrations/engines/redshift.md)
+* [RisingWave](../integrations/engines/risingwave.md)
 * [Snowflake](../integrations/engines/snowflake.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 #### State connection
@@ -952,6 +976,7 @@ Unsupported state engines, even for development:
 
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 This example gateway configuration uses Snowflake for the data warehouse connection and Postgres for the state backend connection:
@@ -1492,7 +1517,7 @@ Example enabling debug mode for the CLI command `sqlmesh plan`:
 === "Bash"
 
     ```bash
-    $ SQLMESH_DEBUG=1 sqlmesh plan
+    SQLMESH_DEBUG=1 sqlmesh plan
     ```
 
 === "MS Powershell"

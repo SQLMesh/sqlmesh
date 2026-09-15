@@ -42,7 +42,7 @@ def column_types_to_sqlmesh(
             )
             if column_def.args.get("constraints"):
                 logger.warning(
-                    f"Ignoring unsupported constraints for column '{name}' with definition '{column.data_type}'. Please refer to github.com/TobikoData/sqlmesh/issues/4717 for more information."
+                    f"Ignoring unsupported constraints for column '{name}' with definition '{column.data_type}'. Please refer to github.com/SQLMesh/sqlmesh/issues/4717 for more information."
                 )
             kind = column_def.kind
             if kind:

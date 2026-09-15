@@ -50,7 +50,10 @@ export default defineConfig({
 
   /* Run your local dev server before starting the tests */
   webServer: {
-    command: 'npm run build && npm run preview',
+    command:
+      process.env.PLAYWRIGHT_SKIP_BUILD != null
+        ? 'npm run preview'
+        : 'npm run build && npm run preview',
     url: URL,
     reuseExistingServer: process.env.CI == null,
     timeout: 120000, // Two minutes

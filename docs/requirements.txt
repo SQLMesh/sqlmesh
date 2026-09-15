@@ -4,3 +4,4 @@ mkdocs-material==9.0.5
 mkdocs-material-extensions==1.1.1
 mkdocs-glightbox==0.3.7
 pdoc==14.5.1
+pygments==2.19.2    # Temporary pin: 2.20.0 breaks docs build; revisit after the fix

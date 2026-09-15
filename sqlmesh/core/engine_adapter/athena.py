@@ -158,7 +158,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         schema_name: SchemaName,
         ignore_if_exists: bool,
         warn_on_error: bool,
-        properties: t.List[exp.Expression],
+        properties: t.List[exp.Expr],
         kind: str,
     ) -> None:
         if location := self._table_location(table_properties=None, table=exp.to_table(schema_name)):
@@ -177,14 +177,14 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
     def _build_create_table_exp(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         **kwargs: t.Any,
     ) -> exp.Create:
         exists = False if replace else exists
@@ -235,18 +235,18 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         catalog_name: t.Optional[str] = None,
         table_format: t.Optional[str] = None,
         storage_format: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
         partition_interval_unit: t.Optional[IntervalUnit] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
         table: t.Optional[exp.Table] = None,
-        expression: t.Optional[exp.Expression] = None,
+        expression: t.Optional[exp.Expr] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
         table_properties = table_properties or {}
 
         is_hive = self._table_type(table_format) == "hive"
@@ -266,7 +266,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
             properties.append(exp.SchemaCommentProperty(this=exp.Literal.string(table_description)))
 
         if partitioned_by:
-            schema_expressions: t.List[exp.Expression] = []
+            schema_expressions: t.List[exp.Expr] = []
             if is_hive and target_columns_to_types:
                 # For Hive-style tables, you cannot include the partitioned by columns in the main set of columns
                 # In the PARTITIONED BY expression, you also cant just include the column names, you need to include the data type as well
@@ -381,7 +381,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
             raise e
 
     def _table_location_or_raise(
-        self, table_properties: t.Optional[t.Dict[str, exp.Expression]], table: exp.Table
+        self, table_properties: t.Optional[t.Dict[str, exp.Expr]], table: exp.Table
     ) -> exp.LocationProperty:
         location = self._table_location(table_properties, table)
         if not location:
@@ -392,7 +392,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
 
     def _table_location(
         self,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]],
+        table_properties: t.Optional[t.Dict[str, exp.Expr]],
         table: exp.Table,
     ) -> t.Optional[exp.LocationProperty]:
         base_uri: str
@@ -402,7 +402,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
             s3_base_location_property = table_properties.pop(
                 "s3_base_location"
             )  # pop because it's handled differently and we dont want it to end up in the TBLPROPERTIES clause
-            if isinstance(s3_base_location_property, exp.Expression):
+            if isinstance(s3_base_location_property, exp.Expr):
                 base_uri = s3_base_location_property.name
             else:
                 base_uri = s3_base_location_property
@@ -419,7 +419,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
         return exp.LocationProperty(this=exp.Literal.string(full_uri))
 
     def _find_matching_columns(
-        self, partitioned_by: t.List[exp.Expression], columns_to_types: t.Dict[str, exp.DataType]
+        self, partitioned_by: t.List[exp.Expr], columns_to_types: t.Dict[str, exp.DataType]
     ) -> t.List[t.Tuple[str, exp.DataType]]:
         matches = []
         for col in partitioned_by:
@@ -557,7 +557,7 @@ class AthenaEngineAdapter(PandasNativeFetchDFSupportMixin, RowDiffMixin):
                 PartitionsToDelete=[{"Values": v} for v in batch],
             )
 
-    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expression]) -> None:
+    def delete_from(self, table_name: TableName, where: t.Union[str, exp.Expr]) -> None:
         table = exp.to_table(table_name)
 
         table_type = self._query_table_type(table)

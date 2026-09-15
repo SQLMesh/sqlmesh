@@ -38,9 +38,9 @@ class LogicalMergeMixin(EngineAdapter):
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        unique_key: t.Sequence[exp.Expression],
+        unique_key: t.Sequence[exp.Expr],
         when_matched: t.Optional[exp.Whens] = None,
-        merge_filter: t.Optional[exp.Expression] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **kwargs: t.Any,
     ) -> None:
@@ -58,18 +58,14 @@ class LogicalMergeMixin(EngineAdapter):
 
 class PandasNativeFetchDFSupportMixin(EngineAdapter):
     def _fetch_native_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> DF:
         """Fetches a Pandas DataFrame from a SQL query."""
         from warnings import catch_warnings, filterwarnings
 
         from pandas.io.sql import read_sql_query
 
-        sql = (
-            self._to_sql(query, quote=quote_identifiers)
-            if isinstance(query, exp.Expression)
-            else query
-        )
+        sql = self._to_sql(query, quote=quote_identifiers) if isinstance(query, exp.Expr) else query
         logger.debug(f"Executing SQL:\n{sql}")
         with catch_warnings(), self.transaction():
             filterwarnings(
@@ -87,7 +83,7 @@ class HiveMetastoreTablePropertiesMixin(EngineAdapter):
 
     def _build_partitioned_by_exp(
         self,
-        partitioned_by: t.List[exp.Expression],
+        partitioned_by: t.List[exp.Expr],
         *,
         catalog_name: t.Optional[str] = None,
         **kwargs: t.Any,
@@ -120,16 +116,16 @@ class HiveMetastoreTablePropertiesMixin(EngineAdapter):
         catalog_name: t.Optional[str] = None,
         table_format: t.Optional[str] = None,
         storage_format: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
         partition_interval_unit: t.Optional[IntervalUnit] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         if table_format and self.dialect == "spark":
             properties.append(exp.FileFormatProperty(this=exp.Var(this=table_format)))
@@ -166,12 +162,12 @@ class HiveMetastoreTablePropertiesMixin(EngineAdapter):
 
     def _build_view_properties_exp(
         self,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         table_description: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
         """Creates a SQLGlot table properties expression for view"""
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         if table_description:
             properties.append(
@@ -194,7 +190,7 @@ class HiveMetastoreTablePropertiesMixin(EngineAdapter):
 
 
 class GetCurrentCatalogFromFunctionMixin(EngineAdapter):
-    CURRENT_CATALOG_EXPRESSION: exp.Expression = exp.func("current_catalog")
+    CURRENT_CATALOG_EXPRESSION: exp.Expr = exp.func("current_catalog")
 
     def get_current_catalog(self) -> t.Optional[str]:
         """Returns the catalog name of the current connection."""
@@ -240,7 +236,7 @@ class VarcharSizeWorkaroundMixin(EngineAdapter):
     def _build_create_table_exp(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
@@ -322,11 +318,11 @@ class TableAlterChangeClusterKeyOperation(TableAlterClusterByOperation):
         return False
 
     @property
-    def _alter_actions(self) -> t.List[exp.Expression]:
+    def _alter_actions(self) -> t.List[exp.Expr]:
         return [exp.Cluster(expressions=self.cluster_key_expressions)]
 
     @property
-    def cluster_key_expressions(self) -> t.List[exp.Expression]:
+    def cluster_key_expressions(self) -> t.List[exp.Expr]:
         # Note: Assumes `clustering_key` as a string like:
         # - "(col_a)"
         # - "(col_a, col_b)"
@@ -346,14 +342,14 @@ class TableAlterDropClusterKeyOperation(TableAlterClusterByOperation):
         return False
 
     @property
-    def _alter_actions(self) -> t.List[exp.Expression]:
+    def _alter_actions(self) -> t.List[exp.Expr]:
         return [exp.Command(this="DROP", expression="CLUSTERING KEY")]
 
 
 class ClusteredByMixin(EngineAdapter):
     def _build_clustered_by_exp(
         self,
-        clustered_by: t.List[exp.Expression],
+        clustered_by: t.List[exp.Expr],
         **kwargs: t.Any,
     ) -> t.Optional[exp.Cluster]:
         return exp.Cluster(expressions=[c.copy() for c in clustered_by])
@@ -410,9 +406,9 @@ def logical_merge(
     target_table: TableName,
     source_table: QueryOrDF,
     target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-    unique_key: t.Sequence[exp.Expression],
+    unique_key: t.Sequence[exp.Expr],
     when_matched: t.Optional[exp.Whens] = None,
-    merge_filter: t.Optional[exp.Expression] = None,
+    merge_filter: t.Optional[exp.Expr] = None,
     source_columns: t.Optional[t.List[str]] = None,
 ) -> None:
     """
@@ -452,12 +448,12 @@ class RowDiffMixin(EngineAdapter):
         decimal_precision: int = 3,
         timestamp_precision: int = MAX_TIMESTAMP_PRECISION,
         delimiter: str = ",",
-    ) -> exp.Expression:
+    ) -> exp.Expr:
         """
         Produce an expression that generates a string version of a record, that is:
             - Every column converted to a string representation, joined together into a single string using the specified :delimiter
         """
-        expressions_to_concat: t.List[exp.Expression] = []
+        expressions_to_concat: t.List[exp.Expr] = []
         for idx, (column, type) in enumerate(columns_to_types.items()):
             expressions_to_concat.append(
                 exp.func(
@@ -475,11 +471,11 @@ class RowDiffMixin(EngineAdapter):
 
     def normalize_value(
         self,
-        expr: exp.Expression,
+        expr: exp.Expr,
         type: exp.DataType,
         decimal_precision: int = 3,
         timestamp_precision: int = MAX_TIMESTAMP_PRECISION,
-    ) -> exp.Expression:
+    ) -> exp.Expr:
         """
         Return an expression that converts the values inside the column `col` to a normalized string
 
@@ -490,6 +486,7 @@ class RowDiffMixin(EngineAdapter):
             - `boolean` columns -> '1' or '0'
             - NULLS -> "" (empty string)
         """
+        value: exp.Expr
         if type.is_type(exp.DataType.Type.BOOLEAN):
             value = self._normalize_boolean_value(expr)
         elif type.is_type(*exp.DataType.INTEGER_TYPES):
@@ -512,12 +509,12 @@ class RowDiffMixin(EngineAdapter):
 
         return exp.cast(value, to=exp.DataType.build("VARCHAR"))
 
-    def _normalize_nested_value(self, expr: exp.Expression) -> exp.Expression:
+    def _normalize_nested_value(self, expr: exp.Expr) -> exp.Expr:
         return expr
 
     def _normalize_timestamp_value(
-        self, expr: exp.Expression, type: exp.DataType, precision: int
-    ) -> exp.Expression:
+        self, expr: exp.Expr, type: exp.DataType, precision: int
+    ) -> exp.Expr:
         if precision > self.MAX_TIMESTAMP_PRECISION:
             raise ValueError(
                 f"Requested timestamp precision '{precision}' exceeds maximum supported precision: {self.MAX_TIMESTAMP_PRECISION}"
@@ -547,18 +544,18 @@ class RowDiffMixin(EngineAdapter):
 
         return expr
 
-    def _normalize_integer_value(self, expr: exp.Expression) -> exp.Expression:
+    def _normalize_integer_value(self, expr: exp.Expr) -> exp.Expr:
         return exp.cast(expr, "BIGINT")
 
-    def _normalize_decimal_value(self, expr: exp.Expression, precision: int) -> exp.Expression:
+    def _normalize_decimal_value(self, expr: exp.Expr, precision: int) -> exp.Expr:
         return exp.cast(expr, f"DECIMAL(38,{precision})")
 
-    def _normalize_boolean_value(self, expr: exp.Expression) -> exp.Expression:
+    def _normalize_boolean_value(self, expr: exp.Expr) -> exp.Expr:
         return exp.cast(expr, "INT")
 
 
 class GrantsFromInfoSchemaMixin(EngineAdapter):
-    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expression = exp.func("current_user")
+    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.func("current_user")
     SUPPORTS_MULTIPLE_GRANT_PRINCIPALS = False
     USE_CATALOG_IN_GRANTS = False
     GRANT_INFORMATION_SCHEMA_TABLE_NAME = "table_privileges"
@@ -578,8 +575,8 @@ class GrantsFromInfoSchemaMixin(EngineAdapter):
         table: exp.Table,
         grants_config: GrantsConfig,
         table_type: DataObjectType = DataObjectType.TABLE,
-    ) -> t.List[exp.Expression]:
-        expressions: t.List[exp.Expression] = []
+    ) -> t.List[exp.Expr]:
+        expressions: t.List[exp.Expr] = []
         if not grants_config:
             return expressions
 
@@ -617,7 +614,7 @@ class GrantsFromInfoSchemaMixin(EngineAdapter):
         table: exp.Table,
         grants_config: GrantsConfig,
         table_type: DataObjectType = DataObjectType.TABLE,
-    ) -> t.List[exp.Expression]:
+    ) -> t.List[exp.Expr]:
         return self._dcl_grants_config_expr(exp.Grant, table, grants_config, table_type)
 
     def _revoke_grants_config_expr(
@@ -625,10 +622,10 @@ class GrantsFromInfoSchemaMixin(EngineAdapter):
         table: exp.Table,
         grants_config: GrantsConfig,
         table_type: DataObjectType = DataObjectType.TABLE,
-    ) -> t.List[exp.Expression]:
+    ) -> t.List[exp.Expr]:
         return self._dcl_grants_config_expr(exp.Revoke, table, grants_config, table_type)
 
-    def _get_grant_expression(self, table: exp.Table) -> exp.Expression:
+    def _get_grant_expression(self, table: exp.Table) -> exp.Expr:
         schema_identifier = table.args.get("db") or normalize_identifiers(
             exp.to_identifier(self._get_current_schema(), quoted=True), dialect=self.dialect
         )

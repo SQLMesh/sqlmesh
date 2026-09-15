@@ -52,7 +52,9 @@ Bad data is worse than no data. The best way to keep bad data out of your system
 ### [Tests](./tests.md)
 SQLMesh "tests" are similar to unit tests in software development, where the unit is a single model. SQLMesh tests validate model *code* &mdash; you specify the input data and expected output, then SQLMesh runs the test and compares the expected and actual output.
 
-SQLMesh automatically runs tests when you apply a `plan`, or you can run them on demand with the [`test` command](../reference/cli.md#test).
+SQLMesh automatically runs all unit tests when a `plan` is created. Use `--test-changed-only` to run tests only for models included in the plan (added, modified, or restated), `--skip-tests` to skip, run tests for specific models with [`sqlmesh test --select-model`](../reference/cli.md#test), or run the full suite on demand with the [`test` command](../reference/cli.md#test).
+
+Learn more in the [testing guide](../guides/testing.md).
 
 ### [Audits](./audits.md)
 In contrast to tests, SQLMesh "audits" validate the results of model code applied to your actual data.
@@ -68,4 +70,4 @@ SQLMesh automatically runs audits when you apply a `plan` to an environment, or 
 ## Infrastructure and orchestration
 Every company's data infrastructure is different. SQLMesh is flexible with regard to which engines and orchestration frameworks you use &mdash; its only requirement is access to the target SQL/analytics engine.
 
-SQLMesh keeps track of model versions and processed data intervals using your existing infrastructure. SQLMesh it automatically creates a `sqlmesh` schema in your data warehouse for its internal metadata.
+SQLMesh keeps track of model versions and processed data intervals using your existing infrastructure. It automatically creates a `sqlmesh` schema in your data warehouse for its internal metadata.

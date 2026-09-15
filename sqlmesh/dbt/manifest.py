@@ -846,7 +846,8 @@ def _build_test_name(node: ManifestNode, dependencies: Dependencies) -> str:
             continue
         if isinstance(val, dict):
             val = list(val.values())
-        val = [re.sub("[^0-9a-zA-Z_]+", "_", str(v)) for v in ensure_list(val)]
+        items: t.List[t.Any] = ensure_list(val)
+        val = [re.sub("[^0-9a-zA-Z_]+", "_", str(v)) for v in items]
         arg_val_parts.extend(val)
     unique_args = "__".join(arg_val_parts) if arg_val_parts else ""
     unique_args = f"_{unique_args}" if unique_args else ""

@@ -92,7 +92,7 @@ The state file is a simple `json` file that looks like:
 You can export a specific environment like so:
 
 ```sh
-$ sqlmesh state export --environment my_dev -o my_dev_state.json
+sqlmesh state export --environment my_dev -o my_dev_state.json
 ```
 
 Note that every snapshot that is part of the environment will be exported, not just the differences from `prod`. The reason for this is so that the environment can be fully imported elsewhere without any assumptions about which snapshots are already present in state.
@@ -102,7 +102,7 @@ Note that every snapshot that is part of the environment will be exported, not j
 You can export local state like so:
 
 ```bash
-$ sqlmesh state export --local -o local_state.json
+sqlmesh state export --local -o local_state.json
 ```
 
 This essentially just exports the state of the local context which includes local changes that have not been applied to any virtual data environments.
@@ -174,10 +174,11 @@ If your project has [multiple gateways](../guides/configuration.md#gateways) wit
 
 ```bash
 # state export
-$ sqlmesh --gateway <gateway> state export -o state.json
-
+sqlmesh --gateway <gateway> state export -o state.json
+```
+```bash
 # state import
-$ sqlmesh --gateway <gateway> state import -i state.json
+sqlmesh --gateway <gateway> state import -i state.json
 ```
 
 ## Version Compatibility

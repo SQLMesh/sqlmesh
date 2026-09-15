@@ -593,7 +593,7 @@ def _to_sql_calls(execute_mock: t.Any, identify: bool = True) -> t.List[str]:
         for value in values:
             sql = (
                 value.sql(dialect="bigquery", identify=identify)
-                if isinstance(value, exp.Expression)
+                if isinstance(value, exp.Expr)
                 else str(value)
             )
             output.append(sql)
@@ -1245,7 +1245,7 @@ def test_sync_grants_config(make_mocked_engine_adapter: t.Callable, mocker: Mock
     executed_sql = executed_query.sql(dialect="bigquery")
     expected_sql = (
         "SELECT privilege_type, grantee FROM `project`.`region-us-central1`.`INFORMATION_SCHEMA.OBJECT_PRIVILEGES` AS OBJECT_PRIVILEGES "
-        "WHERE object_schema = 'dataset' AND object_name = 'test_table' AND SPLIT(grantee, ':')[OFFSET(1)] <> session_user()"
+        "WHERE object_schema = 'dataset' AND object_name = 'test_table' AND SPLIT(grantee, ':')[OFFSET(1)] <> SESSION_USER()"
     )
     assert executed_sql == expected_sql
 
@@ -1306,7 +1306,7 @@ def test_sync_grants_config_with_overlaps(
     executed_sql = executed_query.sql(dialect="bigquery")
     expected_sql = (
         "SELECT privilege_type, grantee FROM `project`.`region-us-central1`.`INFORMATION_SCHEMA.OBJECT_PRIVILEGES` AS OBJECT_PRIVILEGES "
-        "WHERE object_schema = 'dataset' AND object_name = 'test_table' AND SPLIT(grantee, ':')[OFFSET(1)] <> session_user()"
+        "WHERE object_schema = 'dataset' AND object_name = 'test_table' AND SPLIT(grantee, ':')[OFFSET(1)] <> SESSION_USER()"
     )
     assert executed_sql == expected_sql
 

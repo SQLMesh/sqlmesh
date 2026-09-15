@@ -13,7 +13,6 @@ import React, { useState } from 'react'
 import { ModelSQLMeshModel } from '@/domain/sqlmesh-model'
 import { useEventBus } from '@/hooks/eventBus'
 import type { VSCodeEvent } from '@bus/callbacks'
-import { URI } from 'vscode-uri'
 import type { Model } from '@/api/client'
 import { useRpc } from '@/utils/rpc'
 import {
@@ -98,13 +97,12 @@ function Lineage() {
         return models[0].name
       }
       // @ts-ignore
-      const fileUri: string = activeFile.fileUri
-      const filePath = URI.file(fileUri).path
+      const filePath: string = activeFile.fileUri
       const model = models.find((m: Model) => {
         if (!m.full_path) {
           return false
         }
-        return URI.file(m.full_path).path === filePath
+        return m.full_path === filePath
       })
       if (model) {
         return model.name
@@ -134,9 +132,8 @@ function Lineage() {
 
   React.useEffect(() => {
     const handleChangeFocusedFile = (fileUri: { fileUri: string }) => {
-      const full_path = URI.parse(fileUri.fileUri).path
       const model = Object.values(modelsRecord).find(
-        m => URI.file(m.full_path).path === full_path,
+        m => m.full_path === fileUri.fileUri,
       )
       if (model) {
         setSelectedModel(model.name)
@@ -201,7 +198,7 @@ export function LineageComponentFromWeb({
     if (!model.full_path) {
       return
     }
-    vscode('openFile', { uri: URI.file(model.full_path).toString() })
+    vscode('openFile', { filePath: model.full_path })
   }
 
   function handleError(error: any): void {

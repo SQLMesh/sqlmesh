@@ -77,8 +77,8 @@ If you encounter issues, please refer to the [VSCode Extension Guide](https://sq
 
 We welcome contributions! Please:
 
-1. [Report bugs](https://github.com/tobikodata/sqlmesh/issues) you encounter
-2. [Request features](https://github.com/tobikodata/sqlmesh/issues) you'd like to see
+1. [Report bugs](https://github.com/SQLMesh/sqlmesh/issues) you encounter
+2. [Request features](https://github.com/SQLMesh/sqlmesh/issues) you'd like to see
 3. Share feedback on your experience
 
 ## 📄 License
@@ -87,7 +87,7 @@ This extension is licensed under the Apache License 2.0. See [LICENSE](LICENSE) 
 
 ## 🔗 Links
 
-- [SQLMesh GitHub Repository](https://github.com/tobikodata/sqlmesh)
+- [SQLMesh GitHub Repository](https://github.com/SQLMesh/sqlmesh)
 - [Tobiko Data Website](https://tobikodata.com)
 - [Extension Marketplace Page](https://marketplace.visualstudio.com/items?itemName=tobikodata.sqlmesh)
 

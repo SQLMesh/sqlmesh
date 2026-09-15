@@ -404,6 +404,8 @@ class GithubController:
                 categorizer_config=self.bot_config.auto_categorize_changes,
                 start=self.bot_config.default_pr_start,
                 min_intervals=self.bot_config.pr_min_intervals,
+                preview_start=self.bot_config.default_pr_preview_start,
+                preview_min_intervals=self.bot_config.pr_preview_min_intervals,
                 skip_backfill=self.bot_config.skip_pr_backfill,
                 include_unmodified=self.bot_config.pr_include_unmodified,
                 forward_only=self.forward_only_plan,
@@ -772,10 +774,10 @@ class GithubController:
                 "PR is already merged and this event was triggered prior to the merge."
             )
         merge_status = self._get_merge_state_status()
-        if merge_status.is_blocked:
+        if self.bot_config.check_if_blocked_on_deploy_to_prod and merge_status.is_blocked:
             raise CICDBotError(
                 "Branch protection or ruleset requirement is likely not satisfied, e.g. missing CODEOWNERS approval. "
-                "Please check PR and resolve any issues."
+                "Please check PR and resolve any issues. To disable this check, set `check_if_blocked_on_deploy_to_prod` to false in the bot configuration."
             )
         if merge_status.is_dirty:
             raise CICDBotError(
@@ -1180,13 +1182,26 @@ class GithubController:
 
     def _chunk_up_api_message(self, message: str) -> t.List[str]:
         """
-        Chunks up the message into `MAX_BYTE_LENGTH` byte chunks
+        Chunks up the message into chunks of at most `MAX_BYTE_LENGTH` bytes when
+        UTF-8 encoded.
+
+        Chunk boundaries are placed between characters rather than raw bytes so a
+        multibyte character that lands on a boundary is never split and dropped.
         """
-        message_encoded = message.encode("utf-8")
-        return [
-            message_encoded[i : i + self.MAX_BYTE_LENGTH].decode("utf-8", "ignore")
-            for i in range(0, len(message_encoded), self.MAX_BYTE_LENGTH)
-        ]
+        chunks: t.List[str] = []
+        current = ""
+        current_length = 0
+        for char in message:
+            char_length = len(char.encode("utf-8"))
+            if current and current_length + char_length > self.MAX_BYTE_LENGTH:
+                chunks.append(current)
+                current = ""
+                current_length = 0
+            current += char
+            current_length += char_length
+        if current:
+            chunks.append(current)
+        return chunks
 
     @property
     def running_in_github_actions(self) -> bool:

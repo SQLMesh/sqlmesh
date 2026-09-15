@@ -1,6 +1,7 @@
 <p align="center">
   <img src="docs/readme/sqlmesh.png" alt="SQLMesh logo" width="50%" height="50%">
 </p>
+<p align="center">SQLMesh is a project of the <a href="https://www.linuxfoundation.org/">Linux Foundation</a>.</p>
 
 SQLMesh is a next-generation data transformation framework designed to ship data quickly, efficiently, and without error. Data teams can run and deploy data transformations written in SQL or Python with visibility and control at any size.
 
@@ -12,7 +13,7 @@ It is more than just a [dbt alternative](https://tobikodata.com/reduce_costs_wit
 
 ## Core Features
 
-<img src="https://github.com/TobikoData/sqlmesh-public-assets/blob/main/vscode.gif?raw=true" alt="SQLMesh Plan Mode">
+<img src="https://github.com/SQLMesh/sqlmesh-public-assets/blob/main/vscode.gif?raw=true" alt="SQLMesh Plan Mode">
 
 > Get instant SQL impact and context of your changes, both in the CLI and in the [SQLMesh VSCode Extension](https://sqlmesh.readthedocs.io/en/latest/guides/vscode/?h=vs+cod)
 
@@ -121,19 +122,19 @@ outputs:
 * Never build a table [more than once](https://tobikodata.com/simplicity-or-efficiency-how-dbt-makes-you-choose.html)
 * Track what data’s been modified and run only the necessary transformations for [incremental models](https://tobikodata.com/correctly-loading-incremental-data-at-scale.html)
 * Run [unit tests](https://tobikodata.com/we-need-even-greater-expectations.html) for free and configure automated audits
-* Run [table diffs](https://sqlmesh.readthedocs.io/en/stable/examples/sqlmesh_cli_crash_course/?h=crash#run-data-diff-against-prod) between prod and dev based on tables/views impacted by a change 
+* Run [table diffs](https://sqlmesh.readthedocs.io/en/stable/examples/sqlmesh_cli_crash_course/?h=crash#run-data-diff-against-prod) between prod and dev based on tables/views impacted by a change
 
 <details>
 <summary><b>Level Up Your SQL</b></summary>
 Write SQL in any dialect and SQLMesh will transpile it to your target SQL dialect on the fly before sending it to the warehouse.
-<img src="https://github.com/TobikoData/sqlmesh/blob/main/docs/readme/transpile_example.png?raw=true" alt="Transpile Example">
+<img src="https://github.com/SQLMesh/sqlmesh/blob/main/docs/readme/transpile_example.png?raw=true" alt="Transpile Example">
 </details>
 
 * Debug transformation errors *before* you run them in your warehouse in [10+ different SQL dialects](https://sqlmesh.readthedocs.io/en/stable/integrations/overview/#execution-engines)
 * Definitions using [simply SQL](https://sqlmesh.readthedocs.io/en/stable/concepts/models/sql_models/#sql-based-definition) (no need for redundant and confusing `Jinja` + `YAML`)
 * See impact of changes before you run them in your warehouse with column-level lineage
 
-For more information, check out the [website](https://www.tobikodata.com/sqlmesh) and [documentation](https://sqlmesh.readthedocs.io/en/stable/).
+For more information, check out the [documentation](https://sqlmesh.readthedocs.io/en/stable/).
 
 ## Getting Started
 Install SQLMesh through [pypi](https://pypi.org/project/sqlmesh/) by running:
@@ -169,21 +170,24 @@ sqlmesh init # follow the prompts to get started (choose DuckDB)
 
 Follow the [quickstart guide](https://sqlmesh.readthedocs.io/en/stable/quickstart/cli/) to learn how to use SQLMesh. You already have a head start!
 
-Follow the [crash course](https://sqlmesh.readthedocs.io/en/stable/examples/sqlmesh_cli_crash_course/) to learn the core movesets and use the easy to reference cheat sheet. 
+Follow the [crash course](https://sqlmesh.readthedocs.io/en/stable/examples/sqlmesh_cli_crash_course/) to learn the core movesets and use the easy to reference cheat sheet.
 
 Follow this [example](https://sqlmesh.readthedocs.io/en/stable/examples/incremental_time_full_walkthrough/) to learn how to use SQLMesh in a full walkthrough.
 
 ## Join Our Community
-Together, we want to build data transformation without the waste. Connect with us in the following ways:
+Connect with us in the following ways:
 
 * Join the [Tobiko Slack Community](https://tobikodata.com/slack) to ask questions, or just to say hi!
-* File an issue on our [GitHub](https://github.com/TobikoData/sqlmesh/issues/new)
+* File an issue on our [GitHub](https://github.com/SQLMesh/sqlmesh/issues/new)
 * Send us an email at [hello@tobikodata.com](mailto:hello@tobikodata.com) with your questions or feedback
 * Read our [blog](https://tobikodata.com/blog)
 
-## Contribution
-Contributions in the form of issues or pull requests (from fork) are greatly appreciated. 
+## Contributing
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute, including our DCO sign-off requirement.
 
-[Read more](https://sqlmesh.readthedocs.io/en/stable/development/) on how to contribute to SQLMesh open source.
+Please review our [Code of Conduct](CODE_OF_CONDUCT.md) and [Governance](GOVERNANCE.md) documents.
 
-[Watch this video walkthrough](https://www.loom.com/share/2abd0d661c12459693fa155490633126?sid=b65c1c0f-8ef7-4036-ad19-3f85a3b87ff2) to see how our team contributes a feature to SQLMesh.
+[Read more](https://sqlmesh.readthedocs.io/en/stable/development/) on how to set up your development environment.
+
+## License
+This project is licensed under the [Apache License 2.0](LICENSE). Documentation is licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/).

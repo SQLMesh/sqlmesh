@@ -58,6 +58,21 @@ def test_read_custom_settings():
     pd.testing.assert_frame_equal(next(dfs), expected_df)
 
 
+def test_read_returns_independent_batches():
+    content = """key,value
+1,one
+2,two
+"""
+    seed = Seed(content=content)
+    seed_reader = seed.reader()
+
+    batches = list(seed_reader.read(batch_size=1))
+    batches[0].at[0, "value"] = "changed"
+
+    assert [df["value"].tolist() for df in batches] == [["changed"], ["two"]]
+    assert next(seed_reader.read())["value"].tolist() == ["one", "two"]
+
+
 def test_column_hashes():
     content = """key,value,ds
 1,one,2022-01-01

@@ -42,6 +42,22 @@ def test_file_cache(tmp_path: Path, mocker: MockerFixture):
     assert "客户数据" in cache._cache_entry_path("客户数据").name
 
 
+def test_file_cache_put_is_atomic(tmp_path: Path, mocker: MockerFixture) -> None:
+    cache: FileCache[_TestEntry] = FileCache(tmp_path)
+
+    old_entry = _TestEntry(value="old")
+    cache.put("test_name", value=old_entry)
+
+    # Simulate os.replace failing, e.g. on Windows when a concurrent reader still has the
+    # target file open. The existing entry must never be truncated / partially overwritten.
+    mocker.patch("sqlmesh.utils.cache.os.replace", side_effect=PermissionError("file in use"))
+    cache.put("test_name", value=_TestEntry(value="new"))
+
+    assert cache.get("test_name") == old_entry
+    # The temporary file should have been cleaned up.
+    assert len(list(tmp_path.glob("*"))) == 1
+
+
 def test_optimized_query_cache(tmp_path: Path, mocker: MockerFixture):
     model = SqlModel(
         name="test_model",
@@ -106,7 +122,7 @@ def test_optimized_query_cache_macro_def_change(tmp_path: Path, mocker: MockerFi
     assert cache.with_optimized_query(model)
     assert (
         model.render_query_or_raise().sql()
-        == 'SELECT "_q_0"."a" AS "a" FROM (SELECT 1 AS "a") AS "_q_0" WHERE "_q_0"."a" = 1'
+        == 'SELECT "_0"."a" AS "a" FROM (SELECT 1 AS "a") AS "_0" WHERE "_0"."a" = 1'
     )
 
     # Change the filter_ definition
@@ -129,5 +145,23 @@ def test_optimized_query_cache_macro_def_change(tmp_path: Path, mocker: MockerFi
     assert cache.with_optimized_query(new_model)
     assert (
         new_model.render_query_or_raise().sql()
-        == 'SELECT "_q_0"."a" AS "a" FROM (SELECT 1 AS "a") AS "_q_0" WHERE "_q_0"."a" = 2'
+        == 'SELECT "_0"."a" AS "a" FROM (SELECT 1 AS "a") AS "_0" WHERE "_0"."a" = 2'
     )
+
+
+def test_file_cache_init_handles_stale_file(tmp_path: Path, mocker: MockerFixture) -> None:
+    cache: FileCache[_TestEntry] = FileCache(tmp_path)
+
+    stale_file = tmp_path / f"{cache._cache_version}__fake_deleted_model_9999999999"
+    stale_file.touch()
+
+    original_stat = Path.stat
+
+    def flaky_stat(self, **kwargs):
+        if self.name == stale_file.name:
+            raise FileNotFoundError(f"Simulated stale file: {self}")
+        return original_stat(self, **kwargs)
+
+    mocker.patch.object(Path, "stat", flaky_stat)
+
+    FileCache(tmp_path)

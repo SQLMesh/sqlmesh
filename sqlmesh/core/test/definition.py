@@ -263,12 +263,9 @@ class ModelTest(unittest.TestCase):
         for col, value in object_sentinel_values.items():
             try:
                 # can't use `isinstance()` here - https://stackoverflow.com/a/68743663/1707525
-                if type(value) is datetime.date:
-                    expected[col] = pd.to_datetime(expected[col]).dt.date
-                elif type(value) is datetime.time:
-                    expected[col] = pd.to_datetime(expected[col]).dt.time
-                elif type(value) is datetime.datetime:
-                    expected[col] = pd.to_datetime(expected[col]).dt.to_pydatetime()
+                value_type = type(value)
+                if value_type in (datetime.date, datetime.time, datetime.datetime):
+                    expected[col] = _parse_expected_datetime_column(expected[col], value_type)
             except Exception as e:
                 from sqlmesh.core.console import get_console
 
@@ -308,7 +305,6 @@ class ModelTest(unittest.TestCase):
                 expected,
                 actual,
                 check_dtype=False,
-                check_datetimelike_compat=True,
                 check_like=True,  # Ignore column order
             )
         except AssertionError as e:
@@ -612,20 +608,27 @@ class ModelTest(unittest.TestCase):
         - Globally patch the SQLGlot dialect so that any date/time nodes are evaluated at the `execution_time` during generation
         """
         import time_machine
+        from sqlglot.generator import _DISPATCH_CACHE
 
         lock_ctx: AbstractContextManager = (
             self.CONCURRENT_RENDER_LOCK if self.concurrency else nullcontext()
         )
         time_ctx: AbstractContextManager = nullcontext()
         dialect_patch_ctx: AbstractContextManager = nullcontext()
+        dispatch_patch_ctx: AbstractContextManager = nullcontext()
 
         if self._execution_time:
+            generator_class = self._test_adapter_dialect.generator_class
             time_ctx = time_machine.travel(self._execution_time, tick=False)
-            dialect_patch_ctx = patch.dict(
-                self._test_adapter_dialect.generator_class.TRANSFORMS, self._transforms
-            )
+            dialect_patch_ctx = patch.dict(generator_class.TRANSFORMS, self._transforms)
 
-        with lock_ctx, time_ctx, dialect_patch_ctx:
+            # sqlglot caches a dispatch table per generator class, so we need to patch
+            # it as well to ensure the overridden transforms are actually used
+            dispatch = _DISPATCH_CACHE.get(generator_class)
+            if dispatch is not None:
+                dispatch_patch_ctx = patch.dict(dispatch, self._transforms)
+
+        with lock_ctx, time_ctx, dialect_patch_ctx, dispatch_patch_ctx:
             yield
 
     def _execute(self, query: exp.Query | str) -> pd.DataFrame:
@@ -674,7 +677,7 @@ class ModelTest(unittest.TestCase):
 
 
 class SqlModelTest(ModelTest):
-    def test_ctes(self, ctes: t.Dict[str, exp.Expression], recursive: bool = False) -> None:
+    def test_ctes(self, ctes: t.Dict[str, exp.Expr], recursive: bool = False) -> None:
         """Run CTE queries and compare output to expected output"""
         for cte_name, values in self.body["outputs"].get("ctes", {}).items():
             with self.subTest(cte=cte_name):
@@ -711,7 +714,7 @@ class SqlModelTest(ModelTest):
             query = self._render_model_query()
             sql = query.sql(self._test_adapter_dialect, pretty=self.engine_adapter._pretty_sql)
 
-        with_clause = query.args.get("with")
+        with_clause = query.args.get("with_")
 
         if with_clause:
             self.test_ctes(
@@ -819,7 +822,7 @@ class PythonModelTest(ModelTest):
             time_kwargs = {key: variables.pop(key) for key in TIME_KWARG_KEYS if key in variables}
             df = next(self.model.render(context=self.context, variables=variables, **time_kwargs))
 
-        assert not isinstance(df, exp.Expression)
+        assert not isinstance(df, exp.Expr)
         return df if isinstance(df, pd.DataFrame) else df.toPandas()
 
 
@@ -905,7 +908,7 @@ def generate_test(
     if isinstance(model, SqlModel):
         assert isinstance(test, SqlModelTest)
         model_query = test._render_model_query()
-        with_clause = model_query.args.get("with")
+        with_clause = model_query.args.get("with_")
 
         if with_clause and include_ctes:
             ctes = {}
@@ -1006,6 +1009,34 @@ def _raise_error(msg: str, path: Path | None = None) -> None:
     if path:
         raise TestError(f"Failed to run test at {path}:\n{msg}")
     raise TestError(f"Failed to run test:\n{msg}")
+
+
+def _parse_expected_datetime_column(series: pd.Series, target_type: type) -> pd.Series:
+    """Convert a series of expected values to python ``date``/``time``/``datetime``.
+
+    Falls back to microsecond resolution when pandas' default nanosecond
+    parsing overflows. SQL ``TIMESTAMP`` columns can carry values outside
+    pandas' default ``datetime64[ns]`` range (1677-09-21..2262-04-11), so
+    unit tests may compare against values like ``0001-01-01`` which are
+    valid in the database but overflow the default resolution.
+    """
+    import pandas as pd
+    from pandas.errors import OutOfBoundsDatetime
+
+    try:
+        parsed = pd.to_datetime(series)
+    except OutOfBoundsDatetime:
+        parsed = series.astype("datetime64[us]")
+
+    if target_type is datetime.date:
+        return parsed.dt.date
+    if target_type is datetime.time:
+        return parsed.dt.time
+    # `Series.dt.to_pydatetime()` returns an `ndarray` in pandas 2.x. Wrap it in a
+    # Series with ``dtype=object`` so pandas does not coerce the values back to
+    # ``pd.Timestamp`` (which would reintroduce the nanosecond overflow this
+    # function exists to avoid).
+    return pd.Series(parsed.dt.to_pydatetime(), index=parsed.index, dtype="object")
 
 
 def _normalize_df_value(value: t.Any) -> t.Any:

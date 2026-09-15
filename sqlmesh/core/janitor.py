@@ -16,16 +16,16 @@ from sqlmesh.core.state_sync.common import (
     RowBoundary,
     ExpiredBatchRange,
 )
-from sqlmesh.utils.errors import SQLMeshError
 
 
 def cleanup_expired_views(
     default_adapter: EngineAdapter,
     engine_adapters: t.Dict[str, EngineAdapter],
     environments: t.List[Environment],
-    warn_on_delete_failure: bool = False,
     console: t.Optional[Console] = None,
-) -> None:
+) -> t.List[str]:
+    failures: t.List[str] = []
+
     expired_schema_or_catalog_environments = [
         environment
         for environment in environments
@@ -85,10 +85,8 @@ def cleanup_expired_views(
                 console.update_cleanup_progress(expired_view)
         except Exception as e:
             message = f"Failed to drop the expired environment view '{expired_view}': {e}"
-            if warn_on_delete_failure:
-                logger.warning(message)
-            else:
-                raise SQLMeshError(message) from e
+            logger.warning(message)
+            failures.append(message)
 
     # Drop the schemas for the expired environments
     for engine_adapter, schema in schemas_to_drop:
@@ -102,10 +100,8 @@ def cleanup_expired_views(
                 console.update_cleanup_progress(schema.sql(dialect=engine_adapter.dialect))
         except Exception as e:
             message = f"Failed to drop the expired environment schema '{schema}': {e}"
-            if warn_on_delete_failure:
-                logger.warning(message)
-            else:
-                raise SQLMeshError(message) from e
+            logger.warning(message)
+            failures.append(message)
 
     # Drop any catalogs that were associated with a snapshot where the engine adapter supports dropping catalogs
     # catalogs_to_drop is only populated when environment_suffix_target is set to 'catalog'
@@ -117,10 +113,10 @@ def cleanup_expired_views(
                     console.update_cleanup_progress(catalog)
             except Exception as e:
                 message = f"Failed to drop the expired environment catalog '{catalog}': {e}"
-                if warn_on_delete_failure:
-                    logger.warning(message)
-                else:
-                    raise SQLMeshError(message) from e
+                logger.warning(message)
+                failures.append(message)
+
+    return failures
 
 
 def delete_expired_snapshots(
@@ -129,9 +125,10 @@ def delete_expired_snapshots(
     *,
     current_ts: int,
     ignore_ttl: bool = False,
+    force_delete: bool = False,
     batch_size: t.Optional[int] = None,
     console: t.Optional[Console] = None,
-) -> None:
+) -> t.List[str]:
     """Delete all expired snapshots in batches.
 
     This helper function encapsulates the logic for deleting expired snapshots in batches,
@@ -142,12 +139,14 @@ def delete_expired_snapshots(
         snapshot_evaluator: SnapshotEvaluator instance to clean up tables associated with snapshots.
         current_ts: Timestamp used to evaluate expiration.
         ignore_ttl: If True, include snapshots regardless of TTL (only checks if unreferenced).
+        force_delete: If True, delete snapshot state records even when physical table cleanup fails.
         batch_size: Maximum number of snapshots to fetch per batch.
         console: Optional console for reporting progress.
 
     Returns:
-        The total number of deleted expired snapshots.
+        List of failure messages so callers can surface them at the end of the janitor run.
     """
+    failures: t.List[str] = []
     num_expired_snapshots = 0
     for batch in iter_expired_snapshot_batches(
         state_reader=state_sync,
@@ -165,17 +164,32 @@ def delete_expired_snapshots(
             len(batch.expired_snapshot_ids),
             end_info,
         )
-        snapshot_evaluator.cleanup(
-            target_snapshots=batch.cleanup_tasks,
-            on_complete=console.update_cleanup_progress if console else None,
-        )
-        state_sync.delete_expired_snapshots(
-            batch_range=ExpiredBatchRange(
-                start=RowBoundary.lowest_boundary(),
-                end=batch.batch_range.end,
-            ),
-            ignore_ttl=ignore_ttl,
-        )
-        logger.info("Cleaned up expired snapshots batch")
-        num_expired_snapshots += len(batch.expired_snapshot_ids)
+        cleanup_succeeded = True
+        try:
+            snapshot_evaluator.cleanup(
+                target_snapshots=batch.cleanup_tasks,
+                on_complete=console.update_cleanup_progress if console else None,
+            )
+        except Exception as failed_drops:
+            message = f"Failed to clean up: {failed_drops}"
+            logger.warning(message)
+            failures.append(message)
+            cleanup_succeeded = False
+
+        if cleanup_succeeded or force_delete:
+            try:
+                state_sync.delete_expired_snapshots(
+                    batch_range=ExpiredBatchRange(
+                        start=RowBoundary.lowest_boundary(),
+                        end=batch.batch_range.end,
+                    ),
+                    ignore_ttl=ignore_ttl,
+                )
+                logger.info("Cleaned up expired snapshots batch")
+                num_expired_snapshots += len(batch.expired_snapshot_ids)
+            except Exception as e:
+                message = f"Failed to delete expired snapshot state records: {e}"
+                logger.warning(message)
+                failures.append(message)
     logger.info("Cleaned up %s expired snapshots", num_expired_snapshots)
+    return failures

@@ -47,7 +47,7 @@ export class LineagePanel implements WebviewViewProvider, Disposable {
             key: 'vscode_send',
             payload: {
               key: 'changeFocusOnFile',
-              payload: { path: editor.document.uri.toString() },
+              payload: { path: editor.document.uri.fsPath },
             },
           })
         }
@@ -84,7 +84,7 @@ export class LineagePanel implements WebviewViewProvider, Disposable {
             if (workspaceFolders.length != 1) {
               throw new Error('Only one workspace folder is supported')
             }
-            const fullPath = Uri.parse(message.payload.uri)
+            const fullPath = Uri.file(message.payload.filePath)
             const document = await workspace.openTextDocument(fullPath)
             await window.showTextDocument(document)
             break

@@ -209,6 +209,8 @@ function ModelColumnLineage(): JSX.Element {
     withConnected,
     withImpacted,
     withSecondary,
+    withOnlyDirect,
+    directNeighbors,
     hasBackground,
     activeEdges,
     connectedNodes,
@@ -217,6 +219,7 @@ function ModelColumnLineage(): JSX.Element {
     handleError,
     setActiveNodes,
     setWithColumns,
+    setWithOnlyDirect,
   } = useLineageFlow()
 
   const { setCenter } = useReactFlow()
@@ -252,6 +255,8 @@ function ModelColumnLineage(): JSX.Element {
       withConnected,
       withImpacted,
       withSecondary,
+      withOnlyDirect,
+      directNeighbors,
     )
     const newEdges = getUpdatedEdges(
       allEdges,
@@ -264,6 +269,8 @@ function ModelColumnLineage(): JSX.Element {
       withConnected,
       withImpacted,
       withSecondary,
+      withOnlyDirect,
+      directNeighbors,
     )
     const createLayout = createGraphLayout({
       nodesMap,
@@ -324,6 +331,8 @@ function ModelColumnLineage(): JSX.Element {
       withConnected,
       withImpacted,
       withSecondary,
+      withOnlyDirect,
+      directNeighbors,
     )
 
     const newEdges = getUpdatedEdges(
@@ -337,6 +346,8 @@ function ModelColumnLineage(): JSX.Element {
       withConnected,
       withImpacted,
       withSecondary,
+      withOnlyDirect,
+      directNeighbors,
     )
 
     setEdges(newEdges)
@@ -353,6 +364,8 @@ function ModelColumnLineage(): JSX.Element {
     withConnected,
     withImpacted,
     withSecondary,
+    withOnlyDirect,
+    directNeighbors,
     withColumns,
     mainNode,
   ])
@@ -395,6 +408,8 @@ function ModelColumnLineage(): JSX.Element {
           <SettingsControl
             showColumns={withColumns}
             onWithColumnsChange={setWithColumns}
+            withOnlyDirect={withOnlyDirect}
+            onWithOnlyDirectChange={setWithOnlyDirect}
           />
         </Controls>
         <Background

@@ -126,7 +126,7 @@ def get_table_diff(
     table_diffs = context.table_diff(
         source=source,
         target=target,
-        on=exp.condition(on) if on else None,
+        on=t.cast(exp.Condition, exp.condition(on)) if on else None,
         select_models={model_or_snapshot} if model_or_snapshot else None,
         where=where,
         limit=limit,

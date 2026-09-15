@@ -340,12 +340,12 @@ class SparkEngineAdapter(
         return table
 
     def fetchdf(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> pd.DataFrame:
         return self.fetch_pyspark_df(query, quote_identifiers=quote_identifiers).toPandas()
 
     def fetch_pyspark_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> PySparkDataFrame:
         return self._ensure_pyspark_df(
             self._fetch_native_df(query, quote_identifiers=quote_identifiers)
@@ -437,7 +437,7 @@ class SparkEngineAdapter(
     def _create_table(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,

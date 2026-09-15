@@ -41,6 +41,18 @@ SKIP_LOAD_COMMANDS = (
     "table_name",
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
+LOCAL_ONLY_COMMANDS = ("format",)
+
+
+class _SQLMeshGroup(click.Group):
+    def parse_args(self, ctx: click.Context, args: t.List[str]) -> t.List[str]:
+        rest = super().parse_args(ctx, args)
+        # Preserve the subcommand arguments because Click consumes them before invoking the group callback.
+        protected_args = getattr(ctx, "_protected_args", None)
+        if protected_args is None:
+            protected_args = ctx.protected_args
+        ctx.meta["subcommand_args"] = tuple(protected_args) + tuple(ctx.args)
+        return rest
 
 
 def _sqlmesh_version() -> str:
@@ -52,7 +64,7 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
-@click.group(no_args_is_help=True)
+@click.group(cls=_SQLMeshGroup, no_args_is_help=True)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
 @opt.config
@@ -115,6 +127,11 @@ def cli(
     configure_console(ignore_warnings=ignore_warnings)
 
     load = True
+    # Local-only gating must hold for any number of --paths, so it stays outside the block below.
+    load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
+    # The parent callback constructs Context before Click invokes `lint`, so inspect its parsed args here.
+    if ctx.invoked_subcommand == "lint" and "--local" in ctx.meta["subcommand_args"]:
+        load_state = False
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -123,6 +140,10 @@ def cli(
             return
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
+
+    # Unlike the other commands above, lint can scope its own load for multi-project contexts.
+    if ctx.invoked_subcommand == "lint":
+        load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
     log_limit = list(configs.values())[0].log_limit
@@ -135,6 +156,7 @@ def cli(
             config=configs,
             gateway=gateway,
             load=load,
+            load_state=load_state,
         )
     except Exception:
         if debug:
@@ -165,7 +187,7 @@ def cli(
 @click.option(
     "--dlt-path",
     type=str,
-    help="The directory where the DLT pipeline resides. Use alongside template: dlt",
+    help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines). Use alongside template: dlt",
 )
 @click.pass_context
 @error_handler
@@ -246,7 +268,7 @@ Next steps:
 Need help?
 • Docs:   https://sqlmesh.readthedocs.io
 • Slack:  https://www.tobikodata.com/slack
-• GitHub: https://github.com/TobikoData/sqlmesh/issues
+• GitHub: https://github.com/SQLMesh/sqlmesh/issues
 """)
 
 
@@ -406,6 +428,12 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     default=None,
 )
 @click.option(
+    "--test-changed-only",
+    is_flag=True,
+    help="Run unit tests only for models included in the plan instead of all tests.",
+    default=None,
+)
+@click.option(
     "--skip-linter",
     is_flag=True,
     help="Skip linting prior to generating the plan if the linter is enabled.",
@@ -535,7 +563,8 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
 )
 @click.option(
     "--min-intervals",
-    default=0,
+    type=int,
+    default=None,
     help="For every model, ensure at least this many intervals are covered by a missing intervals check regardless of the plan start date",
 )
 @opt.verbose
@@ -622,25 +651,43 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
 def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
     """Invalidate the target environment, forcing its removal during the next run of the janitor process."""
     context = ctx.obj
-    context.invalidate_environment(environment, **kwargs)
+    context.invalidate_environment(environment, must_exist=True, **kwargs)
 
 
 @cli.command("janitor")
 @click.option(
     "--ignore-ttl",
     is_flag=True,
-    help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire",
+    help="Cleanup snapshots that are not referenced in any environment, regardless of when they're set to expire. Has no effect when --environment is specified.",
+)
+@click.option(
+    "--force-delete",
+    is_flag=True,
+    help="Delete expired environment and snapshot state records even when the physical table or view drops fail. "
+    "Any objects that could not be dropped become orphaned and must be removed manually.",
+)
+@click.option(
+    "--environment",
+    "-e",
+    default=None,
+    help="Scope cleanup to a single expired environment. Global snapshot and interval compaction are skipped.",
 )
 @click.pass_context
 @error_handler
 @cli_analytics
-def janitor(ctx: click.Context, ignore_ttl: bool, **kwargs: t.Any) -> None:
+def janitor(
+    ctx: click.Context,
+    ignore_ttl: bool,
+    force_delete: bool,
+    environment: t.Optional[str],
+    **kwargs: t.Any,
+) -> None:
     """
     Run the janitor process on-demand.
 
     The janitor cleans up old environments and expired snapshots.
     """
-    ctx.obj.run_janitor(ignore_ttl, **kwargs)
+    ctx.obj.run_janitor(ignore_ttl, force_delete=force_delete, environment=environment, **kwargs)
 
 
 @cli.command("destroy")
@@ -758,6 +805,12 @@ def create_test(
     default=False,
     help="Preserve the fixture tables in the testing database, useful for debugging.",
 )
+@click.option(
+    "--select-model",
+    type=str,
+    multiple=True,
+    help="Select specific models to run unit tests for.",
+)
 @click.argument("tests", nargs=-1)
 @click.pass_obj
 @error_handler
@@ -767,14 +820,19 @@ def test(
     k: t.List[str],
     verbose: int,
     preserve_fixtures: bool,
+    select_model: t.List[str],
     tests: t.List[str],
 ) -> None:
     """Run model unit tests."""
+    model_names = (
+        obj._new_selector().expand_model_selections(select_model) if select_model else None
+    )
     result = obj.test(
         match_patterns=k,
         tests=tests,
         verbosity=Verbosity(verbose),
         preserve_fixtures=preserve_fixtures,
+        model_names=model_names,
     )
     if not result.wasSuccessful():
         exit(1)
@@ -1133,7 +1191,7 @@ def table_name(
 @click.option(
     "--dlt-path",
     type=str,
-    help="The directory where the DLT pipeline resides.",
+    help="The DLT pipelines working directory, where DLT stores pipeline state (by default ~/.dlt/pipelines).",
 )
 @click.pass_context
 @error_handler
@@ -1172,15 +1230,36 @@ def environments(obj: Context) -> None:
     multiple=True,
     help="A model to lint. Multiple models can be linted. If no models are specified, every model will be linted.",
 )
+@click.option(
+    "--use-project-index",
+    is_flag=True,
+    default=None,
+    help="Use the persistent project index. With --model, only the selected models and their upstream dependencies are loaded, resolved, and validated, so errors in unrelated models are not reported. Without --model, every model is still loaded and linted. Can also be enabled with linter.use_project_index.",
+)
+@click.option(
+    "--local",
+    is_flag=True,
+    expose_value=False,
+    help="Lint using only locally loaded project files without loading state.",
+)
 @click.pass_obj
 @error_handler
 @cli_analytics
 def lint(
     obj: Context,
     models: t.Iterator[str],
+    use_project_index: t.Optional[bool],
 ) -> None:
     """Run the linter for the target model(s)."""
-    obj.lint_models(models)
+    obj.lint_models(
+        models,
+        use_project_index=use_project_index,
+    )
+
+    if not obj.models:
+        raise click.ClickException(
+            f"`{obj.path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
+        )
 
 
 @cli.group(no_args_is_help=True)

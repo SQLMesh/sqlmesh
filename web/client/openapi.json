@@ -1371,6 +1371,12 @@
             "type": "boolean",
             "title": "Has Running Task",
             "default": false
+          },
+          "node_colors": {
+            "additionalProperties": { "type": "string" },
+            "type": "object",
+            "title": "Node Colors",
+            "default": {}
           }
         },
         "additionalProperties": false,

@@ -59,6 +59,31 @@ plan:
         )
 
 
+def add_incremental_model_test(temp_dir) -> None:
+    with open(temp_dir / "tests" / "test_incremental_model.yaml", "w", encoding="utf-8") as f:
+        f.write(
+            """
+test_example_incremental_model:
+  model: sqlmesh_example.incremental_model
+  vars:
+    start: 2020-01-01
+    end: 2020-01-02
+  inputs:
+    sqlmesh_example.seed_model:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  outputs:
+    query:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+"""
+        )
+
+
 def update_incremental_model(temp_dir) -> None:
     with open(temp_dir / "models" / "incremental_model.sql", "w", encoding="utf-8") as f:
         f.write(
@@ -193,6 +218,105 @@ def test_plan_skip_tests(runner, tmp_path):
     assert_backfill_success(result)
 
 
+def test_plan_no_changes_runs_tests_by_default(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 2 tests against duckdb" in result.output
+    assert "No changes to plan" in result.output or "No changes" in result.output
+
+
+def test_plan_test_changed_only_with_no_changes(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+        ],
+        input="\n",
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran" not in result.output
+
+
+def test_plan_test_changed_only_runs_only_changed_model_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
+
+
+def test_plan_select_model_test_changed_only_scopes_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+    incremental_model_path = tmp_path / "models" / "incremental_model.sql"
+    incremental_model_path.write_text(
+        incremental_model_path.read_text().replace(
+            "  item_id,\n  event_date,",
+            "  item_id,\n  'b' as new_col,\n  event_date,",
+        )
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--select-model",
+            "sqlmesh_example.full_model",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
+
+
 def test_plan_skip_linter(runner, tmp_path):
     create_example_project(tmp_path)
 
@@ -261,6 +385,44 @@ def test_plan_skip_backfill(runner, tmp_path, flag):
     assert result.exit_code == 0
     assert_virtual_layer_updated(result)
     assert "Model batches executed" not in result.output
+
+
+def test_plan_min_intervals(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    # build prod so the dev plan below has a baseline to diff against
+    runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts", "--auto-apply"],
+    )
+    update_incremental_model(tmp_path)
+
+    # --min-intervals must be coerced to int; otherwise the string reaches
+    # range() in _calculate_start_override_per_model and raises TypeError
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "dev",
+            "--no-prompts",
+            "--auto-apply",
+            "--min-intervals",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # a non-integer value is rejected by click, not surfaced as a traceback
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "dev", "--min-intervals", "abc"],
+    )
+    assert result.exit_code == 2
+    assert "is not a valid integer" in result.output
 
 
 def test_plan_auto_apply(runner, tmp_path):
@@ -878,7 +1040,6 @@ def test_dlt_pipeline_errors(runner, tmp_path):
     assert "Error: Could not attach to pipeline" in result.output
 
 
-@time_machine.travel(FREEZE_TIME)
 def test_dlt_filesystem_pipeline(tmp_path):
     import dlt
 
@@ -922,7 +1083,7 @@ SELECT
 FROM
   filesystem_pipeline_dataset.equipment as c
 WHERE
-  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(equipment_model_path) as file:
@@ -982,7 +1143,6 @@ WHERE
         rmtree(storage_path)
 
 
-@time_machine.travel(FREEZE_TIME)
 def test_dlt_pipeline(runner, tmp_path):
     from dlt.common.pipeline import get_dlt_pipelines_dir
 
@@ -997,7 +1157,7 @@ def test_dlt_pipeline(runner, tmp_path):
         exec(file.read())
 
     # This should fail since it won't be able to locate the pipeline in this path
-    with pytest.raises(ClickException, match=r".*Could not attach to pipeline*"):
+    with pytest.raises(ClickException, match=r".*Could not attach to pipeline*") as excinfo:
         init_example_project(
             tmp_path,
             "duckdb",
@@ -1005,6 +1165,12 @@ def test_dlt_pipeline(runner, tmp_path):
             pipeline="sushi",
             dlt_path="./dlt2/pipelines",
         )
+
+    # The error should surface where the pipeline was searched for and, since the
+    # pipeline exists in the default working directory, a hint about --dlt-path
+    error_message = str(excinfo.value)
+    assert "Searched in: ./dlt2/pipelines" in error_message
+    assert "Try omitting --dlt-path" in error_message
 
     # By setting the pipelines path where the pipeline directory is located, it should work
     dlt_path = get_dlt_pipelines_dir()
@@ -1060,7 +1226,7 @@ SELECT
 FROM
   sushi_dataset.sushi_types as c
 WHERE
-  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     dlt_sushi_types_model_path = tmp_path / "models/incremental_sushi_types.sql"
@@ -1091,7 +1257,7 @@ SELECT
 FROM
   sushi_dataset._dlt_loads as c
 WHERE
-  TO_TIMESTAMP(CAST(c.load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(c.load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(dlt_loads_model_path) as file:
@@ -1118,7 +1284,7 @@ JOIN
 ON
   c._dlt_parent_id = p._dlt_id
 WHERE
-  TO_TIMESTAMP(CAST(p._dlt_load_id AS DOUBLE)) BETWEEN @start_ds AND @end_ds
+  TO_TIMESTAMP(CAST(p._dlt_load_id AS DOUBLE)) BETWEEN @start_ts AND @end_ts
 """
 
     with open(dlt_sushi_fillings_model_path) as file:
@@ -1308,6 +1474,51 @@ def test_lint(runner, tmp_path):
     )
     assert result.output.count("Linter errors for") == 2
     assert result.exit_code == 1
+
+
+def test_lint_no_models(runner, tmp_path):
+    with open(tmp_path / "config.yaml", "w", encoding="utf-8") as f:
+        f.write("model_defaults:\n  dialect: duckdb\n")
+
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint"])
+    assert result.exit_code == 1
+    assert "doesn't seem to have any models" in result.output
+
+
+def test_lint_model_scopes_validation_with_multiple_projects(runner, tmp_path):
+    project_a = tmp_path / "project_a"
+    project_b = tmp_path / "project_b"
+    for project in (project_a, project_b):
+        (project / "models").mkdir(parents=True)
+        with open(project / "config.yaml", "w", encoding="utf-8") as f:
+            f.write(
+                f"project: {project.name}\n"
+                "model_defaults:\n"
+                "  dialect: duckdb\n"
+                "linter:\n"
+                "  enabled: true\n"
+            )
+
+    with open(project_a / "models" / "selected.sql", "w", encoding="utf-8") as f:
+        f.write("MODEL(name selected); SELECT 1 AS col;")
+    with open(project_b / "models" / "unrelated.sql", "w", encoding="utf-8") as f:
+        f.write("MODEL(name unrelated, kind FULL, partitioned_by (col, col)); SELECT 1 AS col;")
+
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            project_a,
+            "--paths",
+            project_b,
+            "lint",
+            "--use-project-index",
+            "--model",
+            "selected",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def test_state_export(runner: CliRunner, tmp_path: Path) -> None:
@@ -1950,8 +2161,8 @@ def test_init_dbt_template(runner: CliRunner, tmp_path: Path):
 @time_machine.travel(FREEZE_TIME)
 def test_init_project_engine_configs(tmp_path):
     engine_type_to_config = {
-        "redshift": "# concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # database: \n      # host: \n      # port: \n      # source_address: \n      # unix_sock: \n      # ssl: \n      # sslmode: \n      # timeout: \n      # tcp_keepalive: \n      # application_name: \n      # preferred_role: \n      # principal_arn: \n      # credentials_provider: \n      # region: \n      # cluster_identifier: \n      # iam: \n      # is_serverless: \n      # serverless_acct_id: \n      # serverless_work_group: \n      # enable_merge: ",
-        "bigquery": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # method: oauth\n      # project: \n      # execution_project: \n      # quota_project: \n      # location: \n      # keyfile: \n      # keyfile_json: \n      # token: \n      # refresh_token: \n      # client_id: \n      # client_secret: \n      # token_uri: \n      # scopes: \n      # impersonated_service_account: \n      # job_creation_timeout_seconds: \n      # job_execution_timeout_seconds: \n      # job_retries: 1\n      # job_retry_deadline_seconds: \n      # priority: \n      # maximum_bytes_billed: ",
+        "redshift": "# concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # database: \n      # host: \n      # port: \n      # source_address: \n      # unix_sock: \n      # ssl: \n      # sslmode: \n      # timeout: \n      # tcp_keepalive: \n      # application_name: \n      # preferred_role: \n      # principal_arn: \n      # credentials_provider: \n      # region: \n      # cluster_identifier: \n      # iam: \n      # db_user: \n      # is_serverless: \n      # serverless_acct_id: \n      # serverless_work_group: \n      # enable_merge: ",
+        "bigquery": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # method: oauth\n      # project: \n      # execution_project: \n      # quota_project: \n      # location: \n      # keyfile: \n      # keyfile_json: \n      # token: \n      # refresh_token: \n      # client_id: \n      # client_secret: \n      # token_uri: \n      # scopes: \n      # impersonated_service_account: \n      # job_creation_timeout_seconds: \n      # job_execution_timeout_seconds: \n      # job_retries: 1\n      # job_retry_deadline_seconds: \n      # priority: \n      # maximum_bytes_billed: \n      # reservation: ",
         "snowflake": "account: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # warehouse: \n      # database: \n      # role: \n      # authenticator: \n      # token: \n      # host: \n      # port: \n      # application: Tobiko_SQLMesh\n      # private_key: \n      # private_key_path: \n      # private_key_passphrase: \n      # session_parameters: ",
         "databricks": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # server_hostname: \n      # http_path: \n      # access_token: \n      # auth_type: \n      # oauth_client_id: \n      # oauth_client_secret: \n      # catalog: \n      # http_headers: \n      # session_configuration: \n      # databricks_connect_server_hostname: \n      # databricks_connect_access_token: \n      # databricks_connect_cluster_id: \n      # databricks_connect_use_serverless: False\n      # force_databricks_connect: False\n      # disable_databricks_connect: False\n      # disable_spark_session: False",
         "postgres": "host: \n      user: \n      password: \n      port: \n      database: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: True\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # keepalives_idle: \n      # connect_timeout: 10\n      # role: \n      # sslmode: \n      # application_name: ",
@@ -2239,3 +2450,164 @@ FROM table1""")
         assert result.exit_code == 0
     finally:
         del os.environ["SQLMESH__FORMAT__LEADING_COMMA"]
+
+
+def _create_local_only_project(path: Path, project: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    create_example_project(path, template=ProjectTemplate.EMPTY)
+    config_path = path / "config.yaml"
+    existing = config_path.read_text(encoding="utf-8")
+    config_path.write_text(f"project: {project}\n\n" + existing, encoding="utf-8")
+
+    (path / "models" / "example.sql").write_text(
+        f"MODEL(name {project}.example, dialect 'duckdb'); SELECT 1 AS col\n",
+        encoding="utf-8",
+    )
+
+
+def _patch_state_access(mocker):
+    return mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+
+def _setup_local_only_project(tmp_path, mocker):
+    _create_local_only_project(tmp_path, "cli_test")
+    return _patch_state_access(mocker)
+
+
+def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_format_runs_without_state_multi_repo_partial(runner: CliRunner, copy_to_temp_path, mocker):
+    """Format one repo of a multi-repo project whose upstream models live only in prod state."""
+    repo_2 = copy_to_temp_path("examples/multi")[0] / "repo_2"
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--gateway", "memory", "--paths", str(repo_2), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_lint_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `lint` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "lint"])
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `lint`"
+        )
+    assert mock.called, "state-sync was never accessed during `lint`"
+
+
+def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "lint", "--local"])
+
+    assert result.exit_code == 0, f"Lint failed: {result.output}\nException: {result.exception}"
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is False, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `lint --local`"
+        )
+    mock.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["format"])
+def test_local_only_commands_skip_state_multiple_paths(
+    runner: CliRunner, tmp_path: Path, mocker, command: str
+):
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    _create_local_only_project(project_a, "proj_a")
+    _create_local_only_project(project_b, "proj_b")
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(project_a), "--paths", str(project_b), command])
+    assert result.exit_code == 0, (
+        f"{command} failed: {result.output}\nException: {result.exception}"
+    )
+    mock.assert_not_called()
+
+
+def test_plan_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `plan` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "plan"], input="n\n")
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `plan`"
+        )
+    assert mock.called, "state-sync was never accessed during `plan`"
+
+
+def test_format_does_not_open_state_connection(
+    runner: CliRunner, tmp_path: Path, mocker, monkeypatch
+):
+    """Format must not open a configured remote Postgres state connection when CI secrets are unset."""
+    pytest.importorskip("psycopg2")
+
+    for var in ("PG_HOST", "PG_USER", "PG_PASSWORD", "PG_DATABASE"):
+        monkeypatch.delenv(var, raising=False)
+
+    create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
+    (tmp_path / "config.yaml").write_text(
+        """project: cli_test
+
+gateways:
+  prod:
+    state_connection:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'postgres.internal.example.com') }}"
+      port: 5432
+      user: "{{ env_var('PG_USER') }}"
+      password: "{{ env_var('PG_PASSWORD') }}"
+      database: "{{ env_var('PG_DATABASE', 'sqlmesh_state') }}"
+    connection:
+      type: duckdb
+      database: "warehouse.db"
+
+default_gateway: prod
+
+model_defaults:
+  dialect: duckdb
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "example.sql").write_text(
+        "MODEL(name local.example, dialect 'duckdb'); SELECT 1 AS col\n",
+        encoding="utf-8",
+    )
+
+    mock = mocker.patch(
+        "sqlmesh.core.state_sync.db.facade.EngineAdapterStateSync.get_versions",
+        side_effect=RuntimeError("state should not be accessed"),
+    )
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()

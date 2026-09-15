@@ -16,7 +16,6 @@ from web.server.settings import (
     invalidate_context_cache,
 )
 from web.server.utils import is_relative_to
-from sqlglot.helper import ensure_list
 
 
 async def watch_project() -> None:
@@ -40,10 +39,10 @@ async def watch_project() -> None:
     async for entries in awatch(
         settings.project_path,
         watch_filter=DefaultFilter(
-            ignore_paths=ensure_list(DefaultFilter.ignore_paths) + ignore_paths,
-            ignore_entity_patterns=ensure_list(DefaultFilter.ignore_entity_patterns)
+            ignore_paths=list(DefaultFilter.ignore_paths or []) + ignore_paths,
+            ignore_entity_patterns=list(DefaultFilter.ignore_entity_patterns or [])
             + ignore_entity_patterns,
-            ignore_dirs=ensure_list(DefaultFilter.ignore_dirs) + ignore_dirs,
+            ignore_dirs=list(DefaultFilter.ignore_dirs or []) + ignore_dirs,
         ),
     ):
         changes: t.List[models.ArtifactChange] = []
@@ -56,7 +55,7 @@ async def watch_project() -> None:
                     changes.append(
                         models.ArtifactChange(
                             change=Change.deleted,
-                            path=str(relative_path),
+                            path=relative_path.as_posix(),
                         )
                     )
                 elif change == Change.added:
@@ -70,9 +69,9 @@ async def watch_project() -> None:
                         models.ArtifactChange(
                             type=models.ArtifactType.file,
                             change=change,
-                            path=str(relative_path),
+                            path=relative_path.as_posix(),
                             file=_get_file_with_content(
-                                settings.project_path / relative_path, str(relative_path)
+                                settings.project_path / relative_path, relative_path.as_posix()
                             ),
                         )
                     )

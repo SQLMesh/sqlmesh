@@ -1,3 +1,4 @@
 packages:
   - local: packages/customers
-
+  - local: packages/my_macros
+  - local: packages/my_package

@@ -833,7 +833,7 @@ def test_create_table_from_query(make_mocked_engine_adapter: t.Callable, mocker:
     columns_mock.assert_called_once_with(exp.table_("__temp_ctas_test_random_id", quoted=True))
 
     # We don't want to drop anything other than LIMIT 0
-    # See https://github.com/TobikoData/sqlmesh/issues/4048
+    # See https://github.com/SQLMesh/sqlmesh/issues/4048
     adapter.ctas(
         table_name="test_schema.test_table",
         query_or_df=parse_one(
@@ -848,7 +848,7 @@ def test_create_table_from_query(make_mocked_engine_adapter: t.Callable, mocker:
 
 
 def test_replace_query_strategy(adapter: MSSQLEngineAdapter, mocker: MockerFixture):
-    # ref issue 4472: https://github.com/TobikoData/sqlmesh/issues/4472
+    # ref issue 4472: https://github.com/SQLMesh/sqlmesh/issues/4472
     # The FULL strategy calls EngineAdapter.replace_query() which calls _insert_overwrite_by_condition() should use DELETE+INSERT and not MERGE
     expressions = d.parse(
         f"""
@@ -1002,3 +1002,24 @@ def test_python_scd2_model_preserves_physical_properties(make_snapshot):
     snapshot: Snapshot = make_snapshot(m)
     assert snapshot.node.physical_properties == m.physical_properties
     assert snapshot.node.physical_properties.get("mssql_merge_exists")
+
+
+def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
+    adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
+    table = exp.to_table("test_table")
+    comment = "\\"
+
+    mocker.patch.object(adapter, "_create_table")
+
+    adapter.create_table(
+        "test_table",
+        {"a": exp.DataType.build("INT"), "b": exp.DataType.build("INT")},
+        table_description=comment,
+        column_descriptions={"a": comment},
+    )
+
+    sql_calls = to_sql_calls(adapter)
+    assert sql_calls == [
+        adapter._build_create_comment_table_exp(table, comment),
+        adapter._build_create_comment_column_exp(table, "a", comment),
+    ]

@@ -1,7 +1,7 @@
 #
 
 <p align="center">
-  <img src="https://github.com/TobikoData/sqlmesh/blob/main/docs/readme/sqlmesh.png?raw=true" alt="SQLMesh logo" width="50%" height="50%">
+  <img src="https://github.com/SQLMesh/sqlmesh/blob/main/docs/readme/sqlmesh.png?raw=true" alt="SQLMesh logo" width="50%" height="50%">
 </p>
 
 SQLMesh is a next-generation data transformation framework designed to ship data quickly, efficiently, and without error. Data teams can efficiently run and deploy data transformations written in SQL or Python with visibility and control at any size.
@@ -9,11 +9,11 @@ SQLMesh is a next-generation data transformation framework designed to ship data
 It is more than just a [dbt alternative](https://tobikodata.com/reduce_costs_with_cron_and_partitions.html).
 
 <p align="center">
-  <img src="https://github.com/TobikoData/sqlmesh/blob/main/docs/readme/architecture_diagram.png?raw=true" alt="Architecture Diagram" width="100%" height="100%">
+  <img src="https://github.com/SQLMesh/sqlmesh/blob/main/docs/readme/architecture_diagram.png?raw=true" alt="Architecture Diagram" width="100%" height="100%">
 </p>
 
 ## Core Features
-<img src="https://github.com/TobikoData/sqlmesh-public-assets/blob/main/sqlmesh_plan_mode.gif?raw=true" alt="SQLMesh Plan Mode">
+<img src="https://github.com/SQLMesh/sqlmesh-public-assets/blob/main/sqlmesh_plan_mode.gif?raw=true" alt="SQLMesh Plan Mode">
 
 > Get instant SQL impact analysis of your changes, whether in the CLI or in [SQLMesh Plan Mode](https://sqlmesh.readthedocs.io/en/stable/guides/ui/?h=modes#working-with-an-ide)
 
@@ -121,7 +121,7 @@ It is more than just a [dbt alternative](https://tobikodata.com/reduce_costs_wit
 ??? tip "Level Up Your SQL"
 
     Write SQL in any dialect and SQLMesh will transpile it to your target SQL dialect on the fly before sending it to the warehouse.
-    <img src="https://github.com/TobikoData/sqlmesh/blob/main/docs/readme/transpile_example.png?raw=true" alt="Transpile Example">
+    <img src="https://github.com/SQLMesh/sqlmesh/blob/main/docs/readme/transpile_example.png?raw=true" alt="Transpile Example">
 
 * Debug transformation errors *before* you run them in your warehouse in [10+ different SQL dialects](https://sqlmesh.readthedocs.io/en/stable/integrations/overview/#execution-engines)
 * Definitions using [simply SQL](https://sqlmesh.readthedocs.io/en/stable/concepts/models/sql_models/#sql-based-definition) (no need for redundant and confusing `Jinja` + `YAML`)
@@ -153,7 +153,7 @@ Follow this [example](https://sqlmesh.readthedocs.io/en/stable/examples/incremen
 Together, we want to build data transformation without the waste. Connect with us in the following ways:
 
 * Join the [Tobiko Slack Community](https://tobikodata.com/slack) to ask questions, or just to say hi!
-* File an issue on our [GitHub](https://github.com/TobikoData/sqlmesh/issues/new)
+* File an issue on our [GitHub](https://github.com/SQLMesh/sqlmesh/issues/new)
 * Send us an email at [hello@tobikodata.com](mailto:hello@tobikodata.com) with your questions or feedback
 * Read our [blog](https://tobikodata.com/blog)
 

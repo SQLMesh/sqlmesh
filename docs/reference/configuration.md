@@ -60,6 +60,13 @@ The `model_defaults` key is **required** and must contain a value for the `diale
 
 See all the keys allowed in `model_defaults` at the [model configuration reference page](./model_configuration.md#model-defaults).
 
+### Linter
+
+| Option                    | Description                                                                                                                                        | Type    | Required |
+|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|---------|----------|
+| `linter.enabled`          | Whether linting is enabled (Default: `False`)                                                                                                      | boolean | N        |
+| `linter.use_project_index` | Whether to use the persistent project index for linting. Targeted linting loads selected models and their upstream dependencies. (Default: `False`) | boolean | N        |
+
 ### Variables
 
 The `variables` key can be used to provide values for user-defined variables, accessed using the [`@VAR` macro function](../concepts/macros/sqlmesh_macros.md#global-variables) in SQL model definitions, [`context.var` method](../concepts/models/python_models.md#global-variables) in Python model definitions, and [`evaluator.var` method](../concepts/macros/sqlmesh_macros.md#accessing-global-variable-values) in Python macro functions.
@@ -114,7 +121,7 @@ Formatting settings for the `sqlmesh format` command and UI.
 | `normalize`           | Whether to normalize SQL (Default: False)                                                      | boolean |    N     |
 | `pad`                 | The number of spaces to use for padding (Default: 2)                                           |   int   |    N     |
 | `indent`              | The number of spaces to use for indentation (Default: 2)                                       |   int   |    N     |
-| `normalize_functions` | Whether to normalize function names. Supported values are: 'upper' and 'lower' (Default: None) | string  |    N     |
+| `normalize_functions` | How to normalize function name casing. `false` (default) preserves the casing of custom and audit function names as written; `"upper"` uppercases all function names; `"lower"` lowercases all function names; `true` defers to SQLGlot's generator default and uppercases all function names including custom ones; `null` (or omitting the key) is excluded during serialization and therefore takes the same `false` default path — it does **not** defer to SQLGlot's generator default. Note: SQLGlot built-in function names may still be canonicalized by the parser regardless of this setting. | string \| boolean \| null |    N     |
 | `leading_comma`       | Whether to use leading commas (Default: False)                                                 | boolean |    N     |
 | `max_text_width`      | The maximum text width in a segment before creating new lines (Default: 80)                    |   int   |    N     |
 | `append_newline`      | Whether to append a newline to the end of the file (Default: False)                            | boolean |    N     |
@@ -211,18 +218,22 @@ Most parameters are specific to the connection engine `type` - see [below](#engi
 These pages describe the connection configuration options for each execution engine.
 
 * [Athena](../integrations/engines/athena.md)
+* [Azure SQL](../integrations/engines/azuresql.md)
 * [BigQuery](../integrations/engines/bigquery.md)
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
 * [DuckDB](../integrations/engines/duckdb.md)
+* [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)
-* [MySQL](../integrations/engines/mysql.md)
 * [MSSQL](../integrations/engines/mssql.md)
+* [MySQL](../integrations/engines/mysql.md)
 * [Postgres](../integrations/engines/postgres.md)
 * [GCP Postgres](../integrations/engines/gcp-postgres.md)
 * [Redshift](../integrations/engines/redshift.md)
+* [RisingWave](../integrations/engines/risingwave.md)
 * [Snowflake](../integrations/engines/snowflake.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 ### Scheduler
@@ -277,33 +288,33 @@ Example enabling debug mode for the CLI command `sqlmesh plan`:
 === "Bash"
 
     ```bash
-    $ sqlmesh --debug plan
+    sqlmesh --debug plan
     ```
 
     ```bash
-    $ SQLMESH_DEBUG=1 sqlmesh plan
+    SQLMESH_DEBUG=1 sqlmesh plan
     ```
 
 === "MS Powershell"
 
     ```powershell
-    PS> sqlmesh --debug plan
+    sqlmesh --debug plan
     ```
 
     ```powershell
-    PS> $env:SQLMESH_DEBUG=1
-    PS> sqlmesh plan
+    $env:SQLMESH_DEBUG=1
+    sqlmesh plan
     ```
 
 === "MS CMD"
 
     ```cmd
-    C:\> sqlmesh --debug plan
+    sqlmesh --debug plan
     ```
 
     ```cmd
-    C:\> set SQLMESH_DEBUG=1
-    C:\> sqlmesh plan
+    set SQLMESH_DEBUG=1
+    sqlmesh plan
     ```
 
 ## Runtime Environment

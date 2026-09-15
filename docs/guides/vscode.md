@@ -6,7 +6,7 @@
 
     The SQLMesh Visual Studio Code extension is in preview and undergoing active development. You may encounter bugs or API incompatibilities with the SQLMesh version you are running.
 
-    We encourage you to try the extension and [create Github issues](https://github.com/tobikodata/sqlmesh/issues) for any problems you encounter.
+    We encourage you to try the extension and [create Github issues](https://github.com/SQLMesh/sqlmesh/issues) for any problems you encounter.
 
 In this guide, you'll set up the SQLMesh extension in the Visual Studio Code IDE software (which we refer to as "VSCode").
 
@@ -187,7 +187,7 @@ The most common problem is the extension not using the correct Python interprete
 
 Follow the [setup process described above](#vscode-python-interpreter) to ensure that the extension is using the correct Python interpreter.
 
-If you have checked the VSCode `sqlmesh` output channel and the extension is still not using the correct Python interpreter, please raise an issue [here](https://github.com/tobikodata/sqlmesh/issues).
+If you have checked the VSCode `sqlmesh` output channel and the extension is still not using the correct Python interpreter, please raise an issue [here](https://github.com/SQLMesh/sqlmesh/issues).
 
 ### Missing Python dependencies
 
@@ -205,4 +205,4 @@ If you are using Tobiko Cloud, make sure `lsp` is included in the list of extras
 
 While the SQLMesh VSCode extension is in preview and the APIs to the underlying SQLMesh version are not stable, we do not guarantee compatibility between the extension and the SQLMesh version you are using.
 
-If you encounter a problem, please raise an issue [here](https://github.com/tobikodata/sqlmesh/issues).
+If you encounter a problem, please raise an issue [here](https://github.com/SQLMesh/sqlmesh/issues).

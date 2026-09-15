@@ -81,7 +81,7 @@ class ModelCache:
 
 @dataclass
 class OptimizedQueryCacheEntry:
-    optimized_rendered_query: t.Optional[exp.Expression]
+    optimized_rendered_query: t.Optional[exp.Query]
     renderer_violations: t.Optional[t.Dict[type[Rule], t.Any]]
 
 

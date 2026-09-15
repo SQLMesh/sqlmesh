@@ -485,7 +485,7 @@ class ModelConfig(BaseModelConfig):
 
         raise ConfigError(f"{materialization.value} materialization not supported.")
 
-    def _big_query_partition_by_expr(self, context: DbtContext) -> exp.Expression:
+    def _big_query_partition_by_expr(self, context: DbtContext) -> exp.Expr:
         assert isinstance(self.partition_by, dict)
         data_type = self.partition_by["data_type"].lower()
         raw_field = self.partition_by["field"]

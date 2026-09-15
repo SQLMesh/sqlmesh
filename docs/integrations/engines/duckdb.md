@@ -79,6 +79,7 @@ SQLMesh will place models with the explicit catalog "ephemeral", such as `epheme
               type: ducklake
               path: 'catalog.ducklake'
               data_path: data/ducklake
+              override_data_path: true
               encrypted: True
               data_inlining_row_limit: 10
               metadata_schema: main
@@ -105,6 +106,7 @@ SQLMesh will place models with the explicit catalog "ephemeral", such as `epheme
                             type="ducklake",
                             path="catalog.ducklake",
                             data_path="data/ducklake",
+                            override_data_path=False,
                             encrypted=True,
                             data_inlining_row_limit=10,
                             metadata_schema="main",
@@ -120,6 +122,7 @@ SQLMesh will place models with the explicit catalog "ephemeral", such as `epheme
 
 - `path`: Path to the DuckLake catalog file
 - `data_path`: Path where DuckLake data files are stored
+- `override_data_path`: Whether data_override_path option is set
 - `encrypted`: Whether to enable encryption for the catalog (default: `False`)
 - `data_inlining_row_limit`: Maximum number of rows to inline in the catalog (default: `0`)
 - `metadata_schema`: The schema in the catalog server in which to store the DuckLake metadata tables (default: `main`)
@@ -364,6 +367,7 @@ The `filesystems` accepts a list of file systems to register in the DuckDB conne
               type: ducklake
               path: myducklakecatalog.duckdb
               data_path: abfs://MyFabricWorkspace/MyFabricLakehouse.Lakehouse/Files/DuckLake.Files
+              override_data_path: False
         extensions:
           - ducklake
         filesystems:

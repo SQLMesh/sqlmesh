@@ -67,7 +67,7 @@ class AuditMixin(AuditCommonMetaMixin):
     """
 
     query_: ParsableSql
-    defaults: t.Dict[str, exp.Expression]
+    defaults: t.Dict[str, exp.Expr]
     expressions_: t.Optional[t.List[ParsableSql]]
     jinja_macros: JinjaMacroRegistry
     formatting: t.Optional[bool]
@@ -77,10 +77,10 @@ class AuditMixin(AuditCommonMetaMixin):
         return t.cast(t.Union[exp.Query, d.JinjaQuery], self.query_.parse(self.dialect))
 
     @property
-    def expressions(self) -> t.List[exp.Expression]:
+    def expressions(self) -> t.List[exp.Expr]:
         if not self.expressions_:
             return []
-        result = []
+        result: t.List[exp.Expr] = []
         for e in self.expressions_:
             parsed = e.parse(self.dialect)
             if not isinstance(parsed, exp.Semicolon):
@@ -95,7 +95,7 @@ class AuditMixin(AuditCommonMetaMixin):
 
 @field_validator("name", "dialect", mode="before", check_fields=False)
 def audit_string_validator(cls: t.Type, v: t.Any) -> t.Optional[str]:
-    if isinstance(v, exp.Expression):
+    if isinstance(v, exp.Expr):
         return v.name.lower()
     return str(v).lower() if v is not None else None
 
@@ -111,9 +111,7 @@ def audit_map_validator(cls: t.Type, v: t.Any, values: t.Any) -> t.Dict[str, t.A
     if isinstance(v, dict):
         dialect = get_dialect(values)
         return {
-            key: value
-            if isinstance(value, exp.Expression)
-            else d.parse_one(str(value), dialect=dialect)
+            key: value if isinstance(value, exp.Expr) else d.parse_one(str(value), dialect=dialect)
             for key, value in v.items()
         }
     raise_config_error("Defaults must be a tuple of exp.EQ or a dict", error_type=AuditConfigError)
@@ -133,7 +131,7 @@ class ModelAudit(PydanticModel, AuditMixin, DbtInfoMixin, frozen=True):
     blocking: bool = True
     standalone: t.Literal[False] = False
     query_: ParsableSql = Field(alias="query")
-    defaults: t.Dict[str, exp.Expression] = {}
+    defaults: t.Dict[str, exp.Expr] = {}
     expressions_: t.Optional[t.List[ParsableSql]] = Field(default=None, alias="expressions")
     jinja_macros: JinjaMacroRegistry = JinjaMacroRegistry()
     formatting: t.Optional[bool] = Field(default=None, exclude=True)
@@ -169,7 +167,7 @@ class StandaloneAudit(_Node, AuditMixin):
     blocking: bool = False
     standalone: t.Literal[True] = True
     query_: ParsableSql = Field(alias="query")
-    defaults: t.Dict[str, exp.Expression] = {}
+    defaults: t.Dict[str, exp.Expr] = {}
     expressions_: t.Optional[t.List[ParsableSql]] = Field(default=None, alias="expressions")
     jinja_macros: JinjaMacroRegistry = JinjaMacroRegistry()
     default_catalog: t.Optional[str] = None
@@ -323,13 +321,13 @@ class StandaloneAudit(_Node, AuditMixin):
         include_python: bool = True,
         include_defaults: bool = False,
         render_query: bool = False,
-    ) -> t.List[exp.Expression]:
+    ) -> t.List[exp.Expr]:
         """Returns the original list of sql expressions comprising the model definition.
 
         Args:
             include_python: Whether or not to include Python code in the rendered definition.
         """
-        expressions: t.List[exp.Expression] = []
+        expressions: t.List[exp.Expr] = []
         comment = None
         for field_name in sorted(self.meta_fields):
             field_value = getattr(self, field_name)
@@ -381,7 +379,7 @@ class StandaloneAudit(_Node, AuditMixin):
         return set(AuditCommonMetaMixin.__annotations__) | set(_Node.all_field_infos())
 
     @property
-    def audits_with_args(self) -> t.List[t.Tuple[Audit, t.Dict[str, exp.Expression]]]:
+    def audits_with_args(self) -> t.List[t.Tuple[Audit, t.Dict[str, exp.Expr]]]:
         return [(self, {})]
 
 
@@ -389,7 +387,7 @@ Audit = t.Union[ModelAudit, StandaloneAudit]
 
 
 def load_audit(
-    expressions: t.List[exp.Expression],
+    expressions: t.List[exp.Expr],
     *,
     path: Path = Path(),
     module_path: Path = Path(),
@@ -499,7 +497,7 @@ def load_audit(
 
 
 def load_multiple_audits(
-    expressions: t.List[exp.Expression],
+    expressions: t.List[exp.Expr],
     *,
     path: Path = Path(),
     module_path: Path = Path(),
@@ -510,7 +508,7 @@ def load_multiple_audits(
     variables: t.Optional[t.Dict[str, t.Any]] = None,
     project: t.Optional[str] = None,
 ) -> t.Generator[Audit, None, None]:
-    audit_block: t.List[exp.Expression] = []
+    audit_block: t.List[exp.Expr] = []
     for expression in expressions:
         if isinstance(expression, d.Audit):
             if audit_block:
@@ -543,7 +541,7 @@ def _raise_config_error(msg: str, path: pathlib.Path) -> None:
 
 # mypy doesn't realize raise_config_error raises an exception
 @t.no_type_check
-def _maybe_parse_arg_pair(e: exp.Expression) -> t.Tuple[str, exp.Expression]:
+def _maybe_parse_arg_pair(e: exp.Expr) -> t.Tuple[str, exp.Expr]:
     if isinstance(e, exp.EQ):
         return e.left.name, e.right
 

@@ -4,6 +4,7 @@ import logging
 import typing as t
 
 from sqlglot import exp
+from sqlglot.helper import ensure_list
 
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.base import MERGE_SOURCE_ALIAS, MERGE_TARGET_ALIAS
@@ -30,6 +31,7 @@ if t.TYPE_CHECKING:
 
     from sqlmesh.core._typing import SchemaName, TableName
     from sqlmesh.core.engine_adapter.base import QueryOrDF, Query
+    from sqlmesh.core.node import IntervalUnit
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +145,7 @@ class RedshiftEngineAdapter(
         return cursor
 
     def _fetch_native_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> pd.DataFrame:
         """Fetches a Pandas DataFrame from the cursor"""
         import pandas as pd
@@ -217,7 +219,7 @@ class RedshiftEngineAdapter(
         materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **create_kwargs: t.Any,
     ) -> None:
@@ -227,7 +229,7 @@ class RedshiftEngineAdapter(
         swap tables out from under views. Therefore, we create the view as non-binding.
         """
         no_schema_binding = True
-        if isinstance(query_or_df, exp.Expression):
+        if isinstance(query_or_df, exp.Expr):
             # We can't include NO SCHEMA BINDING if the query has a recursive CTE
             has_recursive_cte = any(
                 w.args.get("recursive", False) for w in query_or_df.find_all(exp.With)
@@ -248,6 +250,63 @@ class RedshiftEngineAdapter(
             source_columns=source_columns,
             **create_kwargs,
         )
+
+    def _build_table_properties_exp(
+        self,
+        catalog_name: t.Optional[str] = None,
+        table_format: t.Optional[str] = None,
+        storage_format: t.Optional[str] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
+        partition_interval_unit: t.Optional[IntervalUnit] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        table_description: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
+        **kwargs: t.Any,
+    ) -> t.Optional[exp.Properties]:
+        properties: t.List[exp.Expr] = []
+
+        if table_description:
+            properties.append(
+                exp.SchemaCommentProperty(
+                    this=exp.Literal.string(self._truncate_table_comment(table_description))
+                )
+            )
+
+        def _to_identifier_if_string(expression: exp.Expr) -> exp.Expr:
+            if isinstance(expression, exp.Literal) and expression.is_string:
+                return exp.to_identifier(expression.this)
+            return expression.copy()
+
+        if table_properties:
+            table_properties = {k.upper(): v for k, v in table_properties.items()}
+
+            table_type = self._pop_creatable_type_from_properties(table_properties)
+            properties.extend(ensure_list(table_type))
+
+            diststyle = table_properties.get("DISTSTYLE")
+            if diststyle:
+                properties.append(exp.DistStyleProperty(this=exp.var(diststyle.name.upper())))
+
+            distkey = table_properties.get("DISTKEY")
+            if distkey:
+                properties.append(exp.DistKeyProperty(this=_to_identifier_if_string(distkey)))
+
+            sortkey = table_properties.get("SORTKEY")
+            if sortkey:
+                sortkey_expressions = sortkey.expressions if sortkey.expressions else [sortkey]
+                properties.append(
+                    exp.SortKeyProperty(
+                        this=[
+                            _to_identifier_if_string(expression)
+                            for expression in sortkey_expressions
+                        ],
+                        compound=False,
+                    )
+                )
+
+        return exp.Properties(expressions=properties) if properties else None
 
     def replace_query(
         self,
@@ -367,9 +426,9 @@ class RedshiftEngineAdapter(
         target_table: TableName,
         source_table: QueryOrDF,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
-        unique_key: t.Sequence[exp.Expression],
+        unique_key: t.Sequence[exp.Expr],
         when_matched: t.Optional[exp.Whens] = None,
-        merge_filter: t.Optional[exp.Expression] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **kwargs: t.Any,
     ) -> None:
@@ -400,12 +459,12 @@ class RedshiftEngineAdapter(
         self,
         target_table: TableName,
         query: Query,
-        on: exp.Expression,
+        on: exp.Expr,
         whens: exp.Whens,
     ) -> None:
         # Redshift does not support table aliases in the target table of a MERGE statement.
         # So we must use the actual table name instead of an alias, as we do with the source table.
-        def resolve_target_table(expression: exp.Expression) -> exp.Expression:
+        def resolve_target_table(expression: exp.Expr) -> exp.Expr:
             if (
                 isinstance(expression, exp.Column)
                 and expression.table.upper() == MERGE_TARGET_ALIAS
@@ -436,7 +495,7 @@ class RedshiftEngineAdapter(
             track_rows_processed=True,
         )
 
-    def _normalize_decimal_value(self, expr: exp.Expression, precision: int) -> exp.Expression:
+    def _normalize_decimal_value(self, expr: exp.Expr, precision: int) -> exp.Expr:
         # Redshift is finicky. It truncates when the data is already in a table, but rounds when the data is generated as part of a SELECT.
         #
         # The following works:

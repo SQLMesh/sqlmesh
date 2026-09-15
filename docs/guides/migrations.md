@@ -28,7 +28,7 @@ SQLMeshError: SQLMesh (local) is using version '1' which is behind '2' (remote).
 The project metadata can be migrated to the latest metadata format using SQLMesh's migrate command.
 
 ```bash
-> sqlmesh migrate
+sqlmesh migrate
 ```
 
 Migration should be issued manually by a single user and the migration will affect all users of the project. 

@@ -15,6 +15,7 @@ from sqlmesh.core.dialect import (
 import sqlmesh.core.dialect as d
 from sqlmesh.core.model import SqlModel, load_sql_based_model
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
+from sqlmesh.core.config.format import FormatConfig
 
 pytestmark = pytest.mark.dialect_isolated
 
@@ -98,7 +99,7 @@ def test_format_model_expressions():
   references (a, (b, c) AS d), /* c */
   @macro_prop_with_comment(proper := 'foo'), /* k */
   audits ARRAY(
-    NOT_NULL(
+    not_null(
       columns = ARRAY(
         foo_id,
         foo_normalised,
@@ -112,14 +113,14 @@ def test_format_model_expressions():
         tier
       )
     ),
-    UNIQUE_VALUES(columns = ARRAY(foo_id)),
-    ACCEPTED_RANGE(column = foo_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = bar_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = total_weight, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_RANGE(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_VALUES(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
-    ACCEPTED_VALUES(
+    unique_values(columns = ARRAY(foo_id)),
+    accepted_range(column = foo_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = bar_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = total_weight, min_v = 0, max_v = 100),
+    accepted_range(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_range(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_values(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
+    accepted_values(
       column = total_weight_decile,
       is_in = ARRAY(
         'Decile_01',
@@ -210,6 +211,83 @@ SELECT
     x = format_model_expressions(
         parse(
             """
+            MODEL(name a.b, kind FULL, dialect clickhouse);
+            SELECT data.:String AS foo, CAST(1 AS INT) AS bar
+            """
+        ),
+        dialect="clickhouse",
+    )
+    # JSONCast (e.g. `.:` syntax in ClickHouse) must not be written to `::`
+    assert (
+        x
+        == """MODEL (
+  name a.b,
+  kind FULL,
+  dialect clickhouse
+);
+
+SELECT
+  data.:String AS foo,
+  1::Int32 AS bar"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
+            MODEL(name a.b, kind FULL, dialect tsql, allow_partials true);
+            SELECT TRUE AS col, CAST(x AS INT) AS y FROM t
+            """
+        ),
+        dialect="tsql",
+    )
+    # The MODEL header is SQLMesh DDL and must not be transpiled: a boolean property
+    # such as `allow_partials true` must stay `TRUE`, not become tsql's `(1 = 1)`.
+    # The query body must still transpile to the target dialect.
+    assert (
+        x
+        == """MODEL (
+  name a.b,
+  kind FULL,
+  dialect tsql,
+  allow_partials TRUE
+);
+
+SELECT
+  1 AS col,
+  x::INTEGER AS y
+FROM t"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
+            AUDIT(name my_audit, dialect tsql, blocking false);
+            SELECT TRUE AS col, CAST(x AS INT) AS y FROM t WHERE x > 0
+            """
+        ),
+        dialect="tsql",
+    )
+    # AUDIT headers are SQLMesh DDL too: a `false` boolean property must stay
+    # `FALSE`, not become tsql's `(1 = 0)`, while the query body still transpiles.
+    assert (
+        x
+        == """AUDIT (
+  name my_audit,
+  dialect tsql,
+  blocking FALSE
+);
+
+SELECT
+  1 AS col,
+  x::INTEGER AS y
+FROM t
+WHERE
+  x > 0"""
+    )
+
+    x = format_model_expressions(
+        parse(
+            """
             MODEL(name foo);
             SELECT CAST(1 AS INT) AS bla
             """
@@ -264,10 +342,228 @@ ON_VIRTUAL_UPDATE_END;"""
     )
 
 
+def test_format_model_expressions_normalize_functions():
+    """Regression: formatter function-name casing behavior.
+
+    Approved behavior:
+    - Default (``normalize_functions=False``): custom/audit function names
+      (stored as strings in the AST) are preserved with their original casing.
+      SQLGlot built-in functions like COUNT/SUM are always output in their
+      canonical uppercase form because the parser discards the original spelling.
+    - ``normalize_functions="upper"``: both audit references and query functions
+      are uppercased.
+    - ``normalize_functions="lower"``: both audit references and query functions
+      are lowercased.
+
+    The fix also covers the single-meta-expression early-return path in
+    ``format_model_expressions``; assertions at the end of this test exercise
+    that path to prevent regression.
+    """
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+
+        SELECT SUM(id), count(id) FROM foo;
+        """
+    )
+
+    # Default: audit references preserved lowercase; COUNT/SUM canonicalized uppercase.
+    assert (
+        format_model_expressions(expressions)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # "upper": audit references uppercased; query functions uppercased.
+    assert (
+        format_model_expressions(expressions, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # "lower": audit references preserved lowercase (already lower); query functions lowercased.
+    assert (
+        format_model_expressions(expressions, normalize_functions="lower")
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  sum(id),
+  count(id)
+FROM foo"""
+    )
+
+    # None: explicit deferral to SQLGlot default → custom/audit names uppercased,
+    # just like "upper".  This is distinct from False (preserve) and must be tested
+    # explicitly because None used to be indistinguishable from the missing kwarg.
+    assert (
+        format_model_expressions(expressions, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # Single-meta-expression path: normalize_functions must be forwarded.
+    # Without the fix, this path ignored normalize_functions entirely.
+    single_model = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        """
+    )
+
+    assert (
+        format_model_expressions(single_model, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    assert (
+        format_model_expressions(single_model)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    # Single-meta path, None: custom audit names are uppercased (explicit SQLGlot default deferral).
+    assert (
+        format_model_expressions(single_model, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+
+def test_format_config_normalize_functions_false():
+    config = FormatConfig(normalize_functions=False)
+
+    assert config.normalize_functions is False
+    assert config.generator_options["normalize_functions"] is False
+
+
+def test_format_config_normalize_functions_none():
+    """FormatConfig(normalize_functions=None) must be accepted but excluded from
+    generator_options by Pydantic's exclude_none serialization.  The config-layer
+    null therefore takes the False-default path in format_model_expressions rather
+    than deferring to SQLGlot's generator default the way True does.
+    """
+    config = FormatConfig(normalize_functions=None)
+
+    assert config.normalize_functions is None
+    # None is excluded by PydanticModel.dict(exclude_none=True), so the key must
+    # be absent from generator_options — format_model_expressions will use False.
+    assert "normalize_functions" not in config.generator_options
+
+    # Confirm the False-default behaviour: custom audit names must be preserved.
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        SELECT id FROM foo
+        """
+    )
+    result = format_model_expressions(expressions, **config.generator_options)
+    assert "unique_combination_of_columns" in result
+    assert "not_null" in result
+
+
 def test_macro_format():
     assert parse_one("@EACH(ARRAY(1,2), x -> x)").sql() == "@EACH(ARRAY(1, 2), x -> x)"
     assert parse_one("INTERVAL @x DAY").sql() == "INTERVAL @x DAY"
     assert parse_one("INTERVAL @'@{bar}' DAY").sql() == "INTERVAL @'@{bar}' DAY"
+    assert parse_one("INTERVAL @x @y").sql() == "INTERVAL @x @y"
+    assert parse_one("INTERVAL 1 @y").sql() == "INTERVAL '1' @y"
 
 
 def test_format_body_macros():
@@ -684,6 +980,52 @@ def test_conditional_statement():
     q = parse_one("@IF(cond, VACUUM ANALYZE);", read="postgres")
     assert q.sql(dialect="postgres") == "@IF(cond, VACUUM ANALYZE)"
 
+    # Verify that the original error case from issue #5823 (Required keyword: 'true' missing) is resolved.
+    # It must be parsed as a macro function containing an Anonymous expression rather than exp.If.
+    q = parse_one("@IF(1 = 1, ALTER TABLE x ADD y INT);", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(1 = 1, ALTER TABLE x ADD y INTEGER)"
+    assert isinstance(q.this, exp.Anonymous)
+    assert q.this.name == "IF"
+
+    # Note: SQLGlot's fallback Command parser strips quotes from string literal tokens when parsing unparsed commands
+    q = parse_one("@IF(cond, PRINT 'hello');", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(cond, PRINT hello)"
+
+    q = parse_one("@IF(@runtime_stage = 'evaluating', SELECT 1);", read="tsql")
+    assert q.sql(dialect="tsql") == "@IF(@runtime_stage = 'evaluating', SELECT 1)"
+
+
+def test_tsql_alter_column_nullability():
+    # Issue #5932: T-SQL spells nullability right after the type in ALTER COLUMN. Without support
+    # for it the statement falls back to a Command, so any macros it contains go unresolved.
+    for sql, expected in [
+        (
+            "ALTER TABLE x ALTER COLUMN y INT NOT NULL",
+            "ALTER TABLE x ALTER COLUMN y INTEGER NOT NULL",
+        ),
+        ("ALTER TABLE x ALTER COLUMN y INT NULL", "ALTER TABLE x ALTER COLUMN y INTEGER NULL"),
+        ("ALTER TABLE x ALTER COLUMN y INT", "ALTER TABLE x ALTER COLUMN y INTEGER"),
+    ]:
+        e = parse_one(sql, read="tsql")
+        assert isinstance(e, exp.Alter)
+        assert e.sql(dialect="tsql") == expected
+
+    # The macro must survive parsing so that it can be resolved later
+    e = parse_one(
+        "@IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INT NOT NULL);",
+        read="tsql",
+    )
+    assert (
+        e.sql(dialect="tsql")
+        == "@IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INTEGER NOT NULL)"
+    )
+
+    # Statements that don't carry a type are unaffected
+    assert (
+        parse_one("ALTER TABLE x ALTER COLUMN y DROP NOT NULL", read="tsql").sql(dialect="tsql")
+        == "ALTER TABLE x ALTER COLUMN y DROP NOT NULL"
+    )
+
 
 def test_model_name_cannot_be_string():
     with pytest.raises(ParseError) as parse_error:
@@ -721,6 +1063,149 @@ def test_sqlglot_extended_correctly(dialect: str) -> None:
     assert ast.sql(dialect=dialect) == "MODEL (\nname foo\n)"
 
 
+def test_format_model_expressions_clustered_by():
+    # Unquoted AUTO / NONE → formatted without backticks or parens
+    for keyword in ("AUTO", "NONE"):
+        assert format_model_expressions(
+            parse(
+                f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by {keyword}
+            );
+            SELECT 1 AS a
+            """
+            )
+        ) == (
+            f"MODEL (\n"
+            f"  name db.test,\n"
+            f"  kind FULL,\n"
+            f"  dialect databricks,\n"
+            f"  clustered_by {keyword}\n"
+            f");\n\nSELECT\n  1 AS a"
+        )
+
+    # Backtick-quoted `auto` / `none` → treated as a column, rendered quoted
+    for name in ("auto", "none"):
+        assert format_model_expressions(
+            parse(
+                f"""
+            MODEL (
+                name db.test,
+                kind FULL,
+                dialect databricks,
+                clustered_by `{name}`
+            );
+            SELECT 1 AS `{name}`
+            """
+            )
+        ) == (
+            f"MODEL (\n"
+            f"  name db.test,\n"
+            f"  kind FULL,\n"
+            f"  dialect databricks,\n"
+            f'  clustered_by "{name}"\n'
+            f');\n\nSELECT\n  1 AS "{name}"'
+        )
+
+    # Parens-wrapped (auto) → treated as a column, parens stripped for single column
+    # (same normalisation as partitioned_by (a) → a); quoting happens at model-load time
+    assert format_model_expressions(
+        parse(
+            """
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (auto)
+        );
+        SELECT 1 AS auto
+        """
+        )
+    ) == (
+        "MODEL (\n"
+        "  name db.test,\n"
+        "  kind FULL,\n"
+        "  dialect databricks,\n"
+        "  clustered_by auto\n"
+        ");\n\nSELECT\n  1 AS auto"
+    )
+
+    # Multi-column → parens preserved, identifiers as-written
+    # (quoting happens when the model is loaded, not at format time)
+    assert format_model_expressions(
+        parse(
+            """
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (a, b)
+        );
+        SELECT 1 AS a, 2 AS b
+        """
+        )
+    ) == (
+        "MODEL (\n"
+        "  name db.test,\n"
+        "  kind FULL,\n"
+        "  dialect databricks,\n"
+        "  clustered_by (a, b)\n"
+        ");\n\nSELECT\n  1 AS a,\n  2 AS b"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_format_model_expressions_clustered_by_non_databricks(keyword: str):
+    """AUTO/NONE without dialect or with a non-Databricks dialect is parsed as a bare identifier."""
+    # Without dialect — AUTO/NONE parsed as a plain column name (no special keyword handling)
+    assert format_model_expressions(
+        parse(
+            f"""
+        MODEL (
+            name db.test,
+            kind FULL,
+            clustered_by {keyword}
+        );
+        SELECT 1 AS {keyword.lower()}
+        """
+        )
+    ) == (
+        f"MODEL (\n"
+        f"  name db.test,\n"
+        f"  kind FULL,\n"
+        f"  clustered_by {keyword}\n"
+        f");\n\nSELECT\n  1 AS {keyword.lower()}"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["AUTO", "NONE"])
+def test_format_model_expressions_clustered_by_mixed_list(keyword: str):
+    """AUTO/NONE inside a parenthesised list is treated as a regular column name."""
+    assert format_model_expressions(
+        parse(
+            f"""
+        MODEL (
+            name db.test,
+            kind FULL,
+            dialect databricks,
+            clustered_by (a, {keyword})
+        );
+        SELECT 1 AS a, 2 AS {keyword.lower()}
+        """
+        )
+    ) == (
+        f"MODEL (\n"
+        f"  name db.test,\n"
+        f"  kind FULL,\n"
+        f"  dialect databricks,\n"
+        f"  clustered_by (a, {keyword})\n"
+        f");\n\nSELECT\n  1 AS a,\n  2 AS {keyword.lower()}"
+    )
+
+
 def test_connected_identifier():
     ast = d.parse_one("""SELECT ("x"at time zone 'utc')::timestamp as x""", "redshift")
     assert ast.sql("redshift") == """SELECT CAST(("x" AT TIME ZONE 'utc') AS TIMESTAMP) AS x"""
@@ -732,3 +1217,17 @@ def test_pipe_syntax():
         ast.sql("bigquery")
         == "SELECT * FROM (WITH __tmp1 AS (SELECT id FROM t2) SELECT * FROM __tmp1)"
     )
+
+
+def test_extend_sqlglot_is_idempotent():
+    # extend_sqlglot() runs at import time; calling it again must not re-wrap the
+    # already-installed overrides, otherwise they call themselves (RecursionError).
+    from sqlglot.generator import Generator
+
+    before = Generator.UNWRAPPED_INTERVAL_VALUES
+
+    d.extend_sqlglot()
+
+    assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
+    # The class-level registries must not grow on repeated calls.
+    assert Generator.UNWRAPPED_INTERVAL_VALUES == before

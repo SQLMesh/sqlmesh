@@ -151,7 +151,7 @@ def test_model_to_sqlmesh_fields(dbt_dummy_postgres_config: PostgresConfig):
     assert kind.on_additive_change == OnAdditiveChange.ALLOW
     assert (
         kind.merge_filter.sql(dialect=model.dialect)  # type: ignore
-        == """55 > "__MERGE_SOURCE__"."b" AND "__MERGE_TARGET__"."session_start" > CURRENT_DATE + INTERVAL '7'"""
+        == """55 > "__MERGE_SOURCE__"."b" AND "__MERGE_TARGET__"."session_start" > CURRENT_DATE + INTERVAL '7 DAY'"""
     )
 
     model = model_config.update_with({"dialect": "snowflake"}).to_sqlmesh(context)
@@ -519,6 +519,71 @@ def test_quoting():
 
     source.quoting["schema"] = False
     assert str(BaseRelation.create(**source.relation_info)) == 'foo."bar"'
+
+
+def test_source_canonical_name_with_dots_and_spaces(mocker):
+    from dbt.adapters.base import BaseRelation
+
+    mock_context = mocker.Mock()
+    mock_context.target.database = "target_db"
+
+    def mock_source_macro(source_name, table_name):
+        if table_name == "my_table_dot":
+            identifier = "FILENAME.CSV"
+        elif table_name == "my_table_space":
+            identifier = "my table space"
+        else:
+            identifier = "my_table_std"
+        return BaseRelation.create(
+            database="RAW_DEV",
+            schema="raw_schema",
+            identifier=identifier,
+        )
+
+    mock_context.get_callable_macro.return_value = mock_source_macro
+
+    # 1. Identifier with a dot
+    source_dot = SourceConfig(
+        name="my_table_dot",
+        source_name="my_source",
+        identifier="FILENAME.CSV",
+    )
+    assert source_dot.canonical_name(mock_context) == 'RAW_DEV.raw_schema."FILENAME.CSV"'
+
+    # 2. Identifier with a space
+    source_space = SourceConfig(
+        name="my_table_space",
+        source_name="my_source",
+        identifier="my table space",
+    )
+    assert source_space.canonical_name(mock_context) == 'RAW_DEV.raw_schema."my table space"'
+
+    # 3. Standard identifier (without dots or spaces) should not be quoted
+    source_std = SourceConfig(
+        name="my_table_std",
+        source_name="my_source",
+        identifier="my_table_std",
+    )
+    assert source_std.canonical_name(mock_context) == "RAW_DEV.raw_schema.my_table_std"
+
+    # 4. Standard identifier, but with database matching target database (to test database omission)
+    mock_context_target_db = mocker.Mock()
+    mock_context_target_db.target.database = "RAW_DEV"
+    mock_context_target_db.get_callable_macro.return_value = mock_source_macro
+
+    source_dot_target = SourceConfig(
+        name="my_table_dot",
+        source_name="my_source",
+        identifier="FILENAME.CSV",
+    )
+    source_std_target = SourceConfig(
+        name="my_table_std",
+        source_name="my_source",
+        identifier="my_table_std",
+    )
+
+    assert source_dot_target.canonical_name(mock_context_target_db) == 'raw_schema."FILENAME.CSV"'
+    assert source_std_target.canonical_name(mock_context_target_db) == "raw_schema.my_table_std"
 
 
 def _test_warehouse_config(

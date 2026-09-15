@@ -4,7 +4,7 @@ This page describes the system prerequisites needed to run SQLMesh and provides 
 
 ## SQLMesh prerequisites
 
-You'll need Python 3.8 or higher to use SQLMesh. You can check your python version by running the following command:
+You'll need Python 3.9 or higher to use SQLMesh. You can check your python version by running the following command:
 ```bash
 python3 --version
 ```

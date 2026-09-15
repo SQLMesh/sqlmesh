@@ -6,7 +6,7 @@ build:
     python: "3.10"
   jobs:
     pre_build:
-      - pip install -e ".[athena,azuresql,bigframes,bigquery,clickhouse,databricks,dbt,dlt,gcppostgres,github,llm,mssql,mysql,mwaa,postgres,redshift,slack,snowflake,trino,web,risingwave]"
+      - pip install -e ".[athena,azuresql,bigframes,bigquery,clickhouse,databricks,dbt,dlt,gcppostgres,github,llm,mssql,mysql,mwaa,postgres,redshift,slack,snowflake,starrocks,trino,web,risingwave]"
       - make api-docs
 
 mkdocs:

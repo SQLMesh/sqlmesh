@@ -7,7 +7,7 @@ empty_project:
       type: duckdb
       # database is required for dbt < 1.5 where our adapter deliberately doesnt infer the database from the path and
       # defaults it to "main", which raises a "project catalog doesnt match context catalog" error
-      # ref: https://github.com/TobikoData/sqlmesh/pull/1109
+      # ref: https://github.com/SQLMesh/sqlmesh/pull/1109
       database: empty_project
       path: 'empty_project.duckdb'
       threads: 4

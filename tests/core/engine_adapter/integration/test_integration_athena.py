@@ -48,8 +48,21 @@ def s3_list_objects(s3: t.Any, location: str, **list_objects_kwargs: t.Any) -> t
     return lst
 
 
+def s3_delete_objects(s3: t.Any, location: str) -> None:
+    # The S3 location for a given test is stable across pytest-rerunfailures retries within the same
+    # test session (it's derived from the session's testrun_uid + the test's name), so a prior failed
+    # attempt can leave objects behind that a subsequent retry would otherwise trip over. Proactively
+    # clearing the prefix makes these tests self-healing instead of just asserting it's already empty.
+    bucket, prefix = parse_s3_uri(location)
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        if objects:
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": objects})
+
+
 def test_clear_partition_data(ctx: TestContext, engine_adapter: AthenaEngineAdapter, s3: t.Any):
     base_uri = engine_adapter.s3_warehouse_location_or_raise
+    s3_delete_objects(s3, base_uri)
     assert len(s3_list_objects(s3, base_uri)) == 0
 
     src_table = ctx.table("src_table")
@@ -239,6 +252,7 @@ def test_hive_truncate_table(ctx: TestContext, engine_adapter: AthenaEngineAdapt
         ]
     )
 
+    s3_delete_objects(s3, base_uri)
     assert len(s3_list_objects(s3, base_uri)) == 0
 
     engine_adapter.ctas(table_name=table_1, query_or_df=base_data)
@@ -378,7 +392,7 @@ def test_insert_overwrite_by_time_partition_date_type(
         ),  # note: columns_to_types_from_df() would infer this as TEXT but we need a DATE type
     }
 
-    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expression:
+    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expr:
         return exp.cast(exp.Literal.string(to_ds(time)), "date")
 
     engine_adapter.create_table(
@@ -440,7 +454,7 @@ def test_insert_overwrite_by_time_partition_datetime_type(
         ),  # note: columns_to_types_from_df() would infer this as TEXT but we need a DATETIME type
     }
 
-    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expression:
+    def time_formatter(time: TimeLike, _: t.Optional[t.Dict[str, exp.DataType]]) -> exp.Expr:
         return exp.cast(exp.Literal.string(to_ts(time)), "datetime")
 
     engine_adapter.create_table(

@@ -123,11 +123,9 @@ def create_batches(l: t.List[T], batch_size: int) -> t.List[t.List[T]]:
     return [l[i : i + batch_size] for i in range(0, len(l), batch_size)]
 
 
-def fetchone(
-    engine_adapter: EngineAdapter, query: t.Union[exp.Expression, str]
-) -> t.Optional[t.Tuple]:
+def fetchone(engine_adapter: EngineAdapter, query: t.Union[exp.Expr, str]) -> t.Optional[t.Tuple]:
     return engine_adapter.fetchone(query, ignore_unsupported_errors=True, quote_identifiers=True)
 
 
-def fetchall(engine_adapter: EngineAdapter, query: t.Union[exp.Expression, str]) -> t.List[t.Tuple]:
+def fetchall(engine_adapter: EngineAdapter, query: t.Union[exp.Expr, str]) -> t.List[t.Tuple]:
     return engine_adapter.fetchall(query, ignore_unsupported_errors=True, quote_identifiers=True)

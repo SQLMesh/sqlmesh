@@ -11,7 +11,7 @@ def to_sql_calls(adapter: EngineAdapter, identify: bool = True) -> t.List[str]:
         value = call[0][0]
         sql = (
             value.sql(dialect=adapter.dialect, identify=identify)
-            if isinstance(value, exp.Expression)
+            if isinstance(value, exp.Expr)
             else str(value)
         )
         output.append(sql)

@@ -12,7 +12,21 @@ class FormatConfig(BaseConfig):
         normalize: Whether to normalize the SQL code or not.
         pad: The number of spaces to use for padding.
         indent: The number of spaces to use for indentation.
-        normalize_functions: Whether or not to normalize all function names. Possible values are: 'upper', 'lower'
+        normalize_functions: How to normalize function name casing.
+
+            * ``False`` (default) — preserves the original spelling of custom and audit
+              function names.  SQLGlot built-in functions (e.g. ``COUNT``, ``SUM``) may
+              still be uppercased because the parser discards the original token.
+            * ``"upper"`` — uppercases all function names, including custom audit
+              references.
+            * ``"lower"`` — lowercases all function names, including built-in ones.
+            * ``True`` — defers to SQLGlot's generator default, which uppercases all
+              function names including custom ones.
+            * ``None`` — excluded from the serialized generator options by Pydantic's
+              ``exclude_none`` behaviour, so ``format_model_expressions`` falls back to
+              its own ``False`` default.  Setting this in YAML as ``null`` or omitting
+              the key is therefore equivalent to ``false``; it does **not** defer to
+              SQLGlot's generator default the way ``True`` does.
         leading_comma: Whether to use leading commas or not.
         max_text_width: The maximum text width in a segment before creating new lines.
         append_newline: Whether to append a newline to the end of the file or not.
@@ -22,7 +36,7 @@ class FormatConfig(BaseConfig):
     normalize: bool = False
     pad: int = 2
     indent: int = 2
-    normalize_functions: t.Optional[str] = None
+    normalize_functions: t.Union[str, bool, None] = False
     leading_comma: bool = False
     max_text_width: int = 80
     append_newline: bool = False

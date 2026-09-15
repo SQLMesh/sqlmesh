@@ -8,7 +8,7 @@
 .react-flow__node.react-flow__node-model:active {
   z-index: 20 !important;
 }
-react-flow__attribution {
+.react-flow__attribution {
   background: transparent;
 }
 .lineage__column-source b {

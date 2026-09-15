@@ -1074,8 +1074,8 @@ class SQLMeshLanguageServer:
                     loaded_sqlmesh_message(self.server)
             else:
                 self._ensure_context_for_document(document_uri)
-        if isinstance(state, ContextLoaded):
-            return state.lsp_context
+        if isinstance(self.context_state, ContextLoaded):
+            return self.context_state.lsp_context
         raise RuntimeError("Context failed to load")
 
     def _ensure_context_for_document(

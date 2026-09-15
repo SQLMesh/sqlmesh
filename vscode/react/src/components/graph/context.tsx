@@ -7,6 +7,7 @@ import {
 } from 'react'
 import { getNodeMap, hasActiveEdge, hasActiveEdgeConnector } from './help'
 import { type Node } from 'reactflow'
+import { isNil } from '@/utils/index'
 import type { Lineage } from '@/domain/lineage'
 import type { ModelSQLMeshModel } from '@/domain/sqlmesh-model'
 import type { Column } from '@/domain/column'
@@ -43,6 +44,8 @@ interface LineageFlow {
   hasBackground: boolean
   withImpacted: boolean
   withSecondary: boolean
+  withOnlyDirect: boolean
+  directNeighbors: Set<ModelEncodedFQN>
   manuallySelectedColumn?: [ModelSQLMeshModel, Column]
   highlightedNodes: HighlightedNodes
   nodesMap: Record<ModelEncodedFQN, Node>
@@ -55,6 +58,7 @@ interface LineageFlow {
   setHasBackground: React.Dispatch<React.SetStateAction<boolean>>
   setWithImpacted: React.Dispatch<React.SetStateAction<boolean>>
   setWithSecondary: React.Dispatch<React.SetStateAction<boolean>>
+  setWithOnlyDirect: React.Dispatch<React.SetStateAction<boolean>>
   setConnections: React.Dispatch<React.SetStateAction<Map<string, Connections>>>
   hasActiveEdge: (edge: [string | undefined, string | undefined]) => boolean
   addActiveEdges: (edges: Array<[string, string]>) => void
@@ -85,6 +89,8 @@ export const LineageFlowContext = createContext<LineageFlow>({
   withConnected: false,
   withImpacted: true,
   withSecondary: false,
+  withOnlyDirect: false,
+  directNeighbors: new Set(),
   hasBackground: true,
   mainNode: undefined,
   activeEdges: new Map(),
@@ -103,6 +109,7 @@ export const LineageFlowContext = createContext<LineageFlow>({
   setWithImpacted: () => false,
   setWithSecondary: () => false,
   setWithConnected: () => false,
+  setWithOnlyDirect: () => false,
   hasActiveEdge: () => false,
   addActiveEdges: () => {},
   removeActiveEdges: () => {},
@@ -161,6 +168,7 @@ export default function LineageFlowProvider({
   const [hasBackground, setHasBackground] = useState(true)
   const [withImpacted, setWithImpacted] = useState(true)
   const [withSecondary, setWithSecondary] = useState(false)
+  const [withOnlyDirect, setWithOnlyDirect] = useState(false)
 
   const nodesMap = useMemo(
     () =>
@@ -264,6 +272,39 @@ export default function LineageFlowProvider({
     [nodesConnections],
   )
 
+  // Reverse adjacency index: parent -> children. Built once per `lineage`
+  // change so per-model `directNeighbors` lookups stay O(parents + children)
+  // instead of scanning the whole graph on every mainNode switch.
+  const childrenByParent = useMemo(() => {
+    const map = new Map<ModelEncodedFQN, ModelEncodedFQN[]>()
+    for (const [child, info] of Object.entries(lineage) as Array<
+      [ModelEncodedFQN, Lineage]
+    >) {
+      for (const parent of info?.models ?? []) {
+        const existing = map.get(parent)
+        if (existing) {
+          existing.push(child)
+        } else {
+          map.set(parent, [child])
+        }
+      }
+    }
+    return map
+  }, [lineage])
+
+  const directNeighbors = useMemo(() => {
+    const set = new Set<ModelEncodedFQN>()
+    if (isNil(mainNode)) return set
+    set.add(mainNode)
+    for (const parent of lineage[mainNode]?.models ?? []) {
+      set.add(parent)
+    }
+    for (const child of childrenByParent.get(mainNode) ?? []) {
+      set.add(child)
+    }
+    return set
+  }, [mainNode, lineage, childrenByParent])
+
   const selectedEdges = useMemo(
     () =>
       Array.from(selectedNodes)
@@ -292,6 +333,8 @@ export default function LineageFlowProvider({
         withConnected,
         withImpacted,
         withSecondary,
+        withOnlyDirect,
+        directNeighbors,
         showControls,
         hasBackground,
         nodesMap,
@@ -304,6 +347,7 @@ export default function LineageFlowProvider({
         setWithConnected,
         setWithImpacted,
         setWithSecondary,
+        setWithOnlyDirect,
         setHasBackground,
         setSelectedNodes,
         setMainNode,

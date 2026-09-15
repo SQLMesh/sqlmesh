@@ -1,6 +1,6 @@
 site_name: SQLMesh
-repo_url: https://github.com/TobikoData/sqlmesh
-repo_name: TobikoData/sqlmesh
+repo_url: https://github.com/SQLMesh/sqlmesh
+repo_name: SQLMesh/sqlmesh
 nav:
   - "Overview": index.md
   - Get started:
@@ -93,6 +93,7 @@ nav:
       - integrations/engines/risingwave.md
       - integrations/engines/snowflake.md
       - integrations/engines/spark.md
+      - integrations/engines/starrocks.md
       - integrations/engines/trino.md
   - Resources:
     - comparisons.md
@@ -202,7 +203,7 @@ extra:
     - icon: fontawesome/solid/paper-plane
       link: mailto:hello@tobikodata.com
     - icon: fontawesome/brands/github
-      link: https://github.com/TobikoData/sqlmesh/issues/new
+      link: https://github.com/SQLMesh/sqlmesh/issues/new
   analytics:
     provider: google
     property: G-JXQ1R227VS

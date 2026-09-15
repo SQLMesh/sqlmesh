@@ -138,7 +138,7 @@ class SnapshotState:
         ):
             self.engine_adapter.update_table(
                 self.snapshots_table,
-                {"unpaused_ts": None, "updated_ts": updated_ts},
+                {"unpaused_ts": None},
                 where=where,
             )
 
@@ -623,7 +623,7 @@ class SnapshotState:
         self,
         snapshot_ids: t.Iterable[SnapshotIdLike],
         lock_for_update: bool = False,
-    ) -> t.Iterator[exp.Expression]:
+    ) -> t.Iterator[exp.Expr]:
         for where in snapshot_id_filter(
             self.engine_adapter,
             snapshot_ids,

@@ -105,7 +105,10 @@ def apply_to_environment(
 
 
 def change_data_type(
-    context: Context, model_name: str, old_type: DataType.Type, new_type: DataType.Type
+    context: Context,
+    model_name: str,
+    old_type: exp.DType,
+    new_type: exp.DType,
 ) -> None:
     model = context.get_model(model_name)
     assert model is not None

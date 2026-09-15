@@ -4,3 +4,9 @@ packages:
   - vscode/react
   - web/client
   - web/common
+allowBuilds:
+  '@swc/core': true
+  '@tailwindcss/oxide': true
+  '@vscode/vsce-sign': true
+  esbuild: true
+  keytar: true

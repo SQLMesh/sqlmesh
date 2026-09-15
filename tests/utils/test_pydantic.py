@@ -2,8 +2,14 @@ import typing as t
 import pytest
 from functools import cached_property
 
+import pydantic
+
 from sqlmesh.utils.date import TimeLike, to_date, to_datetime
-from sqlmesh.utils.pydantic import PydanticModel, get_concrete_types_from_typehint
+from sqlmesh.utils.pydantic import (
+    PydanticModel,
+    get_concrete_types_from_typehint,
+    validation_error_message,
+)
 
 
 def test_datetime_date_serialization() -> None:
@@ -87,3 +93,19 @@ def test_pydantic_dict_default_args_override() -> None:
 )
 def test_get_concrete_types_from_typehint(input: t.Any, output: set[type]) -> None:
     assert get_concrete_types_from_typehint(input) == output
+
+
+def test_validation_error_message_with_list_index_location() -> None:
+    class Inner(PydanticModel):
+        x: int
+
+    class Outer(PydanticModel):
+        items: t.List[Inner]
+
+    with pytest.raises(pydantic.ValidationError) as ex:
+        Outer(items=[{"x": "not_an_int"}])
+
+    # The error is located at a list index, so pydantic's loc mixes str field
+    # names with an int sequence index (e.g. ("items", 0, "x")).
+    message = validation_error_message(ex.value, "Invalid config:")
+    assert "Invalid field 'items.0.x'" in message

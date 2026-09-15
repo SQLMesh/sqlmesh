@@ -305,6 +305,53 @@ def test_create_external_models_no_duplicates(tmp_path: Path):
     assert len(_load_external_models()) == 1
 
 
+def test_create_external_models_skips_models_from_external_models_directory(tmp_path: Path):
+    config = Config(gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())})
+
+    model_dir = tmp_path / c.MODELS
+    model_dir.mkdir()
+
+    with open(model_dir / "table.sql", "w", encoding="utf8") as fd:
+        fd.write(
+            """
+        MODEL (
+            name lake.table,
+            kind FULL,
+        );
+
+        SELECT * FROM landing.source_table
+        """,
+        )
+
+    external_models_dir = tmp_path / c.EXTERNAL_MODELS
+    external_models_dir.mkdir()
+
+    with open(external_models_dir / "source_table.yaml", "w", encoding="utf8") as fd:
+        yaml.dump(
+            [
+                {
+                    "name": "landing.source_table",
+                    "columns": {"a": "int"},
+                }
+            ],
+            fd,
+        )
+
+    ctx = Context(paths=[tmp_path], config=config)
+    ctx.engine_adapter.execute("create schema landing")
+    ctx.engine_adapter.execute("create table landing.source_table as select 1 as a")
+    ctx.engine_adapter.execute("create schema lake")
+
+    ctx.create_external_models()
+
+    assert yaml.load(tmp_path / c.EXTERNAL_MODELS_YAML) == []
+
+    ctx.load()
+    external_models = [model for model in ctx.models.values() if isinstance(model, ExternalModel)]
+    assert len(external_models) == 1
+    assert external_models[0].fqn == '"memory"."landing"."source_table"'
+
+
 def test_no_internal_model_conversion(tmp_path: Path, mocker: MockerFixture):
     engine_adapter_mock = mocker.Mock()
     engine_adapter_mock.columns.return_value = {

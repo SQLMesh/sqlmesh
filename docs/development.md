@@ -1,6 +1,6 @@
 # Contribute to development
 
-SQLMesh is licensed under [Apache 2.0](https://github.com/TobikoData/sqlmesh/blob/main/LICENSE). We encourage community contribution and would love for you to get involved. The following document outlines the process to contribute to SQLMesh.
+SQLMesh is licensed under [Apache 2.0](https://github.com/SQLMesh/sqlmesh/blob/main/LICENSE). We encourage community contribution and would love for you to get involved. The following document outlines the process to contribute to SQLMesh.
 
 ## Prerequisites
 
@@ -10,6 +10,22 @@ Before you begin, ensure you have the following installed on your machine. Exact
 * Docker Compose V2
 * OpenJDK >= 11
 * Python >= 3.9 < 3.13
+
+### Windows Prerequisites
+
+The development environment of SQLMesh depends both on:
+
+* Symbolic links in the repository which, whilst available on Windows, typically require additional permissions for the process running git, and;
+* Some Python functionality (e.g. `SIGUSR1`) that is only available on UNIX systems. Whilst this functionality is gated so shouldn't error on Windows, the development container enables its use.
+
+For the Python functionality, a development container is provided to develop against Ubuntu 24 with Python 3.12.
+
+For symbolic links, you must ensure that when checking out the repository:
+
+* The git configuration `core.symlinks` is set to `true` (this also needs to be done before bind mount, i.e. when the development container is started)
+* The process that git runs as is permitted to create symbolic links. This can typically be done by running git as an administrator, or enabling [developer mode on Windows](https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode).
+
+Development containers are supported by [a number of IDEs](https://containers.dev/supporting.html). For developers using VSCode,  [Microsoft has a tutorial on how to use development containers](https://code.visualstudio.com/docs/devcontainers/tutorial).
 
 ## Virtual environment setup
 

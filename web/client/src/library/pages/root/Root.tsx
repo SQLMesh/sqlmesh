@@ -106,6 +106,7 @@ export default function Root({
   const closeTab = useStoreEditor(s => s.closeTab)
   const inTabs = useStoreEditor(s => s.inTabs)
   const setVersion = useStoreContext(s => s.setVersion)
+  const setNodeColors = useStoreContext(s => s.setNodeColors)
 
   const { refetch: getMeta, cancel: cancelRequestMeta } = useApiMeta()
   const { refetch: getModels, cancel: cancelRequestModels } = useApiModels()
@@ -313,6 +314,7 @@ export default function Root({
   useEffect(() => {
     void getMeta().then(({ data }) => {
       setVersion(data?.version)
+      setNodeColors(data?.node_colors ?? {})
 
       if (isTrue(data?.has_running_task)) {
         setPlanAction(

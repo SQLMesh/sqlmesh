@@ -212,11 +212,13 @@ def pytest_collection_modifyitems(items, *args, **kwargs):
         "dialect_isolated",
     }
     for item in items:
+        if "capsys" in item.fixturenames:
+            # capsys is not threadsafe, so the test must be isolated.
+            item.add_marker("isolated")
         for marker in item.iter_markers():
             if marker.name in test_type_markers:
                 break
         else:
-            # if no test type marker is found, assume fast test
             item.add_marker("fast")
 
 
@@ -381,7 +383,7 @@ def init_and_plan_context(copy_to_temp_path, mocker) -> t.Callable:
 @pytest.fixture
 def assert_exp_eq() -> t.Callable:
     def _assert_exp_eq(
-        source: exp.Expression | str, expected: exp.Expression | str, dialect: DialectType = None
+        source: exp.Expr | str, expected: exp.Expr | str, dialect: DialectType = None
     ) -> None:
         source_exp = maybe_parse(source, dialect=dialect)
         expected_exp = maybe_parse(expected, dialect=dialect)
@@ -571,7 +573,7 @@ def copy_to_temp_path(tmp_path: Path) -> t.Callable:
         return [name for name in names if name == ".cache"]
 
     def _make_function(
-        paths: t.Union[t.Union[str, Path], t.Collection[t.Union[str, Path]]],
+        paths: t.Union[str, Path, t.List[t.Union[str, Path]], t.Tuple[t.Union[str, Path], ...]],
     ) -> t.List[Path]:
         paths = ensure_list(paths)
         all_paths = [Path(p) for p in paths]

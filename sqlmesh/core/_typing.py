@@ -8,8 +8,8 @@ from sqlglot import exp
 if t.TYPE_CHECKING:
     TableName = t.Union[str, exp.Table]
     SchemaName = t.Union[str, exp.Table]
-    SessionProperties = t.Dict[str, t.Union[exp.Expression, str, int, float, bool]]
-    CustomMaterializationProperties = t.Dict[str, t.Union[exp.Expression, str, int, float, bool]]
+    SessionProperties = t.Dict[str, t.Union[exp.Expr, str, int, float, bool]]
+    CustomMaterializationProperties = t.Dict[str, t.Union[exp.Expr, str, int, float, bool]]
 
 
 if sys.version_info >= (3, 11):

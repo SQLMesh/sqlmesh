@@ -22,6 +22,7 @@ from sqlmesh.core.config.connection import (
     RedshiftConnectionConfig as RedshiftConnectionConfig,
     SnowflakeConnectionConfig as SnowflakeConnectionConfig,
     SparkConnectionConfig as SparkConnectionConfig,
+    StarRocksConnectionConfig as StarRocksConnectionConfig,
     TrinoConnectionConfig as TrinoConnectionConfig,
     parse_connection_config as parse_connection_config,
 )

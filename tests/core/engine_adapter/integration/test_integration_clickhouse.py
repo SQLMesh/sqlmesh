@@ -64,9 +64,7 @@ def _create_table_and_insert_existing_data(
         "ds": exp.DataType.build("Date", "clickhouse"),
     },
     table_name: str = "data_existing",
-    partitioned_by: t.Optional[t.List[exp.Expression]] = [
-        parse_one("toMonth(ds)", dialect="clickhouse")
-    ],
+    partitioned_by: t.Optional[t.List[exp.Expr]] = [parse_one("toMonth(ds)", dialect="clickhouse")],
 ) -> exp.Table:
     existing_data = existing_data
     existing_table_name: exp.Table = ctx.table(table_name)

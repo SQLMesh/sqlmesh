@@ -4,7 +4,7 @@ export type CallbackShape = Record<string, any>
 
 export type Callback = {
   openFile: {
-    uri: string
+    filePath: string
   }
   rpcResponse: RPCResponse
 } & CallbackShape

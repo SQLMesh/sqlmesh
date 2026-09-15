@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script is intended to be run by an Ubuntu build agent on CircleCI
+# This script is intended to be run by an Ubuntu CI build agent
 # The goal is to install OS-level dependencies that are required before trying to install Python dependencies
 
 set -e
@@ -25,7 +25,7 @@ elif [ "$ENGINE" == "fabric" ]; then
     sudo dpkg -i packages-microsoft-prod.deb
     rm packages-microsoft-prod.deb
 
-    ENGINE_DEPENDENCIES="msodbcsql18"    
+    ENGINE_DEPENDENCIES="msodbcsql18"
 fi
 
 ALL_DEPENDENCIES="$COMMON_DEPENDENCIES $ENGINE_DEPENDENCIES"

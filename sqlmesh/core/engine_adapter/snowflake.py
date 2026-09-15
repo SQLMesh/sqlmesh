@@ -24,6 +24,7 @@ from sqlmesh.core.engine_adapter.shared import (
     SourceQuery,
     set_catalog,
 )
+from sqlmesh.core.schema_diff import TableAlterOperation
 from sqlmesh.utils import optional_import, get_source_columns_to_types
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.pandas import columns_to_types_from_dtypes
@@ -83,7 +84,7 @@ class SnowflakeEngineAdapter(
     SNOWPARK = "snowpark"
     SUPPORTS_QUERY_EXECUTION_TRACKING = True
     SUPPORTS_GRANTS = True
-    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expression = exp.func("CURRENT_ROLE")
+    CURRENT_USER_OR_ROLE_EXPRESSION: exp.Expr = exp.func("CURRENT_ROLE")
     USE_CATALOG_IN_GRANTS = True
 
     @contextlib.contextmanager
@@ -95,7 +96,7 @@ class SnowflakeEngineAdapter(
 
         if isinstance(warehouse, str):
             warehouse = exp.to_identifier(warehouse)
-        if not isinstance(warehouse, exp.Expression):
+        if not isinstance(warehouse, exp.Expr):
             raise SQLMeshError(f"Invalid warehouse: '{warehouse}'")
 
         warehouse_exp = quote_identifiers(
@@ -189,7 +190,7 @@ class SnowflakeEngineAdapter(
     def _create_table(
         self,
         table_name_or_schema: t.Union[exp.Schema, TableName],
-        expression: t.Optional[exp.Expression],
+        expression: t.Optional[exp.Expr],
         exists: bool = True,
         replace: bool = False,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
@@ -225,9 +226,9 @@ class SnowflakeEngineAdapter(
         table_name: TableName,
         query: Query,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
         source_columns: t.Optional[t.List[str]] = None,
@@ -278,7 +279,7 @@ class SnowflakeEngineAdapter(
         materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
         table_description: t.Optional[str] = None,
         column_descriptions: t.Optional[t.Dict[str, str]] = None,
-        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         source_columns: t.Optional[t.List[str]] = None,
         **create_kwargs: t.Any,
     ) -> None:
@@ -311,16 +312,16 @@ class SnowflakeEngineAdapter(
         catalog_name: t.Optional[str] = None,
         table_format: t.Optional[str] = None,
         storage_format: t.Optional[str] = None,
-        partitioned_by: t.Optional[t.List[exp.Expression]] = None,
+        partitioned_by: t.Optional[t.List[exp.Expr]] = None,
         partition_interval_unit: t.Optional[IntervalUnit] = None,
-        clustered_by: t.Optional[t.List[exp.Expression]] = None,
-        table_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        clustered_by: t.Optional[t.List[exp.Expr]] = None,
+        table_properties: t.Optional[t.Dict[str, exp.Expr]] = None,
         target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
-        properties: t.List[exp.Expression] = []
+        properties: t.List[exp.Expr] = []
 
         # TODO: there is some overlap with the base class and other engine adapters
         # we need a better way of filtering table properties relevent to the current engine
@@ -407,7 +408,7 @@ class SnowflakeEngineAdapter(
             elif isinstance(df, pd.DataFrame):
                 from snowflake.connector.pandas_tools import write_pandas
 
-                ordered_df = df[list(source_columns_to_types)]
+                ordered_df = df[list(source_columns_to_types)].reset_index(drop=True)
 
                 # Workaround for https://github.com/snowflakedb/snowflake-connector-python/issues/1034
                 # The above issue has already been fixed upstream, but we keep the following
@@ -471,7 +472,7 @@ class SnowflakeEngineAdapter(
         return [SourceQuery(query_factory=query_factory, cleanup_func=cleanup)]
 
     def _fetch_native_df(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+        self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> DF:
         import pandas as pd
         from snowflake.connector.errors import NotSupportedError
@@ -561,7 +562,7 @@ class SnowflakeEngineAdapter(
             for row in df.rename(columns={col: col.lower() for col in df.columns}).itertuples()
         ]
 
-    def _get_grant_expression(self, table: exp.Table) -> exp.Expression:
+    def _get_grant_expression(self, table: exp.Table) -> exp.Expr:
         # Upon execute the catalog in table expressions are properly normalized to handle the case where a user provides
         # the default catalog in their connection config. This doesn't though update catalogs in strings like when querying
         # the information schema. So we need to manually replace those here.
@@ -586,7 +587,7 @@ class SnowflakeEngineAdapter(
     def set_current_schema(self, schema: str) -> None:
         self.execute(exp.Use(kind="SCHEMA", this=to_schema(schema)))
 
-    def _normalize_catalog(self, expression: exp.Expression) -> exp.Expression:
+    def _normalize_catalog(self, expression: exp.Expr) -> exp.Expr:
         # note: important to use self._default_catalog instead of the self.default_catalog property
         # otherwise we get RecursionError: maximum recursion depth exceeded
         # because it calls get_current_catalog(), which executes a query, which needs the default catalog, which calls get_current_catalog()... etc
@@ -604,7 +605,7 @@ class SnowflakeEngineAdapter(
                 self._default_catalog, dialect=self.dialect
             )
 
-            def catalog_rewriter(node: exp.Expression) -> exp.Expression:
+            def catalog_rewriter(node: exp.Expr) -> exp.Expr:
                 if isinstance(node, exp.Table):
                     if node.catalog:
                         # only replace the catalog on the model with the target catalog if the two are functionally equivalent
@@ -621,7 +622,7 @@ class SnowflakeEngineAdapter(
             expression = expression.transform(catalog_rewriter)
         return expression
 
-    def _to_sql(self, expression: exp.Expression, quote: bool = True, **kwargs: t.Any) -> str:
+    def _to_sql(self, expression: exp.Expr, quote: bool = True, **kwargs: t.Any) -> str:
         return super()._to_sql(
             expression=self._normalize_catalog(expression), quote=quote, **kwargs
         )
@@ -667,6 +668,8 @@ class SnowflakeEngineAdapter(
         replace: bool = False,
         exists: bool = True,
         clone_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
+        table_format: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> None:
         # The Snowflake adapter should use the transient property to clone transient tables
@@ -675,13 +678,42 @@ class SnowflakeEngineAdapter(
             if isinstance(table_type, exp.TransientProperty):
                 kwargs["properties"] = exp.Properties(expressions=[table_type])
 
+        # Snowflake rejects `CREATE TABLE ... CLONE` for Iceberg tables, it requires
+        # `CREATE ICEBERG TABLE ... CLONE` instead
+        if table_format and not table_kind:
+            table_kind = f"{table_format.upper()} TABLE"
+
         super().clone_table(
             target_table_name,
             source_table_name,
             replace=replace,
             clone_kwargs=clone_kwargs,
+            table_kind=table_kind,
             **kwargs,
         )
+
+    def alter_table(
+        self,
+        alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
+    ) -> None:
+        # Snowflake rejects `ALTER TABLE` for Iceberg tables, it requires
+        # `ALTER ICEBERG TABLE` instead
+        if table_format:
+            table_kind = f"{table_format.upper()} TABLE"
+            resolved_expressions = []
+            for alter_expression in alter_expressions:
+                resolved_expression = (
+                    alter_expression.expression
+                    if isinstance(alter_expression, TableAlterOperation)
+                    else alter_expression.copy()
+                )
+                resolved_expression.set("kind", table_kind)
+                resolved_expressions.append(resolved_expression)
+
+            super().alter_table(resolved_expressions)
+        else:
+            super().alter_table(alter_expressions)
 
     @t.overload
     def _columns_to_types(

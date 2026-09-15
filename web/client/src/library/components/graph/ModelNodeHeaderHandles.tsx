@@ -85,7 +85,7 @@ export default function ModelNodeHeaderHandles({
             )}
             onClick={handleClick}
           >
-            {truncate(decodeURI(label), 50, 20)}
+            {decodeURI(label)}
           </span>
           {isNotNil(count) && (
             <span className="flex justify-between ml-2 mr-1 px-2 rounded-full bg-neutral-10">

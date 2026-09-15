@@ -2333,6 +2333,48 @@ def test_plan_evaluator_correlation_id(tmp_path: Path):
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_run_correlation_id(tmp_path: Path):
+    def _correlation_id_in_sqls(correlation_id: CorrelationId, mock_logger):
+        sqls = [call[0][0] for call in mock_logger.call_args_list]
+        return any(f"/* {correlation_id} */" in sql for sql in sqls)
+
+    run_id = "test_run_id"
+    ctx = Context(paths=[tmp_path], config=Config())
+
+    create_temp_file(
+        tmp_path,
+        Path("models", "test.sql"),
+        """
+MODEL (
+    name test.a,
+    kind INCREMENTAL_BY_TIME_RANGE (
+        time_column event_ts
+    ),
+    cron '@daily',
+    start '2023-01-07'
+);
+SELECT 1 AS col, '2023-01-07' AS event_ts
+""",
+    )
+
+    ctx.load()
+    ctx.plan(auto_apply=True, no_prompts=True)
+
+    with time_machine.travel("2023-01-09 00:00:00 UTC"):
+        with mock.patch(
+            "sqlmesh.core.context.analytics.collector.on_run_start", return_value=run_id
+        ):
+            with mock.patch(
+                "sqlmesh.core.engine_adapter.base.EngineAdapter._log_sql"
+            ) as mock_logger:
+                ctx.run()
+
+    correlation_id = CorrelationId.from_run_id(run_id)
+    assert str(correlation_id) == f"SQLMESH_RUN: {run_id}"
+    assert _correlation_id_in_sqls(correlation_id, mock_logger)
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_scd_type_2_regular_run_with_offset(init_and_plan_context: t.Callable):
     context, plan = init_and_plan_context("examples/sushi")
     context.apply(plan)

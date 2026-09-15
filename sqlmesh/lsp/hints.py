@@ -5,7 +5,6 @@ import typing as t
 from lsprotocol import types
 
 from sqlglot import exp
-from sqlglot.expressions import Expression
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlmesh.core.model.definition import SqlModel
 from sqlmesh.lsp.context import LSPContext, ModelTarget
@@ -60,7 +59,7 @@ def get_hints(
 
 
 def _get_type_hints_for_select(
-    expression: exp.Expression,
+    expression: exp.Expr,
     dialect: str,
     columns_to_types: t.Dict[str, exp.DataType],
     start_line: int,
@@ -113,7 +112,7 @@ def _get_type_hints_for_select(
 
 
 def _get_type_hints_for_model_from_query(
-    query: Expression,
+    query: exp.Expr,
     dialect: str,
     columns_to_types: t.Dict[str, exp.DataType],
     start_line: int,

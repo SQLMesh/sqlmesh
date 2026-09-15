@@ -33,8 +33,8 @@ install-dev-dbt-%:
 	echo "Installing dbt version: $$version"; \
 	cp pyproject.toml pyproject.toml.backup; \
 	$(SED_INPLACE) 's/"pydantic>=2.0.0"/"pydantic"/g' pyproject.toml; \
-	if [ "$$version" = "1.10.0" ]; then \
-		echo "Applying special handling for dbt 1.10.0"; \
+	if [ "$$version" = "1.10.0" ] || [ "$$version" = "1.11.0" ] || [ "$$version" = "1.12.0" ]; then \
+		echo "Applying special handling for dbt $$version"; \
 		$(SED_INPLACE) -E 's/"(dbt-core)[^"]*"/"\1~='"$$version"'"/g' pyproject.toml; \
 		$(SED_INPLACE) -E 's/"(dbt-(bigquery|duckdb|snowflake|athena-community|clickhouse|redshift|trino))[^"]*"/"\1"/g' pyproject.toml; \
 		$(SED_INPLACE) -E 's/"(dbt-databricks)[^"]*"/"\1~='"$$version"'"/g' pyproject.toml; \
@@ -46,18 +46,30 @@ install-dev-dbt-%:
 		echo "Applying numpy<2 constraint for dbt $$version"; \
 		$(SED_INPLACE) 's/"numpy"/"numpy<2"/g' pyproject.toml; \
 	fi; \
-	$(MAKE) install-dev; \
+	if [ "$$version" = "1.6.0" ]; then \
+		echo "Installing without web/lsp for dbt 1.6.0 (fastapi>=0.136 needs pydantic v2; dbt 1.6 needs pydantic v1)"; \
+		$(PIP) install -e ".[dev,slack,dlt]" ./examples/custom_materializations; \
+	else \
+		$(MAKE) install-dev; \
+	fi; \
 	if [ "$$version" = "1.6.0" ]; then \
 		echo "Applying overrides for dbt 1.6.0"; \
-		$(PIP) install 'pydantic>=2.0.0' 'google-cloud-bigquery==3.30.0' 'databricks-sdk==0.28.0' --reinstall; \
+		$(PIP) install 'pydantic>=2.0.0' 'google-cloud-bigquery==3.30.0' 'databricks-sdk==0.28.0' \
+			'pyOpenSSL>=24.0.0' --reinstall; \
 	fi; \
 	if [ "$$version" = "1.7.0" ]; then \
 		echo "Applying overrides for dbt 1.7.0"; \
-		$(PIP) install 'databricks-sdk==0.28.0' --reinstall; \
+		$(PIP) install 'databricks-sdk==0.28.0' \
+			'pyOpenSSL>=24.0.0' --reinstall; \
 	fi; \
 	if [ "$$version" = "1.5.0" ]; then \
 		echo "Applying overrides for dbt 1.5.0"; \
 		$(PIP) install 'dbt-databricks==1.5.6' 'numpy<2' --reinstall; \
+	fi; \
+	if [ "$$version" = "1.3.0" ]; then \
+		echo "Applying overrides for dbt $$version - upgrading google-cloud-bigquery"; \
+		$(PIP) install 'google-cloud-bigquery>=3.0.0' \
+			'pyOpenSSL>=24.0.0' --upgrade; \
 	fi; \
 	mv pyproject.toml.backup pyproject.toml; \
 	echo "Restored original pyproject.toml"
@@ -120,13 +132,13 @@ engine-up: engine-clickhouse-up engine-mssql-up engine-mysql-up engine-postgres-
 engine-down: engine-clickhouse-down engine-mssql-down engine-mysql-down engine-postgres-down engine-spark-down engine-trino-down
 
 fast-test:
-	pytest -n auto -m "fast and not cicdonly" --junitxml=test-results/junit-fast-test.xml && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
+	pytest -n auto -m "fast and not cicdonly and not isolated" --junitxml=test-results/junit-fast-test.xml && pytest -m "isolated and not slow" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
 
 slow-test:
-	pytest -n auto -m "(fast or slow) and not cicdonly" && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
+	pytest -n auto -m "(fast or slow) and not cicdonly and not isolated" && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
 
 cicd-test:
-	pytest -n auto -m "fast or slow" --junitxml=test-results/junit-cicd.xml && pytest -m "isolated" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
+	pytest -n auto -m "(fast or slow) and not pyspark and not isolated" --junitxml=test-results/junit-cicd.xml && pytest -m "pyspark" && pytest -m "isolated and not pyspark" && pytest -m "registry_isolation" && pytest -m "dialect_isolated"
 
 core-fast-test:
 	pytest -n auto -m "fast and not web and not github and not dbt and not jupyter"
@@ -162,7 +174,7 @@ web-test:
 	pytest -n auto -m "web"
 
 guard-%:
-	@ if [ "${${*}}" = "" ]; then \
+	@ if ! printenv ${*} > /dev/null 2>&1; then \
 		echo "Environment variable $* not set"; \
 		exit 1; \
 	fi
@@ -172,7 +184,7 @@ engine-%-install:
 
 engine-docker-%-up:
 	docker compose -f ./tests/core/engine_adapter/integration/docker/compose.${*}.yaml up -d
-	./.circleci/wait-for-db.sh ${*}
+	./.github/scripts/wait-for-db.sh ${*}
 
 engine-%-up: engine-%-install engine-docker-%-up
 	@echo "Engine '${*}' is up and running"
@@ -208,18 +220,21 @@ trino-test: engine-trino-up
 risingwave-test: engine-risingwave-up
 	pytest -n auto -m "risingwave" --reruns 3 --junitxml=test-results/junit-risingwave.xml
 
+starrocks-test: engine-starrocks-up
+	pytest -n auto -m "starrocks" --reruns 3 --junitxml=test-results/junit-starrocks.xml
+
 #################
 # Cloud Engines #
 #################
 
-snowflake-test: guard-SNOWFLAKE_ACCOUNT guard-SNOWFLAKE_WAREHOUSE guard-SNOWFLAKE_DATABASE guard-SNOWFLAKE_USER guard-SNOWFLAKE_PASSWORD engine-snowflake-install
+snowflake-test: guard-SNOWFLAKE_ACCOUNT guard-SNOWFLAKE_WAREHOUSE guard-SNOWFLAKE_DATABASE guard-SNOWFLAKE_USER engine-snowflake-install
 	pytest -n auto -m "snowflake" --reruns 3 --junitxml=test-results/junit-snowflake.xml
 
 bigquery-test: guard-BIGQUERY_KEYFILE engine-bigquery-install
 	$(PIP) install -e ".[bigframes]"
 	pytest -n auto -m "bigquery" --reruns 3 --junitxml=test-results/junit-bigquery.xml
 
-databricks-test: guard-DATABRICKS_CATALOG guard-DATABRICKS_SERVER_HOSTNAME guard-DATABRICKS_HTTP_PATH guard-DATABRICKS_ACCESS_TOKEN guard-DATABRICKS_CONNECT_VERSION engine-databricks-install
+databricks-test: guard-DATABRICKS_CATALOG guard-DATABRICKS_SERVER_HOSTNAME guard-DATABRICKS_HTTP_PATH guard-DATABRICKS_CONNECT_VERSION engine-databricks-install
 	$(PIP) install 'databricks-connect==${DATABRICKS_CONNECT_VERSION}'
 	pytest -n auto -m "databricks" --reruns 3 --junitxml=test-results/junit-databricks.xml
 

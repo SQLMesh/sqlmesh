@@ -109,6 +109,12 @@ For context, every model has a start date. The start can be specified in [the mo
 
 Because the prod environment supports business operations, prod plans ensure every model is backfilled from its start date until the most recent completed time interval. Due to that restriction, the `plan` command's `--start` and `--end` options are not supported for regular plans against prod. The options are supported for [restatement plans](#restatement-plans) against prod to allow re-processing a subset of existing data.
 
+!!! note "Explicit execution time"
+
+    "The most recent completed time interval" is measured relative to the plan's *execution time*, which defaults to now. If you pass an explicit `--execution-time` that is later than the intervals already loaded in prod, the plan extends its end date up to that time and backfills the intervals in between.
+
+    For example, if a daily model in prod is loaded through 2025-12-25, running `sqlmesh plan --execution-time '2025-12-28'` backfills the missing 2025-12-26 and 2025-12-27 intervals.
+
 Non-prod plans are typically used for development, so their models can optionally be backfilled for any date range with the `--start` and `--end` options. Limiting the date range makes backfills faster and development more efficient, especially for incremental models using large tables.
 
 #### Model kind limitations

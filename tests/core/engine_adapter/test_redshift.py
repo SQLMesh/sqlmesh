@@ -8,8 +8,11 @@ from unittest.mock import PropertyMock
 from sqlglot import expressions as exp
 from sqlglot import parse_one
 
+import sqlmesh.core.dialect as d
 from sqlmesh.core.engine_adapter import RedshiftEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
+from sqlmesh.core.model import load_sql_based_model
+from sqlmesh.core.model.definition import SqlModel
 from sqlmesh.utils.errors import SQLMeshError
 from tests.core.engine_adapter import to_sql_calls
 
@@ -30,6 +33,158 @@ def test_columns(adapter: t.Callable):
         """SELECT "column_name", "data_type", "character_maximum_length", "numeric_precision", "numeric_scale" FROM "svv_columns" WHERE "table_name" = 'table' AND "table_schema" = 'db'"""
     )
     assert resp == {"col": exp.DataType.build("INT")}
+
+
+def test_create_table_physical_properties(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    adapter.create_table(
+        "test_schema.test_table",
+        {
+            "id_file": exp.DataType.build("INT"),
+            "batch_time": exp.DataType.build("TIMESTAMP"),
+        },
+        table_properties={
+            "diststyle": exp.column("key"),
+            "distkey": exp.to_column("id_file"),
+            "sortkey": exp.to_column("batch_time"),
+        },
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER, "batch_time" TIMESTAMP) DISTSTYLE KEY DISTKEY("id_file") SORTKEY("batch_time")',
+    ]
+
+
+@pytest.mark.parametrize(
+    ("diststyle", "expected"),
+    [
+        ("auto", "AUTO"),
+        ("even", "EVEN"),
+        ("key", "KEY"),
+        ("all", "ALL"),
+    ],
+)
+def test_create_table_physical_properties_diststyle_values(
+    make_mocked_engine_adapter: t.Callable,
+    diststyle: str,
+    expected: str,
+):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+    table_properties = {"diststyle": exp.column(diststyle)}
+    if diststyle == "key":
+        table_properties["distkey"] = exp.to_column("id_file")
+
+    adapter.create_table(
+        "test_schema.test_table",
+        {"id_file": exp.DataType.build("INT")},
+        table_properties=table_properties,
+    )
+
+    expected_distkey = ' DISTKEY("id_file")' if diststyle == "key" else ""
+    assert to_sql_calls(adapter) == [
+        f'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER) DISTSTYLE {expected}{expected_distkey}',
+    ]
+
+
+def test_create_table_physical_properties_distkey_without_diststyle(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    adapter.create_table(
+        "test_schema.test_table",
+        {"id_file": exp.DataType.build("INT")},
+        table_properties={"distkey": exp.to_column("id_file")},
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER) DISTKEY("id_file")',
+    ]
+
+
+def test_create_table_physical_properties_multi_column_sortkey(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    adapter.create_table(
+        "test_schema.test_table",
+        {
+            "id_file": exp.DataType.build("INT"),
+            "batch_time": exp.DataType.build("TIMESTAMP"),
+            "event_time": exp.DataType.build("TIMESTAMP"),
+        },
+        table_properties={
+            "diststyle": exp.column("key"),
+            "distkey": exp.to_column("id_file"),
+            "sortkey": exp.Tuple(
+                expressions=[exp.to_column("batch_time"), exp.to_column("event_time")]
+            ),
+        },
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER, "batch_time" TIMESTAMP, "event_time" TIMESTAMP) DISTSTYLE KEY DISTKEY("id_file") SORTKEY("batch_time", "event_time")',
+    ]
+
+
+def test_create_table_physical_properties_with_string_columns(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    adapter.create_table(
+        "test_schema.test_table",
+        {
+            "id_file": exp.DataType.build("INT"),
+            "batch_time": exp.DataType.build("TIMESTAMP"),
+        },
+        table_properties={
+            "diststyle": exp.Literal.string("key"),
+            "distkey": exp.Literal.string("id_file"),
+            "sortkey": exp.Literal.string("batch_time"),
+        },
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER, "batch_time" TIMESTAMP) DISTSTYLE KEY DISTKEY("id_file") SORTKEY("batch_time")',
+    ]
+
+
+def test_create_table_physical_properties_from_model_definition(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+    model: SqlModel = t.cast(
+        SqlModel,
+        load_sql_based_model(
+            d.parse(
+                """
+MODEL (
+    name test_schema.test_table,
+    kind full,
+    physical_properties (
+        diststyle = key,
+        distkey = "id_file",
+        sortkey = "batch_time"
+    )
+);
+SELECT id_file::INT, batch_time::TIMESTAMP;
+    """
+            )
+        ),
+    )
+
+    adapter.create_table(
+        model.name,
+        target_columns_to_types=model.columns_to_types_or_raise,
+        table_properties=model.physical_properties,
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER, "batch_time" TIMESTAMP) DISTSTYLE KEY DISTKEY("id_file") SORTKEY("batch_time")',
+    ]
 
 
 def test_varchar_size_workaround(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):

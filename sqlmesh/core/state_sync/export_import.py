@@ -29,7 +29,7 @@ from sqlmesh.utils.pydantic import DEFAULT_ARGS as PYDANTIC_DEFAULT_ARGS, Pydant
 
 class SQLMeshJSONStreamEncoder(JSONStreamEncoder):
     def default(self, obj: t.Any) -> t.Any:
-        if isinstance(obj, exp.Expression):
+        if isinstance(obj, exp.Expr):
             return _expression_encoder(obj)
 
         return super().default(obj)
