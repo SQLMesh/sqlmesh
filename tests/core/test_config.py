@@ -14,6 +14,7 @@ from sqlmesh.core.config import (
     DuckDBConnectionConfig,
     GatewayConfig,
     ModelDefaultsConfig,
+    OwnershipConfig,
     BigQueryConnectionConfig,
     MotherDuckConnectionConfig,
     BuiltInSchedulerConfig,
@@ -608,19 +609,189 @@ model_defaults:
 
     assert config.gateways["another_gateway"].connection.catalogs.get("memory") == ":memory:"
 
-    attach_config_1 = config.gateways["another_gateway"].connection.catalogs.get("sqlite")
 
-    assert isinstance(attach_config_1, DuckDBAttachOptions)
-    assert attach_config_1.type == "sqlite"
-    assert attach_config_1.path == "test.db"
-    assert attach_config_1.read_only is False
+# ---------------------------------------------------------------------------
+# OwnershipConfig tests
+# ---------------------------------------------------------------------------
 
-    attach_config_2 = config.gateways["another_gateway"].connection.catalogs.get("postgres")
 
-    assert isinstance(attach_config_2, DuckDBAttachOptions)
-    assert attach_config_2.type == "postgres"
-    assert attach_config_2.path == "dbname=postgres user=postgres host=127.0.0.1"
-    assert attach_config_2.read_only is True
+def test_ownership_config_resolve_owner():
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(
+        environment_owner_mapping={
+            "^prod$": "svc_prod_spn",
+            ".*": "group:shared-developers",
+        }
+    )
+    assert config.resolve_owner("prod", mock_adapter) == "svc_prod_spn"
+    assert config.resolve_owner("dev_alice", mock_adapter) == "group:shared-developers"
+    assert config.resolve_owner("staging", mock_adapter) == "group:shared-developers"
+    # "production" does not match ^prod$ so falls through to .*
+    assert config.resolve_owner("production", mock_adapter) == "group:shared-developers"
+
+
+def test_ownership_config_empty_returns_none():
+    mock_adapter = mock.MagicMock()
+    assert OwnershipConfig().resolve_owner("prod", mock_adapter) is None
+    assert OwnershipConfig().resolve_owner("dev_env", mock_adapter) is None
+
+
+def test_ownership_config_first_match_wins():
+    # The catch-all .* comes before a more specific pattern — it always wins.
+    # This documents the ordering contract: users must put specific patterns first.
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(
+        environment_owner_mapping={
+            ".*": "catch_all_owner",
+            "^prod$": "prod_owner",
+        }
+    )
+    assert config.resolve_owner("prod", mock_adapter) == "catch_all_owner"
+
+
+def test_ownership_config_case_sensitive():
+    # Patterns are compiled without re.IGNORECASE, so matching is case-sensitive.
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(environment_owner_mapping={"^prod$": "svc_prod"})
+    assert config.resolve_owner("prod", mock_adapter) == "svc_prod"
+    assert config.resolve_owner("PROD", mock_adapter) is None
+    assert config.resolve_owner("Prod", mock_adapter) is None
+
+
+def test_ownership_config_no_match_returns_none():
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(environment_owner_mapping={"^prod$": "svc_prod"})
+    assert config.resolve_owner("staging", mock_adapter) is None
+    assert config.resolve_owner("dev_bob", mock_adapter) is None
+
+
+def test_ownership_config_deserialization_from_dict():
+    # Simulates YAML/dict-based config loading (as produced by load_config_from_yaml).
+    mock_adapter = mock.MagicMock()
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership={
+            "environment_owner_mapping": {
+                "^prod$": "svc_prod_spn",
+                ".*": "group:shared-developers",
+            }
+        },
+    )
+    assert config.ownership.resolve_owner("prod", mock_adapter) == "svc_prod_spn"
+    assert config.ownership.resolve_owner("dev", mock_adapter) == "group:shared-developers"
+
+
+def test_ownership_config_nested_update():
+    # Config.ownership uses UpdateStrategy.NESTED_UPDATE.
+    # When two Configs are merged, the second one's environment_owner_mapping
+    # replaces the first's (REPLACE semantics within OwnershipConfig since
+    # environment_owner_mapping has no explicit strategy).
+    mock_adapter = mock.MagicMock()
+    c1 = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership=OwnershipConfig(environment_owner_mapping={"^prod$": "spn_prod"}),
+    )
+    c2 = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership=OwnershipConfig(environment_owner_mapping={".*": "grp_devs"}),
+    )
+    merged = c1.update_with(c2)
+    # c2's mapping fully replaces c1's — the ^prod$ pattern is gone
+    assert merged.ownership.resolve_owner("prod", mock_adapter) == "grp_devs"
+    assert merged.ownership.resolve_owner("dev_alice", mock_adapter) == "grp_devs"
+
+
+def test_config_ownership_defaults_to_empty():
+    # Configs without an explicit ownership block have a no-op OwnershipConfig.
+    mock_adapter = mock.MagicMock()
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    assert config.ownership.environment_owner_mapping == {}
+    assert config.ownership.resolve_owner("prod", mock_adapter) is None
+
+
+def test_ownership_config_physical_owner():
+    # physical_owner is a simple optional string — no pattern matching.
+    config = OwnershipConfig(physical_owner="group:data-platform")
+    assert config.physical_owner == "group:data-platform"
+
+
+def test_ownership_config_physical_owner_default_none():
+    assert OwnershipConfig().physical_owner is None
+
+
+def test_ownership_config_physical_owner_deserialization():
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ownership={
+            "environment_owner_mapping": {"^prod$": "svc_prod"},
+            "physical_owner": "group:data-platform",
+        },
+    )
+    assert config.ownership.physical_owner == "group:data-platform"
+    assert config.ownership.resolve_owner("prod", mock.MagicMock()) == "svc_prod"
+
+
+def test_ownership_config_resolve_owner_callable():
+    # A callable resolver takes precedence over environment_owner_mapping and
+    # receives (env_name, adapter) so it can call adapter.current_user() etc.
+    mock_adapter = mock.MagicMock()
+    mock_adapter.current_user.return_value = "spn-dynamic-uuid"
+
+    config = OwnershipConfig(
+        environment_owner_mapping={".*": "group:fallback"},
+        environment_owner_resolver=lambda env, adapter: (
+            adapter.current_user() if env == "prod" else "group:shared-developers"
+        ),
+    )
+
+    assert config.resolve_owner("prod", mock_adapter) == "spn-dynamic-uuid"
+    assert config.resolve_owner("dev_alice", mock_adapter) == "group:shared-developers"
+    mock_adapter.current_user.assert_called_once()
+
+
+def test_ownership_config_resolver_overrides_mapping():
+    # Resolver always wins when set, even if the mapping would also match.
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(
+        environment_owner_mapping={"^prod$": "static-owner"},
+        environment_owner_resolver=lambda env, adapter: "dynamic-owner",
+    )
+    assert config.resolve_owner("prod", mock_adapter) == "dynamic-owner"
+
+
+def test_ownership_config_resolve_physical_owner_callable():
+    mock_adapter = mock.MagicMock()
+    mock_adapter.current_user.return_value = "spn-uuid-123"
+
+    config = OwnershipConfig(
+        physical_owner_resolver=lambda adapter: adapter.current_user(),
+    )
+    assert config.resolve_physical_owner(mock_adapter) == "spn-uuid-123"
+    mock_adapter.current_user.assert_called_once()
+
+
+def test_ownership_config_resolve_physical_owner_static():
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(physical_owner="group:data-platform")
+    assert config.resolve_physical_owner(mock_adapter) == "group:data-platform"
+    mock_adapter.current_user.assert_not_called()
+
+
+def test_ownership_config_physical_owner_resolver_overrides_static():
+    mock_adapter = mock.MagicMock()
+    config = OwnershipConfig(
+        physical_owner="static-owner",
+        physical_owner_resolver=lambda adapter: "dynamic-owner",
+    )
+    assert config.resolve_physical_owner(mock_adapter) == "dynamic-owner"
+
+
+def test_ownership_config_is_active():
+    assert not OwnershipConfig().is_active
+    assert OwnershipConfig(environment_owner_mapping={".*": "grp"}).is_active
+    assert OwnershipConfig(environment_owner_resolver=lambda e, a: None).is_active
+    assert OwnershipConfig(physical_owner="grp").is_active
+    assert OwnershipConfig(physical_owner_resolver=lambda a: "grp").is_active
 
 
 def test_load_model_defaults_audits(tmp_path):

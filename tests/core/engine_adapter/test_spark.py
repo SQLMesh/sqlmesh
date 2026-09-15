@@ -1092,6 +1092,86 @@ def test_table_format(adapter: SparkEngineAdapter, mocker: MockerFixture):
     ]
 
 
+def test_alter_schema_owner(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_schema_owner("catalog.my_schema", "svc_prod_spn")
+    assert to_sql_calls(adapter) == ["ALTER SCHEMA `catalog`.`my_schema` OWNER TO `svc_prod_spn`"]
+
+
+def test_alter_schema_owner_three_part_name(make_mocked_engine_adapter: t.Callable):
+    # Schema references are typically 2-part (catalog.schema), but verify quoting is correct.
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_schema_owner("my_schema", "svc_prod_spn")
+    assert to_sql_calls(adapter) == ["ALTER SCHEMA `my_schema` OWNER TO `svc_prod_spn`"]
+
+
+def test_alter_view_owner(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_view_owner("catalog.my_schema.my_view", "svc_prod_spn")
+    assert to_sql_calls(adapter) == [
+        "ALTER VIEW `catalog`.`my_schema`.`my_view` OWNER TO `svc_prod_spn`"
+    ]
+
+
+def test_alter_view_owner_special_chars_in_principal(make_mocked_engine_adapter: t.Callable):
+    # Databricks Unity Catalog principals can contain colons and @ signs.
+    # Verify they are safely backtick-quoted and not interpreted as SQL syntax.
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_view_owner("catalog.sushi__dev.orders", "group:devs@company.com")
+    assert to_sql_calls(adapter) == [
+        "ALTER VIEW `catalog`.`sushi__dev`.`orders` OWNER TO `group:devs@company.com`"
+    ]
+
+
+def test_alter_table_owner(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_table_owner("catalog.sqlmesh__sushi.orders__abc123", "svc_prod_spn")
+    assert to_sql_calls(adapter) == [
+        "ALTER TABLE `catalog`.`sqlmesh__sushi`.`orders__abc123` OWNER TO `svc_prod_spn`"
+    ]
+
+
+def test_alter_table_owner_special_chars_in_principal(make_mocked_engine_adapter: t.Callable):
+    # Databricks Unity Catalog principals can contain colons and @ signs.
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.alter_table_owner("catalog.sqlmesh__sushi.orders__abc123", "group:data@company.com")
+    assert to_sql_calls(adapter) == [
+        "ALTER TABLE `catalog`.`sqlmesh__sushi`.`orders__abc123` OWNER TO `group:data@company.com`"
+    ]
+
+
+def test_alter_schema_owner_base_noop(make_mocked_engine_adapter: t.Callable):
+    # The base EngineAdapter.alter_schema_owner is a no-op: adapters that don't
+    # support ownership control silently skip it without emitting any SQL.
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+
+    adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    adapter.alter_schema_owner("my_schema", "some_owner")
+    adapter.alter_view_owner("my_schema.my_view", "some_owner")
+    adapter.alter_table_owner("my_schema.my_table", "some_owner")
+    # No ALTER SQL should have been emitted
+    alter_calls = [s for s in to_sql_calls(adapter) if "OWNER" in s.upper()]
+    assert alter_calls == []
+
+
+def test_current_user(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    adapter.cursor.fetchone.return_value = ("spn-abc-123",)
+    result = adapter.current_user()
+    assert result == "spn-abc-123"
+    sql_calls = to_sql_calls(adapter)
+    assert any("CURRENT_USER" in s.upper() for s in sql_calls)
+
+
+def test_current_user_base_noop(make_mocked_engine_adapter: t.Callable):
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+
+    adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    adapter.cursor.fetchone.return_value = ("duckdb-user",)
+    result = adapter.current_user()
+    assert result == "duckdb-user"
+
+
 def test_get_data_object_wap_branch(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SparkEngineAdapter, patch_get_data_objects=False)
     mocker.patch.object(adapter, "_get_data_objects", return_value=[])
