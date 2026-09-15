@@ -354,11 +354,10 @@ class BaseExpressionRenderer:
             else:
                 mapping = {
                     **self._to_table_mapping([snapshot] if snapshot else [], deployability_index),
-                    **(
-                        {table_name: table_mapping[table_name]}
-                        if table_name in table_mapping
-                        else {}
-                    ),
+                    # Keep the complete explicit mapping so exp.replace_tables can preserve
+                    # its dialect-aware matching and precedence for equivalent keys. This still
+                    # avoids scanning the full snapshots environment.
+                    **table_mapping,
                 }
         else:
             mapping = {
