@@ -821,7 +821,7 @@ def create_test(
     "--local",
     is_flag=True,
     expose_value=False,
-    help="Run tests using only locally loaded project files without loading state.",
+    help="Run tests using only locally loaded project files without loading state. Tests whose model is not loaded are skipped with a warning rather than failing.",
 )
 @click.argument("tests", nargs=-1)
 @click.pass_obj

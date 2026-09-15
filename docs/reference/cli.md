@@ -631,11 +631,8 @@ Options:
   --select-model TEXT  Select specific models to run unit tests for. Can be
                        specified multiple times.
   --local              Run tests using only locally loaded project files
-                       without loading state. In multi-repository setups, or
-                       when running tests for only a subset of projects, this
-                       may cause errors because SQLMesh will not resolve
-                       references or schemas from models that exist only in
-                       remote state.
+                       without loading state. Tests whose model is not loaded
+                       are skipped with a warning rather than failing.
   --help               Show this message and exit.
 ```
 
