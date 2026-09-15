@@ -727,11 +727,23 @@ def test_drop_schema_skips_dbo(make_mocked_engine_adapter: t.Callable):
         )
     ]
 
+    # String "dbo" path (original coverage)
     adapter.drop_schema("dbo", cascade=True)
 
     sql_calls = to_sql_calls(adapter)
     assert """DROP VIEW IF EXISTS [dbo].[test_view];""" in sql_calls
     assert """DROP SCHEMA IF EXISTS [dbo];""" not in sql_calls
+
+    # exp.to_table("dbo") path — schema ends up in .name, not .db
+    adapter2 = make_mocked_engine_adapter(MSSQLEngineAdapter)
+    adapter2._get_data_objects = mock.Mock()
+    adapter2._get_data_objects.return_value = []
+
+    schema_name = exp.to_table("dbo", dialect="tsql")
+    adapter2.drop_schema(schema_name, cascade=False)
+
+    sql_calls2 = to_sql_calls(adapter2)
+    assert """DROP SCHEMA IF EXISTS [dbo];""" not in sql_calls2
 
 
 def test_drop_schema_with_special_identifiers(make_mocked_engine_adapter: t.Callable):

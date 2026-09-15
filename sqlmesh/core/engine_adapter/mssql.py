@@ -203,7 +203,11 @@ class MSSQLEngineAdapter(
                         exists=ignore_if_not_exists,
                     )
 
-        schema = schema_name.db if isinstance(schema_name, exp.Table) else schema_name
+        schema = (
+            (schema_name.db or schema_name.name)
+            if isinstance(schema_name, exp.Table)
+            else schema_name
+        )
         if schema.lower() == "dbo":
             return
 
