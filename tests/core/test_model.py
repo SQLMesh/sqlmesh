@@ -9748,6 +9748,474 @@ def test_resolve_table(make_snapshot: t.Callable):
         assert post_statements[0].sql() == f'"main"."sqlmesh__schema"."schema__parent__{version}"'
 
 
+def test_resolve_table_large_environment(make_snapshot: t.Callable, mocker: MockerFixture):
+    """`_resolve_table` should only build a mapping for the one table being resolved, not the
+    entire environment (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    target = load_sql_based_model(d.parse("MODEL (name target); SELECT 1 AS c"))
+    target_snapshot = make_snapshot(target)
+    target_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    snapshots = {'"target"': target_snapshot}
+    for i in range(50):
+        other = load_sql_based_model(d.parse(f"MODEL (name other_{i}); SELECT 1 AS c"))
+        other_snapshot = make_snapshot(other)
+        other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[f'"other_{i}"'] = other_snapshot
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT c FROM target;
+            @resolve_named('target')
+            """
+        )
+    )
+
+    spy = mocker.spy(exp, "replace_tables")
+
+    post_statements = child.render_post_statements(snapshots=snapshots)
+    assert len(post_statements) == 1
+    assert post_statements[0].sql() == f'"sqlmesh__default"."target__{target_snapshot.version}"'
+
+    # every replace_tables call made while resolving the single `target` reference should only
+    # ever see that one mapping entry, not all 51 snapshots in the environment
+    for call in spy.call_args_list:
+        assert len(call.args[1]) <= 1
+
+    # an explicit table_mapping entry takes precedence over the snapshot-derived one (rendered
+    # via a separate model instance so the statement-render cache doesn't return the earlier result)
+    child_for_override = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child_override);
+            SELECT c FROM target;
+            @resolve_named('target')
+            """
+        )
+    )
+    override = child_for_override.render_post_statements(
+        snapshots=snapshots, table_mapping={'"target"': "overridden_table"}
+    )
+    assert override[0].sql() == '"overridden_table"'
+
+    # a name absent from both snapshots and table_mapping resolves unchanged
+    unmapped = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name unmapped_child);
+            SELECT 1 AS c;
+            @resolve_named('does_not_exist')
+            """
+        )
+    )
+    unmapped_result = unmapped.render_post_statements(snapshots=snapshots)
+    assert unmapped_result[0].sql() == '"does_not_exist"'
+
+
+@pytest.mark.parametrize("include_exact_mapping", [False, True])
+def test_resolve_table_preserves_dialect_equivalent_table_mapping_override(
+    make_snapshot: t.Callable, include_exact_mapping: bool
+):
+    """An explicit mapping should override a snapshot mapping when its key is dialect-equivalent
+    to the resolved table name, even when the snapshot lookup is an exact match."""
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    parent = load_sql_based_model(d.parse("MODEL (name parent); SELECT 1 AS c"))
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT 1 AS c;
+            @resolve_named('parent')
+            """
+        )
+    )
+
+    table_mapping = {"parent": "override_table"}
+    if include_exact_mapping:
+        table_mapping = {parent.fqn: "earlier_table", **table_mapping}
+
+    post_statements = child.render_post_statements(
+        snapshots={parent.fqn: parent_snapshot}, table_mapping=table_mapping
+    )
+
+    assert post_statements[0].sql() == '"override_table"'
+
+
+def test_render_virtual_properties_skips_mapping_without_table_refs(
+    make_snapshot: t.Callable, mocker: MockerFixture
+):
+    """Rendering a property expression with no table references shouldn't build the full
+    snapshot -> table-name mapping at all (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
+    import sqlmesh.core.snapshot as snapshot_module
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.test_model,
+                virtual_properties (
+                    labels = [('team', 'data')]
+                ),
+                session_properties (
+                    "spark.executor.memory" = '1G'
+                ),
+            );
+            SELECT a FROM tbl;
+            """
+        )
+    )
+
+    snapshots = {}
+    for i in range(50):
+        other = load_sql_based_model(d.parse(f"MODEL (name other_{i}); SELECT 1 AS c"))
+        other_snapshot = make_snapshot(other)
+        other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[f'"other_{i}"'] = other_snapshot
+
+    to_table_mapping_spy = mocker.spy(snapshot_module, "to_table_mapping")
+
+    assert model.render_virtual_properties(snapshots=snapshots) == {
+        "labels": exp.maybe_parse("[('team', 'data')]")
+    }
+    assert model.render_session_properties(snapshots=snapshots) == {
+        "spark.executor.memory": "1G",
+    }
+
+    # `this_model` resolution may still make a narrow, single-snapshot (or empty) call, but the
+    # full N-snapshot mapping build in `_resolve_tables` must never fire for a table-less property
+    for call in to_table_mapping_spy.call_args_list:
+        assert len(call.args[0]) <= 1
+
+
+def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
+    """`_resolve_table`'s narrowed lookup keys `snapshots` by the caller's already-normalized
+    `table_name` string. That string is built with the *referencing* model's own dialect
+    (`self._dialect` in the `resolve_table` macro closure), while the entry in `snapshots` is
+    keyed by the *referenced* model's fqn, which is normalized using that model's own dialect.
+
+    When the two models use dialects with different identifier-casing rules (e.g. a
+    case-insensitive dialect like duckdb referencing a model whose fqn was computed under a
+    case-uppercasing dialect like snowflake), the raw string lookup can miss even though
+    `exp.replace_tables`'s own (dialect-aware) matching -- which is what ran before this
+    optimization, and which the narrowed lookup's own final `exp.replace_tables` call still
+    performs when the key IS found -- would have matched them.
+    """
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    # parent is declared/rendered under snowflake, which uppercases unquoted identifiers, so its
+    # fqn (the key that will appear in `snapshots`) is uppercase-quoted.
+    parent = load_sql_based_model(
+        d.parse("MODEL (name parent); SELECT 1 AS c"), dialect="snowflake"
+    )
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    assert parent.fqn == '"PARENT"'
+
+    # child is declared/rendered under duckdb (case-insensitive), referencing `parent` in lowercase
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT c FROM parent;
+            @resolve_named('parent')
+            """
+        ),
+        dialect="duckdb",
+    )
+
+    snapshots = {parent.fqn: parent_snapshot}
+    post_statements = child.render_post_statements(snapshots=snapshots)
+
+    assert len(post_statements) == 1
+    resolved_sql = post_statements[0].sql()
+    # BUG: if this assertion fails with the resolved name still literally "parent" (unmapped)
+    # instead of the physical table name, the narrowed single-snapshot lookup in `_resolve_table`
+    # failed to find `parent` in `snapshots` due to the cross-dialect casing mismatch between the
+    # lookup key and the dict key, even though the table legitimately exists in `snapshots`.
+    assert resolved_sql == f'"sqlmesh__default"."parent__{parent_snapshot.version}"', (
+        f"expected parent to resolve to its physical table name, but got {resolved_sql!r} -- "
+        "this indicates the narrowed snapshots.get(table_name) lookup in _resolve_table missed "
+        "a snapshot that the old full-mapping + exp.replace_tables path would have matched"
+    )
+
+
+def test_resolve_table_table_mapping_only_no_snapshots(make_snapshot: t.Callable):
+    """A `table_mapping` entry with no corresponding `snapshots` entry should still be honored
+    by the narrowed lookup in `_resolve_table` (mirrors the override case in
+    `test_resolve_table_large_environment`, but with `snapshots=None`/empty entirely, to make
+    sure the narrowed code path doesn't assume `snapshots` is non-empty before consulting
+    `table_mapping`)."""
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT 1 AS c;
+            @resolve_named('parent')
+            """
+        )
+    )
+
+    post_statements = child.render_post_statements(
+        snapshots=None, table_mapping={'"parent"': "explicit_physical_table"}
+    )
+    assert post_statements[0].sql() == '"explicit_physical_table"'
+
+
+def test_resolve_table_non_string_expr_path(make_snapshot: t.Callable):
+    """When `table_name` is an `exp.Expr` (not a `str`), `_resolve_table` falls back to building
+    the full snapshot mapping (the `else` branch of the new code). This exercises that branch --
+    which the `this_model`/`resolve_table` macro call sites never hit, since they always pass a
+    pre-normalized string -- directly at the renderer level, to make sure it's still reachable
+    and correct, and not dead code that silently bit-rots."""
+
+    from sqlmesh.core.renderer import ExpressionRenderer
+
+    parent = load_sql_based_model(d.parse("MODEL (name parent); SELECT 1 AS c"))
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    other = load_sql_based_model(d.parse("MODEL (name other); SELECT 1 AS c"))
+    other_snapshot = make_snapshot(other)
+    other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    expr_renderer = ExpressionRenderer(
+        exp.select("*"),
+        dialect="",
+        macro_definitions=[],
+        path=Path("."),
+    )
+
+    table_expr = exp.to_table('"parent"')
+    resolved = expr_renderer._resolve_table(
+        table_expr,
+        snapshots={'"parent"': parent_snapshot, '"other"': other_snapshot},
+    )
+    assert resolved.sql(comments=False) == f'"sqlmesh__default"."parent__{parent_snapshot.version}"'
+
+
+def test_resolve_tables_table_ref_only_in_string_literal_not_expanded(make_snapshot: t.Callable):
+    """Adversarial case for the `expression.find(exp.Table)` short-circuit in `_resolve_tables`:
+    an expression that references a table only inside a string literal (not a parsed `exp.Table`
+    node) has no `exp.Table` node for `find()` to see, so the mapping build is correctly skipped.
+    This documents/locks in that the short-circuit is safe because `exp.replace_tables` itself
+    only ever rewrites `exp.Table` nodes -- it would never have touched a string literal either,
+    mapping built or not -- so skipping the mapping cannot change behavior here."""
+
+    parent = load_sql_based_model(d.parse("MODEL (name parent); SELECT 1 AS c"))
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.string_ref_model,
+                virtual_properties (
+                    description = 'references parent as a plain string, not a table node'
+                ),
+            );
+            SELECT a FROM tbl;
+            """
+        )
+    )
+
+    snapshots = {'"parent"': parent_snapshot}
+    props = model.render_virtual_properties(snapshots=snapshots)
+    assert props["description"].this == "references parent as a plain string, not a table node"
+
+
+def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.Callable):
+    """Embedded-model expansion (`expand=`) runs as an `expression.transform` *before* the new
+    `expression.find(exp.Table)` short-circuit in `_resolve_tables`, so a table reference that
+    only exists *after* inlining an embedded model's query must still be seen by `find()` and
+    mapped. This locks in that ordering: `grandparent` is not a literal `exp.Table` node in
+    `child`'s original query -- it only appears once the embedded `mid` model is expanded -- and
+    must still resolve to its physical table name, not be silently skipped because it wasn't
+    present at the time `_resolve_tables` was first called."""
+
+    grandparent = load_sql_based_model(d.parse("MODEL (name grandparent); SELECT 1 AS c"))
+    grandparent_snapshot = make_snapshot(grandparent)
+    grandparent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mid = load_sql_based_model(
+        d.parse("MODEL (name mid, kind EMBEDDED); SELECT c FROM grandparent;")
+    )
+    mid_snapshot = make_snapshot(mid)
+    mid_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    child = load_sql_based_model(d.parse("MODEL (name child); SELECT c FROM mid;"))
+
+    snapshots = {'"grandparent"': grandparent_snapshot, '"mid"': mid_snapshot}
+    query = child.render_query(snapshots=snapshots)
+    assert query is not None
+    rendered_sql = query.sql()
+
+    # the physical table name for `grandparent` must appear -- if the find(exp.Table) check had
+    # run before expansion (or expansion didn't feed into it), `grandparent` would remain
+    # unmapped in the rendered output.
+    assert f"grandparent__{grandparent_snapshot.version}" in rendered_sql
+    assert "FROM grandparent" not in rendered_sql
+
+
+def test_resolve_table_deployability_index_consistency(make_snapshot: t.Callable):
+    """The narrowed `_resolve_table` single-snapshot mapping must respect `deployability_index`
+    identically to the full-mapping path: a non-deployable (dev-preview) snapshot should map to
+    its dev table, not its deployable/prod table.
+
+    A snapshot's dev table only differs from its prod table when `dev_version_` differs from
+    `version` (see `Snapshot._table_name`); that normally arises from a forward-only change
+    against a previous version. `SnapshotChangeCategory.FORWARD_ONLY` is deprecated/blocked by
+    `categorize_as`, so this sets `dev_version_` directly to force that condition deterministically
+    without relying on a deprecated code path.
+    """
+    from sqlmesh.core.snapshot import DeployabilityIndex
+
+    parent = load_sql_based_model(
+        d.parse("MODEL (name parent); SELECT 1 AS c"),
+        dialect="duckdb",
+    )
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    parent_snapshot.dev_version_ = "customdevversion123"
+    assert parent_snapshot.table_name(is_deployable=True) != parent_snapshot.table_name(
+        is_deployable=False
+    )
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    child_sql = """
+        MODEL (name child);
+        SELECT 1 AS c;
+        @resolve_named('parent')
+        """
+
+    snapshots = {parent.fqn: parent_snapshot}
+
+    # separate model instances per render call so the statement-render cache (keyed independent
+    # of `deployability_index`) doesn't just return the first call's cached result.
+    deployable_result = (
+        load_sql_based_model(d.parse(child_sql))
+        .render_post_statements(
+            snapshots=snapshots, deployability_index=DeployabilityIndex.all_deployable()
+        )[0]
+        .sql()
+    )
+    non_deployable_result = (
+        load_sql_based_model(d.parse(child_sql))
+        .render_post_statements(
+            snapshots=snapshots,
+            deployability_index=DeployabilityIndex.all_deployable().with_non_deployable(
+                parent_snapshot
+            ),
+        )[0]
+        .sql()
+    )
+
+    # the narrowed single-snapshot mapping must still pick the right table for each index.
+    assert deployable_result != non_deployable_result
+    assert parent_snapshot.table_name(is_deployable=True) in deployable_result.replace('"', "")
+    assert parent_snapshot.table_name(is_deployable=False) in non_deployable_result.replace('"', "")
+
+
+def test_resolve_table_table_mapping_only_dialect_mismatch(make_snapshot: t.Callable):
+    """When `snapshots` is empty/None, `_resolve_table`'s narrowed lookup must still fall back to
+    the full, dialect-reconciling mapping on a miss - not just when `snapshots` is non-empty.
+
+    `table_name` and a `table_mapping` key can be normalized under different dialects (e.g. a
+    unit-test `table_mapping` built from the project's dialect vs. a model's own dialect for the
+    macro-resolved name), so they can disagree in casing/quoting even though an entry for this
+    table exists. The old exp.replace_tables-based path reconciled this via its own
+    normalization; a raw `table_name in table_mapping` string-equality check does not.
+    """
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT 1 AS c;
+            @resolve_named('a.b')
+            """
+        )
+    )
+
+    # `table_mapping` key differs from the resolved name only in quoting - a raw dict lookup on
+    # `'"a"."b"'` would miss `'a.b'`, but exp.replace_tables' normalization matches them.
+    post_statements = child.render_post_statements(snapshots=None, table_mapping={"a.b": "c"})
+    assert post_statements[0].sql(comments=False) == '"c"'
+
+
+def test_resolve_tables_skips_expand_computation_without_table_refs(
+    make_snapshot: t.Callable,
+):
+    """Rendering a table-less expression (e.g. `virtual_properties`) must skip building the
+    `expand` set and `model_mapping` entirely, not just the final mapping/replace_tables call -
+    both of those are themselves O(N) in the number of snapshots when any snapshot is embedded,
+    so doing them for an expression with no `exp.Table` node at all defeats the point of skipping
+    the mapping build."""
+
+    embedded = load_sql_based_model(d.parse("MODEL (name embedded, kind EMBEDDED); SELECT 1 AS c"))
+    embedded_snapshot = make_snapshot(embedded)
+    embedded_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    class ItemsCountingDict(dict):
+        items_call_count = 0
+
+        def items(self):
+            ItemsCountingDict.items_call_count += 1
+            return super().items()
+
+    snapshots = ItemsCountingDict({embedded.fqn: embedded_snapshot})
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.test_model,
+                virtual_properties (
+                    labels = [('team', 'data')]
+                ),
+            );
+            SELECT a FROM tbl;
+            """
+        )
+    )
+
+    assert model.render_virtual_properties(snapshots=snapshots) == {
+        "labels": exp.maybe_parse("[('team', 'data')]")
+    }
+    # `_resolve_tables` computing `expand` (which scans `snapshots.items()` for embedded
+    # snapshots) and `model_mapping` must not happen for a table-less expression, even though
+    # this environment has an embedded snapshot that would otherwise trigger both.
+    assert ItemsCountingDict.items_call_count == 0
+
+
 def test_cluster_with_complex_expression():
     expressions = d.parse(
         """

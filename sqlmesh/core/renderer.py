@@ -330,12 +330,44 @@ class BaseExpressionRenderer:
         table_mapping: t.Optional[t.Dict[str, str]] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
     ) -> exp.Table:
+        table_mapping = table_mapping or {}
+        if isinstance(table_name, str):
+            # table_name arrives here already normalized to a model FQN (see the `resolve_table`
+            # closure below and the `this_model` call site), the same key format `snapshots` and
+            # `table_mapping` use. Only the one relevant snapshot needs mapping, not the whole
+            # environment - building the full mapping made this call O(N) in the number of
+            # snapshots in the environment for every table resolved.
+            snapshot = snapshots.get(table_name) if snapshots else None
+            if snapshot is None and table_name not in table_mapping:
+                # table_name is normalized under this renderer's own dialect, but a snapshots key
+                # is normalized under that model's own dialect and a table_mapping key may come
+                # from yet another dialect (e.g. a test fixture's table_mapping, normalized under
+                # the project's dialect) - these can disagree in casing/quoting even though an
+                # entry for this table exists in one of them. A direct dict lookup can miss in
+                # that case, so on a miss in both dicts, fall back to the full, dialect-
+                # reconciling mapping that exp.replace_tables itself performs. This only pays the
+                # O(N) cost on a miss, not on every resolution.
+                mapping = {
+                    **self._to_table_mapping((snapshots or {}).values(), deployability_index),
+                    **table_mapping,
+                }
+            else:
+                mapping = {
+                    **self._to_table_mapping([snapshot] if snapshot else [], deployability_index),
+                    # Keep the complete explicit mapping so exp.replace_tables can preserve
+                    # its dialect-aware matching and precedence for equivalent keys. This still
+                    # avoids scanning the full snapshots environment.
+                    **table_mapping,
+                }
+        else:
+            mapping = {
+                **self._to_table_mapping((snapshots or {}).values(), deployability_index),
+                **table_mapping,
+            }
+
         table = exp.replace_tables(
             t.cast(exp.Table, exp.maybe_parse(table_name, into=exp.Table, dialect=self._dialect)),
-            {
-                **self._to_table_mapping((snapshots or {}).values(), deployability_index),
-                **(table_mapping or {}),
-            },
+            mapping,
             dialect=self._dialect,
             copy=False,
         )
@@ -363,12 +395,15 @@ class BaseExpressionRenderer:
 
         expression = expression.copy()
         with self._normalize_and_quote(expression) as expression:
+            # An expression with no exp.Table node at all (e.g. session/virtual properties) has
+            # nothing for `expand` to expand or for a table mapping to replace - skip building
+            # the expand set and model_mapping too, not just the mapping/replace_tables below,
+            # since both of those are themselves O(N) in the number of snapshots.
+            if not expression.find(exp.Table):
+                return expression
+
             snapshots = snapshots or {}
             table_mapping = table_mapping or {}
-            mapping = {
-                **self._to_table_mapping(snapshots.values(), deployability_index),
-                **table_mapping,
-            }
             expand = set(expand) | {
                 name for name, snapshot in snapshots.items() if snapshot.is_embedded
             }
@@ -410,10 +445,22 @@ class BaseExpressionRenderer:
 
                 expression = expression.transform(_expand, copy=False)  # type: ignore
 
-            if mapping:
-                expression = exp.replace_tables(
-                    expression, mapping, dialect=self._dialect, copy=False
-                )
+            # Building the full snapshot -> table-name mapping and normalizing it in
+            # exp.replace_tables is O(N) in the number of snapshots in the environment; skip it
+            # entirely for expressions that don't reference any table at all (e.g. session/
+            # virtual properties), since there's nothing for the mapping to replace.
+            if expression.find(exp.Table):
+                # mypy loses the `snapshots`/`table_mapping` narrowing above because they're
+                # captured by the `_expand` closure defined earlier in this block.
+                assert snapshots is not None and table_mapping is not None
+                mapping = {
+                    **self._to_table_mapping(snapshots.values(), deployability_index),
+                    **table_mapping,
+                }
+                if mapping:
+                    expression = exp.replace_tables(
+                        expression, mapping, dialect=self._dialect, copy=False
+                    )
 
             return expression
 
