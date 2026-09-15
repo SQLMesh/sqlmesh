@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import gzip
 import logging
+import os
 import pickle
 import shutil
+import tempfile
 import typing as t
 from pathlib import Path
 
@@ -125,8 +127,25 @@ class FileCache(t.Generic[T]):
         if not self._path.is_dir():
             raise SQLMeshError(f"Cache path '{self._path}' is not a directory.")
 
-        with gzip.open(self._cache_entry_path(name, entry_id), "wb", compresslevel=1) as fd:
-            pickle.dump(value, fd)
+        # Write to a temporary file and then atomically move it into place. Writing the
+        # entry in place ("wb" truncates the target file first) means that a concurrent
+        # reader (e.g. another pytest-xdist worker) could observe a partially written
+        # entry and fail to unpickle it.
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=self._path, prefix=f"{self._cache_version}__tmp")
+        try:
+            with os.fdopen(tmp_fd, "wb") as raw_fd:
+                with gzip.open(raw_fd, "wb", compresslevel=1) as fd:
+                    pickle.dump(value, fd)
+            try:
+                os.replace(tmp_name, self._cache_entry_path(name, entry_id))
+            except OSError as ex:
+                # Windows os.replace fails if a concurrent reader still has the target file open.
+                logger.warning("Failed to store a cache entry '%s': %s", name, ex)
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
     def exists(self, name: str, entry_id: str = "") -> bool:
         """Returns true if the cache entry with the given name and ID exists, false otherwise.

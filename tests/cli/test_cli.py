@@ -59,6 +59,31 @@ plan:
         )
 
 
+def add_incremental_model_test(temp_dir) -> None:
+    with open(temp_dir / "tests" / "test_incremental_model.yaml", "w", encoding="utf-8") as f:
+        f.write(
+            """
+test_example_incremental_model:
+  model: sqlmesh_example.incremental_model
+  vars:
+    start: 2020-01-01
+    end: 2020-01-02
+  inputs:
+    sqlmesh_example.seed_model:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  outputs:
+    query:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+"""
+        )
+
+
 def update_incremental_model(temp_dir) -> None:
     with open(temp_dir / "models" / "incremental_model.sql", "w", encoding="utf-8") as f:
         f.write(
@@ -191,6 +216,105 @@ def test_plan_skip_tests(runner, tmp_path):
     assert "Successfully Ran 1 tests against duckdb" not in result.output
     assert_new_env(result)
     assert_backfill_success(result)
+
+
+def test_plan_no_changes_runs_tests_by_default(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 2 tests against duckdb" in result.output
+    assert "No changes to plan" in result.output or "No changes" in result.output
+
+
+def test_plan_test_changed_only_with_no_changes(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+        ],
+        input="\n",
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran" not in result.output
+
+
+def test_plan_test_changed_only_runs_only_changed_model_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
+
+
+def test_plan_select_model_test_changed_only_scopes_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+    incremental_model_path = tmp_path / "models" / "incremental_model.sql"
+    incremental_model_path.write_text(
+        incremental_model_path.read_text().replace(
+            "  item_id,\n  event_date,",
+            "  item_id,\n  'b' as new_col,\n  event_date,",
+        )
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--select-model",
+            "sqlmesh_example.full_model",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
 
 
 def test_plan_skip_linter(runner, tmp_path):

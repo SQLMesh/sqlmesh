@@ -490,7 +490,7 @@ MODEL (
     cron '@daily',
     start '2023-01-07'
 );
-SELECT 1 AS col, '2023-01-07' AS event_ts
+SELECT 1 AS col, CAST('2023-01-07' AS DATE) AS event_ts
 """
             )
         )
