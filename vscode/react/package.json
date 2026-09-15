@@ -33,7 +33,7 @@
     "react-dom": "^18.3.1",
     "react-router": "^7.7.0",
     "reactflow": "^11.11.4",
-    "tailwindcss": "^4.1.11",
+    "tailwindcss": "^4.1.16",
     "vscode-uri": "^3.1.0"
   },
   "devDependencies": {
