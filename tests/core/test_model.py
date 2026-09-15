@@ -10104,6 +10104,86 @@ def test_resolve_table_deployability_index_consistency(make_snapshot: t.Callable
     )
 
 
+def test_resolve_table_table_mapping_only_dialect_mismatch(make_snapshot: t.Callable):
+    """When `snapshots` is empty/None, `_resolve_table`'s narrowed lookup must still fall back to
+    the full, dialect-reconciling mapping on a miss - not just when `snapshots` is non-empty.
+
+    `table_name` and a `table_mapping` key can be normalized under different dialects (e.g. a
+    unit-test `table_mapping` built from the project's dialect vs. a model's own dialect for the
+    macro-resolved name), so they can disagree in casing/quoting even though an entry for this
+    table exists. The old exp.replace_tables-based path reconciled this via its own
+    normalization; a raw `table_name in table_mapping` string-equality check does not.
+    """
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT 1 AS c;
+            @resolve_named('a.b')
+            """
+        )
+    )
+
+    # `table_mapping` key differs from the resolved name only in quoting - a raw dict lookup on
+    # `'"a"."b"'` would miss `'a.b'`, but exp.replace_tables' normalization matches them.
+    post_statements = child.render_post_statements(
+        snapshots=None, table_mapping={"a.b": "c"}
+    )
+    assert post_statements[0].sql(comments=False) == '"c"'
+
+
+def test_resolve_tables_skips_expand_computation_without_table_refs(
+    make_snapshot: t.Callable,
+):
+    """Rendering a table-less expression (e.g. `virtual_properties`) must skip building the
+    `expand` set and `model_mapping` entirely, not just the final mapping/replace_tables call -
+    both of those are themselves O(N) in the number of snapshots when any snapshot is embedded,
+    so doing them for an expression with no `exp.Table` node at all defeats the point of skipping
+    the mapping build."""
+
+    embedded = load_sql_based_model(
+        d.parse("MODEL (name embedded, kind EMBEDDED); SELECT 1 AS c")
+    )
+    embedded_snapshot = make_snapshot(embedded)
+    embedded_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    class ItemsCountingDict(dict):
+        items_call_count = 0
+
+        def items(self):
+            ItemsCountingDict.items_call_count += 1
+            return super().items()
+
+    snapshots = ItemsCountingDict({embedded.fqn: embedded_snapshot})
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.test_model,
+                virtual_properties (
+                    labels = [('team', 'data')]
+                ),
+            );
+            SELECT a FROM tbl;
+            """
+        )
+    )
+
+    assert model.render_virtual_properties(snapshots=snapshots) == {
+        "labels": exp.maybe_parse("[('team', 'data')]")
+    }
+    # `_resolve_tables` computing `expand` (which scans `snapshots.items()` for embedded
+    # snapshots) and `model_mapping` must not happen for a table-less expression, even though
+    # this environment has an embedded snapshot that would otherwise trigger both.
+    assert ItemsCountingDict.items_call_count == 0
+
+
 def test_cluster_with_complex_expression():
     expressions = d.parse(
         """

@@ -338,16 +338,17 @@ class BaseExpressionRenderer:
             # environment - building the full mapping made this call O(N) in the number of
             # snapshots in the environment for every table resolved.
             snapshot = snapshots.get(table_name) if snapshots else None
-            if snapshot is None and snapshots and table_name not in table_mapping:
-                # table_name is normalized under this renderer's own dialect, but a snapshot's
-                # fqn (the snapshots dict key) is normalized under that model's own dialect -
-                # these can disagree in casing when models use different dialects (e.g. a
-                # case-uppercasing dialect referenced from a case-insensitive one). A direct
-                # dict lookup can miss in that case even though the table is present, so fall
-                # back to the full, dialect-reconciling mapping that exp.replace_tables itself
-                # performs. This only pays the O(N) cost on a miss, not on every resolution.
+            if snapshot is None and table_name not in table_mapping:
+                # table_name is normalized under this renderer's own dialect, but a snapshots key
+                # is normalized under that model's own dialect and a table_mapping key may come
+                # from yet another dialect (e.g. a test fixture's table_mapping, normalized under
+                # the project's dialect) - these can disagree in casing/quoting even though an
+                # entry for this table exists in one of them. A direct dict lookup can miss in
+                # that case, so on a miss in both dicts, fall back to the full, dialect-
+                # reconciling mapping that exp.replace_tables itself performs. This only pays the
+                # O(N) cost on a miss, not on every resolution.
                 mapping = {
-                    **self._to_table_mapping(snapshots.values(), deployability_index),
+                    **self._to_table_mapping((snapshots or {}).values(), deployability_index),
                     **table_mapping,
                 }
             else:
@@ -395,6 +396,13 @@ class BaseExpressionRenderer:
 
         expression = expression.copy()
         with self._normalize_and_quote(expression) as expression:
+            # An expression with no exp.Table node at all (e.g. session/virtual properties) has
+            # nothing for `expand` to expand or for a table mapping to replace - skip building
+            # the expand set and model_mapping too, not just the mapping/replace_tables below,
+            # since both of those are themselves O(N) in the number of snapshots.
+            if not expression.find(exp.Table):
+                return expression
+
             snapshots = snapshots or {}
             table_mapping = table_mapping or {}
             expand = set(expand) | {
