@@ -37,7 +37,7 @@ def get_file(
     """Get a file, including its contents."""
     try:
         file_path = Path(path)
-        file = _get_file_with_content(settings.project_path / file_path, str(file_path))
+        file = _get_file_with_content(settings.project_path / file_path, file_path.as_posix())
     except FileNotFoundError:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND)
 
@@ -155,7 +155,7 @@ def _get_directory(path: str | Path, settings: Settings) -> models.Directory:
         return sorted(directories, key=lambda x: x.name), sorted(files, key=lambda x: x.name)
 
     directories, files = walk_path(path)
-    relative_path = str(Path(path).relative_to(settings.project_path))
+    relative_path = Path(path).relative_to(settings.project_path).as_posix()
 
     return models.Directory(
         name=os.path.basename(path),
@@ -181,6 +181,6 @@ def _get_file_with_content(file_path: Path, relative_path: str) -> models.File:
 
     return models.File(
         name=file_path.name,
-        path=relative_path,
+        path=str(Path(relative_path).as_posix()),
         content=content,
     )
