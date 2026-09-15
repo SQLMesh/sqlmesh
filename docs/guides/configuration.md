@@ -929,19 +929,22 @@ Example snowflake connection configuration:
 These pages describe the connection configuration options for each execution engine.
 
 * [Athena](../integrations/engines/athena.md)
+* [Azure SQL](../integrations/engines/azuresql.md)
 * [BigQuery](../integrations/engines/bigquery.md)
+* [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)
-* [MySQL](../integrations/engines/mysql.md)
 * [MSSQL](../integrations/engines/mssql.md)
+* [MySQL](../integrations/engines/mysql.md)
 * [Postgres](../integrations/engines/postgres.md)
 * [GCP Postgres](../integrations/engines/gcp-postgres.md)
 * [Redshift](../integrations/engines/redshift.md)
+* [RisingWave](../integrations/engines/risingwave.md)
 * [Snowflake](../integrations/engines/snowflake.md)
-* [StarRocks](../integrations/engines/starrocks.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 #### State connection
