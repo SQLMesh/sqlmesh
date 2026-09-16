@@ -282,9 +282,11 @@ class TableDiff:
         # If the columns to join on are explicitly specified, then just return them
         if isinstance(self._on, (list, tuple)):
             identifiers = [normalize_identifiers(c, dialect=dialect) for c in self._on]
-            s_index = [exp.column(c, "s") for c in identifiers]
-            t_index = [exp.column(c, "t") for c in identifiers]
-            return s_index, t_index, [i.name for i in identifiers]
+            s_names = [self._resolve_column_name(c.name, self.source_schema) for c in identifiers]
+            t_names = [self._resolve_column_name(c.name, self.target_schema) for c in identifiers]
+            s_index = [exp.column(c, "s") for c in s_names]
+            t_index = [exp.column(c, "t") for c in t_names]
+            return s_index, t_index, s_names
 
         # Otherwise, we need to parse them out of the supplied "on" condition
         index_cols = []
@@ -295,15 +297,25 @@ class TableDiff:
         for col in self._on.find_all(exp.Column):
             index_cols.append(col.name)
             if col.table.lower() == "s":
+                col = exp.column(self._resolve_column_name(col.name, self.source_schema), col.table)
                 s_index.append(col)
             elif col.table.lower() == "t":
+                col = exp.column(self._resolve_column_name(col.name, self.target_schema), col.table)
                 t_index.append(col)
+            index_cols.append(col.name)
 
         index_cols = list(dict.fromkeys(index_cols))
         s_index = list(dict.fromkeys(s_index))
         t_index = list(dict.fromkeys(t_index))
 
         return s_index, t_index, index_cols
+
+    def _resolve_column_name(self, name: str, schema: t.Dict[str, exp.DataType]) -> str:
+        if name in schema:
+            return name
+
+        lowercase_name = name.lower()
+        return next((c for c in schema if c.lower() == lowercase_name), name)
 
     @property
     def source_key_expression(self) -> exp.Expr:
