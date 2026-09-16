@@ -105,6 +105,7 @@ nav:
       - reference/cli.md
       - reference/notebook.md
       - reference/python.md
+      - reference/execution_observations.md
     - Configuration:
       - reference/configuration.md
       - reference/model_configuration.md

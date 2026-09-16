@@ -18,6 +18,7 @@ import abc
 import logging
 import typing as t
 from sqlmesh.core import analytics
+from sqlmesh.core.execution_observation import action, console_observer_scope
 from sqlmesh.core import constants as c
 from sqlmesh.core.console import Console, get_console
 from sqlmesh.core.environment import EnvironmentNamingInfo, execute_environment_statements
@@ -102,7 +103,8 @@ class BuiltInPlanEvaluator(PlanEvaluator):
 
         try:
             plan_stages = stages.build_plan_stages(plan, self.state_sync, self.default_catalog)
-            self._evaluate_stages(plan_stages, plan)
+            with console_observer_scope(self.console):
+                self._evaluate_stages(plan_stages, plan)
         except Exception as e:
             analytics.collector.on_plan_apply_end(plan_id=plan.plan_id, error=e)
             raise
@@ -122,7 +124,8 @@ class BuiltInPlanEvaluator(PlanEvaluator):
                 raise SQLMeshError(f"Unexpected plan stage: {stage_name}")
             logger.info("Evaluating plan stage %s", stage_name)
             handler = getattr(self, handler_name)
-            handler(stage, plan)
+            with action("stage", stage_name, native_plan_id=plan.plan_id):
+                handler(stage, plan)
 
     def visit_before_all_stage(self, stage: stages.BeforeAllStage, plan: EvaluatablePlan) -> None:
         execute_environment_statements(
