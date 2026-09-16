@@ -477,6 +477,23 @@ $ sqlmesh test models/full_model.sql tests/test_full_model.yaml
 
 An argument that is neither a known model file nor a known test file is an error, so a mistyped or stale path fails instead of quietly running no tests. A model that simply has no tests is not an error.
 
+You can pass `--local` to run tests without loading state from the configured state connection:
+
+``` bash
+$ sqlmesh test --local
+```
+
+This keeps offline runs and commit hooks from opening a connection to the state backend.
+
+In multi-repository setups, or when running tests for only a subset of projects, models that exist only in remote state are not loaded under `--local`. Unlike [`sqlmesh lint --local`](../guides/linter.md), which reports additional errors in that situation, a test whose model is missing is **skipped with a warning and the run still succeeds**:
+
+```
+[WARNING] Model '"memory"."bronze"."a"' was not found at tests/test_a.yaml
+.**Successfully Ran `1` Tests Against `duckdb`**
+```
+
+So a passing exit code alone does not mean every test you expected actually ran. Watch the output for these warnings, and keep in mind that a hook using `--local` will not fail on them.
+
 ### Testing using notebooks
 
 You can execute tests on demand using the `%run_test` notebook magic as follows:
