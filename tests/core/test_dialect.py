@@ -1027,6 +1027,20 @@ def test_tsql_alter_column_nullability():
     )
 
 
+def test_sqlglot_parser_signature_compatibility():
+    # SQLGlot passes UPDATE-specific alias tokens to _parse_join. The SQLMesh
+    # override must preserve those tokens when delegating to SQLGlot.
+    assert (
+        parse_one("UPDATE target JOIN source SET target.x = source.x", read="tsql").sql(
+            dialect="tsql"
+        )
+        == "UPDATE target, source SET target.x = source.x"
+    )
+
+    # SQLGlot 30.17 passes parse_function_unit to _parse_interval_span.
+    assert parse_one("INTERVAL '1' DAY").sql() == "INTERVAL '1' DAY"
+
+
 def test_model_name_cannot_be_string():
     with pytest.raises(ParseError) as parse_error:
         parse(
@@ -1231,3 +1245,12 @@ def test_extend_sqlglot_is_idempotent():
     assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
     # The class-level registries must not grow on repeated calls.
     assert Generator.UNWRAPPED_INTERVAL_VALUES == before
+
+
+def test_extend_sqlglot_supports_collated_types():
+    # SQLGlot calls Parser._parse_types with this keyword while parsing
+    # collated types. Keep the SQLMesh override compatible with that API.
+    assert (
+        parse_one("SELECT CAST('x' AS VARCHAR COLLATE utf8)", "spark").sql("spark")
+        == "SELECT CAST('x' AS STRING COLLATE utf8)"
+    )
