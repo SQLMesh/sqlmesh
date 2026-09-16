@@ -182,3 +182,182 @@ def test_format_without_state_load(tmp_path: pathlib.Path, mocker: MockerFixture
     context = Context(paths=tmp_path, config=Config(project="local_only"), load_state=False)
     context.format(check=True)
     mock.assert_not_called()
+
+
+def _format_project(tmp_path: pathlib.Path) -> dict:
+    """A project with a model, an audit, a standalone audit, a macro and a python model."""
+    files = {
+        "models/model_1.sql": "MODEL(name this.model1, dialect 'duckdb'); SELECT 1 AS   col",
+        "models/model_2.sql": "MODEL(name this.model2, dialect 'duckdb'); SELECT 2 AS   col",
+        "models/model_3.py": "# python model, must be left alone\n",
+        "audits/audit_1.sql": "AUDIT(name audit1, dialect 'duckdb'); SELECT  * FROM @this_model WHERE   col < 0;",
+        "macros/macro_1.sql": "SELECT   1",
+    }
+    created = {}
+    for rel, text in files.items():
+        created[rel] = create_temp_file(tmp_path, pathlib.Path(rel), text)
+    return created
+
+
+def test_format_paths_does_not_load_project(tmp_path: pathlib.Path, mocker: MockerFixture):
+    """`sqlmesh format models/a.sql` must not parse unrelated models."""
+    files = _format_project(tmp_path)
+    before_2 = files["models/model_2.sql"].read_text(encoding="utf-8")
+
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    load_spy = mocker.spy(Context, "load")
+
+    assert context.format(paths=(str(files["models/model_1.sql"]),))
+
+    load_spy.assert_not_called()
+    assert not context._models
+    # The selected model is formatted even though nothing was loaded.
+    assert files["models/model_1.sql"].read_text(encoding="utf-8") == (
+        "MODEL (\n  name this.model1,\n  dialect 'duckdb'\n);\n\nSELECT\n  1 AS col"
+    )
+    # The unselected model is untouched.
+    assert files["models/model_2.sql"].read_text(encoding="utf-8") == before_2
+
+
+def test_format_paths_output_matches_loaded_format(tmp_path: pathlib.Path):
+    """The path-based formatter must produce exactly what the loading one produces."""
+    loaded_path = tmp_path / "loaded"
+    unloaded_path = tmp_path / "unloaded"
+    loaded = _format_project(loaded_path)
+    unloaded = _format_project(unloaded_path)
+
+    Context(paths=loaded_path, config=Config()).format()
+
+    context = Context(paths=unloaded_path, config=Config(), load=False)
+    context.format(paths=(str(unloaded["models/model_1.sql"]), str(unloaded["audits/audit_1.sql"])))
+
+    for rel in ("models/model_1.sql", "audits/audit_1.sql"):
+        assert unloaded[rel].read_text(encoding="utf-8") == loaded[rel].read_text(encoding="utf-8")
+
+
+def test_format_paths_ignores_non_model_sql(tmp_path: pathlib.Path):
+    """macros/*.sql and other non-model SQL are a no-op, same as today."""
+    files = _format_project(tmp_path)
+    macro_before = files["macros/macro_1.sql"].read_text(encoding="utf-8")
+    model_before = files["models/model_1.sql"].read_text(encoding="utf-8")
+
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    context.format(paths=(str(files["macros/macro_1.sql"]), str(files["models/model_1.sql"])))
+
+    assert files["macros/macro_1.sql"].read_text(encoding="utf-8") == macro_before
+    # Guard against the assertion above passing simply because nothing was formatted.
+    assert files["models/model_1.sql"].read_text(encoding="utf-8") != model_before
+
+
+def test_format_paths_ignores_python_models(tmp_path: pathlib.Path):
+    files = _format_project(tmp_path)
+    before = files["models/model_3.py"].read_text(encoding="utf-8")
+
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    context.format(paths=(str(files["models/model_3.py"]), str(files["models/model_1.sql"])))
+
+    assert files["models/model_3.py"].read_text(encoding="utf-8") == before
+    # Guard against the assertion above passing simply because nothing was formatted.
+    assert "1 AS col" in files["models/model_1.sql"].read_text(encoding="utf-8")
+
+
+def test_format_paths_honors_formatting_false(tmp_path: pathlib.Path):
+    text = "MODEL(name this.model, dialect 'duckdb', formatting false); SELECT 1 AS   col"
+    model = create_temp_file(tmp_path, pathlib.Path("models/model.sql"), text)
+
+    other = create_temp_file(
+        tmp_path,
+        pathlib.Path("models/other.sql"),
+        "MODEL(name this.other, dialect 'duckdb'); SELECT 1 AS   col",
+    )
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    context.format(paths=(str(model), str(other)))
+
+    assert model.read_text(encoding="utf-8") == text
+    # Guard against the assertion above passing simply because nothing was formatted.
+    assert (
+        other.read_text(encoding="utf-8")
+        != "MODEL(name this.other, dialect 'duckdb'); SELECT 1 AS   col"
+    )
+
+
+def test_format_paths_honors_model_defaults_formatting_false(tmp_path: pathlib.Path):
+    text = "MODEL(name this.model, dialect 'duckdb'); SELECT 1 AS   col"
+    model = create_temp_file(tmp_path, pathlib.Path("models/model.sql"), text)
+
+    override = create_temp_file(
+        tmp_path,
+        pathlib.Path("models/override.sql"),
+        "MODEL(name this.override, dialect 'duckdb', formatting true); SELECT 1 AS   col",
+    )
+    context = Context(
+        paths=tmp_path,
+        config=Config(model_defaults=ModelDefaultsConfig(formatting=False)),
+        load=False,
+    )
+    context.format(paths=(str(model), str(override)))
+
+    assert model.read_text(encoding="utf-8") == text
+    # An explicit `formatting true` in the header still overrides the default.
+    assert override.read_text(encoding="utf-8") == (
+        "MODEL (\n  name this.override,\n  dialect 'duckdb',\n  formatting TRUE\n);"
+        "\n\nSELECT\n  1 AS col"
+    )
+
+
+def test_format_paths_check_reports_unformatted(tmp_path: pathlib.Path, mocker: MockerFixture):
+    files = _format_project(tmp_path)
+    before = files["models/model_1.sql"].read_text(encoding="utf-8")
+
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    context.console = mocker.Mock()
+
+    assert not context.format(paths=(str(files["models/model_1.sql"]),), check=True)
+    # check must not rewrite the file
+    assert files["models/model_1.sql"].read_text(encoding="utf-8") == before
+
+
+def test_format_without_paths_still_loads(tmp_path: pathlib.Path):
+    """No paths means the whole project is formatted, unchanged."""
+    files = _format_project(tmp_path)
+
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    context.format()
+
+    assert context._loaded
+    assert files["models/model_1.sql"].read_text(encoding="utf-8") == (
+        "MODEL (\n  name this.model1,\n  dialect 'duckdb'\n);\n\nSELECT\n  1 AS col"
+    )
+    assert files["models/model_2.sql"].read_text(encoding="utf-8") == (
+        "MODEL (\n  name this.model2,\n  dialect 'duckdb'\n);\n\nSELECT\n  2 AS col"
+    )
+
+
+def test_format_paths_formats_standalone_audits(tmp_path: pathlib.Path):
+    """Standalone audits are skipped by the project-wide format; by path they are formatted."""
+    text = (
+        "AUDIT(name sa, dialect 'duckdb', standalone true); SELECT 1 AS   c FROM t WHERE   c < 0;"
+    )
+    audit = create_temp_file(tmp_path, pathlib.Path("audits/standalone.sql"), text)
+
+    Context(paths=tmp_path, config=Config()).format()
+    assert audit.read_text(encoding="utf-8") == text, "project-wide format skips standalone audits"
+
+    context = Context(paths=tmp_path, config=Config(), load=False)
+    context.format(paths=(str(audit),))
+    assert audit.read_text(encoding="utf-8") != text
+
+
+def test_format_paths_honors_string_model_defaults_formatting(tmp_path: pathlib.Path):
+    """A configured `formatting: 'false'` string is coerced the way the model validator does."""
+    text = "MODEL(name this.model, dialect 'duckdb'); SELECT 1 AS   col"
+    model = create_temp_file(tmp_path, pathlib.Path("models/model.sql"), text)
+
+    context = Context(
+        paths=tmp_path,
+        config=Config(model_defaults=ModelDefaultsConfig(formatting="false")),
+        load=False,
+    )
+    context.format(paths=(str(model),))
+
+    assert model.read_text(encoding="utf-8") == text
