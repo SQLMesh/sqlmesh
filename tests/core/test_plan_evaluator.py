@@ -10,7 +10,9 @@ from sqlmesh.core.plan import (
     PlanBuilder,
     stages as plan_stages,
 )
-from sqlmesh.core.snapshot import SnapshotChangeCategory
+from sqlmesh.core.snapshot import SnapshotChangeCategory, SnapshotId
+from sqlmesh.utils.concurrency import NodeExecutionFailedError
+from sqlmesh.utils.errors import PlanError
 
 
 @pytest.fixture
@@ -82,3 +84,23 @@ def test_builtin_evaluator_push(sushi_context: Context, make_snapshot):
     )
     assert sushi_context.engine_adapter.table_exists(new_model_snapshot.table_name())
     assert sushi_context.engine_adapter.table_exists(new_view_model_snapshot.table_name())
+
+
+def test_migrate_schema_failure_includes_node_context(mocker: MockerFixture):
+    error = NodeExecutionFailedError(SnapshotId(name="model", identifier="snapshot"))
+    error.__cause__ = RuntimeError("driver error")
+
+    snapshot_evaluator = mocker.Mock()
+    snapshot_evaluator.migrate.side_effect = error
+    evaluator = BuiltInPlanEvaluator(
+        state_sync=mocker.Mock(),
+        snapshot_evaluator=snapshot_evaluator,
+        create_scheduler=mocker.Mock(),
+        default_catalog=None,
+        console=mocker.Mock(),
+    )
+
+    with pytest.raises(PlanError, match="model.*driver error") as ex:
+        evaluator.visit_migrate_schemas_stage(mocker.Mock(), mocker.Mock())
+
+    assert ex.value.__cause__ is error
