@@ -2240,6 +2240,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     password: t.Optional[str] = None
     port: t.Optional[int] = None
     cluster: t.Optional[str] = None
+    cloud_mode: t.Optional[bool] = None
     virtual_catalog: t.Optional[str] = None
     connect_timeout: int = 10
     send_receive_timeout: int = 300
@@ -2345,14 +2346,24 @@ class ClickhouseConnectionConfig(ConnectionConfig):
         return partial(connect, pool_mgr=pool_mgr)
 
     @property
-    def cloud_mode(self) -> bool:
+    def _resolved_cloud_mode(self) -> bool:
+        """Whether to use ClickHouse Cloud mode.
+
+        An explicit `cloud_mode` setting always wins. When it is unset we fall back to
+        detecting ClickHouse Cloud from the host name, which preserves the behavior for
+        existing configurations. The setting lets self-hosted deployments that share
+        Cloud's constraints (e.g. the replicated database engine, which also cannot run
+        `CREATE TABLE ... AS SELECT`) opt in without renaming their host.
+        """
+        if self.cloud_mode is not None:
+            return self.cloud_mode
         return "clickhouse.cloud" in self.host
 
     @property
     def _extra_engine_config(self) -> t.Dict[str, t.Any]:
         return {
             "cluster": self.cluster,
-            "cloud_mode": self.cloud_mode,
+            "cloud_mode": self._resolved_cloud_mode,
             "virtual_catalog": self.virtual_catalog,
         }
 
@@ -2376,7 +2387,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
         settings["mutations_sync"] = "2"
         #  insert_distributed_sync = 1: "INSERT operation succeeds only after all the data is saved on all shards"
         settings["insert_distributed_sync"] = "1"
-        if self.cluster or self.cloud_mode:
+        if self.cluster or self._resolved_cloud_mode:
             # database_replicated_enforce_synchronous_settings = 1:
             #   - "Enforces synchronous waiting for some queries"
             #   - https://github.com/ClickHouse/ClickHouse/blob/ccaa8d03a9351efc16625340268b9caffa8a22ba/src/Core/Settings.h#L709
