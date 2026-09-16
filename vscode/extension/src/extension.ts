@@ -24,6 +24,8 @@ import {
   traceError,
 } from './utilities/common/log'
 import { onDidChangePythonInterpreter } from './utilities/common/python'
+import { requiresLspRestart } from './utilities/common/configurationChange'
+import { coalesceAsync } from './utilities/coalesceAsync'
 import { sleep } from './utilities/sleep'
 import { handleError } from './utilities/errors'
 
@@ -65,7 +67,16 @@ export async function activate(context: vscode.ExtensionContext) {
     ),
   )
 
-  const restartLsp = async (invokedByUser = false): Promise<void> => {
+  /**
+   * Set when a restart was asked for explicitly, so that a user-invoked restart
+   * coalesced together with an automatic one is still treated as user-invoked.
+   */
+  let restartInvokedByUser = false
+
+  const runRestart = async (): Promise<void> => {
+    const invokedByUser = restartInvokedByUser
+    restartInvokedByUser = false
+
     if (!lspClient) {
       lspClient = new LSPClient()
     }
@@ -93,6 +104,18 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     testControllerDisposable = setupTestController(lspClient)
     context.subscriptions.push(testControllerDisposable)
+  }
+
+  /**
+   * Restarts are serialized: a client disposing while the next one starts up
+   * leaves colliding command registrations and requests aimed at a disposed
+   * client, which is what surfaced as constant crashes.
+   */
+  const restartLspSerialized = coalesceAsync(runRestart)
+
+  const restartLsp = async (invokedByUser = false): Promise<void> => {
+    restartInvokedByUser = restartInvokedByUser || invokedByUser
+    await restartLspSerialized()
   }
 
   // commands needing the restart helper
@@ -191,7 +214,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     onDidChangePythonInterpreter(() => restartLsp()),
-    onDidChangeConfiguration(() => restartLsp()),
+    // Only restart for settings the server actually reads. This event fires for
+    // every setting in the editor, including ones written by other extensions.
+    onDidChangeConfiguration(event => {
+      if (requiresLspRestart(event)) {
+        void restartLsp()
+      }
+    }),
   )
 
   if (!lspClient.hasCompletionCapability()) {
