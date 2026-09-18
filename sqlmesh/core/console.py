@@ -4391,3 +4391,4 @@ def _calculate_annotation_str_len(
             + execution_stats_len,
         )
     return annotation_str_len
+
