@@ -2820,3 +2820,54 @@ def test_test_local_with_model_paths(runner: CliRunner, tmp_path: Path, mocker) 
     assert result.exit_code != 0
     assert "is not a known model or test file" in result.output
     mock.assert_not_called()
+
+
+def test_test_local_with_python_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """The `--local` + path-selector combination works for Python models too."""
+    create_example_project(tmp_path)
+
+    (tmp_path / "models" / "py_model.py").write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model, ExecutionContext
+import typing as t
+
+@model(
+  name="sqlmesh_example.py_model",
+  columns={"id": "int"},
+)
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+  return pd.DataFrame([{"id": 1}])
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_py_model.yaml").write_text(
+        """
+test_py_model:
+  model: sqlmesh_example.py_model
+  outputs:
+    query:
+      rows:
+      - id: 1
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "py_model.py")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # A Python file that is not a model is still an error rather than a silent no-op.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.py")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+    mock.assert_not_called()

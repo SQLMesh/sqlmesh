@@ -3659,12 +3659,28 @@ class GenericContext(BaseContext, t.Generic[C]):
                 )
             return [metadata] if metadata is not None else None
 
-        for path in (Path(selector), Path(os.path.abspath(selector))):
-            matched = self._model_test_metadata_path_index.get(path)
+        for candidate in (Path(selector), Path(os.path.abspath(selector))):
+            matched = self._model_test_metadata_path_index.get(candidate)
             if matched is not None:
                 return list(matched)
 
         return None
+
+    def _unknown_test_selector_error(self, selector: str) -> str:
+        """Explains why a selector matched nothing.
+
+        A `path::test_name` whose file is a known test file failed on the test name, not the
+        path, so the message says so rather than claiming the file is unknown.
+        """
+        if "::" in selector:
+            path, _, _ = selector.rpartition("::")
+            if any(
+                candidate in self._model_test_metadata_path_index
+                for candidate in (Path(path), Path(os.path.abspath(path)))
+            ):
+                return f"'{selector}' is not a known test in '{path}'."
+
+        return f"'{selector}' is not a known model or test file."
 
     def select_tests(
         self,
@@ -3704,7 +3720,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                     matched = tests_by_model_path.get(os.path.abspath(test))
                 if matched is None:
                     if raise_on_unknown_paths:
-                        raise SQLMeshError(f"'{test}' is not a known model or test file.")
+                        raise SQLMeshError(self._unknown_test_selector_error(test))
                     continue
                 filtered_tests.extend(matched)
 

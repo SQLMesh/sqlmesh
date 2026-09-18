@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import re
 import typing as t
 import io
 from pathlib import Path
@@ -2697,6 +2698,46 @@ def test_model_path_selects_its_tests(tmp_path: Path) -> None:
     assert results.testsRun == 1
 
 
+def test_python_model_path_selects_its_tests(tmp_path: Path) -> None:
+    """Selection is by file path, so a Python model works the same way a SQL one does."""
+    init_example_project(tmp_path, engine_type="duckdb")
+
+    py_model = tmp_path / "models" / "py_model.py"
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model, ExecutionContext
+import typing as t
+
+@model(
+  name="sqlmesh_example.py_model",
+  columns={"id": "int"},
+)
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+  return pd.DataFrame([{"id": 1}])
+"""
+    )
+    (tmp_path / "tests" / "test_py_model.yaml").write_text(
+        """
+test_py_model:
+  model: sqlmesh_example.py_model
+  outputs:
+    query:
+      rows:
+      - id: 1
+"""
+    )
+
+    context = Context(paths=tmp_path)
+
+    results = context.test(tests=[str(py_model)])
+    assert results.testsRun == 1
+    assert len(results.successes) == 1
+
+    # The SQL model's own test is not pulled in by selecting the Python model.
+    assert context.test(tests=[str(tmp_path / "models" / "full_model.sql")]).testsRun == 1
+
+
 def test_model_path_without_tests_selects_nothing(tmp_path: Path) -> None:
     """A known model that simply has no tests is not an error."""
     init_example_project(tmp_path, engine_type="duckdb")
@@ -2763,13 +2804,23 @@ def test_unknown_path_errors_when_requested(tmp_path: Path) -> None:
 
 
 def test_unknown_test_name_errors_when_requested(tmp_path: Path) -> None:
-    """A known YAML file with an unknown `::test_name` is just as wrong as a bad path."""
+    """A known YAML file with an unknown `::test_name` reports the test, not the file."""
     init_example_project(tmp_path, engine_type="duckdb")
     context = Context(paths=tmp_path)
 
     test_path = tmp_path / "tests" / "test_full_model.yaml"
-    with pytest.raises(SQLMeshError, match="is not a known model or test file"):
+    with pytest.raises(SQLMeshError, match=f"is not a known test in '{re.escape(str(test_path))}'"):
         context.select_tests(tests=[f"{test_path}::nope"], raise_on_unknown_paths=True)
+
+
+def test_unknown_test_name_in_unknown_file_reports_the_file(tmp_path: Path) -> None:
+    """A `::test_name` on a file that isn't a test file is a path problem, not a name one."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    missing = tmp_path / "tests" / "test_nope.yaml"
+    with pytest.raises(SQLMeshError, match="is not a known model or test file"):
+        context.select_tests(tests=[f"{missing}::nope"], raise_on_unknown_paths=True)
 
 
 def test_select_model_still_filters_path_selection(tmp_path: Path) -> None:
