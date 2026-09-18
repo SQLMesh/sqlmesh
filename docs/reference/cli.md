@@ -630,6 +630,9 @@ Options:
                        useful for debugging.
   --select-model TEXT  Select specific models to run unit tests for. Can be
                        specified multiple times.
+  --local              Run tests using only locally loaded project files
+                       without loading state. Tests whose model is not loaded
+                       are skipped with a warning rather than failing.
   --help               Show this message and exit.
 ```
 

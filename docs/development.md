@@ -42,7 +42,7 @@ Once you have activated your virtual environment, you can install the dependenci
 make install-dev
 ```
 
-Optionally, you can use pre-commit to automatically run linters/formatters:
+Optionally, `make install-pre-commit` installs git hooks so ruff and mypy run on `git commit`. Hooks do not replace `make style`: they run on staged files, while CI runs `make style` across the tree.
 
 ```bash
 make install-pre-commit
