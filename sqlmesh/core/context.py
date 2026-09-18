@@ -648,6 +648,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         update_schemas: bool = True,
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
+        model_paths: t.Optional[t.Set[Path]] = None,
     ) -> GenericContext[C]:
         """Load files in the context's path, optionally scoped to specific models.
 
@@ -656,8 +657,10 @@ class GenericContext(BaseContext, t.Generic[C]):
             model_fqns: If provided with ``use_project_index=True``, only the selected models
                 and their transitive upstream dependencies are loaded.
             use_project_index: Whether to use and maintain the persistent project model index.
-                When ``model_fqns`` is not provided, all models are loaded and the index is
-                refreshed for future scoped loads.
+                When neither ``model_fqns`` nor ``model_paths`` is provided, all models are
+                loaded and the index is refreshed for future scoped loads.
+            model_paths: Resolved model file paths to select models with, in addition to
+                ``model_fqns``.
         """
         load_start_ts = time.perf_counter()
 
@@ -665,6 +668,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             loader.load(
                 model_fqns=model_fqns,
                 use_project_index=use_project_index,
+                model_paths=model_paths,
             )
             for loader in self._loaders
         ]
@@ -713,8 +717,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         indexed_model_fqns = {
             fqn for project in loaded_projects for fqn in (project.indexed_model_fqns or set())
         }
-        if model_fqns and (
-            not model_fqns <= self._models.keys()
+        if (model_fqns or model_paths) and (
+            not (model_fqns or set()) <= self._models.keys()
+            or (model_paths is not None and not model_paths <= self._loaded_model_paths())
             or any(
                 dependency in indexed_model_fqns and dependency not in self._models
                 for model in self._models.values()
@@ -728,7 +733,9 @@ class GenericContext(BaseContext, t.Generic[C]):
                 use_project_index=use_project_index,
             )
             if update_schemas:
-                self._update_model_schemas_and_validate(model_fqns)
+                self._update_model_schemas_and_validate(
+                    self._selected_model_fqns(model_fqns, model_paths)
+                )
             return self
 
         # Load environment statements from state for projects not in current load
@@ -762,7 +769,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             self.dag.add(model.fqn, model.depends_on)
 
         if update_schemas:
-            self._update_model_schemas_and_validate(model_fqns or None)
+            self._update_model_schemas_and_validate(
+                self._selected_model_fqns(model_fqns, model_paths) or None
+            )
 
         duplicates = set(self._models) & set(self._standalone_audits)
         if duplicates:
@@ -788,6 +797,25 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         self._loaded = True
         return self
+
+    def _loaded_model_paths(self) -> t.Set[Path]:
+        """The resolved file paths of every loaded model that was defined in a file."""
+        return {model._path.resolve() for model in self._models.values() if model._path is not None}
+
+    def _selected_model_fqns(
+        self,
+        model_fqns: t.Optional[t.Set[str]] = None,
+        model_paths: t.Optional[t.Set[Path]] = None,
+    ) -> t.Set[str]:
+        """The FQNs of the loaded models selected by name and/or by file path."""
+        selected = set(model_fqns or set())
+        if model_paths:
+            selected.update(
+                model.fqn
+                for model in self._models.values()
+                if model._path is not None and model._path.resolve() in model_paths
+            )
+        return selected
 
     def _update_model_schemas_and_validate(self, model_fqns: t.Optional[t.Set[str]] = None) -> None:
         """Updates the mapping schemas of the given models (all models by default) and validates their definitions.
@@ -3546,25 +3574,65 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
         return models_for_interval_end
 
+    def _models_for_paths(self, paths: t.List[Path]) -> t.List[Model]:
+        """Resolves model file paths to the loaded models defined in them.
+
+        Raises:
+            SQLMeshError: If any of the paths doesn't define a model.
+        """
+        models_by_path: t.Dict[Path, t.List[Model]] = collections.defaultdict(list)
+        for model in self._models.values():
+            if model._path is not None:
+                models_by_path[model._path.resolve()].append(model)
+
+        models = []
+        unknown_paths = []
+        for path in paths:
+            path_models = models_by_path.get(path.resolve())
+            if path_models:
+                models.extend(path_models)
+            else:
+                unknown_paths.append(str(path))
+
+        if unknown_paths:
+            raise SQLMeshError(
+                f"No models were found at the following path(s): {', '.join(unknown_paths)}"
+            )
+
+        return models
+
     def lint_models(
         self,
         models: t.Optional[t.Iterable[t.Union[str, Model]]] = None,
         raise_on_error: bool = True,
         use_project_index: t.Optional[bool] = None,
+        paths: t.Optional[t.Iterable[t.Union[str, Path]]] = None,
     ) -> t.List[AnnotatedRuleViolation]:
         """Lint the selected models.
 
         Args:
-            models: Models to lint. If omitted, all loaded models are linted.
+            models: Models to lint. If omitted and no paths are given, all loaded models are linted.
             raise_on_error: Whether to raise when an error-level violation is found.
             use_project_index: Whether to use the persistent project index. If omitted, the
                 value of ``linter.use_project_index`` is used. Indexed linting of selected
                 models reloads an already-loaded context so the requested scope is applied.
+            paths: Model file paths to lint, each resolved to the model(s) defined in it. Can be
+                combined with `models`.
         """
         models = list(models) if models is not None else []
+        target_paths = [Path(path) for path in paths] if paths is not None else []
+
+        # Fail fast on a mistyped path instead of loading and linting the whole project.
+        missing_paths = [str(path) for path in target_paths if not path.is_file()]
+        if missing_paths:
+            raise SQLMeshError(
+                f"No models were found at the following path(s): {', '.join(missing_paths)}"
+            )
+
         use_project_index = (
             self.config.linter.use_project_index if use_project_index is None else use_project_index
         )
+        scoped = use_project_index and bool(models or target_paths)
 
         target_fqns = (
             {
@@ -3577,22 +3645,37 @@ class GenericContext(BaseContext, t.Generic[C]):
                 else model.fqn
                 for model in models
             }
-            if models and use_project_index
+            if scoped
             else None
+        )
+        target_model_paths = (
+            {path.resolve() for path in target_paths} if scoped and target_paths else None
         )
 
         # An already-loaded context does not otherwise enter the loading path. Reload when
         # indexed linting is requested for specific models so the scope is actually applied.
-        if not self._loaded or target_fqns is not None:
-            self.load(model_fqns=target_fqns, use_project_index=use_project_index)
+        if not self._loaded or scoped:
+            self.load(
+                model_fqns=target_fqns,
+                use_project_index=use_project_index,
+                model_paths=target_model_paths,
+            )
 
         found_error = False
 
-        model_list = (
-            list(self.get_model(model, raise_if_missing=True) for model in models)
-            if models
-            else self.models.values()
-        )
+        model_list: t.Iterable[Model]
+        if models or target_paths:
+            # A model selected both by name and by path must only be linted once.
+            selected_models: t.Dict[str, Model] = {}
+            for model in models:
+                selected_model = self.get_model(model, raise_if_missing=True)
+                selected_models[selected_model.fqn] = selected_model
+            for selected_model in self._models_for_paths(target_paths):
+                selected_models[selected_model.fqn] = selected_model
+            model_list = selected_models.values()
+        else:
+            model_list = self.models.values()
+
         all_violations = []
         for model in model_list:
             # Linter may be `None` if the context is not loaded yet

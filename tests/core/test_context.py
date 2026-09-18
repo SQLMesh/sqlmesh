@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import pathlib
 import typing as t
 import re
@@ -3402,6 +3403,214 @@ def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
 
     assert schemas_mock.call_count == 1
     assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+
+def test_lint_models_by_path(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    sql_path = create_temp_file(
+        tmp_path, pathlib.Path("models", "a.sql"), "MODEL(name a); SELECT 1 AS col;"
+    )
+    violating_path = create_temp_file(
+        tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT * FROM a;"
+    )
+    python_path = create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "c.py"),
+        """import typing as t
+import pandas as pd
+from sqlmesh import ExecutionContext, model
+
+@model("c", columns={"col": "int"})
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+    return pd.DataFrame({"col": [1]})
+""",
+    )
+
+    # Case: a path selects only the models defined in that file.
+    ctx = create_context()
+    violations = ctx.lint_models(paths=[violating_path], raise_on_error=False)
+    assert [violation.model.name for violation in violations] == ["b"]
+
+    # Case: linting an unrelated file doesn't report the violation in b.sql.
+    assert create_context().lint_models(paths=[sql_path]) == []
+
+    # Case: Python model files are selectable too.
+    assert create_context().lint_models(paths=[python_path]) == []
+
+    # Case: relative paths are resolved against the current working directory.
+    monkeypatch.chdir(tmp_path)
+    assert create_context().lint_models(paths=[pathlib.Path("models", "c.py")]) == []
+
+    # Case: paths and names can be combined, and a model selected by both is linted once.
+    ctx = create_context()
+    violations = ctx.lint_models(["b"], paths=[violating_path, sql_path], raise_on_error=False)
+    assert [violation.model.name for violation in violations] == ["b"]
+
+    # Case: an unknown path is an error rather than a silent full-project lint.
+    unknown_path = tmp_path / "models" / "missing.sql"
+    with pytest.raises(SQLMeshError, match="No models were found at the following path\\(s\\)"):
+        create_context().lint_models(paths=[unknown_path])
+
+    # Case: an error-level violation still raises when selected by path.
+    with pytest.raises(
+        LinterError, match="Linter detected errors in the code. Please fix them before proceeding."
+    ):
+        create_context().lint_models(paths=[violating_path])
+
+
+def test_lint_models_by_path_with_project_index(tmp_path: pathlib.Path) -> None:
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a); SELECT 1 AS col FROM raw.unregistered_source;",
+    )
+    target_path = create_temp_file(
+        tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;"
+    )
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT * FROM b;")
+
+    # The initial full file load also creates the index.
+    assert create_context().lint_models(paths=[target_path], use_project_index=True) == []
+
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        assert ctx.lint_models(paths=[target_path], use_project_index=True) == []
+
+    # Only the target file and its upstream dependencies are loaded off the index.
+    assert load_mock.call_count == 1
+    selected_paths = load_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(ctx.models) == {
+        ctx.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b")
+    }
+
+    # Case: an unknown path is rejected off the index, before any models are loaded.
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        with pytest.raises(SQLMeshError, match="No models were found at the following path\\(s\\)"):
+            ctx.lint_models(paths=[tmp_path / "models" / "missing.sql"], use_project_index=True)
+
+    assert load_mock.call_count == 0
+
+
+def test_lint_models_by_path_with_project_index_resolves_only_given_paths(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Matching a path off the index must not stat every model in the project."""
+
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    for name in ("a", "b", "c", "d", "e"):
+        create_temp_file(
+            tmp_path, pathlib.Path("models", f"{name}.sql"), f"MODEL(name {name}); SELECT 1 AS col;"
+        )
+    target_path = tmp_path / "models" / "a.sql"
+
+    # The initial full file load also creates the index and primes the loader's state.
+    ctx = create_context()
+    assert ctx.lint_models(paths=[target_path], use_project_index=True) == []
+
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    original_resolve = pathlib.Path.resolve
+    resolved: t.List[pathlib.Path] = []
+
+    def counting_resolve(self: pathlib.Path, *args: t.Any, **kwargs: t.Any) -> pathlib.Path:
+        resolved.append(self)
+        return original_resolve(self, *args, **kwargs)
+
+    resolved_target_path = target_path.resolve()
+    with patch.object(pathlib.Path, "resolve", counting_resolve):
+        selected_paths, _ = t.cast(
+            t.Tuple[t.Set[pathlib.Path], t.Set[str]],
+            loader._selected_model_paths(set(), {resolved_target_path}),
+        )
+
+    assert {path.name for path in selected_paths} == {"a.sql"}
+    # The project root is resolved, but never one path per indexed model.
+    assert [path for path in resolved if path.suffix == ".sql"] == []
+
+
+def test_lint_models_by_path_with_project_index_symlinked_model_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A model file that is itself a symlink is still matched against the index."""
+    create_temp_file(tmp_path, pathlib.Path("models", "a.sql"), "MODEL(name a); SELECT 1 AS col;")
+    external_path = create_temp_file(
+        tmp_path, pathlib.Path("external", "b.sql"), "MODEL(name b); SELECT col FROM a;"
+    )
+    link_path = tmp_path / "models" / "b.sql"
+    os.symlink(external_path, link_path)
+
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    # The initial full file load also creates the index.
+    assert create_context().lint_models(paths=[link_path], use_project_index=True) == []
+
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        assert ctx.lint_models(paths=[link_path], use_project_index=True) == []
+
+    selected_paths = load_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+
+
+def test_lint_models_by_path_without_index_falls_back_to_full_load(tmp_path: pathlib.Path) -> None:
+    create_temp_file(tmp_path, pathlib.Path("models", "a.sql"), "MODEL(name a); SELECT 1 AS col;")
+    target_path = create_temp_file(
+        tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;"
+    )
+
+    context = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+        ),
+        paths=tmp_path,
+        load=False,
+    )
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        assert context.lint_models(paths=[target_path], use_project_index=True) == []
+
+    assert load_mock.call_args.kwargs["selected_paths"] is None
 
 
 def test_lint_models_project_index_reloads_loaded_context(tmp_path: pathlib.Path) -> None:
