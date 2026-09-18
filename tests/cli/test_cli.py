@@ -204,6 +204,34 @@ def test_plan(runner, tmp_path):
     assert "sqlmesh_example.incremental_model   [insert 2020-01-01 - 2022-12-31]" in result.output
 
 
+@time_machine.travel(FREEZE_TIME)
+def test_plan_use_project_index(runner, tmp_path):
+    create_example_project(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "plan:\n  no_prompts: false",
+            "plan:\n  no_prompts: false\n  use_project_index: true",
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+        ],
+        input="y\n",
+    )
+
+    assert_plan_success(result)
+    assert list((tmp_path / ".cache").glob("*_model_index.json"))
+
+
 def test_plan_skip_tests(runner, tmp_path):
     create_example_project(tmp_path)
 
@@ -2234,6 +2262,19 @@ GROUP BY
 """
 
     assert expected in cleaned_output
+
+    indexed_result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(tmp_path),
+            "render",
+            "sqlmesh_example.full_model",
+            "--use-project-index",
+            "--no-format",
+        ],
+    )
+    assert indexed_result.exit_code == 0
 
 
 @time_machine.travel(FREEZE_TIME)
