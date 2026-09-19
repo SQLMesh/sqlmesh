@@ -9914,6 +9914,11 @@ def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
     performs when the key IS found -- would have matched them.
     """
 
+    # Use explicit per-model normalization settings so this regression is independent of
+    # mutable process-global SQLGlot dialect settings.
+    parent_dialect = "snowflake,normalization_strategy=uppercase"
+    child_dialect = "duckdb,normalization_strategy=case_insensitive"
+
     @macro()
     def resolve_named(evaluator, name):
         return evaluator.resolve_table(name.name)
@@ -9921,7 +9926,7 @@ def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
     # parent is declared/rendered under snowflake, which uppercases unquoted identifiers, so its
     # fqn (the key that will appear in `snapshots`) is uppercase-quoted.
     parent = load_sql_based_model(
-        d.parse("MODEL (name parent); SELECT 1 AS c"), dialect="snowflake"
+        d.parse("MODEL (name parent); SELECT 1 AS c"), dialect=parent_dialect
     )
     parent_snapshot = make_snapshot(parent)
     parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
@@ -9936,7 +9941,7 @@ def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
             @resolve_named('parent')
             """
         ),
-        dialect="duckdb",
+        dialect=child_dialect,
     )
 
     snapshots = {parent.fqn: parent_snapshot}
