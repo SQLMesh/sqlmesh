@@ -2666,6 +2666,27 @@ model_defaults:
     mock.assert_not_called()
 
 
+def test_test_accepts_model_paths(runner: CliRunner, tmp_path: Path) -> None:
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "full_model.sql")]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Ran 1 test" in result.output
+
+
+def test_test_unknown_path_fails(runner: CliRunner, tmp_path: Path) -> None:
+    """A staged file that resolves to nothing must fail rather than silently run no tests."""
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+
+
 def test_test_local_runs_project_unit_tests(runner: CliRunner, tmp_path: Path, mocker) -> None:
     """A real unit test from the project's YAML runs under `--local` without touching state."""
     create_example_project(tmp_path)
@@ -2775,4 +2796,78 @@ def test_test_local_multi_repo_partial(runner: CliRunner, copy_to_temp_path, moc
         "the unloaded model should warn rather than fail"
     )
     assert "Successfully Ran 1 tests" in output, "the repo_2 test should still run"
+    mock.assert_not_called()
+
+
+def test_test_local_with_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """`--local` and model path selectors compose, which is the pre-commit hook case in #6020."""
+    create_example_project(tmp_path)
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "full_model.sql")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # An unresolvable path still fails loudly, without reaching state.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+    mock.assert_not_called()
+
+
+def test_test_local_with_python_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """The `--local` + path-selector combination works for Python models too."""
+    create_example_project(tmp_path)
+
+    (tmp_path / "models" / "py_model.py").write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model, ExecutionContext
+import typing as t
+
+@model(
+  name="sqlmesh_example.py_model",
+  columns={"id": "int"},
+)
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+  return pd.DataFrame([{"id": 1}])
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_py_model.yaml").write_text(
+        """
+test_py_model:
+  model: sqlmesh_example.py_model
+  outputs:
+    query:
+      rows:
+      - id: 1
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "py_model.py")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # A Python file that is not a model is still an error rather than a silent no-op.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.py")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
     mock.assert_not_called()
