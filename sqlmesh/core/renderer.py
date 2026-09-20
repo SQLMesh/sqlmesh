@@ -332,21 +332,11 @@ class BaseExpressionRenderer:
     ) -> exp.Table:
         table_mapping = table_mapping or {}
         if isinstance(table_name, str):
-            # table_name arrives here already normalized to a model FQN (see the `resolve_table`
-            # closure below and the `this_model` call site), the same key format `snapshots` and
-            # `table_mapping` use. Only the one relevant snapshot needs mapping, not the whole
-            # environment - building the full mapping made this call O(N) in the number of
-            # snapshots in the environment for every table resolved.
+            # An exact FQN match avoids scanning unrelated snapshots.
             snapshot = snapshots.get(table_name) if snapshots else None
             if snapshot is None and table_name not in table_mapping:
-                # table_name is normalized under this renderer's own dialect, but a snapshots key
-                # is normalized under that model's own dialect and a table_mapping key may come
-                # from yet another dialect (e.g. a test fixture's table_mapping, normalized under
-                # the project's dialect) - these can disagree in casing/quoting even though an
-                # entry for this table exists in one of them. A direct dict lookup can miss in
-                # that case, so on a miss in both dicts, fall back to the full, dialect-
-                # reconciling mapping that exp.replace_tables itself performs. This only pays the
-                # O(N) cost on a miss, not on every resolution.
+                # Keys normalized under different dialects may differ in casing or quoting.
+                # Fall back to the full mapping so exp.replace_tables can reconcile them.
                 mapping = {
                     **self._to_table_mapping((snapshots or {}).values(), deployability_index),
                     **table_mapping,
@@ -354,9 +344,7 @@ class BaseExpressionRenderer:
             else:
                 mapping = {
                     **self._to_table_mapping([snapshot] if snapshot else [], deployability_index),
-                    # Keep the complete explicit mapping so exp.replace_tables can preserve
-                    # its dialect-aware matching and precedence for equivalent keys. This still
-                    # avoids scanning the full snapshots environment.
+                    # Keep all explicit overrides to preserve precedence for equivalent keys.
                     **table_mapping,
                 }
         else:
