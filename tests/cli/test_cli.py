@@ -2530,6 +2530,59 @@ def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker
     mock.assert_not_called()
 
 
+def test_test_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `test` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "test"])
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `test`"
+        )
+    assert mock.called, "state-sync was never accessed during `test`"
+
+
+def test_test_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is False, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `test --local`"
+        )
+    mock.assert_not_called()
+
+
+def test_test_local_runs_without_state_multiple_paths(
+    runner: CliRunner, tmp_path: Path, mocker
+) -> None:
+    """`--local` gating must hold for any number of --paths, matching `lint --local`."""
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    _create_local_only_project(project_a, "proj_a")
+    _create_local_only_project(project_b, "proj_b")
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli, ["--paths", str(project_a), "--paths", str(project_b), "test", "--local"]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
 @pytest.mark.parametrize("command", ["format"])
 def test_local_only_commands_skip_state_multiple_paths(
     runner: CliRunner, tmp_path: Path, mocker, command: str
@@ -2610,4 +2663,211 @@ model_defaults:
 
     result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
     assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_test_accepts_model_paths(runner: CliRunner, tmp_path: Path) -> None:
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "full_model.sql")]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Ran 1 test" in result.output
+
+
+def test_test_unknown_path_fails(runner: CliRunner, tmp_path: Path) -> None:
+    """A staged file that resolves to nothing must fail rather than silently run no tests."""
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+
+
+def test_test_local_runs_project_unit_tests(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """A real unit test from the project's YAML runs under `--local` without touching state."""
+    create_example_project(tmp_path)
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+
+def test_test_local_does_not_open_state_connection(
+    runner: CliRunner, tmp_path: Path, mocker, monkeypatch
+) -> None:
+    """`test --local` must not open a configured remote Postgres state connection."""
+    pytest.importorskip("psycopg2")
+
+    for var in ("PG_HOST", "PG_USER", "PG_PASSWORD", "PG_DATABASE"):
+        monkeypatch.delenv(var, raising=False)
+
+    create_example_project(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        """project: cli_test
+
+gateways:
+  prod:
+    state_connection:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'postgres.internal.example.com') }}"
+      port: 5432
+      user: "{{ env_var('PG_USER') }}"
+      password: "{{ env_var('PG_PASSWORD') }}"
+      database: "{{ env_var('PG_DATABASE', 'sqlmesh_state') }}"
+    connection:
+      type: duckdb
+      database: "warehouse.db"
+
+default_gateway: prod
+
+model_defaults:
+  dialect: duckdb
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_test_local_multi_repo_partial(runner: CliRunner, copy_to_temp_path, mocker) -> None:
+    """Run tests for one repo of a multi-repo project whose upstream models live only in state.
+
+    Pins the behavioral difference against `lint --local`: a model that isn't loaded produces a
+    warning and its test is skipped, rather than turning into an error.
+    """
+    repo_2 = copy_to_temp_path("examples/multi")[0] / "repo_2"
+
+    # silver.c lives in repo_2 and its upstream bronze.a is supplied as a test input.
+    (repo_2 / "tests" / "test_c.yaml").write_text(
+        """test_silver_c:
+  model: silver.c
+  inputs:
+    bronze.a:
+      rows:
+      - col_a: 1
+      - col_a: 1
+      - col_a: 2
+  outputs:
+    query:
+      rows:
+      - col_a: 1
+      - col_a: 2
+""",
+        encoding="utf-8",
+    )
+    # bronze.a itself is defined in repo_1, so it is not loaded when only repo_2 is given.
+    (repo_2 / "tests" / "test_a.yaml").write_text(
+        """test_bronze_a:
+  model: bronze.a
+  outputs:
+    query:
+      rows:
+      - col_a: 1
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+    args = ["--gateway", "memory", "--paths", str(repo_2), "test"]
+
+    # Without --local the same run reaches the state backend.
+    runner.invoke(cli, args)
+    assert mock.called, "state-sync was never accessed during `test`"
+
+    mock.reset_mock()
+
+    result = runner.invoke(cli, [*args, "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    # Console output wraps, so compare against whitespace-normalized text.
+    output = " ".join(result.output.split())
+    assert 'Model \'"memory"."bronze"."a"\' was not found' in output, (
+        "the unloaded model should warn rather than fail"
+    )
+    assert "Successfully Ran 1 tests" in output, "the repo_2 test should still run"
+    mock.assert_not_called()
+
+
+def test_test_local_with_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """`--local` and model path selectors compose, which is the pre-commit hook case in #6020."""
+    create_example_project(tmp_path)
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "full_model.sql")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # An unresolvable path still fails loudly, without reaching state.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+    mock.assert_not_called()
+
+
+def test_test_local_with_python_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """The `--local` + path-selector combination works for Python models too."""
+    create_example_project(tmp_path)
+
+    (tmp_path / "models" / "py_model.py").write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model, ExecutionContext
+import typing as t
+
+@model(
+  name="sqlmesh_example.py_model",
+  columns={"id": "int"},
+)
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+  return pd.DataFrame([{"id": 1}])
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_py_model.yaml").write_text(
+        """
+test_py_model:
+  model: sqlmesh_example.py_model
+  outputs:
+    query:
+      rows:
+      - id: 1
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "py_model.py")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # A Python file that is not a model is still an error rather than a silent no-op.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.py")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
     mock.assert_not_called()
