@@ -705,10 +705,11 @@ class SQLMeshLanguageServer:
             try:
                 uri = URI(params.text_document.uri)
                 context = self._context_get_or_load(uri)
+                document = ls.workspace.get_text_document(params.text_document.uri)
 
                 start_line = params.range.start.line
                 end_line = params.range.end.line
-                hints = get_hints(context, uri, start_line, end_line)
+                hints = get_hints(context, uri, start_line, end_line, document.source)
                 return hints
 
             except Exception as e:
