@@ -43,7 +43,7 @@ Before `sqlmesh migrate` changes the project metadata, it copies each state tabl
 
 To undo a migration:
 
-1. Run `sqlmesh rollback` with the SQLMesh version that performed the migration still installed. The command does not print any output when it succeeds.
+1. Run `sqlmesh rollback` with the SQLMesh version that performed the migration still installed.
 2. Reinstall the SQLMesh version the project used before the upgrade, for example by reverting the version change in your requirements file.
 
 The second step is required. Rolling back does not change the installed version of SQLMesh, and the newer version will refuse to run against the restored metadata until it is migrated again:
