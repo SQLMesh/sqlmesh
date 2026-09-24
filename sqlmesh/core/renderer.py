@@ -65,10 +65,6 @@ class TableMapping(t.Dict[str, str]):
             self._normalized_keys[dialect] = normalized_keys
         return normalized_keys
 
-    def copy(self) -> TableMapping:
-        # dict.copy() would return a plain dict and lose the cache.
-        return TableMapping(self)
-
     def __setitem__(self, key: str, value: str) -> None:
         self._normalized_keys.clear()
         super().__setitem__(key, value)
@@ -441,15 +437,17 @@ class BaseExpressionRenderer:
 
         expression = expression.copy()
         with self._normalize_and_quote(expression) as expression:
-            # An expression with no exp.Table node at all (e.g. session/virtual properties) has
-            # nothing for `expand` to expand or for a table mapping to replace - skip building
-            # the expand set and model_mapping too, not just the mapping/replace_tables below,
-            # since both of those are themselves O(N) in the number of snapshots.
+            # An expression with no table (e.g. most session or virtual properties) has nothing
+            # to expand or replace, so skip building the O(N) expand set and mapping.
             if not expression.find(exp.Table):
                 return expression
 
             snapshots = snapshots or {}
             table_mapping = table_mapping or {}
+            mapping = {
+                **self._to_table_mapping(snapshots.values(), deployability_index),
+                **table_mapping,
+            }
             expand = set(expand) | {
                 name for name, snapshot in snapshots.items() if snapshot.is_embedded
             }
@@ -491,22 +489,10 @@ class BaseExpressionRenderer:
 
                 expression = expression.transform(_expand, copy=False)  # type: ignore
 
-            # Building the full snapshot -> table-name mapping and normalizing it in
-            # exp.replace_tables is O(N) in the number of snapshots in the environment; skip it
-            # entirely for expressions that don't reference any table at all (e.g. session/
-            # virtual properties), since there's nothing for the mapping to replace.
-            if expression.find(exp.Table):
-                # mypy loses the `snapshots`/`table_mapping` narrowing above because they're
-                # captured by the `_expand` closure defined earlier in this block.
-                assert snapshots is not None and table_mapping is not None
-                mapping = {
-                    **self._to_table_mapping(snapshots.values(), deployability_index),
-                    **table_mapping,
-                }
-                if mapping:
-                    expression = exp.replace_tables(
-                        expression, mapping, dialect=self._dialect, copy=False
-                    )
+            if mapping:
+                expression = exp.replace_tables(
+                    expression, mapping, dialect=self._dialect, copy=False
+                )
 
             return expression
 

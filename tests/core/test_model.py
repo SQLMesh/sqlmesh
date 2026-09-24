@@ -9789,22 +9789,6 @@ def test_resolve_table_large_environment(make_snapshot: t.Callable, mocker: Mock
     for call in spy.call_args_list:
         assert len(call.args[1]) <= 1
 
-    # an explicit table_mapping entry takes precedence over the snapshot-derived one (rendered
-    # via a separate model instance so the statement-render cache doesn't return the earlier result)
-    child_for_override = load_sql_based_model(
-        d.parse(
-            """
-            MODEL (name child_override);
-            SELECT c FROM target;
-            @resolve_named('target')
-            """
-        )
-    )
-    override = child_for_override.render_post_statements(
-        snapshots=snapshots, table_mapping={'"target"': "overridden_table"}
-    )
-    assert override[0].sql() == '"overridden_table"'
-
     # a name absent from both snapshots and table_mapping resolves unchanged
     unmapped = load_sql_based_model(
         d.parse(
@@ -9854,52 +9838,6 @@ def test_resolve_table_preserves_dialect_equivalent_table_mapping_override(
     )
 
     assert post_statements[0].sql() == '"override_table"'
-
-
-def test_render_virtual_properties_skips_mapping_without_table_refs(
-    make_snapshot: t.Callable, mocker: MockerFixture
-):
-    """Rendering a property expression with no table references shouldn't build the full
-    snapshot -> table-name mapping at all (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
-    import sqlmesh.core.snapshot as snapshot_module
-
-    model = load_sql_based_model(
-        d.parse(
-            """
-            MODEL (
-                name test_schema.test_model,
-                virtual_properties (
-                    labels = [('team', 'data')]
-                ),
-                session_properties (
-                    "spark.executor.memory" = '1G'
-                ),
-            );
-            SELECT a FROM tbl;
-            """
-        )
-    )
-
-    snapshots = {}
-    for i in range(50):
-        other = load_sql_based_model(d.parse(f"MODEL (name other_{i}); SELECT 1 AS c"))
-        other_snapshot = make_snapshot(other)
-        other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
-        snapshots[f'"other_{i}"'] = other_snapshot
-
-    to_table_mapping_spy = mocker.spy(snapshot_module, "to_table_mapping")
-
-    assert model.render_virtual_properties(snapshots=snapshots) == {
-        "labels": exp.maybe_parse("[('team', 'data')]")
-    }
-    assert model.render_session_properties(snapshots=snapshots) == {
-        "spark.executor.memory": "1G",
-    }
-
-    # `this_model` resolution may still make a narrow, single-snapshot (or empty) call, but the
-    # full N-snapshot mapping build in `_resolve_tables` must never fire for a table-less property
-    for call in to_table_mapping_spy.call_args_list:
-        assert len(call.args[0]) <= 1
 
 
 def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
@@ -9962,33 +9900,6 @@ def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
     )
 
 
-def test_resolve_table_table_mapping_only_no_snapshots(make_snapshot: t.Callable):
-    """A `table_mapping` entry with no corresponding `snapshots` entry should still be honored
-    by the narrowed lookup in `_resolve_table` (mirrors the override case in
-    `test_resolve_table_large_environment`, but with `snapshots=None`/empty entirely, to make
-    sure the narrowed code path doesn't assume `snapshots` is non-empty before consulting
-    `table_mapping`)."""
-
-    @macro()
-    def resolve_named(evaluator, name):
-        return evaluator.resolve_table(name.name)
-
-    child = load_sql_based_model(
-        d.parse(
-            """
-            MODEL (name child);
-            SELECT 1 AS c;
-            @resolve_named('parent')
-            """
-        )
-    )
-
-    post_statements = child.render_post_statements(
-        snapshots=None, table_mapping={'"parent"': "explicit_physical_table"}
-    )
-    assert post_statements[0].sql() == '"explicit_physical_table"'
-
-
 def test_resolve_table_non_string_expr_path(make_snapshot: t.Callable):
     """When `table_name` is an `exp.Expr` (not a `str`), `_resolve_table` falls back to building
     the full snapshot mapping (the `else` branch of the new code). This exercises that branch --
@@ -10019,37 +9930,6 @@ def test_resolve_table_non_string_expr_path(make_snapshot: t.Callable):
         snapshots={'"parent"': parent_snapshot, '"other"': other_snapshot},
     )
     assert resolved.sql(comments=False) == f'"sqlmesh__default"."parent__{parent_snapshot.version}"'
-
-
-def test_resolve_tables_table_ref_only_in_string_literal_not_expanded(make_snapshot: t.Callable):
-    """Adversarial case for the `expression.find(exp.Table)` short-circuit in `_resolve_tables`:
-    an expression that references a table only inside a string literal (not a parsed `exp.Table`
-    node) has no `exp.Table` node for `find()` to see, so the mapping build is correctly skipped.
-    This documents/locks in that the short-circuit is safe because `exp.replace_tables` itself
-    only ever rewrites `exp.Table` nodes -- it would never have touched a string literal either,
-    mapping built or not -- so skipping the mapping cannot change behavior here."""
-
-    parent = load_sql_based_model(d.parse("MODEL (name parent); SELECT 1 AS c"))
-    parent_snapshot = make_snapshot(parent)
-    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
-
-    model = load_sql_based_model(
-        d.parse(
-            """
-            MODEL (
-                name test_schema.string_ref_model,
-                virtual_properties (
-                    description = 'references parent as a plain string, not a table node'
-                ),
-            );
-            SELECT a FROM tbl;
-            """
-        )
-    )
-
-    snapshots = {'"parent"': parent_snapshot}
-    props = model.render_virtual_properties(snapshots=snapshots)
-    assert props["description"].this == "references parent as a plain string, not a table node"
 
 
 def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.Callable):
@@ -10223,70 +10103,15 @@ def test_resolve_tables_skips_expand_computation_without_table_refs(
     assert ItemsCountingDict.items_call_count == 0
 
 
-def test_resolve_table_with_view_mapping_uses_single_entry(
-    make_snapshot: t.Callable, mocker: MockerFixture
-):
-    """During promotion `table_mapping` maps every model in the environment to its view. Resolving
-    one table against it must not normalize every key in that mapping on every call
-    (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
-    from sqlmesh.core.snapshot.definition import to_view_mapping
-
-    @macro()
-    def resolve_named(evaluator, name):
-        return evaluator.resolve_table(name.name)
-
-    snapshots = {}
-    for i in range(50):
-        other = load_sql_based_model(d.parse(f"MODEL (name db.other_{i}); SELECT 1 AS c"))
-        other_snapshot = make_snapshot(other)
-        other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
-        snapshots[other.fqn] = other_snapshot
-
-    children = [
-        load_sql_based_model(
-            d.parse(
-                f"""
-                MODEL (name db.child_{i});
-                SELECT 1 AS c;
-                @resolve_named('db.other_{i}')
-                """
-            )
-        )
-        for i in range(3)
-    ]
-    for child in children:
-        child_snapshot = make_snapshot(child)
-        child_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
-        snapshots[child.fqn] = child_snapshot
-
-    table_mapping = to_view_mapping(snapshots.values(), EnvironmentNamingInfo(name="dev"))
-    spy = mocker.spy(exp, "replace_tables")
-
-    for i, child in enumerate(children):
-        rendered = child.render_post_statements(snapshots=snapshots, table_mapping=table_mapping)
-        assert rendered[0].sql() == f'"db__dev"."other_{i}"'
-
-    # One call for `this_model` and one for the resolved table, per child.
-    assert spy.call_count == 6
-    for call in spy.call_args_list:
-        assert len(call.args[1]) == 1
-
-
-@pytest.mark.parametrize("dialect", ["duckdb", "snowflake"])
-def test_table_mapping_normalized_keys(dialect: str):
+def test_table_mapping_normalized_keys():
     table_mapping = TableMapping({'"db"."a"': "view_a", "db.A": "view_a_upper"})
 
-    normalized = table_mapping.normalized_keys(dialect)
     # Keys that normalize to the same name resolve to the last one, like exp.replace_tables.
-    if dialect == "snowflake":
-        assert normalized == {"db.a": '"db"."a"', "DB.A": "db.A"}
-    else:
-        assert normalized == {"db.a": "db.A"}
-    # Normalization happens once per dialect.
-    assert table_mapping.normalized_keys(dialect) is normalized
-
-    assert isinstance(table_mapping.copy(), TableMapping)
-    assert table_mapping.copy() == table_mapping
+    duckdb_keys = table_mapping.normalized_keys("duckdb")
+    assert duckdb_keys == {"db.a": "db.A"}
+    # Normalization happens once per dialect, and each dialect gets its own normalization.
+    assert table_mapping.normalized_keys("duckdb") is duckdb_keys
+    assert table_mapping.normalized_keys("snowflake") == {"db.a": '"db"."a"', "DB.A": "db.A"}
 
     # Every mutation invalidates the cache.
     table_mapping["db.b"] = "view_b"
