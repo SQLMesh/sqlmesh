@@ -112,4 +112,46 @@ describe('coalesceAsync', () => {
     task.release()
     await second
   })
+
+  // A failed restart is reported to the caller, which handles it after the run
+  // has finished. The not_signed_in handler signs the user in and restarts the
+  // client again, so that handler must not run inside the task: the restart it
+  // triggers would wait on the run that is still waiting on the handler, and
+  // neither would ever settle. See #5920.
+  it('lets a failure handler trigger another run without deadlocking', async () => {
+    let failNextRun = true
+    let reportedError: string | undefined
+    let runs = 0
+
+    const runRestart = async (): Promise<void> => {
+      runs += 1
+      // The real run awaits the client restart before it knows the outcome.
+      // Without that await the re-entrant call below lands in the synchronous
+      // prefix of the run, before it has been recorded as in flight, and the
+      // deadlock this covers cannot happen.
+      const failed = await Promise.resolve(failNextRun)
+      if (failed) {
+        failNextRun = false
+        reportedError = 'not_signed_in'
+      }
+    }
+
+    const runRestartSerialized = coalesceAsync(runRestart)
+
+    const restart = async (): Promise<void> => {
+      await runRestartSerialized()
+
+      const error = reportedError
+      reportedError = undefined
+      if (error === 'not_signed_in') {
+        // Stands in for the sign-in flow, which restarts once signed in.
+        await restart()
+      }
+    }
+
+    await restart()
+
+    expect(runs).toBe(2)
+    expect(reportedError).toBeUndefined()
+  }, 2_000)
 })
