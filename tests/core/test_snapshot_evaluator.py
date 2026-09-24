@@ -5680,13 +5680,13 @@ def test_promote_virtual_properties_see_snapshots_by_name(mocker: MockerFixture,
     evaluator = SnapshotEvaluator(adapter_mock)
 
     upstream = load_sql_based_model(
-        parse("MODEL (name test_schema.upstream, kind FULL); SELECT 1 AS a")
+        d.parse("MODEL (name test_schema.upstream, kind FULL); SELECT 1 AS a")
     )
     upstream_snapshot = make_snapshot(upstream)
     upstream_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
 
     model = load_sql_based_model(
-        parse(
+        d.parse(
             """
             MODEL (
                 name test_schema.test_model,
@@ -5735,7 +5735,7 @@ def test_promote_resolves_this_model_with_single_mapping_entry(
     snapshots = {}
     for i in range(20):
         model = load_sql_based_model(
-            parse(
+            d.parse(
                 f"""
                 MODEL (
                     name test_schema.model_{i},
