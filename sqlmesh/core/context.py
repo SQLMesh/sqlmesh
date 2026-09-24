@@ -2611,8 +2611,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         """
         self.notification_target_manager.notify(NotificationEvent.MIGRATION_START)
         self._load_materializations()
+        state_sync = self._new_state_sync()
+        previous_versions = self._state_versions(state_sync)
         try:
-            self._new_state_sync().migrate(
+            state_sync.migrate(
                 promoted_snapshots_only=self.config.migration.promoted_snapshots_only,
             )
         except Exception as e:
@@ -2620,6 +2622,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 NotificationEvent.MIGRATION_FAILURE, traceback.format_exc()
             )
             raise e
+        self._print_state_versions(self._state_versions(state_sync), previous_versions)
         self.notification_target_manager.notify(NotificationEvent.MIGRATION_END)
 
     @python_api_analytics
