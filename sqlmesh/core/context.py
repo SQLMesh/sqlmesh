@@ -108,6 +108,7 @@ from sqlmesh.core.state_sync import (
     CachingStateSync,
     StateReader,
     StateSync,
+    Versions,
 )
 from sqlmesh.core.janitor import cleanup_expired_views, delete_expired_snapshots
 from sqlmesh.core.table_diff import TableDiff
@@ -2610,8 +2611,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         """
         self.notification_target_manager.notify(NotificationEvent.MIGRATION_START)
         self._load_materializations()
+        state_sync = self._new_state_sync()
+        previous_versions = self._state_versions(state_sync)
         try:
-            self._new_state_sync().migrate(
+            state_sync.migrate(
                 promoted_snapshots_only=self.config.migration.promoted_snapshots_only,
             )
         except Exception as e:
@@ -2619,6 +2622,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 NotificationEvent.MIGRATION_FAILURE, traceback.format_exc()
             )
             raise e
+        self._print_state_versions(self._state_versions(state_sync), previous_versions)
         self.notification_target_manager.notify(NotificationEvent.MIGRATION_END)
 
     @python_api_analytics
@@ -2627,7 +2631,10 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         Please contact your SQLMesh administrator before doing this. This action cannot be undone.
         """
-        self._new_state_sync().rollback()
+        state_sync = self._new_state_sync()
+        previous_versions = self._state_versions(state_sync)
+        state_sync.rollback()
+        self._print_state_versions(self._state_versions(state_sync), previous_versions)
 
     @python_api_analytics
     def create_external_models(self, strict: bool = False) -> None:
@@ -2700,6 +2707,12 @@ class GenericContext(BaseContext, t.Generic[C]):
         state_connection = self.config.get_state_connection(self.gateway)
         if state_connection:
             self._try_connection("state backend", state_connection.connection_validator())
+
+        if verbosity >= Verbosity.VERBOSE:
+            try:
+                self._print_state_versions(self._state_versions())
+            except Exception as ex:
+                self.console.log_error(f"Failed to fetch the state backend versions. {ex}")
 
     @python_api_analytics
     def print_environment_names(self) -> None:
@@ -3289,6 +3302,25 @@ class GenericContext(BaseContext, t.Generic[C]):
             self.console.log_status_update(f"{connection_name} connection [green]succeeded[/green]")
         except Exception as ex:
             self.console.log_error(f"{connection_name} connection failed. {ex}")
+
+    def _state_versions(self, state_sync: t.Optional[StateSync] = None) -> Versions:
+        """Returns the versions recorded in the state backend without validating them."""
+        return (state_sync or self._new_state_sync()).get_versions(validate=False)
+
+    def _print_state_versions(
+        self, versions: Versions, previous_versions: t.Optional[Versions] = None
+    ) -> None:
+        """Prints the state backend versions, optionally alongside the ones they replaced."""
+        self.console.log_status_update("\nState backend versions:")
+        for label, attribute in (
+            ("Schema version", "schema_version"),
+            ("SQLGlot version", "sqlglot_version"),
+            ("SQLMesh version", "sqlmesh_version"),
+        ):
+            version = getattr(versions, attribute)
+            if previous_versions is not None:
+                version = f"{getattr(previous_versions, attribute)} -> {version}"
+            self.console.log_status_update(f"{label}: {version}")
 
     def _new_state_sync(self) -> StateSync:
         return self._provided_state_sync or self._scheduler.create_state_sync(self)
