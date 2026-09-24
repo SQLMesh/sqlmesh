@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Serialize an async task so it never overlaps with itself, collapsing any
  * calls that arrive while it is running into a single rerun.

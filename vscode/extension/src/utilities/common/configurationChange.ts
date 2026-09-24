@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Configuration sections the language server reads, so a change to any of them
  * needs the server restarted to take effect.
