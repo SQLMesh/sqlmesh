@@ -1,6 +1,10 @@
 """Tests for type hinting SQLMesh models"""
 
+import typing as t
+
 import pytest
+
+from lsprotocol import types
 
 from sqlglot import exp, parse_one
 
@@ -8,6 +12,16 @@ from sqlmesh.core.context import Context
 from sqlmesh.lsp.context import LSPContext, ModelTarget
 from sqlmesh.lsp.hints import get_hints, _get_type_hints_for_model_from_query
 from sqlmesh.lsp.uri import URI
+
+
+def _render(text: str, hints: t.List[types.InlayHint]) -> str:
+    """Insert the hints into the text the way an editor displays them."""
+    lines = text.split("\n")
+    for hint in sorted(hints, key=lambda h: (h.position.line, h.position.character), reverse=True):
+        line = lines[hint.position.line]
+        character = hint.position.character
+        lines[hint.position.line] = f"{line[:character]}{hint.label}{line[character:]}"
+    return "\n".join(lines)
 
 
 @pytest.mark.fast
@@ -201,3 +215,51 @@ def test_cte_with_union_hints() -> None:
     assert result[0].label == "::INT"
     assert result[1].label == "::TEXT"
     assert result[2].label == "::DATE"
+
+
+@pytest.mark.fast
+def test_hints_are_positioned_from_the_edited_document() -> None:
+    """The context is only reloaded on save, so hints must be positioned against the text
+    the editor currently holds. Positioning them from the loaded model puts the type cast
+    inside a column name the user is part-way through typing."""
+    context = Context(paths=["examples/sushi"])
+    lsp_context = LSPContext(context)
+
+    path = next(
+        path
+        for path, info in lsp_context.map.items()
+        if isinstance(info, ModelTarget) and "sushi.active_customers" in info.names
+    )
+    uri = URI.from_path(path)
+    saved = path.read_text()
+
+    # While the document matches what was loaded, nothing changes.
+    unchanged = get_hints(lsp_context, uri, start_line=0, end_line=9999, document_text=saved)
+    assert "SELECT customer_id::INT, zip::TEXT" in _render(saved, unchanged)
+
+    # The user is renaming `zip` to `zip_code` and has not saved yet.
+    edited = saved.replace("SELECT customer_id, zip\n", "SELECT customer_id, zip_code\n")
+    assert edited != saved
+    hints = get_hints(lsp_context, uri, start_line=0, end_line=9999, document_text=edited)
+
+    # `customer_id` is untouched so it keeps its hint; the column being renamed gets none
+    # until the context is reloaded, rather than one rendered inside its name.
+    assert "SELECT customer_id::INT, zip_code" in _render(edited, hints)
+    assert [hint.label for hint in hints] == ["::INT"]
+
+
+@pytest.mark.fast
+def test_hints_for_unparseable_document() -> None:
+    """No hints are better than hints positioned from a stale parse."""
+    context = Context(paths=["examples/sushi"])
+    lsp_context = LSPContext(context)
+
+    path = next(
+        path
+        for path, info in lsp_context.map.items()
+        if isinstance(info, ModelTarget) and "sushi.active_customers" in info.names
+    )
+    uri = URI.from_path(path)
+    edited = path.read_text().replace("SELECT customer_id, zip\n", "SELECT customer_id, zip(\n")
+
+    assert get_hints(lsp_context, uri, start_line=0, end_line=9999, document_text=edited) == []
