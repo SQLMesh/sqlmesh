@@ -1,4 +1,6 @@
 from sqlmesh.core.console import MarkdownConsole
+from sqlmesh.core.snapshot import SnapshotId
+from sqlmesh.utils.concurrency import NodeExecutionFailedError
 
 
 def test_markdown_console_warning_block():
@@ -129,3 +131,14 @@ def test_markdown_console_error_block():
     )
 
     assert console.consume_captured_errors() == ""
+
+
+def test_markdown_console_failed_model_includes_node_in_captured_error():
+    error = NodeExecutionFailedError(SnapshotId(name="model", identifier="snapshot"))
+    error.__cause__ = RuntimeError("driver error")
+    console = MarkdownConsole()
+
+    console.log_failed_models([error])
+
+    assert "model: driver error" in console.consume_captured_errors()
+    assert "* `model`" in console.consume_captured_output()

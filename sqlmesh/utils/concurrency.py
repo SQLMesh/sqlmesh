@@ -17,6 +17,12 @@ class NodeExecutionFailedError(t.Generic[H], SQLMeshError):
         self.node = node
         super().__init__(f"Execution failed for node {node}")
 
+    def __str__(self) -> str:
+        message = super().__str__()
+        if self.__cause__:
+            return f"{message}: {self.__cause__}"
+        return message
+
 
 class ConcurrentDAGExecutor(t.Generic[H]):
     """Concurrently traverses the given DAG in topological order while applying a function to each node.

@@ -381,7 +381,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
                 deployability_index=stage.deployability_index,
             )
         except NodeExecutionFailedError as ex:
-            raise PlanError(str(ex.__cause__) if ex.__cause__ else str(ex))
+            raise PlanError(str(ex)) from ex
 
     def visit_unpause_stage(self, stage: stages.UnpauseStage, plan: EvaluatablePlan) -> None:
         self.state_sync.unpause_snapshots(stage.promoted_snapshots, plan.end)
