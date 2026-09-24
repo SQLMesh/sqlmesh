@@ -5762,6 +5762,7 @@ def test_promote_resolves_this_model_with_single_mapping_entry(
     )
 
     assert adapter_mock.create_view.call_count == 20
-    assert spy.call_count >= 20
+    # One call per view, to resolve `this_model`.
+    assert spy.call_count == 20
     for call in spy.call_args_list:
         assert len(call.args[1]) == 1

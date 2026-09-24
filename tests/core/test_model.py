@@ -10285,6 +10285,9 @@ def test_table_mapping_normalized_keys(dialect: str):
     # Normalization happens once per dialect.
     assert table_mapping.normalized_keys(dialect) is normalized
 
+    assert isinstance(table_mapping.copy(), TableMapping)
+    assert table_mapping.copy() == table_mapping
+
     # Every mutation invalidates the cache.
     table_mapping["db.b"] = "view_b"
     assert "db.b" in table_mapping.normalized_keys("duckdb")

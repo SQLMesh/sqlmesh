@@ -65,6 +65,10 @@ class TableMapping(t.Dict[str, str]):
             self._normalized_keys[dialect] = normalized_keys
         return normalized_keys
 
+    def copy(self) -> TableMapping:
+        # dict.copy() would return a plain dict and lose the cache.
+        return TableMapping(self)
+
     def __setitem__(self, key: str, value: str) -> None:
         self._normalized_keys.clear()
         super().__setitem__(key, value)
