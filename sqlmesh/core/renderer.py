@@ -384,7 +384,7 @@ class BaseExpressionRenderer:
 
     def _resolve_table(
         self,
-        table_name: str | exp.Expr,
+        table_name: str,
         snapshots: t.Optional[t.Dict[str, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
@@ -405,7 +405,7 @@ class BaseExpressionRenderer:
 
         if not mapping and snapshots:
             # An exact FQN match avoids scanning unrelated snapshots.
-            snapshot = snapshots.get(table_name) if isinstance(table_name, str) else None
+            snapshot = snapshots.get(table_name)
             # Keys normalized under different dialects may differ in casing or quoting.
             # Fall back to the full mapping so exp.replace_tables can reconcile them.
             mapping = self._to_table_mapping(

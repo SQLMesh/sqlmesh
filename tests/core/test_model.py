@@ -9900,38 +9900,6 @@ def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
     )
 
 
-def test_resolve_table_non_string_expr_path(make_snapshot: t.Callable):
-    """When `table_name` is an `exp.Expr` (not a `str`), `_resolve_table` falls back to building
-    the full snapshot mapping (the `else` branch of the new code). This exercises that branch --
-    which the `this_model`/`resolve_table` macro call sites never hit, since they always pass a
-    pre-normalized string -- directly at the renderer level, to make sure it's still reachable
-    and correct, and not dead code that silently bit-rots."""
-
-    from sqlmesh.core.renderer import ExpressionRenderer
-
-    parent = load_sql_based_model(d.parse("MODEL (name parent); SELECT 1 AS c"))
-    parent_snapshot = make_snapshot(parent)
-    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
-
-    other = load_sql_based_model(d.parse("MODEL (name other); SELECT 1 AS c"))
-    other_snapshot = make_snapshot(other)
-    other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
-
-    expr_renderer = ExpressionRenderer(
-        exp.select("*"),
-        dialect="",
-        macro_definitions=[],
-        path=Path("."),
-    )
-
-    table_expr = exp.to_table('"parent"')
-    resolved = expr_renderer._resolve_table(
-        table_expr,
-        snapshots={'"parent"': parent_snapshot, '"other"': other_snapshot},
-    )
-    assert resolved.sql(comments=False) == f'"sqlmesh__default"."parent__{parent_snapshot.version}"'
-
-
 def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.Callable):
     """Embedded-model expansion (`expand=`) runs as an `expression.transform` *before* the new
     `expression.find(exp.Table)` short-circuit in `_resolve_tables`, so a table reference that
