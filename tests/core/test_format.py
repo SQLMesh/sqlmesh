@@ -161,3 +161,37 @@ def test_format_without_state_load(tmp_path: pathlib.Path, mocker: MockerFixture
     context = Context(paths=tmp_path, config=Config(project="local_only"), load_state=False)
     context.format(check=True)
     mock.assert_not_called()
+
+
+def test_format_bigquery_header_list_properties(tmp_path: pathlib.Path):
+    # A BigQuery model must survive `sqlmesh format` and still load: list-valued header
+    # properties were rewritten to `ARRAY(...)`, which BigQuery parses as a subquery.
+    model_file = create_temp_file(
+        tmp_path,
+        pathlib.Path("models/model.sql"),
+        """MODEL (
+  name test.model,
+  kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+  tags ['C1', 'c2'],
+  ignored_rules ['noselectstar', 'ambiguousorinvalidcolumn'],
+  grain [id],
+  partitioned_by DATE_TRUNC(ds, MONTH)
+);
+SELECT 1 AS id, CURRENT_DATE() AS ds""",
+    )
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="bigquery"))
+
+    Context(paths=tmp_path, config=config).format()
+
+    formatted = model_file.read_text(encoding="utf-8")
+    assert "tags ['C1', 'c2']" in formatted
+    assert "ignored_rules ['noselectstar', 'ambiguousorinvalidcolumn']" in formatted
+    assert "grain [id]" in formatted
+    assert "partitioned_by DATE_TRUNC(ds, MONTH)" in formatted
+
+    context = Context(paths=tmp_path, config=config)
+    assert context.format(check=True)
+    model = context.get_model("test.model")
+    assert model.tags == ["C1", "c2"]
+    assert model.ignored_rules == {"noselectstar", "ambiguousorinvalidcolumn"}
+    assert [p.sql("bigquery") for p in model.partitioned_by] == ["DATE_TRUNC(`ds`, MONTH)"]
