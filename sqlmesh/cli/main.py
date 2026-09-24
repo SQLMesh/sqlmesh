@@ -42,6 +42,8 @@ SKIP_LOAD_COMMANDS = (
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
 LOCAL_ONLY_COMMANDS = ("format",)
+# Commands that are local-only when they're passed --local.
+OPTIONAL_LOCAL_COMMANDS = ("lint", "test")
 
 
 class _SQLMeshGroup(click.Group):
@@ -129,8 +131,12 @@ def cli(
     load = True
     # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
-    # The parent callback constructs Context before Click invokes `lint`, so inspect its parsed args here.
-    if ctx.invoked_subcommand == "lint" and "--local" in ctx.meta["subcommand_args"]:
+    # The parent callback constructs Context before Click invokes the subcommand, so inspect its
+    # parsed args here.
+    if (
+        ctx.invoked_subcommand in OPTIONAL_LOCAL_COMMANDS
+        and "--local" in ctx.meta["subcommand_args"]
+    ):
         load_state = False
 
     if len(paths) == 1:
@@ -811,6 +817,12 @@ def create_test(
     multiple=True,
     help="Select specific models to run unit tests for.",
 )
+@click.option(
+    "--local",
+    is_flag=True,
+    expose_value=False,
+    help="Run tests using only locally loaded project files without loading state. Tests whose model is not loaded are skipped with a warning rather than failing.",
+)
 @click.argument("tests", nargs=-1)
 @click.pass_obj
 @error_handler
@@ -823,7 +835,12 @@ def test(
     select_model: t.List[str],
     tests: t.List[str],
 ) -> None:
-    """Run model unit tests."""
+    """Run model unit tests.
+
+    TESTS are test files, `file.yaml::test_name` selectors, or model files, in which case the
+    tests for those models are run. They are unioned, and a test selected more than once still
+    only runs once.
+    """
     model_names = (
         obj._new_selector().expand_model_selections(select_model) if select_model else None
     )
@@ -833,6 +850,7 @@ def test(
         verbosity=Verbosity(verbose),
         preserve_fixtures=preserve_fixtures,
         model_names=model_names,
+        raise_on_unknown_paths=True,
     )
     if not result.wasSuccessful():
         exit(1)
