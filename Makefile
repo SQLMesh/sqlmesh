@@ -14,7 +14,7 @@ else
 endif
 
 install-dev:
-	$(PIP) install -e ".[dev,web,slack,dlt,lsp,db2]" ./examples/custom_materializations
+	$(PIP) install -e ".[dev,web,slack,dlt,lsp]" ./examples/custom_materializations
 
 install-doc:
 	$(PIP) install -r ./docs/requirements.txt
