@@ -1284,6 +1284,8 @@ class SnapshotEvaluator:
             table_mapping=table_mapping,
             runtime_stage=RuntimeStage.PROMOTING,
         )
+        # Renderers look snapshots up by model name, not by SnapshotId.
+        snapshots_by_name = {s.name: s for s in (snapshots or {}).values()}
 
         with (
             adapter.transaction(),
@@ -1294,14 +1296,16 @@ class SnapshotEvaluator:
                 view_name=view_name,
                 model=snapshot.model,
                 environment=environment_naming_info.name,
-                snapshots=snapshots,
+                snapshots=snapshots_by_name,
                 snapshot=snapshot,
                 **render_kwargs,
             )
 
-            snapshot_by_name = {s.name: s for s in (snapshots or {}).values()}
-            render_kwargs["snapshots"] = snapshot_by_name
-            adapter.execute(snapshot.model.render_on_virtual_update(**render_kwargs))
+            adapter.execute(
+                snapshot.model.render_on_virtual_update(
+                    snapshots=snapshots_by_name, **render_kwargs
+                )
+            )
 
         if on_complete is not None:
             on_complete(snapshot)

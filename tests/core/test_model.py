@@ -15,6 +15,7 @@ from sqlglot.errors import ParseError
 from sqlglot.schema import MappingSchema
 from sqlmesh.cli.project_init import init_example_project, ProjectTemplate
 from sqlmesh.core.environment import EnvironmentNamingInfo
+from sqlmesh.core.renderer import TableMapping
 from sqlmesh.core.model.kind import TimeColumn, ModelKindName, SeedKind
 
 from sqlmesh import CustomMaterialization, CustomKind
@@ -9818,9 +9819,10 @@ def test_resolve_table_large_environment(make_snapshot: t.Callable, mocker: Mock
     assert unmapped_result[0].sql() == '"does_not_exist"'
 
 
+@pytest.mark.parametrize("mapping_type", [dict, TableMapping])
 @pytest.mark.parametrize("include_exact_mapping", [False, True])
 def test_resolve_table_preserves_dialect_equivalent_table_mapping_override(
-    make_snapshot: t.Callable, include_exact_mapping: bool
+    make_snapshot: t.Callable, include_exact_mapping: bool, mapping_type: t.Callable
 ):
     """An explicit mapping should override a snapshot mapping when its key is dialect-equivalent
     to the resolved table name, even when the snapshot lookup is an exact match."""
@@ -9848,7 +9850,7 @@ def test_resolve_table_preserves_dialect_equivalent_table_mapping_override(
         table_mapping = {parent.fqn: "earlier_table", **table_mapping}
 
     post_statements = child.render_post_statements(
-        snapshots={parent.fqn: parent_snapshot}, table_mapping=table_mapping
+        snapshots={parent.fqn: parent_snapshot}, table_mapping=mapping_type(table_mapping)
     )
 
     assert post_statements[0].sql() == '"override_table"'
@@ -10219,6 +10221,87 @@ def test_resolve_tables_skips_expand_computation_without_table_refs(
     # snapshots) and `model_mapping` must not happen for a table-less expression, even though
     # this environment has an embedded snapshot that would otherwise trigger both.
     assert ItemsCountingDict.items_call_count == 0
+
+
+def test_resolve_table_with_view_mapping_uses_single_entry(
+    make_snapshot: t.Callable, mocker: MockerFixture
+):
+    """During promotion `table_mapping` maps every model in the environment to its view. Resolving
+    one table against it must not normalize every key in that mapping on every call
+    (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
+    from sqlmesh.core.snapshot.definition import to_view_mapping
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    snapshots = {}
+    for i in range(50):
+        other = load_sql_based_model(d.parse(f"MODEL (name db.other_{i}); SELECT 1 AS c"))
+        other_snapshot = make_snapshot(other)
+        other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[other.fqn] = other_snapshot
+
+    children = [
+        load_sql_based_model(
+            d.parse(
+                f"""
+                MODEL (name db.child_{i});
+                SELECT 1 AS c;
+                @resolve_named('db.other_{i}')
+                """
+            )
+        )
+        for i in range(3)
+    ]
+    for child in children:
+        child_snapshot = make_snapshot(child)
+        child_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[child.fqn] = child_snapshot
+
+    table_mapping = to_view_mapping(snapshots.values(), EnvironmentNamingInfo(name="dev"))
+    spy = mocker.spy(exp, "replace_tables")
+
+    for i, child in enumerate(children):
+        rendered = child.render_post_statements(snapshots=snapshots, table_mapping=table_mapping)
+        assert rendered[0].sql() == f'"db__dev"."other_{i}"'
+
+    # One call for `this_model` and one for the resolved table, per child.
+    assert spy.call_count == 6
+    for call in spy.call_args_list:
+        assert len(call.args[1]) == 1
+
+
+@pytest.mark.parametrize("dialect", ["duckdb", "snowflake"])
+def test_table_mapping_normalized_keys(dialect: str):
+    table_mapping = TableMapping({'"db"."a"': "view_a", "db.A": "view_a_upper"})
+
+    normalized = table_mapping.normalized_keys(dialect)
+    # Keys that normalize to the same name resolve to the last one, like exp.replace_tables.
+    if dialect == "snowflake":
+        assert normalized == {"db.a": '"db"."a"', "DB.A": "db.A"}
+    else:
+        assert normalized == {"db.a": "db.A"}
+    # Normalization happens once per dialect.
+    assert table_mapping.normalized_keys(dialect) is normalized
+
+    # Every mutation invalidates the cache.
+    table_mapping["db.b"] = "view_b"
+    assert "db.b" in table_mapping.normalized_keys("duckdb")
+    table_mapping.update({"db.c": "view_c"})
+    assert "db.c" in table_mapping.normalized_keys("duckdb")
+    table_mapping.setdefault("db.d", "view_d")
+    assert "db.d" in table_mapping.normalized_keys("duckdb")
+    table_mapping |= {"db.e": "view_e"}
+    assert "db.e" in table_mapping.normalized_keys("duckdb")
+    del table_mapping["db.b"]
+    assert "db.b" not in table_mapping.normalized_keys("duckdb")
+    table_mapping.pop("db.c")
+    assert "db.c" not in table_mapping.normalized_keys("duckdb")
+    table_mapping.popitem()
+    assert "db.e" not in table_mapping.normalized_keys("duckdb")
+    table_mapping.clear()
+    assert table_mapping.normalized_keys("duckdb") == {}
 
 
 def test_cluster_with_complex_expression():
