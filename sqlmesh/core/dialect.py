@@ -804,7 +804,42 @@ def _meta_render_policy() -> t.Dict[str, bool]:
     for source in sources:
         for name, field in source.model_fields.items():
             policy.setdefault((field.alias or name).lower(), _holds_expression(field.annotation))
+
+    # `ModelMeta._pre_root_validator` (sqlmesh/core/model/meta.py) renames these two
+    # user-facing property names to their target field before Pydantic validation, so
+    # they never surface as a `Field(alias=...)` for the reflection above to find. Give
+    # each the render policy of the field it is renamed to.
+    pre_validator_aliases = {
+        "grain": "grains",
+        "table_properties": "physical_properties",
+    }
+    for alias, target in pre_validator_aliases.items():
+        if target in policy:
+            policy[alias] = policy[target]
+
     return policy
+
+
+@functools.lru_cache(maxsize=None)
+def _dialect_renders_array_as_brackets(dialect_name: t.Optional[str]) -> bool:
+    """Whether `dialect_name`'s own generator spells an array literal as `[a, b]`.
+
+    Checked by actually rendering a sample `exp.Array` with that dialect, rather than
+    inspecting `Dialect.ARRAY_SIZE_NAME` or similar generator flags, because the
+    generator is the single source of truth for what a dialect's array syntax looks
+    like and there is no single shared flag for it across dialects. This also covers
+    dialects (tsql, sqlite, tableau, exasol, fabric) that reuse `[`/`]` for identifier
+    quoting and therefore render arrays as `ARRAY(...)` instead: rewriting their
+    `tags`/`ignored_rules` value to `[a, b]` would not be an array literal in their
+    grammar at all, so it silently reparses as one bracket-quoted identifier and
+    corrupts the value. An unrecognized dialect name renders with the generic
+    generator, which itself does not use brackets, so it falls back to `False`.
+    """
+    try:
+        sample = exp.Array(expressions=[exp.Literal.string("x")])
+        return sample.sql(dialect=dialect_name).startswith("[")
+    except Exception:
+        return False
 
 
 def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
@@ -855,6 +890,26 @@ def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
                 and _meta_render_policy().get(prop.name.lower())
             ):
                 value_sql = render_with_model_dialect(value)
+            elif (
+                meta_dialect
+                and isinstance(value, exp.Array)
+                and _dialect_renders_array_as_brackets(meta_dialect)
+            ):
+                # Dialect-agnostic properties (e.g. `tags`, `ignored_rules`) that hold a
+                # list still go through the base (dialect=None) generator, which renders
+                # an `exp.Array` as `ARRAY(...)`. On BigQuery `ARRAY(` is parsed as a
+                # subquery constructor, so a multi-element `ARRAY('a', 'b')` fails to
+                # reparse ("Required keyword: 'value' missing for Property"). Render it
+                # as a bracketed list literal instead -- but only for dialects that
+                # actually spell arrays that way; dialects that reuse `[`/`]` for
+                # identifier quoting (tsql, sqlite, ...) keep the generic `ARRAY(...)`
+                # form, which they parse back correctly. The elements themselves stay on
+                # the dialect-agnostic path (`self.expressions`, not
+                # `render_with_model_dialect`): these are SQLMesh's own scalar values
+                # (tag/rule name strings), not user warehouse SQL, so they must not be
+                # transpiled with the model dialect (e.g. tsql boolean literals turning
+                # into `(1 = 1)`).
+                value_sql = f"[{self.expressions(value, flat=True)}]"
             else:
                 value_sql = self.sql(prop, "value")
 

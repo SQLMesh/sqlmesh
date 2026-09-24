@@ -617,6 +617,167 @@ SELECT
     assert formatted == twice
 
 
+@pytest.mark.parametrize("dialect", ["bigquery", "duckdb", "snowflake"])
+@pytest.mark.parametrize("prop_name", ["tags", "ignored_rules"])
+def test_format_model_expressions_list_property_array_literal(dialect: str, prop_name: str):
+    """Dialect-agnostic header properties that hold a list (`tags`, `ignored_rules`) must
+    render as a bracketed list literal (`[a, b]`) on dialects that spell arrays that way,
+    not the base generator's `ARRAY(a, b)`.
+
+    On BigQuery, `ARRAY(` is parsed as a subquery constructor, so a multi-element
+    `ARRAY('C1', 'c2')` fails to reparse with `Required keyword: 'value' missing for
+    Property`. This previously affected any dialect using this generator, since these
+    properties render generically (the `dialect=None` path) regardless of the model's
+    own dialect. Only bigquery/duckdb/snowflake-like dialects are covered here;
+    dialects whose own array syntax is not brackets (postgres' `ARRAY[...]`,
+    databricks' `ARRAY(...)`) or that reuse `[`/`]` for identifier quoting (tsql,
+    sqlite, ...) are covered by
+    `test_format_model_expressions_list_property_dialects_without_bracket_arrays`.
+    """
+    source = f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  {prop_name} ['C1', 'c2']
+);
+SELECT 1 AS x"""
+
+    formatted = format_model_expressions(parse(source, default_dialect=dialect), dialect=dialect)
+
+    assert f"{prop_name} ['C1', 'c2']" in formatted
+
+    # Reparses cleanly with the model's own dialect.
+    reparsed = parse(formatted, default_dialect=dialect)
+
+    # Idempotent: formatting an already-formatted model is a no-op.
+    twice = format_model_expressions(reparsed, dialect=dialect)
+    assert formatted == twice
+
+    model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+    if prop_name == "tags":
+        assert model.tags == ["C1", "c2"]
+    else:
+        assert model.ignored_rules == {"c1", "c2"}
+
+
+def test_format_model_expressions_array_property_no_dialect_unchanged():
+    """Regression guard: with no model dialect, list-valued header properties must keep
+    rendering through the base generator (`ARRAY(...)`), exactly as pinned by
+    `test_format_model_expressions`. The `[...]` rewrite only applies once a model
+    dialect is present (gated on `meta_dialect`)."""
+    formatted = format_model_expressions(
+        parse("MODEL (name a.b, tags ['C1', 'c2']); SELECT 1 AS x")
+    )
+
+    assert "tags ARRAY('C1', 'c2')" in formatted
+
+
+@pytest.mark.parametrize("dialect", ["tsql", "sqlite", "postgres", "databricks"])
+@pytest.mark.parametrize("prop_name", ["tags", "ignored_rules"])
+def test_format_model_expressions_list_property_dialects_without_bracket_arrays(
+    dialect: str, prop_name: str
+):
+    """Regression: dialects whose own generator does not spell an `exp.Array` as
+    `[a, b]` must NOT get the bracket-list rewrite from
+    `test_format_model_expressions_list_property_array_literal`, and must keep the
+    generic `ARRAY(...)` form.
+
+    This matters most for tsql and sqlite (also true of tableau, exasol, fabric), which
+    reuse `[`/`]` for identifier quoting: `['a', 'b']` is not an array literal in their
+    grammar at all, so rewriting `tags` or `ignored_rules` to that form reparses as a
+    single bracket-quoted identifier, silently collapsing two values into one and
+    corrupting the tag/rule names -- even though this exact source formatted correctly
+    on `main` before bracket rendering was introduced. postgres (`ARRAY[...]`) and
+    databricks (`ARRAY(...)`) are not corrupted by the bracket form, but should still
+    keep rendering with their own generator's spelling rather than a generic bracket
+    literal that is not how either dialect writes arrays.
+    """
+    source = f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  {prop_name} ARRAY('C1', 'c2')
+);
+SELECT 1 AS x"""
+
+    formatted = format_model_expressions(parse(source, default_dialect=dialect), dialect=dialect)
+
+    prop_line = formatted.split(f"{prop_name} ")[1].split("\n")[0]
+    assert prop_line.startswith("ARRAY")
+    assert "[" not in prop_line
+
+    reparsed = parse(formatted, default_dialect=dialect)
+    twice = format_model_expressions(reparsed, dialect=dialect)
+    assert formatted == twice
+
+    model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+    if prop_name == "tags":
+        assert model.tags == ["C1", "c2"]
+    else:
+        assert model.ignored_rules == {"c1", "c2"}
+
+
+@pytest.mark.parametrize("dialect", ["bigquery", "duckdb", "snowflake", "postgres"])
+def test_format_model_expressions_grain_alias_render_policy(dialect: str):
+    """`grain` is renamed to `grains` in `ModelMeta._pre_root_validator`, not via a
+    Pydantic alias, so `_meta_render_policy` must special-case it to inherit `grains`'
+    render policy (warehouse SQL). Otherwise a multi-column `grain [id, id2]` falls back
+    to the generic, dialect-agnostic path and (via the base generator) becomes
+    `ARRAY(id, id2)`, which fails to reparse on BigQuery.
+    """
+    source = f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  grain [id, id2]
+);
+SELECT 1 AS x, 2 AS id, 3 AS id2"""
+
+    formatted = format_model_expressions(parse(source, default_dialect=dialect), dialect=dialect)
+
+    # Rendered with the model's own dialect (e.g. postgres' native `ARRAY[...]`), never
+    # the base generator's `ARRAY(id, id2)`, which fails to reparse on BigQuery.
+    assert "ARRAY(id, id2)" not in formatted
+
+    twice = format_model_expressions(parse(formatted, default_dialect=dialect), dialect=dialect)
+    assert formatted == twice
+
+    # `grain [id, id2]` parses to a single composite grain wrapping both columns
+    # (independent of this fix); what matters here is that it survives a dialect-
+    # specific round trip rather than being flattened to the generic `ARRAY(...)`.
+    model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+    assert len(model.grains) == 1
+    assert {c.name for c in model.grains[0].find_all(exp.Column)} == {"id", "id2"}
+
+
+def test_format_model_expressions_table_properties_alias_render_policy():
+    """`table_properties` is the deprecated alias for `physical_properties`, renamed in
+    `ModelMeta._pre_root_validator`, not via a Pydantic alias. It must inherit
+    `physical_properties`' render policy (warehouse SQL) so dialect-specific values
+    inside it, such as tsql's `DATETIME2`, are not flattened to the generic generator's
+    `TIMESTAMP` spelling.
+    """
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              table_properties (
+                x = CAST('2024-01-01' AS DATETIME2)
+              )
+            );
+
+            SELECT 1 AS x
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert "x = '2024-01-01'::DATETIME2" in formatted
+
+    twice = format_model_expressions(parse(formatted, default_dialect="tsql"), dialect="tsql")
+    assert formatted == twice
+
+
 def test_format_model_expressions_normalize_functions():
     """Regression: formatter function-name casing behavior.
 
