@@ -17,6 +17,8 @@ ENGINE_DEPENDENCIES=""
 
 if [ "$ENGINE" == "spark" ]; then
     ENGINE_DEPENDENCIES="default-jdk"
+elif [ "$ENGINE" == "db2" ]; then
+    ENGINE_DEPENDENCIES="libxml2-dev build-essential"
 elif [ "$ENGINE" == "fabric" ]; then
     echo "Installing Microsoft package repository"
 

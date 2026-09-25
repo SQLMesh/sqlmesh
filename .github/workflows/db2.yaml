@@ -1,0 +1,63 @@
+name: db2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'sqlmesh/core/engine_adapter/db2.py'
+      - 'tests/core/engine_adapter/test_db2.py'
+      - 'tests/core/engine_adapter/integration/test_integration_db2.py'
+      - 'tests/core/engine_adapter/integration/docker/compose.db2.yaml'
+      - '.github/workflows/db2.yaml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'sqlmesh/core/engine_adapter/db2.py'
+      - 'tests/core/engine_adapter/test_db2.py'
+      - 'tests/core/engine_adapter/integration/test_integration_db2.py'
+      - 'tests/core/engine_adapter/integration/docker/compose.db2.yaml'
+      - '.github/workflows/db2.yaml'
+
+concurrency:
+  group: db2-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  db2-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTEST_XDIST_AUTO_NUM_WORKERS: 2
+      SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install SQLMesh dev dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-dev
+      - name: Install OS-level dependencies
+        run: ./.github/scripts/install-prerequisites.sh "db2"
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          make db2-test
+      - name: Upload test results
+        uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-docker-db2
+          path: test-results/
+          retention-days: 7
