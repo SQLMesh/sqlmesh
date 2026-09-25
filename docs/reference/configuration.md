@@ -67,6 +67,12 @@ See all the keys allowed in `model_defaults` at the [model configuration referen
 | `linter.enabled`          | Whether linting is enabled (Default: `False`)                                                                                                      | boolean | N        |
 | `linter.use_project_index` | Whether to use the persistent project index for linting. Targeted linting loads selected models and their upstream dependencies. (Default: `False`) | boolean | N        |
 
+### Render
+
+| Option                     | Description                                                                                                                                                       | Type    | Required |
+|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|----------|
+| `render.use_project_index` | Whether to use the persistent project index when rendering. Only the target model and its upstream dependencies are loaded. (Default: `False`)                    | boolean | N        |
+
 ### Variables
 
 The `variables` key can be used to provide values for user-defined variables, accessed using the [`@VAR` macro function](../concepts/macros/sqlmesh_macros.md#global-variables) in SQL model definitions, [`context.var` method](../concepts/models/python_models.md#global-variables) in Python model definitions, and [`evaluator.var` method](../concepts/macros/sqlmesh_macros.md#accessing-global-variable-values) in Python macro functions.
@@ -102,6 +108,7 @@ Configuration for the `sqlmesh plan` command.
 | `no_diff`                 | Don't show diffs for changed models (Default: False)                                                                                                                                                                                                    | boolean              | N        |
 | `no_prompts`              | Disables interactive prompts in CLI (Default: True)                                                                                                                                                                                                     | boolean              | N        |
 | `always_recreate_environment`              | Always recreates the target environment from the environment specified in `create_from` (by default `prod`) (Default: False)                                                                                                                                                                                                     | boolean              | N        |
+| `use_project_index`                        | Whether to refresh the persistent project index, reuse loaded snapshot state, and scope plan graph work to changed or selected model lineage without changing the plan result. (Default: `False`)                                                                                                                                | boolean              | N        |
 
 ## Run
 
