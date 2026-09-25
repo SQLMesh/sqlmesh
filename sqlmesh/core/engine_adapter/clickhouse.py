@@ -61,6 +61,21 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         configured = self._extra_config.get("virtual_catalog")
         self._default_catalog = f"__{gateway}__" if configured is None else configured
 
+    def _to_sql(self, expression: exp.Expr, quote: bool = True, **kwargs: t.Any) -> str:
+        """Render SQL without the virtual catalog, which ClickHouse does not support."""
+        if self._default_catalog and any(self._virtual_catalog_references(expression)):
+            expression = expression.copy()
+            for reference in list(self._virtual_catalog_references(expression)):
+                reference.set("catalog", None)
+        return super()._to_sql(expression, quote=quote, **kwargs)
+
+    def _virtual_catalog_references(self, expression: exp.Expr) -> t.Iterator[exp.Expr]:
+        return (
+            reference
+            for reference in expression.find_all(exp.Table, exp.Column)
+            if reference.text("catalog") == self._default_catalog
+        )
+
     @property
     def engine_run_mode(self) -> EngineRunMode:
         if self._extra_config.get("cloud_mode"):

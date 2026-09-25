@@ -1596,6 +1596,65 @@ def test_virtual_catalog_stripped_in_alter_table(make_mocked_engine_adapter: t.C
     assert "ALTER TABLE" in sql_calls[0]
 
 
+@pytest.mark.parametrize(
+    "query_sql, expected_sql",
+    [
+        (
+            'INSERT INTO __ch_gw__.mydb.target ("id") '
+            "SELECT __ch_gw__.mydb.source.id FROM __ch_gw__.mydb.source",
+            'INSERT INTO "mydb"."target" ("id") SELECT "mydb"."source"."id" FROM "mydb"."source"',
+        ),
+        (
+            "SELECT __ch_gw__.mydb.source.id FROM __ch_gw__.mydb.source",
+            'SELECT "mydb"."source"."id" FROM "mydb"."source"',
+        ),
+        (
+            "SELECT __ch_gw__.mydb.source.id, '__ch_gw__.literal' FROM __ch_gw__.mydb.source "
+            "JOIN other_catalog.otherdb.source ON __ch_gw__.mydb.source.id = "
+            "other_catalog.otherdb.source.id",
+            'SELECT "mydb"."source"."id", \'__ch_gw__.literal\' FROM "mydb"."source" JOIN '
+            '"other_catalog"."otherdb"."source" ON "mydb"."source"."id" = '
+            '"other_catalog"."otherdb"."source"."id"',
+        ),
+    ],
+)
+def test_virtual_catalog_stripped_from_execute_queries(
+    make_mocked_engine_adapter: t.Callable, query_sql: str, expected_sql: str
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    query = parse_one(query_sql, dialect="clickhouse")
+    original_sql = query.sql(dialect="clickhouse")
+
+    adapter.execute(query)
+
+    assert query.sql(dialect="clickhouse") == original_sql
+    assert to_sql_calls(adapter) == [expected_sql]
+
+
+def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+
+    adapter.ctas(
+        "__ch_gw__.mydb.target",
+        parse_one("SELECT __ch_gw__.mydb.source.id FROM __ch_gw__.mydb.source"),
+        {"id": exp.DataType.build("Int32")},
+    )
+    adapter.delete_from(
+        "__ch_gw__.mydb.target",
+        "__ch_gw__.mydb.target.id IN (SELECT id FROM __ch_gw__.mydb.source)",
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "mydb"."target" ENGINE=MergeTree ORDER BY () AS '
+        'SELECT CAST("id" AS Nullable(Int32)) AS "id" FROM '
+        '(SELECT "mydb"."source"."id" FROM "mydb"."source") AS "_subquery"',
+        'DELETE FROM "mydb"."target" WHERE "mydb"."target"."id" IN '
+        '(SELECT "id" FROM "mydb"."source")',
+    ]
+
+
 def test_virtual_catalog_stripped_from_create_view_source(
     make_mocked_engine_adapter: t.Callable,
 ):
