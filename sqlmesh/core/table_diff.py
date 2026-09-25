@@ -255,14 +255,7 @@ class TableDiff:
         self.source_alias = source_alias
         self.target_alias = target_alias
 
-        cols: t.List[str] = ensure_list(skip_columns)
-        self.skip_columns = {
-            normalize_identifiers(
-                exp.parse_identifier(col),
-                dialect=self.model_dialect or self.dialect,
-            ).name
-            for col in cols
-        }
+        self._skip_columns_raw: t.List[str] = ensure_list(skip_columns)
 
         self._on = on
         self._row_diff: t.Optional[RowDiff] = None
@@ -276,15 +269,49 @@ class TableDiff:
         return self.adapter.columns(self.target_table)
 
     @cached_property
+    def skip_columns(self) -> t.Set[str]:
+        dialect = self.model_dialect or self.dialect
+        names = set()
+        for col in self._skip_columns_raw:
+            normalized_name = normalize_identifiers(exp.parse_identifier(col), dialect=dialect).name
+            # Resolve against both schemas (case-insensitively, if needed) so a column is
+            # skipped even if the two tables disagree on casing, or the engine reports a
+            # different case than the normalized `skip_columns` name.
+            names.add(self._resolve_column_name(normalized_name, self.source_schema))
+            names.add(self._resolve_column_name(normalized_name, self.target_schema))
+        return names
+
+    @staticmethod
+    def _resolve_column_name(name: str, schema: t.Dict[str, exp.DataType]) -> str:
+        """Resolves `name` to the corresponding key in `schema`.
+
+        Some dialects (e.g. BigQuery, DuckDB) normalize unquoted identifiers to a
+        different case than what the engine's `adapter.columns()` reports for the
+        underlying table (which reflects however the table was actually created).
+        If there isn't an exact match, fall back to a case-insensitive lookup so
+        the normalized `on`/`skip_columns` names still resolve to the real column.
+        """
+        if name in schema:
+            return name
+
+        for actual_name in schema:
+            if actual_name.lower() == name.lower():
+                return actual_name
+
+        return name
+
+    @cached_property
     def key_columns(self) -> t.Tuple[t.List[exp.Column], t.List[exp.Column], t.List[str]]:
         dialect = self.model_dialect or self.dialect
 
         # If the columns to join on are explicitly specified, then just return them
         if isinstance(self._on, (list, tuple)):
             identifiers = [normalize_identifiers(c, dialect=dialect) for c in self._on]
-            s_index = [exp.column(c, "s") for c in identifiers]
-            t_index = [exp.column(c, "t") for c in identifiers]
-            return s_index, t_index, [i.name for i in identifiers]
+            s_names = [self._resolve_column_name(i.name, self.source_schema) for i in identifiers]
+            t_names = [self._resolve_column_name(i.name, self.target_schema) for i in identifiers]
+            s_index = [exp.column(name, "s") for name in s_names]
+            t_index = [exp.column(name, "t") for name in t_names]
+            return s_index, t_index, s_names
 
         # Otherwise, we need to parse them out of the supplied "on" condition
         index_cols = []
