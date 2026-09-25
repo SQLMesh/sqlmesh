@@ -127,9 +127,13 @@ Error: Linter detected errors in the code. Please fix them before proceeding.
 
 Use `sqlmesh lint --help` for more information.
 
-Models can be selected by name with `--model`, by model file path, or by both at once. Selecting by
-path lets `sqlmesh lint` be wired up to path-based tooling such as [pre-commit](https://pre-commit.com/),
-which passes the names of the changed files:
+Models can be selected by name with `--model`, by model file path, or by both at once.
+
+Selecting by path is intended for tools that hand `sqlmesh lint` a list of file names, such as
+[pre-commit](https://pre-commit.com/) hooks and editor integrations. To lint the models that changed
+on a branch in CI, prefer a model selector such as `git:main` over passing paths from
+`git diff --name-only`, so that the models affected by a change are selected rather than only the
+files that were edited.
 
 ``` bash
 $ sqlmesh lint models/full_model.sql models/incremental_model.sql
