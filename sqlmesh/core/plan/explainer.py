@@ -8,9 +8,11 @@ from collections import defaultdict
 
 from rich.console import Console as RichConsole
 from rich.tree import Tree
+from sqlglot import exp
 from sqlglot.dialects.dialect import DialectType
 from sqlmesh.core import constants as c
 from sqlmesh.core.console import Console, TerminalConsole, get_console
+from sqlmesh.core.dialect import schema_
 from sqlmesh.core.environment import EnvironmentNamingInfo
 from sqlmesh.core.plan.common import (
     SnapshotIntervalClearRequest,
@@ -144,6 +146,29 @@ class RichExplainerConsole(ExplainerConsole):
 
     def visit_after_all_stage(self, stage: stages.AfterAllStage) -> Tree:
         return Tree("[bold]Execute after all statements[/bold]")
+
+    def visit_physical_layer_schema_creation_stage(
+        self, stage: stages.PhysicalLayerSchemaCreationStage
+    ) -> t.Optional[Tree]:
+        tables = [
+            exp.to_table(
+                snapshot.table_name(is_deployable=stage.deployability_index.is_deployable(snapshot))
+            )
+            for snapshot in stage.snapshots
+            if snapshot.is_model and not snapshot.is_symbolic
+        ]
+        schemas = {
+            schema_(table.args["db"], table.args.get("catalog")).sql(dialect=self.dialect)
+            for table in tables
+            if table.db
+        }
+        if not schemas:
+            return None
+
+        tree = Tree("[bold]Create physical schemas if they do not exist[/bold]")
+        for schema in sorted(schemas):
+            tree.add(schema)
+        return tree
 
     def visit_physical_layer_update_stage(self, stage: stages.PhysicalLayerUpdateStage) -> Tree:
         snapshots = [
