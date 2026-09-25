@@ -34,6 +34,7 @@ from sqlmesh.core.snapshot import (
     SnapshotId,
     SnapshotInfoLike,
     SnapshotCreationFailedError,
+    missing_intervals_for_no_gaps,
 )
 from sqlmesh.utils import to_snake_case
 from sqlmesh.core.state_sync import StateSync
@@ -363,6 +364,44 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def visit_environment_record_update_stage(
         self, stage: stages.EnvironmentRecordUpdateStage, plan: EvaluatablePlan
     ) -> None:
+        if (
+            plan.no_gaps
+            and stage.no_gaps_snapshot_names
+            and not plan.is_dev
+            and not plan.skip_backfill
+            and not plan.empty_backfill
+        ):
+            # A plan's initial backfill frontier is frozen when the plan is built, but the
+            # target environment can advance before that plan reaches promotion.
+            target_environment = self.state_sync.get_environment(plan.environment.name)
+            if target_environment:
+                target_snapshots = list(stage.all_snapshots.values())
+                self.state_sync.refresh_snapshot_intervals(target_snapshots)
+
+                previous_snapshot_infos = [
+                    snapshot
+                    for snapshot in target_environment.snapshots
+                    if snapshot.name in stage.no_gaps_snapshot_names
+                ]
+                previous_snapshots = self.state_sync.get_snapshots(previous_snapshot_infos).values()
+                snapshot_to_intervals = missing_intervals_for_no_gaps(
+                    target_snapshots,
+                    previous_snapshots,
+                    stage.no_gaps_snapshot_names,
+                )
+                if snapshot_to_intervals:
+                    self.visit_backfill_stage(
+                        stages.BackfillStage(
+                            snapshot_to_intervals=snapshot_to_intervals,
+                            selected_snapshot_ids=stage.selected_snapshot_ids,
+                            all_snapshots=stage.all_snapshots,
+                            deployability_index=stage.deployability_index,
+                        ),
+                        plan,
+                    )
+
+        # Promotion performs the same no-gaps check again, so a target that advances after
+        # the catch-up read still fails safely instead of being promoted with a gap.
         self.state_sync.promote(
             plan.environment,
             no_gaps_snapshot_names=stage.no_gaps_snapshot_names if plan.no_gaps else set(),
