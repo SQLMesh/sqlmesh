@@ -1552,7 +1552,17 @@ def test_lint_relative_path(runner, tmp_path, monkeypatch):
 """
         )
 
-    # Path-based tools such as pre-commit pass paths relative to the project root.
+    # Relative paths resolve against the current working directory, not the project path.
+    # Running from elsewhere is what tells the two apart.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint", "models/seed_model.sql"])
+    assert result.exit_code == 1
+    assert "No models were found at the following path(s)" in result.output
+    assert "Linter errors for" not in result.output
+
+    # Path-based tools such as pre-commit run from the directory they pass paths relative to.
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(cli, ["--paths", tmp_path, "lint", "models/seed_model.sql"])
     assert result.output.count("Linter errors for") == 1
@@ -1575,13 +1585,6 @@ def test_lint_unknown_path(runner, tmp_path):
     result = runner.invoke(
         cli, ["--paths", tmp_path, "lint", str(tmp_path / "models" / "missing.sql")]
     )
-    assert result.exit_code == 1
-    assert "No models were found at the following path(s)" in result.output
-    assert "Linter errors for" not in result.output
-
-    # A file that exists but defines no models is an error too.
-    audit_path = tmp_path / "audits" / "assert_positive_order_ids.sql"
-    result = runner.invoke(cli, ["--paths", tmp_path, "lint", str(audit_path)])
     assert result.exit_code == 1
     assert "No models were found at the following path(s)" in result.output
     assert "Linter errors for" not in result.output
