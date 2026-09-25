@@ -981,13 +981,16 @@ def generate_surrogate_key(
         # Same split as MD5/MD5Digest: the surrogate key must be a hex string,
         # not a binary digest, on every dialect.
         func = exp.SHA2(this=func.this, length=func.args.get("length"))
-    elif isinstance(func, exp.Anonymous) and _is_presto_family(evaluator.dialect):
-        # Athena runs the Trino engine, so sha256() takes varbinary there too,
-        # but its parser has no SHA256/SHA512 entry: exp.func returns an
-        # Anonymous node, so neither branch above fires and the surrogate key
-        # keeps the bare SHA256(varchar) form reported in #5871. Unlike the
-        # probe below, this is not a pin-era workaround — Athena still parses
-        # to Anonymous on sqlglot versions that carry tobymao/sqlglot#7824.
+    elif isinstance(func, exp.Anonymous):
+        # Some dialects' parsers have no entry for the SHA-2 functions, so
+        # exp.func returns an Anonymous node and neither branch above fires:
+        # on MySQL and StarRocks the bare SHA256(varchar) is a runtime error
+        # because those engines only spell the function SHA2(expr, length),
+        # and Athena runs the Trino engine where sha256() takes varbinary
+        # (#5871). Mapping the untyped name to exp.SHA2 with the canonical
+        # digest length renders the valid call on every one of them. Unlike
+        # the probe below, this is not a pin-era workaround: these parsers
+        # hand back Anonymous on every sqlglot version.
         #
         # Anonymous is the catch-all for every unrecognised function name, and
         # hash_function is caller-supplied, so the name is checked rather than
@@ -1013,6 +1016,26 @@ def generate_surrogate_key(
             )
         )
 
+    if isinstance(func, (exp.MD5, exp.SHA, exp.SHA2)) and _renders_varbinary(evaluator.dialect):
+        # T-SQL renders every one of these as HASHBYTES, which returns
+        # VARBINARY rather than the hex string the surrogate key promises.
+        # CONVERT style 2 strips the 0x prefix and LOWER() restores the
+        # lowercase hex the other dialects return, so keys hash identically
+        # everywhere. The probe keeps this branch inert if the tsql generator
+        # ever emits the conversion itself.
+        digest_bits = 128
+        if isinstance(func, exp.SHA):
+            digest_bits = 160
+        elif isinstance(func, exp.SHA2) and func.args.get("length") is not None:
+            digest_bits = int(str(func.args["length"].name))  # type: ignore[union-attr]
+        func = exp.Lower(
+            this=exp.Convert(
+                this=exp.DataType.build(f"VARCHAR({digest_bits // 4})"),
+                expression=func,
+                style=exp.Literal.number(2),
+            )
+        )
+
     return func
 
 
@@ -1021,6 +1044,11 @@ def generate_surrogate_key(
 # Athena is on the list because it runs the Trino engine.
 _PRESTO_FAMILY = frozenset({"presto", "trino", "athena"})
 
+# Dialects that render every string hash as HASHBYTES, which returns
+# VARBINARY rather than a hex string. Fabric is on the list because it runs
+# the T-SQL engine.
+_TSQL_FAMILY = frozenset({"tsql", "fabric"})
+
 # The SHA-2 digest widths a surrogate key may ask for, by function name.
 _SHA2_DIGEST_LENGTHS = {"SHA256": 256, "SHA512": 512}
 
@@ -1028,6 +1056,11 @@ _SHA2_DIGEST_LENGTHS = {"SHA256": 256, "SHA512": 512}
 def _is_presto_family(dialect: DialectType) -> bool:
     """Whether this dialect is Presto, Trino or Athena."""
     return (str(dialect) if dialect else "").split(",")[0].strip().lower() in _PRESTO_FAMILY
+
+
+def _is_tsql_family(dialect: DialectType) -> bool:
+    """Whether this dialect is T-SQL (MSSQL or Fabric)."""
+    return (str(dialect) if dialect else "").split(",")[0].strip().lower() in _TSQL_FAMILY
 
 
 @lru_cache(maxsize=None)
@@ -1041,6 +1074,21 @@ def _sha2_renders_binary(dialect: DialectType) -> bool:
         return False
     probe = exp.SHA2(this=exp.column("_sqlmesh_probe"), length=exp.Literal.number(256))
     return "TO_HEX" not in probe.sql(dialect=dialect)
+
+
+@lru_cache(maxsize=None)
+def _renders_varbinary(dialect: DialectType) -> bool:
+    """Whether this dialect renders the string hashes as HASHBYTES (VARBINARY).
+
+    The T-SQL family (MSSQL, Fabric) has no MD5/SHA2 functions: every string
+    hash renders as HASHBYTES, which returns VARBINARY instead of the hex
+    string the surrogate key promises.
+    """
+    if not _is_tsql_family(dialect):
+        return False
+    probe = exp.MD5(this=exp.column("_sqlmesh_probe"))
+    rendered = probe.sql(dialect=dialect)
+    return "HASHBYTES" in rendered and "CONVERT" not in rendered
 
 
 @macro()
