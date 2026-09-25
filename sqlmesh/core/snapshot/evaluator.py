@@ -543,17 +543,16 @@ class SnapshotEvaluator:
                 len(skipped),
                 ", ".join(f"{sid} (gateway={gw})" for sid, gw in skipped),
             )
-        snapshots_to_dev_table_only = {
-            t.snapshot.snapshot_id: t.dev_table_only for t in filtered_targets
-        }
+        cleanup_tasks_by_snapshot = {t.snapshot.snapshot_id: t for t in filtered_targets}
         with self.concurrent_context():
             errors, _ = concurrent_apply_to_snapshots(
                 [t.snapshot for t in filtered_targets],
                 lambda s: self._cleanup_snapshot(
                     s,
-                    snapshots_to_dev_table_only[s.snapshot_id],
+                    cleanup_tasks_by_snapshot[s.snapshot_id].dev_table_only,
                     self.get_adapter(s.model_gateway),
                     on_complete,
+                    delete_dev_table=cleanup_tasks_by_snapshot[s.snapshot_id].delete_dev_table,
                 ),
                 self.ddl_concurrent_tasks,
                 reverse_order=True,
@@ -1347,10 +1346,13 @@ class SnapshotEvaluator:
         dev_table_only: bool,
         adapter: EngineAdapter,
         on_complete: t.Optional[t.Callable[[str], None]],
+        delete_dev_table: bool = True,
     ) -> None:
         snapshot = snapshot.table_info
 
-        table_names = [(False, snapshot.table_name(is_deployable=False))]
+        table_names = (
+            [(False, snapshot.table_name(is_deployable=False))] if delete_dev_table else []
+        )
         if not dev_table_only:
             table_names.append((True, snapshot.table_name(is_deployable=True)))
 

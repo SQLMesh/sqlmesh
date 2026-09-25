@@ -277,16 +277,35 @@ class IntervalState:
             t.Tuple[str, str, t.Optional[str], t.Optional[str]], SnapshotIntervals
         ] = {}
 
-        for where in (
-            snapshot_name_version_filter(
-                self.engine_adapter,
-                snapshots,
-                alias="intervals",
-                batch_size=self.SNAPSHOT_BATCH_SIZE,
+        filters: t.List[t.Optional[exp.Condition]] = (
+            list(
+                snapshot_name_version_filter(
+                    self.engine_adapter,
+                    snapshots,
+                    alias="intervals",
+                    batch_size=self.SNAPSHOT_BATCH_SIZE,
+                )
             )
             if snapshots
             else [None]
-        ):
+        )
+        if snapshots:
+            dev_keys = [
+                SnapshotNameVersion(name=s.name, version=s.dev_version)
+                for s in snapshots
+                if hasattr(s, "dev_version")
+            ]
+            filters.extend(
+                where.and_(exp.column("is_dev", table="intervals"))
+                for where in snapshot_name_version_filter(
+                    self.engine_adapter,
+                    dev_keys,
+                    alias="intervals",
+                    version_column_name="dev_version",
+                    batch_size=self.SNAPSHOT_BATCH_SIZE,
+                )
+            )
+        for where in filters:
             rows = fetchall(self.engine_adapter, query.where(where))
             for (
                 interval_id,
@@ -301,6 +320,8 @@ class IntervalState:
                 is_pending_restatement,
                 last_altered_ts,
             ) in rows:
+                if interval_id in interval_ids:
+                    continue
                 interval_ids.add(interval_id)
                 merge_key = (name, version, dev_version, identifier)
                 # Pending restatement intervals are merged by name and version
@@ -420,7 +441,7 @@ class IntervalState:
         dev_keys_to_delete = [
             SnapshotNameVersion(name=t.snapshot.name, version=t.snapshot.dev_version)
             for t in targets
-            if t.dev_table_only
+            if t.clears_dev_intervals
         ]
         if not dev_keys_to_delete:
             return
@@ -436,7 +457,7 @@ class IntervalState:
 
     def _delete_intervals_by_version(self, targets: t.List[SnapshotTableCleanupTask]) -> None:
         """Deletes intervals for snapshot versions that are no longer used."""
-        non_dev_keys_to_delete = [t.snapshot for t in targets if not t.dev_table_only]
+        non_dev_keys_to_delete = [t.snapshot for t in targets if t.clears_prod_intervals]
         if not non_dev_keys_to_delete:
             return
 
@@ -446,7 +467,9 @@ class IntervalState:
             alias=None,
             batch_size=self.SNAPSHOT_BATCH_SIZE,
         ):
-            self.engine_adapter.delete_from(self.intervals_table, where)
+            self.engine_adapter.delete_from(
+                self.intervals_table, where.and_(exp.column("is_dev").not_())
+            )
 
 
 def _intervals_to_df(
