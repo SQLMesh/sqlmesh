@@ -1052,12 +1052,11 @@ def safe_add(_: MacroEvaluator, *fields: exp.Expr) -> exp.Case:
         >>> from sqlmesh.core.macros import MacroEvaluator
         >>> sql = "SELECT @SAFE_ADD(a, b) FROM foo"
         >>> MacroEvaluator().transform(parse_one(sql)).sql()
-        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE COALESCE(a, 0) + COALESCE(b, 0) END FROM foo'
+        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE (COALESCE(a, 0) + COALESCE(b, 0)) END FROM foo'
     """
-    return (
-        exp.Case()
-        .when(exp.and_(*(field.is_(exp.null()) for field in fields)), exp.null())
-        .else_(reduce(lambda a, b: a + b, [exp.func("COALESCE", field, 0) for field in fields]))  # type: ignore
+    return _null_if_all_null(
+        fields,
+        reduce(lambda a, b: a + b, [exp.func("COALESCE", field, 0) for field in fields]),  # type: ignore
     )
 
 
@@ -1070,17 +1069,30 @@ def safe_sub(_: MacroEvaluator, *fields: exp.Expr) -> exp.Case:
         >>> from sqlmesh.core.macros import MacroEvaluator
         >>> sql = "SELECT @SAFE_SUB(a, b) FROM foo"
         >>> MacroEvaluator().transform(parse_one(sql)).sql()
-        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE COALESCE(a, 0) - COALESCE(b, 0) END FROM foo'
+        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE (COALESCE(a, 0) - COALESCE(b, 0)) END FROM foo'
+    """
+    return _null_if_all_null(
+        fields,
+        reduce(lambda a, b: a - b, [exp.func("COALESCE", field, 0) for field in fields]),  # type: ignore
+    )
+
+
+def _null_if_all_null(fields: t.Sequence[exp.Expr], arithmetic: exp.Expr) -> exp.Case:
+    """Returns NULL when every field is NULL, otherwise the result of the arithmetic.
+
+    The arithmetic is parenthesized because the optimizer replaces the CASE with this branch
+    when the condition is statically false (e.g. `1 IS NULL`), and without the parentheses
+    the operation would bind to the operators around the macro call.
     """
     return (
         exp.Case()
         .when(exp.and_(*(field.is_(exp.null()) for field in fields)), exp.null())
-        .else_(reduce(lambda a, b: a - b, [exp.func("COALESCE", field, 0) for field in fields]))  # type: ignore
+        .else_(exp.paren(arithmetic, copy=False))
     )
 
 
 @macro()
-def safe_div(_: MacroEvaluator, numerator: exp.Expr, denominator: exp.Expr) -> exp.Div:
+def safe_div(_: MacroEvaluator, numerator: exp.Expr, denominator: exp.Expr) -> exp.Paren:
     """Divides numbers, returns null if the denominator is 0.
 
     Example:
@@ -1088,9 +1100,10 @@ def safe_div(_: MacroEvaluator, numerator: exp.Expr, denominator: exp.Expr) -> e
         >>> from sqlmesh.core.macros import MacroEvaluator
         >>> sql = "SELECT @SAFE_DIV(a, b) FROM foo"
         >>> MacroEvaluator().transform(parse_one(sql)).sql()
-        'SELECT a / NULLIF(b, 0) FROM foo'
+        'SELECT (a / NULLIF(b, 0)) FROM foo'
     """
-    return numerator / exp.func("NULLIF", denominator, 0)
+    # The quotient must stay a single operand of whatever operator surrounds the macro call
+    return exp.paren(numerator / exp.func("NULLIF", denominator, 0), copy=False)
 
 
 @macro()
