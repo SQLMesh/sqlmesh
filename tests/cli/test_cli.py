@@ -1492,7 +1492,7 @@ def test_lint_paths(runner, tmp_path):
         cli, ["--paths", tmp_path, "lint", str(tmp_path / "models" / "seed_model.sql")]
     )
     assert result.output.count("Linter errors for") == 1
-    assert "seed_model.sql" in result.output
+    assert "seed_model.sql" in result.output.replace("\n", "")
     assert result.exit_code == 1
 
     # Multiple model files can be passed, as pre-commit does.
@@ -1556,7 +1556,7 @@ def test_lint_relative_path(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(cli, ["--paths", tmp_path, "lint", "models/seed_model.sql"])
     assert result.output.count("Linter errors for") == 1
-    assert "seed_model.sql" in result.output
+    assert "seed_model.sql" in result.output.replace("\n", "")
     assert result.exit_code == 1
 
 
@@ -1584,6 +1584,14 @@ def test_lint_unknown_path(runner, tmp_path):
     result = runner.invoke(cli, ["--paths", tmp_path, "lint", str(audit_path)])
     assert result.exit_code == 1
     assert "No models were found at the following path(s)" in result.output
+    assert "Linter errors for" not in result.output
+
+    # A directory says so, rather than claiming it contains no models.
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint", str(tmp_path / "models")])
+    assert result.exit_code == 1
+    output = result.output.replace("\n", "")
+    assert "Expected model files but got directory" in output
+    assert "Pass the model files themselves." in output
     assert "Linter errors for" not in result.output
 
 

@@ -3617,12 +3617,22 @@ class GenericContext(BaseContext, t.Generic[C]):
                 value of ``linter.use_project_index`` is used. Indexed linting of selected
                 models reloads an already-loaded context so the requested scope is applied.
             paths: Model file paths to lint, each resolved to the model(s) defined in it. Can be
-                combined with `models`.
+                combined with `models`. Relative paths are resolved against the current working
+                directory rather than the project path, which is what path-based tools such as
+                pre-commit pass. Calling this from the Python API with relative paths therefore
+                only works from inside the project directory.
         """
         models = list(models) if models is not None else []
         target_paths = [Path(path) for path in paths] if paths is not None else []
 
         # Fail fast on a mistyped path instead of loading and linting the whole project.
+        directory_paths = [str(path) for path in target_paths if path.is_dir()]
+        if directory_paths:
+            raise SQLMeshError(
+                f"Expected model files but got director{'ies' if len(directory_paths) > 1 else 'y'}: "
+                f"{', '.join(directory_paths)}. Pass the model files themselves."
+            )
+
         missing_paths = [str(path) for path in target_paths if not path.is_file()]
         if missing_paths:
             raise SQLMeshError(
