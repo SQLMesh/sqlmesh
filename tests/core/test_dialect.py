@@ -342,6 +342,68 @@ ON_VIRTUAL_UPDATE_END;"""
     )
 
 
+def test_format_model_expressions_transpile_meta():
+    """The opt-in `transpile_meta` flag renders MODEL/AUDIT/METRIC headers with the
+    target dialect, which projects that authored their headers in warehouse dialect
+    need in order to preserve dialect-specific values such as column types.
+    """
+    expressions = parse(
+        """
+        MODEL(
+          name a.b,
+          kind FULL,
+          dialect tsql,
+          allow_partials true,
+          columns (ts DATETIME2(6))
+        );
+        SELECT CAST(x AS INT) AS y FROM t
+        """
+    )
+
+    # Default: the header stays dialect-agnostic, so tsql's DATETIME2 is generalized.
+    assert "ts TIMESTAMP(6)" in format_model_expressions(expressions, dialect="tsql")
+
+    x = format_model_expressions(expressions, dialect="tsql", transpile_meta=True)
+
+    # Opting in renders the header with tsql, preserving DATETIME2 at the cost of
+    # tsql's boolean representation. The query body transpiles either way.
+    assert (
+        x
+        == """MODEL (
+  name a.b,
+  kind FULL,
+  dialect tsql,
+  allow_partials (1 = 1),
+  columns (
+    ts DATETIME2(6)
+  )
+);
+
+SELECT
+  x::INTEGER AS y
+FROM t"""
+    )
+
+
+def test_format_model_expressions_transpile_meta_single_expression():
+    """The single meta expression path (no query) must honor the flag too."""
+    expressions = parse("MODEL(name a.b, kind FULL, dialect tsql, columns (ts DATETIME2(6)))")
+
+    assert "ts TIMESTAMP(6)" in format_model_expressions(expressions, dialect="tsql")
+    assert "ts DATETIME2(6)" in format_model_expressions(
+        expressions, dialect="tsql", transpile_meta=True
+    )
+
+
+def test_format_config_transpile_meta():
+    """`transpile_meta` is a SQLMesh-level option, so it must not leak into the
+    options forwarded to SQLGlot's generator.
+    """
+    assert FormatConfig().transpile_meta is False
+    assert FormatConfig(transpile_meta=True).transpile_meta is True
+    assert "transpile_meta" not in FormatConfig(transpile_meta=True).generator_options
+
+
 def test_format_model_expressions_normalize_functions():
     """Regression: formatter function-name casing behavior.
 
