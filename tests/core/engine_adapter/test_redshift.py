@@ -167,7 +167,7 @@ MODEL (
     physical_properties (
         diststyle = key,
         distkey = "id_file",
-        sortkey = "batch_time"
+        sortkey = ("batch_time")
     )
 );
 SELECT id_file::INT, batch_time::TIMESTAMP;
