@@ -84,6 +84,44 @@ def test_restatement_plan_ignores_changes(init_and_plan_context: t.Callable):
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_prod_restatement_with_unbackfilled_dev_version(init_and_plan_context: t.Callable):
+    """
+    Scenario:
+        Prod is built. A breaking change is planned to `dev` with `--skip-backfill`,
+        so `dev` holds a different snapshot version with no interval rows. Prod is
+        then restated.
+    Outcome:
+        RestatementStage tries to clear `dev` intervals for that other version, finds
+        none in `_intervals`, and no-ops instead of crashing on an empty insert. Prod
+        restatement still applies; the un-backfilled `dev` snapshot still has no
+        intervals.
+    """
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    prod_snapshot_id = context.get_snapshot("sushi.waiter_revenue_by_day").snapshot_id
+
+    context.upsert_model(
+        add_projection_to_model(t.cast(SqlModel, context.get_model("sushi.waiter_revenue_by_day")))
+    )
+    context.plan("dev", skip_backfill=True, auto_apply=True, no_prompts=True)
+
+    dev_snapshot_id = context.get_snapshot("sushi.waiter_revenue_by_day").snapshot_id
+    assert dev_snapshot_id != prod_snapshot_id
+    assert not context.state_sync.get_snapshots([dev_snapshot_id])[dev_snapshot_id].intervals
+
+    context.plan(
+        restate_models=["sushi.waiter_revenue_by_day"],
+        start="2023-01-07",
+        end="2023-01-08",
+        auto_apply=True,
+        no_prompts=True,
+    )
+
+    assert not context.state_sync.get_snapshots([dev_snapshot_id])[dev_snapshot_id].intervals
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_restatement_plan_across_environments_snapshot_with_shared_version(
     init_and_plan_context: t.Callable,
 ):
