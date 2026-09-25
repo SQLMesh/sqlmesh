@@ -4254,3 +4254,35 @@ def test_state_version_is_too_old(
         match="The current state belongs to an old version of SQLMesh that is no longer supported. Please upgrade to 0.134.0 first before upgrading to.*",
     ):
         state_sync.migrate(skip_backup=True)
+
+
+def test_migrate_patch_bump_preserves_schema_version(
+    state_sync: EngineAdapterStateSync, mocker: MockerFixture
+) -> None:
+    """A run with nothing to migrate must not move the recorded schema version.
+
+    `_apply_migrations` is forced to report no rows so the patch-bump branch is reached with a
+    schema version that differs from the current one. A real state can't get into that shape,
+    which is the point: the schema version is carried over rather than defaulted so that a
+    migration which is genuinely still needed can't be masked.
+    """
+    from sqlmesh import __version__ as SQLMESH_VERSION
+    from sqlmesh.core.state_sync.base import SCHEMA_VERSION
+
+    stale_schema_version = SCHEMA_VERSION - 1
+    state_sync.version_state.update_versions(
+        schema_version=stale_schema_version,
+        sqlglot_version="0.0.1",
+        sqlmesh_version=SQLMESH_VERSION,
+    )
+
+    mocker.patch(
+        "sqlmesh.core.state_sync.db.migrator.StateMigrator._apply_migrations",
+        return_value=False,
+    )
+
+    state_sync.migrate()
+
+    versions = state_sync.get_versions(validate=False)
+    assert versions.schema_version == stale_schema_version
+    assert versions.sqlglot_version == SQLGLOT_VERSION
