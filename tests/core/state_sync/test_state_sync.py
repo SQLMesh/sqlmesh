@@ -402,6 +402,40 @@ def test_remove_interval_missing_snapshot(
     ]
 
 
+def test_remove_interval_no_matching_intervals(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+) -> None:
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            cron="@daily",
+            query=parse_one("select 1, ds"),
+        ),
+        version="a",
+    )
+    state_sync.push_snapshots([snapshot])
+
+    # The snapshot has never been backfilled, so there are no rows to expand the shared versions from
+    state_sync.remove_intervals(
+        [(snapshot, snapshot.inclusive_exclusive("2020-01-15", "2020-01-17"))],
+        remove_shared_versions=True,
+    )
+
+    remove_records_count = state_sync.engine_adapter.fetchone(
+        "SELECT COUNT(*) FROM sqlmesh._intervals WHERE name = '\"a\"' AND version = 'a' AND is_removed"
+    )[0]  # type: ignore
+    assert remove_records_count == 0
+
+    assert not state_sync.get_snapshots([snapshot])[snapshot.snapshot_id].intervals
+
+
+def test_remove_interval_empty_input(state_sync: EngineAdapterStateSync) -> None:
+    state_sync.remove_intervals([])
+    state_sync.remove_intervals([], remove_shared_versions=True)
+
+    assert state_sync.engine_adapter.fetchone("SELECT COUNT(*) FROM sqlmesh._intervals")[0] == 0  # type: ignore
+
+
 def test_refresh_snapshot_intervals(
     state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
 ) -> None:
@@ -4369,3 +4403,35 @@ def test_get_expired_snapshots_scoped_to_target_ids(
     )
     assert batch_all is not None
     assert snapshot_b.snapshot_id in batch_all.expired_snapshot_ids
+
+
+def test_migrate_patch_bump_preserves_schema_version(
+    state_sync: EngineAdapterStateSync, mocker: MockerFixture
+) -> None:
+    """A run with nothing to migrate must not move the recorded schema version.
+
+    `_apply_migrations` is forced to report no rows so the patch-bump branch is reached with a
+    schema version that differs from the current one. A real state can't get into that shape,
+    which is the point: the schema version is carried over rather than defaulted so that a
+    migration which is genuinely still needed can't be masked.
+    """
+    from sqlmesh import __version__ as SQLMESH_VERSION
+    from sqlmesh.core.state_sync.base import SCHEMA_VERSION
+
+    stale_schema_version = SCHEMA_VERSION - 1
+    state_sync.version_state.update_versions(
+        schema_version=stale_schema_version,
+        sqlglot_version="0.0.1",
+        sqlmesh_version=SQLMESH_VERSION,
+    )
+
+    mocker.patch(
+        "sqlmesh.core.state_sync.db.migrator.StateMigrator._apply_migrations",
+        return_value=False,
+    )
+
+    state_sync.migrate()
+
+    versions = state_sync.get_versions(validate=False)
+    assert versions.schema_version == stale_schema_version
+    assert versions.sqlglot_version == SQLGLOT_VERSION

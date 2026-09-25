@@ -50,6 +50,7 @@ class ModelDefaultsConfig(BaseConfig):
         pre_statements: The list of SQL statements that get executed before a model runs.
         post_statements: The list of SQL statements that get executed before a model runs.
         on_virtual_update: The list of SQL statements to be executed after the virtual update.
+        gateway: The gateway used by models that do not specify one explicitly.
 
     """
 
@@ -76,6 +77,7 @@ class ModelDefaultsConfig(BaseConfig):
     pre_statements: t.Optional[t.List[t.Union[str, exp.Expr]]] = None
     post_statements: t.Optional[t.List[t.Union[str, exp.Expr]]] = None
     on_virtual_update: t.Optional[t.List[t.Union[str, exp.Expr]]] = None
+    gateway: t.Optional[str] = None
 
     _model_kind_validator = model_kind_validator
     _on_destructive_change_validator = on_destructive_change_validator
