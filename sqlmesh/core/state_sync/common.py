@@ -16,6 +16,7 @@ from sqlmesh.core.environment import Environment, EnvironmentStatements, Environ
 from sqlmesh.core.snapshot import (
     Snapshot,
     SnapshotId,
+    SnapshotIdLike,
     SnapshotTableCleanupTask,
     SnapshotTableInfo,
 )
@@ -288,6 +289,7 @@ def iter_expired_snapshot_batches(
     current_ts: int,
     ignore_ttl: bool = False,
     batch_size: t.Optional[int] = None,
+    target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
 ) -> t.Iterator[ExpiredSnapshotBatch]:
     """Yields expired snapshot batches.
 
@@ -306,6 +308,7 @@ def iter_expired_snapshot_batches(
             current_ts=current_ts,
             ignore_ttl=ignore_ttl,
             batch_range=batch_range,
+            target_snapshot_ids=target_snapshot_ids,
         )
 
         if batch is None:

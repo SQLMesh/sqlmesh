@@ -267,6 +267,7 @@ class EngineAdapterStateSync(StateSync):
         batch_range: ExpiredBatchRange,
         current_ts: t.Optional[int] = None,
         ignore_ttl: bool = False,
+        target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     ) -> t.Optional[ExpiredSnapshotBatch]:
         current_ts = current_ts or now_timestamp()
         return self.snapshot_state.get_expired_snapshots(
@@ -274,6 +275,7 @@ class EngineAdapterStateSync(StateSync):
             current_ts=current_ts,
             ignore_ttl=ignore_ttl,
             batch_range=batch_range,
+            target_snapshot_ids=target_snapshot_ids,
         )
 
     def get_expired_environments(
@@ -287,11 +289,13 @@ class EngineAdapterStateSync(StateSync):
         batch_range: ExpiredBatchRange,
         ignore_ttl: bool = False,
         current_ts: t.Optional[int] = None,
+        target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     ) -> None:
         batch = self.get_expired_snapshots(
             ignore_ttl=ignore_ttl,
             current_ts=current_ts,
             batch_range=batch_range,
+            target_snapshot_ids=target_snapshot_ids,
         )
         if batch and batch.expired_snapshot_ids:
             self.snapshot_state.delete_snapshots(batch.expired_snapshot_ids)

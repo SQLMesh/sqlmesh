@@ -295,6 +295,14 @@ class EngineAdapter:
             )
         return default_catalog
 
+    def set_default_catalog(self, catalog: t.Optional[str]) -> None:
+        """Override this adapter's default catalog.
+
+        Used e.g. by janitor cleanup to restore a historical catalog name on a
+        cloned adapter when cleaning up an expired environment's virtual catalog.
+        """
+        self._default_catalog = catalog
+
     @property
     def engine_run_mode(self) -> EngineRunMode:
         return EngineRunMode.SINGLE_MODE_ENGINE

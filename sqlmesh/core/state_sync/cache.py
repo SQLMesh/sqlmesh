@@ -113,12 +113,14 @@ class CachingStateSync(DelegatingStateSync):
         batch_range: ExpiredBatchRange,
         ignore_ttl: bool = False,
         current_ts: t.Optional[int] = None,
+        target_snapshot_ids: t.Optional[t.Collection[SnapshotIdLike]] = None,
     ) -> None:
         self.snapshot_cache.clear()
         self.state_sync.delete_expired_snapshots(
             batch_range=batch_range,
             ignore_ttl=ignore_ttl,
             current_ts=current_ts,
+            target_snapshot_ids=target_snapshot_ids,
         )
 
     def add_snapshots_intervals(self, snapshots_intervals: t.Sequence[SnapshotIntervals]) -> None:
