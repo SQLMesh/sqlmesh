@@ -422,8 +422,8 @@ FROM t"""
 @pytest.mark.parametrize(
     "header",
     [
-        "columns (ts DATETIME2(6))",
         "audits (my_audit(t := CAST('2024-01-01' AS DATETIME2)))",
+        "audits (my_audit(flag := true))",
         "kind SCD_TYPE_2_BY_COLUMN(unique_key id, columns (a, b), time_data_type DATETIME2(6))",
         "physical_properties (labels = (('env', 'prod')))",
         "allow_partials true, description 'my description'",
@@ -445,6 +445,28 @@ def test_format_model_expressions_is_idempotent(header: str):
     twice = format_model_expressions(parse(once, default_dialect="tsql"), dialect="tsql")
 
     assert once == twice
+
+
+@pytest.mark.parametrize(
+    "dialect,column_type",
+    [("bigquery", "DATETIME"), ("tsql", "DATETIME2(6)")],
+)
+def test_format_model_expressions_preserves_column_types(dialect: str, column_type: str):
+    """Repeated `sqlmesh format` runs must not change a model's declared column types.
+
+    Rendering `columns` with the generic generator rewrote them: BigQuery `DATETIME`
+    became `TIMESTAMP` and then `TIMESTAMPTZ`, tsql `DATETIME2` became `TIMESTAMP` and
+    then `VARBINARY`.
+    """
+    expected = exp.DataType.build(column_type, dialect=dialect)
+    formatted = f"MODEL (name a.b, dialect {dialect}, columns (ts {column_type}));\nSELECT 1 AS ts"
+
+    for _ in range(2):
+        formatted = format_model_expressions(
+            parse(formatted, default_dialect=dialect), dialect=dialect
+        )
+        model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+        assert model.columns_to_types == {"ts": expected}
 
 
 def test_format_audit_expressions_meta_render_policy():
@@ -473,60 +495,21 @@ def test_format_audit_expressions_meta_render_policy():
     assert "cutoff := '2024-01-01'::DATETIME2" in formatted
 
 
-def test_format_model_expressions_time_column_dialect():
-    """`time_column` is a nested Pydantic model (`TimeColumn`) wrapping an expression, not
+def test_format_model_expressions_kind_time_column_dialect():
+    """Expression-bearing properties nested inside `kind` render with the model dialect,
+    while their scalar siblings stay dialect-agnostic.
+
+    `time_column` is a nested Pydantic model (`TimeColumn`) wrapping an expression, not
     an `exp.Expr` annotation itself, so the render-policy reflection must recurse into
     nested Pydantic models to classify it as warehouse SQL. Otherwise it falls back to
     generic rendering and loses dialect-specific identifier quoting: tsql's `[end]`
     becomes ANSI `"end"`, even though the same identifier in the query body is correctly
     kept as `[end]`.
-    """
-    formatted = format_model_expressions(
-        parse(
-            """
-            MODEL (
-              name a.b,
-              dialect tsql,
-              kind INCREMENTAL_BY_TIME_RANGE (
-                time_column [end]
-              )
-            );
 
-            SELECT 1 AS x, [end] FROM t
-            """,
-            default_dialect="tsql",
-        ),
-        dialect="tsql",
-    )
-
-    assert (
-        formatted
-        == """MODEL (
-  name a.b,
-  dialect tsql,
-  kind INCREMENTAL_BY_TIME_RANGE (
-    time_column [end]
-  )
-);
-
-SELECT
-  1 AS x,
-  [end]
-FROM t"""
-    )
-
-
-def test_format_model_expressions_kind_scalar_sibling_dialect():
-    """A scalar sibling property of an expression-bearing property inside `kind` (e.g.
-    `forward_only` next to `time_column`) must stay dialect-agnostic even though the
-    render policy correctly marks `kind` as containing an expression-holding field
-    somewhere in the `ModelKind` union.
-
-    Regression: recursing into nested Pydantic models to fix `time_column` (see
-    `test_format_model_expressions_time_column_dialect`) made `_holds_expression` also
-    match on `kind` itself, since *some* member of the `ModelKind` union
-    (`IncrementalByTimeRangeKind.time_column`) holds an expression. That routed the
-    entire `kind (...)` subtree through a dialect-specific generator, so tsql's
+    Regression: recursing into nested Pydantic models to fix `time_column` made
+    `_holds_expression` also match on `kind` itself, since *some* member of the
+    `ModelKind` union (`IncrementalByTimeRangeKind.time_column`) holds an expression.
+    That routed the entire `kind (...)` subtree through a dialect-specific generator, so tsql's
     boolean-literal preprocessing rewrote `forward_only TRUE` into `forward_only (1 = 1)`.
     That reparses without error, but `str_to_bool` on `Paren(EQ(1, 1)).name` (`""`)
     evaluates to `False`, so the value silently flips on reload.

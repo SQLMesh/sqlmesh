@@ -864,7 +864,19 @@ def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
                 "comments": self.comments,
             }
             opts.update(overrides)
-            return node.sql(**opts)
+
+            # Keep boolean literals anywhere in the value (audit args, physical_properties,
+            # merge_filter, ...) as `TRUE`/`FALSE`: tsql would otherwise emit `(1 = 1)`,
+            # which reformats differently on the next pass. The value is transpiled with
+            # the model dialect anyway when it is used, e.g. in the rendered audit query.
+            def keep_boolean_literal(n: exp.Expr) -> exp.Expr:
+                if not isinstance(n, exp.Boolean):
+                    return n
+                literal = exp.var("TRUE" if n.this else "FALSE")
+                literal.comments = n.comments
+                return literal
+
+            return node.transform(keep_boolean_literal).sql(**opts)
 
         if isinstance(prop, MacroFunc):
             # A macro in property position wraps user-authored arguments, so it carries
