@@ -599,6 +599,49 @@ def test_janitor_environment_ignore_ttl_cleans_only_scoped_snapshots(
     assert ctx.state_sync.get_snapshots([dev_b_snapshot.snapshot_id])
 
 
+def test_invalidate_environment_cleanup_snapshots_includes_previous_finalized(tmp_path: Path):
+    """An unfinalized environment's previous finalized snapshots are cleaned up too."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    model_path = models_dir / "model1.sql"
+    model_path.write_text("MODEL(name test.model1, kind FULL); SELECT 1 AS col")
+
+    ctx = Context(
+        paths=[tmp_path],
+        config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")),
+    )
+
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+    old_snapshot = ctx.get_snapshot("test.model1")
+    assert old_snapshot is not None
+
+    model_path.write_text("MODEL(name test.model1, kind FULL); SELECT 2 AS col")
+    ctx.load()
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+    new_snapshot = ctx.get_snapshot("test.model1")
+    assert new_snapshot is not None
+    assert old_snapshot.snapshot_id != new_snapshot.snapshot_id
+
+    # Simulate a plan that failed partway: the environment is left unfinalized and still
+    # points at the snapshots from its last finalized plan.
+    dev_env = ctx.state_sync.get_environment("dev")
+    assert dev_env is not None
+    ctx.state_sync.state_sync.environment_state.update_environment(  # type: ignore
+        dev_env.copy(
+            update={
+                "finalized_ts": None,
+                "previous_finalized_snapshots": [old_snapshot.table_info],
+            }
+        )
+    )
+
+    ctx.invalidate_environment("dev", cleanup_snapshots=True)
+
+    assert ctx.state_sync.get_environment("dev") is None
+    assert not ctx.state_sync.get_snapshots([old_snapshot.snapshot_id])
+    assert not ctx.state_sync.get_snapshots([new_snapshot.snapshot_id])
+
+
 @time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_evaluate_uncategorized_snapshot(init_and_plan_context: t.Callable):
     context, plan = init_and_plan_context("examples/sushi")

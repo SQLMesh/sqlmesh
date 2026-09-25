@@ -3185,7 +3185,17 @@ class GenericContext(BaseContext, t.Generic[C]):
             if expired_environments:
                 expired_env = self.state_reader.get_environment(expired_environments[0].name)
                 if expired_env:
-                    target_snapshot_ids = {s.snapshot_id for s in expired_env.snapshots}
+                    # An unfinalized environment may still point at the snapshots of its last
+                    # finalized plan, which would otherwise be left behind.
+                    expired_env_snapshots = (
+                        expired_env.snapshots
+                        if expired_env.finalized_ts is not None
+                        else [
+                            *expired_env.snapshots,
+                            *(expired_env.previous_finalized_snapshots or []),
+                        ]
+                    )
+                    target_snapshot_ids = {s.snapshot_id for s in expired_env_snapshots}
 
         # Clean up expired environments by removing their views and schemas
         failures.extend(
@@ -3194,28 +3204,19 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
         )
 
-        if environment is None:
-            failures.extend(
-                delete_expired_snapshots(
-                    self.state_sync,
-                    self.snapshot_evaluator,
-                    current_ts=current_ts,
-                    ignore_ttl=ignore_ttl,
-                    force_delete=force_delete,
-                    console=self.console,
-                    batch_size=self.config.janitor.expired_snapshots_batch_size,
-                )
-            )
-            self.state_sync.compact_intervals()
-        elif (
-            ignore_ttl
-            and target_snapshot_ids
+        scoped_cleanup = (
+            environment is not None
+            and ignore_ttl
+            and bool(target_snapshot_ids)
             and not self.state_reader.get_environment(environment)
-        ):
+        )
+        if scoped_cleanup:
             self.console.log_warning(
                 "Scoped snapshot cleanup will permanently delete unreferenced physical snapshot "
                 f"tables formerly referenced by environment '{environment}'."
             )
+
+        if environment is None or scoped_cleanup:
             failures.extend(
                 delete_expired_snapshots(
                     self.state_sync,
@@ -3225,9 +3226,12 @@ class GenericContext(BaseContext, t.Generic[C]):
                     force_delete=force_delete,
                     console=self.console,
                     batch_size=self.config.janitor.expired_snapshots_batch_size,
-                    target_snapshot_ids=target_snapshot_ids,
+                    target_snapshot_ids=target_snapshot_ids if scoped_cleanup else None,
                 )
             )
+
+        if environment is None:
+            self.state_sync.compact_intervals()
 
         if failures:
             failure_string = "\n  - ".join(failures)
