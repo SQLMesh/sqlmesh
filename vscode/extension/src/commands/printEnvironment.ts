@@ -2,6 +2,7 @@ import * as vscode from 'vscode'
 import { getSqlmeshEnvironment } from '../utilities/sqlmesh/sqlmesh'
 import { isErr } from '@bus/result'
 import { IS_WINDOWS } from '../utilities/isWindows'
+import { printEnvironmentCommand } from '../utilities/shellCommand'
 
 export function printEnvironment() {
   return async () => {
@@ -23,14 +24,9 @@ export function printEnvironment() {
     // Show the terminal
     terminal.show()
 
-    // Run the appropriate command to display environment variables
-    if (IS_WINDOWS) {
-      // On Windows, use 'set' command
-      terminal.sendText('set')
-    } else {
-      // On Unix-like systems, use 'env' command
-      terminal.sendText('env | sort')
-    }
+    // Run the command the user's shell understands, since the terminal is
+    // opened with the default shell rather than a shell we pick
+    terminal.sendText(printEnvironmentCommand(vscode.env.shell, IS_WINDOWS))
 
     // Show a notification
     vscode.window.showInformationMessage(
