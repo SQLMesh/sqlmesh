@@ -1051,7 +1051,7 @@ def test_parse_snowflake_create_schema_ddl():
 
 @pytest.mark.parametrize("dialect", sorted(set(DIALECT_TO_TYPE.values())))
 def test_sqlglot_extended_correctly(dialect: str) -> None:
-    # Skip DB2 on Python 3.9 since db2-sqlglot-dialect requires Python 3.10+
+    # Skip Db2 on Python 3.9 since db2-sqlglot-dialect requires Python 3.10+
     if dialect == "db2" and sys.version_info < (3, 10):
         pytest.skip("DB2 dialect requires Python 3.10+ for db2-sqlglot-dialect")
 
