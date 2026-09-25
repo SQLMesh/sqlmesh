@@ -629,7 +629,10 @@ class PlanStagesBuilder:
         return audit_snapshots
 
     def _get_snapshots_to_create(
-        self, plan: EvaluatablePlan, snapshots: t.Dict[SnapshotId, Snapshot], deployability_index: DeployabilityIndex
+        self,
+        plan: EvaluatablePlan,
+        snapshots: t.Dict[SnapshotId, Snapshot],
+        deployability_index: DeployabilityIndex,
     ) -> t.List[Snapshot]:
         promoted_snapshot_ids = (
             set(plan.environment.promoted_snapshot_ids)
@@ -642,7 +645,9 @@ class PlanStagesBuilder:
                 return False
 
             # Do not create snapshots that contain production data but can never be deployed.
-            if deployability_index.is_representative(s) and not deployability_index.is_deployable(s):
+            if deployability_index.is_representative(s) and not deployability_index.is_deployable(
+                s
+            ):
                 return False
 
             # Only create tables for snapshots that we're planning to promote or that were selected for backfill
