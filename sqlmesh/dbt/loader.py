@@ -137,11 +137,13 @@ class DbtLoader(Loader):
         self,
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
+        model_paths: t.Optional[t.Set[Path]] = None,
     ) -> LoadedProject:
         self._projects = []
         return super().load(
             model_fqns=model_fqns,
             use_project_index=use_project_index,
+            model_paths=model_paths,
         )
 
     def _load_scripts(self) -> t.Tuple[MacroRegistry, JinjaMacroRegistry]:
@@ -165,6 +167,7 @@ class DbtLoader(Loader):
         signals: UniqueKeyDict[str, signal],
         model_fqns: t.Optional[t.Set[str]] = None,
         use_project_index: bool = False,
+        model_paths: t.Optional[t.Set[Path]] = None,
     ) -> t.Tuple[UniqueKeyDict[str, Model], t.Optional[t.Set[str]]]:
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
 
