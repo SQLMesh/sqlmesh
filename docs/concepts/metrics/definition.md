@@ -59,7 +59,7 @@ Because the `prod.users.country` and `prod.searches.num_searches` models have sp
 
 Metrics can perform additional operations/calculations with other metrics.
 
-In this example, the third metric `clicks_per_search` is calculated by dividing the first metric `total_searches` by the second metric `total_clicks`:
+In this example, the third metric `clicks_per_search` is calculated by dividing `total_clicks` by `total_searches`:
 
 ```sql linenums="1"
 METRIC (
@@ -77,6 +77,8 @@ METRIC (
   expression total_clicks / total_searches -- Calculated from the other two metrics
 );
 ```
+
+Metric references are case insensitive, including quoted references, and may refer to metrics defined later in the project. Shared dependencies are resolved once during expansion. An unknown dependency or a dependency cycle raises a configuration error with the dependency chain and the path of the definition containing the invalid reference.
 
 ## Properties
 
