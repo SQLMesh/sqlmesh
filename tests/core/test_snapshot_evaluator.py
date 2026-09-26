@@ -5656,3 +5656,113 @@ def test_grants_in_production_with_dev_only_vde(
         # Should still apply grants to physical table when target layer is ALL or PHYSICAL
         sync_grants_mock.assert_called_once()
         assert sync_grants_mock.call_args[0][1] == {"select": ["user1"], "insert": ["role1"]}
+
+
+def test_promote_virtual_properties_see_snapshots_by_name(mocker: MockerFixture, make_snapshot):
+    """Promotion receives snapshots keyed by SnapshotId, but renderers expect them keyed by name.
+    Virtual properties must see the same name-keyed snapshots as `on_virtual_update` does."""
+
+    @macro()
+    def upstream_version(evaluator):
+        upstream = evaluator.snapshots.get('"test_schema"."upstream"')
+        return exp.Literal.string(upstream.version if upstream else "missing")
+
+    @macro()
+    def local_or_missing(evaluator, name):
+        value = evaluator.locals.get(name.name)
+        if isinstance(value, exp.Expr):
+            value = value.sql(evaluator.dialect, comments=False)
+        return exp.Literal.string(value or "missing")
+
+    adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
+    adapter_mock.dialect = "duckdb"
+    adapter_mock.with_settings.return_value = adapter_mock
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    upstream = load_sql_based_model(
+        d.parse("MODEL (name test_schema.upstream, kind FULL); SELECT 1 AS a")
+    )
+    upstream_snapshot = make_snapshot(upstream)
+    upstream_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind FULL,
+                virtual_properties (
+                    upstream_version = @upstream_version(),
+                    kind_name = @local_or_missing('model_kind_name'),
+                    this_view = @local_or_missing('this_model'),
+                ),
+            );
+            SELECT a FROM test_schema.upstream
+            """
+        )
+    )
+    snapshot = make_snapshot(model, nodes={upstream.fqn: upstream})
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    snapshots = {s.snapshot_id: s for s in (upstream_snapshot, snapshot)}
+    environment_naming_info = EnvironmentNamingInfo(name="test_env")
+    evaluator.promote(
+        [snapshot],
+        environment_naming_info,
+        snapshots=snapshots,
+        table_mapping=to_view_mapping(snapshots.values(), environment_naming_info),
+    )
+
+    view_properties = adapter_mock.create_view.call_args.kwargs["view_properties"]
+    assert view_properties["upstream_version"] == exp.Literal.string(upstream_snapshot.version)
+    assert view_properties["kind_name"] == exp.Literal.string("FULL")
+    # The environment view mapping still takes precedence over the physical table.
+    assert view_properties["this_view"] == exp.Literal.string(
+        '"test_schema__test_env"."test_model"'
+    )
+
+
+def test_promote_resolves_this_model_with_single_mapping_entry(
+    mocker: MockerFixture, make_snapshot
+):
+    """Rendering a promoted view's properties must not re-normalize the whole environment's view
+    mapping for every view (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
+    adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
+    adapter_mock.dialect = "duckdb"
+    adapter_mock.with_settings.return_value = adapter_mock
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    snapshots = {}
+    for i in range(20):
+        model = load_sql_based_model(
+            d.parse(
+                f"""
+                MODEL (
+                    name test_schema.model_{i},
+                    kind FULL,
+                    virtual_properties (description = 'model {i}'),
+                );
+                SELECT 1 AS a
+                """
+            )
+        )
+        snapshot = make_snapshot(model)
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[snapshot.snapshot_id] = snapshot
+
+    environment_naming_info = EnvironmentNamingInfo(name="test_env")
+    table_mapping = to_view_mapping(snapshots.values(), environment_naming_info)
+    spy = mocker.spy(exp, "replace_tables")
+
+    evaluator.promote(
+        list(snapshots.values()),
+        environment_naming_info,
+        snapshots=snapshots,
+        table_mapping=table_mapping,
+    )
+
+    assert adapter_mock.create_view.call_count == 20
+    # One call per view, to resolve `this_model`.
+    assert spy.call_count == 20
+    for call in spy.call_args_list:
+        assert len(call.args[1]) == 1
