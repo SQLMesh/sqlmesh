@@ -106,7 +106,7 @@ def _migrate_intervals(
             continue
 
         dev_version = snapshot_ids_to_dev_versions.get((name, identifier))
-        if dev_version not in used_dev_versions and is_dev:
+        if (name, dev_version) not in used_dev_versions and is_dev:
             # If the interval's dev version is no longer used and this is a dev interval, we can safely delete it
             continue
 
