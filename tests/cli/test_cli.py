@@ -2771,6 +2771,30 @@ model_defaults:
     mock.assert_not_called()
 
 
+def test_format_with_paths_skips_project_load(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """`sqlmesh format <path>` must not load the project."""
+    create_example_project(tmp_path)
+    load_spy = mocker.spy(Context, "load")
+
+    model = tmp_path / "models" / "full_model.sql"
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format", str(model)])
+
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    load_spy.assert_not_called()
+
+
+def test_format_without_paths_still_loads_project(
+    runner: CliRunner, tmp_path: Path, mocker
+) -> None:
+    create_example_project(tmp_path)
+    load_spy = mocker.spy(Context, "load")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
+
+    assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    assert load_spy.called
+
+
 def test_test_accepts_model_paths(runner: CliRunner, tmp_path: Path) -> None:
     create_example_project(tmp_path)
 
