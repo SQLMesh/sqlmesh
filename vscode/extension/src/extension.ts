@@ -24,8 +24,10 @@ import {
   traceError,
 } from './utilities/common/log'
 import { onDidChangePythonInterpreter } from './utilities/common/python'
+import { requiresLspRestart } from './utilities/common/configurationChange'
+import { coalesceAsync } from './utilities/coalesceAsync'
 import { sleep } from './utilities/sleep'
-import { handleError } from './utilities/errors'
+import { ErrorType, handleError } from './utilities/errors'
 
 import { selector, completionProvider } from './completion/completion'
 import { LineagePanel } from './webviews/lineagePanel'
@@ -65,7 +67,24 @@ export async function activate(context: vscode.ExtensionContext) {
     ),
   )
 
-  const restartLsp = async (invokedByUser = false): Promise<void> => {
+  /**
+   * Set when a restart was asked for explicitly, so that a user-invoked restart
+   * coalesced together with an automatic one is still treated as user-invoked.
+   */
+  let restartInvokedByUser = false
+
+  /**
+   * Set by a failed run and handled by the caller once the run has finished.
+   * Handling it inside the run would deadlock: the not_signed_in handler waits
+   * on a sign-in that restarts the client again, and that restart would wait on
+   * the run that is still waiting on the handler.
+   */
+  let restartError: ErrorType | undefined
+
+  const runRestart = async (): Promise<void> => {
+    const invokedByUser = restartInvokedByUser
+    restartInvokedByUser = false
+
     if (!lspClient) {
       lspClient = new LSPClient()
     }
@@ -73,12 +92,7 @@ export async function activate(context: vscode.ExtensionContext) {
     traceVerbose('Restarting SQLMesh LSP client')
     const result = await lspClient.restart(invokedByUser)
     if (isErr(result)) {
-      await handleError(
-        authProvider,
-        restartLsp,
-        result.error,
-        'LSP restart failed',
-      )
+      restartError = result.error
       return
     }
 
@@ -93,6 +107,25 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     testControllerDisposable = setupTestController(lspClient)
     context.subscriptions.push(testControllerDisposable)
+  }
+
+  /**
+   * Restarts are serialized: a client disposing while the next one starts up
+   * leaves colliding command registrations and requests aimed at a disposed
+   * client, which is what surfaced as constant crashes.
+   */
+  const restartLspSerialized = coalesceAsync(runRestart)
+
+  const restartLsp = async (invokedByUser = false): Promise<void> => {
+    restartInvokedByUser = restartInvokedByUser || invokedByUser
+    await restartLspSerialized()
+
+    // Claimed so that callers coalesced into the same run don't each report it.
+    const error = restartError
+    restartError = undefined
+    if (error) {
+      await handleError(authProvider, restartLsp, error, 'LSP restart failed')
+    }
   }
 
   // commands needing the restart helper
@@ -191,7 +224,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     onDidChangePythonInterpreter(() => restartLsp()),
-    onDidChangeConfiguration(() => restartLsp()),
+    // Only restart for settings the server actually reads. This event fires for
+    // every setting in the editor, including ones written by other extensions.
+    onDidChangeConfiguration(event => {
+      if (requiresLspRestart(event)) {
+        void restartLsp()
+      }
+    }),
   )
 
   if (!lspClient.hasCompletionCapability()) {

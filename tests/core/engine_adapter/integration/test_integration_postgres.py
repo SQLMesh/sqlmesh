@@ -1,4 +1,5 @@
 import typing as t
+import uuid
 from contextlib import contextmanager
 import pytest
 from pytest import FixtureRequest
@@ -53,7 +54,8 @@ def create_users(
             _cleanup_user(engine_adapter, user_name)
 
         for role_name in role_names:
-            user_name = f"test_{role_name}"
+            random_suffix = uuid.uuid4().hex[:6]
+            user_name = f"test_{role_name}_{random_suffix}"
             password = random_id()
             engine_adapter.execute(f"CREATE USER \"{user_name}\" WITH PASSWORD '{password}'")
             engine_adapter.execute(f'GRANT USAGE ON SCHEMA public TO "{user_name}"')
@@ -381,12 +383,14 @@ def test_grants_plan_target_layer_physical_only(
     with create_users(engine_adapter, "reader") as roles:
         (tmp_path / "models").mkdir(exist_ok=True)
 
-        model_def = """
+        reader_username = roles["reader"]["username"]
+
+        model_def = f"""
         MODEL (
             name test_schema.physical_grants_model,
             kind FULL,
             grants (
-                'select' = ['test_reader']
+                'select' = ['{reader_username}']
             ),
             grants_target_layer 'physical'
         );
@@ -421,12 +425,14 @@ def test_grants_plan_target_layer_virtual_only(
     with create_users(engine_adapter, "viewer") as roles:
         (tmp_path / "models").mkdir(exist_ok=True)
 
-        model_def = """
+        viewer_username = roles["viewer"]["username"]
+
+        model_def = f"""
         MODEL (
             name test_schema.virtual_grants_model,
             kind FULL,
             grants (
-                'select' = ['test_viewer']
+                'select' = ['{viewer_username}']
             ),
             grants_target_layer 'virtual'
         );

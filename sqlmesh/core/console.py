@@ -2232,6 +2232,9 @@ class TerminalConsole(Console):
         message = (
             f"Ran {result.testsRun} tests against {target_dialect} in {result.duration} seconds."
         )
+        if result.tests_skipped:
+            message = f"{message}\nSkipped {result.tests_skipped} tests"
+
         if result.wasSuccessful():
             self._print("=" * divider_length)
             self._print(
@@ -3160,6 +3163,8 @@ class NotebookMagicConsole(TerminalConsole):
         message = (
             f"Ran {result.testsRun} tests against {target_dialect} in {result.duration} seconds."
         )
+        if result.tests_skipped:
+            message = f"{message}\nSkipped {result.tests_skipped} tests"
 
         if result.wasSuccessful():
             success_color = {"color": "#008000"}
@@ -3600,6 +3605,8 @@ class MarkdownConsole(CaptureTerminalConsole):
             return
 
         message = f"Ran `{result.testsRun}` Tests Against `{target_dialect}`"
+        if result.tests_skipped:
+            message = f"{message}\n**Skipped `{result.tests_skipped}` Tests**"
 
         if result.wasSuccessful():
             self._print(f"**Successfully {message}**\n\n")

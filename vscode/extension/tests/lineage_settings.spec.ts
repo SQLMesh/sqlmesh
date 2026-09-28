@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures'
-import type { FrameLocator, Page } from '@playwright/test'
+import type { FrameLocator, Page } from './fixtures'
 import fs from 'fs-extra'
 import {
   openLineageView,

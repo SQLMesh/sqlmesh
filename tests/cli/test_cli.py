@@ -10,11 +10,15 @@ from unittest.mock import MagicMock
 
 from click import ClickException
 from click.testing import CliRunner
+from sqlglot import __version__ as SQLGLOT_VERSION
 from sqlmesh import RuntimeEnv
+from sqlmesh._version import __version__ as SQLMESH_VERSION
 from sqlmesh.cli.project_init import ProjectTemplate, init_example_project
 from sqlmesh.cli.main import cli
 from sqlmesh.core.context import Context
+from sqlmesh.core.state_sync.base import SCHEMA_VERSION
 from sqlmesh.integrations.dlt import generate_dlt_models
+from sqlmesh.utils import major_minor
 from sqlmesh.utils.date import now_ds, time_like_to_str, timedelta, to_datetime, yesterday_ds
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
 
@@ -55,6 +59,31 @@ model_defaults:
 
 plan:
   no_prompts: false
+"""
+        )
+
+
+def add_incremental_model_test(temp_dir) -> None:
+    with open(temp_dir / "tests" / "test_incremental_model.yaml", "w", encoding="utf-8") as f:
+        f.write(
+            """
+test_example_incremental_model:
+  model: sqlmesh_example.incremental_model
+  vars:
+    start: 2020-01-01
+    end: 2020-01-02
+  inputs:
+    sqlmesh_example.seed_model:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
+  outputs:
+    query:
+      rows:
+      - id: 1
+        item_id: 1
+        event_date: 2020-01-01
 """
         )
 
@@ -191,6 +220,105 @@ def test_plan_skip_tests(runner, tmp_path):
     assert "Successfully Ran 1 tests against duckdb" not in result.output
     assert_new_env(result)
     assert_backfill_success(result)
+
+
+def test_plan_no_changes_runs_tests_by_default(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--no-prompts"], input="\n"
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 2 tests against duckdb" in result.output
+    assert "No changes to plan" in result.output or "No changes" in result.output
+
+
+def test_plan_test_changed_only_with_no_changes(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+        ],
+        input="\n",
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran" not in result.output
+
+
+def test_plan_test_changed_only_runs_only_changed_model_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
+
+
+def test_plan_select_model_test_changed_only_scopes_tests(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+    add_incremental_model_test(tmp_path)
+
+    full_model_path = tmp_path / "models" / "full_model.sql"
+    full_model_path.write_text(
+        full_model_path.read_text().replace("COUNT(DISTINCT id)", "COUNT(id)")
+    )
+    incremental_model_path = tmp_path / "models" / "incremental_model.sql"
+    incremental_model_path.write_text(
+        incremental_model_path.read_text().replace(
+            "  item_id,\n  event_date,",
+            "  item_id,\n  'b' as new_col,\n  event_date,",
+        )
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--select-model",
+            "sqlmesh_example.full_model",
+            "--test-changed-only",
+            "--no-prompts",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Successfully Ran 1 tests against duckdb" in result.output
+    assert "Skipped 1 tests" in result.output
 
 
 def test_plan_skip_linter(runner, tmp_path):
@@ -900,6 +1028,107 @@ def test_info_on_new_project_does_not_create_state_sync(runner, tmp_path):
     assert not context.engine_adapter.table_exists("sqlmesh._versions")
 
 
+def test_info_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "info"])
+    assert result.exit_code == 0
+    assert "State backend versions" not in result.output
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "info", "-v"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"Schema version: {SCHEMA_VERSION}" in result.output
+    assert f"SQLGlot version: {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: {SQLMESH_VERSION}" in result.output
+
+
+def test_rollback_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    context = Context(paths=tmp_path)
+    state_sync = context._new_state_sync()
+    # Back up the current state, then pretend the state was migrated by a newer SQLMesh.
+    state_sync.migrator._backup_state()
+    state_sync.version_state.update_versions(
+        schema_version=SCHEMA_VERSION + 1,
+        sqlglot_version="9999.0.0",
+        sqlmesh_version="9999.0.0",
+    )
+    context.close()
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "rollback"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"Schema version: {SCHEMA_VERSION + 1} -> {SCHEMA_VERSION}" in result.output
+    assert f"SQLGlot version: 9999.0.0 -> {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: 9999.0.0 -> {SQLMESH_VERSION}" in result.output
+
+
+def test_migrate_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    context = Context(paths=tmp_path)
+    # Pretend the state was written by an older patch release of the same minor version, which
+    # is the case `migrate` used to leave untouched.
+    major, minor = major_minor(SQLMESH_VERSION)
+    older_sqlmesh = f"{major}.{minor}.dev0"
+    context._new_state_sync().version_state.update_versions(
+        sqlglot_version="0.0.1",
+        sqlmesh_version=older_sqlmesh,
+    )
+    context.close()
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "migrate"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"SQLGlot version: 0.0.1 -> {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: {older_sqlmesh} -> {SQLMESH_VERSION}" in result.output
+
+
+def test_migrate_updates_versions_after_a_patch_bump(runner, tmp_path):
+    """A patch bump leaves the minor version equal, but the recorded versions must still move.
+
+    Both minor versions have to match the installed ones, otherwise `_apply_migrations` reports
+    rows to migrate and the early return this covers is never reached.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    sqlmesh_major, sqlmesh_minor = major_minor(SQLMESH_VERSION)
+    sqlglot_major, sqlglot_minor = major_minor(SQLGLOT_VERSION)
+    context = Context(paths=tmp_path)
+    context._new_state_sync().version_state.update_versions(
+        sqlglot_version=f"{sqlglot_major}.{sqlglot_minor}.dev0",
+        sqlmesh_version=f"{sqlmesh_major}.{sqlmesh_minor}.dev0",
+    )
+    context.close()
+
+    assert (
+        runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "migrate"]).exit_code
+        == 0
+    )
+
+    context = Context(paths=tmp_path)
+    versions = context._new_state_sync().get_versions(validate=False)
+    context.close()
+    assert versions.sqlmesh_version == SQLMESH_VERSION
+    assert versions.sqlglot_version == SQLGLOT_VERSION
+
+
+def test_rollback_without_backup_does_not_print_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "rollback"])
+    assert result.exit_code == 1
+    assert "There are no prior migrations to roll back to." in result.output
+    assert "State backend versions" not in result.output
+
+
 def test_dlt_pipeline_errors(runner, tmp_path):
     # Error if no pipeline is provided
     result = runner.invoke(cli, ["--paths", tmp_path, "init", "-t", "dlt", "duckdb"])
@@ -1350,6 +1579,51 @@ def test_lint(runner, tmp_path):
     )
     assert result.output.count("Linter errors for") == 2
     assert result.exit_code == 1
+
+
+def test_lint_no_models(runner, tmp_path):
+    with open(tmp_path / "config.yaml", "w", encoding="utf-8") as f:
+        f.write("model_defaults:\n  dialect: duckdb\n")
+
+    result = runner.invoke(cli, ["--paths", tmp_path, "lint"])
+    assert result.exit_code == 1
+    assert "doesn't seem to have any models" in result.output
+
+
+def test_lint_model_scopes_validation_with_multiple_projects(runner, tmp_path):
+    project_a = tmp_path / "project_a"
+    project_b = tmp_path / "project_b"
+    for project in (project_a, project_b):
+        (project / "models").mkdir(parents=True)
+        with open(project / "config.yaml", "w", encoding="utf-8") as f:
+            f.write(
+                f"project: {project.name}\n"
+                "model_defaults:\n"
+                "  dialect: duckdb\n"
+                "linter:\n"
+                "  enabled: true\n"
+            )
+
+    with open(project_a / "models" / "selected.sql", "w", encoding="utf-8") as f:
+        f.write("MODEL(name selected); SELECT 1 AS col;")
+    with open(project_b / "models" / "unrelated.sql", "w", encoding="utf-8") as f:
+        f.write("MODEL(name unrelated, kind FULL, partitioned_by (col, col)); SELECT 1 AS col;")
+
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            project_a,
+            "--paths",
+            project_b,
+            "lint",
+            "--use-project-index",
+            "--model",
+            "selected",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def test_state_export(runner: CliRunner, tmp_path: Path) -> None:
@@ -2361,6 +2635,59 @@ def test_lint_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker
     mock.assert_not_called()
 
 
+def test_test_still_loads_state(runner: CliRunner, tmp_path: Path, mocker):
+    """Guard that `test` explicitly passes `load_state=True` and still reaches state sync."""
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    runner.invoke(cli, ["--paths", str(tmp_path), "test"])
+
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is True, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `test`"
+        )
+    assert mock.called, "state-sync was never accessed during `test`"
+
+
+def test_test_local_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
+    mock = _setup_local_only_project(tmp_path, mocker)
+    init_spy = mocker.spy(Context, "__init__")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert init_spy.called, "Context was never constructed"
+    for call in init_spy.call_args_list:
+        assert "load_state" in call.kwargs, (
+            "CLI didn't pass load_state= explicitly; missing kwarg defaults to True silently"
+        )
+        assert call.kwargs["load_state"] is False, (
+            f"Context was constructed with load_state={call.kwargs['load_state']} for `test --local`"
+        )
+    mock.assert_not_called()
+
+
+def test_test_local_runs_without_state_multiple_paths(
+    runner: CliRunner, tmp_path: Path, mocker
+) -> None:
+    """`--local` gating must hold for any number of --paths, matching `lint --local`."""
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    _create_local_only_project(project_a, "proj_a")
+    _create_local_only_project(project_b, "proj_b")
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli, ["--paths", str(project_a), "--paths", str(project_b), "test", "--local"]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
 @pytest.mark.parametrize("command", ["format"])
 def test_local_only_commands_skip_state_multiple_paths(
     runner: CliRunner, tmp_path: Path, mocker, command: str
@@ -2441,4 +2768,211 @@ model_defaults:
 
     result = runner.invoke(cli, ["--paths", str(tmp_path), "format"])
     assert result.exit_code == 0, f"Format failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_test_accepts_model_paths(runner: CliRunner, tmp_path: Path) -> None:
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "full_model.sql")]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Ran 1 test" in result.output
+
+
+def test_test_unknown_path_fails(runner: CliRunner, tmp_path: Path) -> None:
+    """A staged file that resolves to nothing must fail rather than silently run no tests."""
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+
+
+def test_test_local_runs_project_unit_tests(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """A real unit test from the project's YAML runs under `--local` without touching state."""
+    create_example_project(tmp_path)
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+
+def test_test_local_does_not_open_state_connection(
+    runner: CliRunner, tmp_path: Path, mocker, monkeypatch
+) -> None:
+    """`test --local` must not open a configured remote Postgres state connection."""
+    pytest.importorskip("psycopg2")
+
+    for var in ("PG_HOST", "PG_USER", "PG_PASSWORD", "PG_DATABASE"):
+        monkeypatch.delenv(var, raising=False)
+
+    create_example_project(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        """project: cli_test
+
+gateways:
+  prod:
+    state_connection:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'postgres.internal.example.com') }}"
+      port: 5432
+      user: "{{ env_var('PG_USER') }}"
+      password: "{{ env_var('PG_PASSWORD') }}"
+      database: "{{ env_var('PG_DATABASE', 'sqlmesh_state') }}"
+    connection:
+      type: duckdb
+      database: "warehouse.db"
+
+default_gateway: prod
+
+model_defaults:
+  dialect: duckdb
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--local"])
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    mock.assert_not_called()
+
+
+def test_test_local_multi_repo_partial(runner: CliRunner, copy_to_temp_path, mocker) -> None:
+    """Run tests for one repo of a multi-repo project whose upstream models live only in state.
+
+    Pins the behavioral difference against `lint --local`: a model that isn't loaded produces a
+    warning and its test is skipped, rather than turning into an error.
+    """
+    repo_2 = copy_to_temp_path("examples/multi")[0] / "repo_2"
+
+    # silver.c lives in repo_2 and its upstream bronze.a is supplied as a test input.
+    (repo_2 / "tests" / "test_c.yaml").write_text(
+        """test_silver_c:
+  model: silver.c
+  inputs:
+    bronze.a:
+      rows:
+      - col_a: 1
+      - col_a: 1
+      - col_a: 2
+  outputs:
+    query:
+      rows:
+      - col_a: 1
+      - col_a: 2
+""",
+        encoding="utf-8",
+    )
+    # bronze.a itself is defined in repo_1, so it is not loaded when only repo_2 is given.
+    (repo_2 / "tests" / "test_a.yaml").write_text(
+        """test_bronze_a:
+  model: bronze.a
+  outputs:
+    query:
+      rows:
+      - col_a: 1
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+    args = ["--gateway", "memory", "--paths", str(repo_2), "test"]
+
+    # Without --local the same run reaches the state backend.
+    runner.invoke(cli, args)
+    assert mock.called, "state-sync was never accessed during `test`"
+
+    mock.reset_mock()
+
+    result = runner.invoke(cli, [*args, "--local"])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    # Console output wraps, so compare against whitespace-normalized text.
+    output = " ".join(result.output.split())
+    assert 'Model \'"memory"."bronze"."a"\' was not found' in output, (
+        "the unloaded model should warn rather than fail"
+    )
+    assert "Successfully Ran 1 tests" in output, "the repo_2 test should still run"
+    mock.assert_not_called()
+
+
+def test_test_local_with_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """`--local` and model path selectors compose, which is the pre-commit hook case in #6020."""
+    create_example_project(tmp_path)
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "full_model.sql")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # An unresolvable path still fails loudly, without reaching state.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.sql")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
+    mock.assert_not_called()
+
+
+def test_test_local_with_python_model_paths(runner: CliRunner, tmp_path: Path, mocker) -> None:
+    """The `--local` + path-selector combination works for Python models too."""
+    create_example_project(tmp_path)
+
+    (tmp_path / "models" / "py_model.py").write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model, ExecutionContext
+import typing as t
+
+@model(
+  name="sqlmesh_example.py_model",
+  columns={"id": "int"},
+)
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+  return pd.DataFrame([{"id": 1}])
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_py_model.yaml").write_text(
+        """
+test_py_model:
+  model: sqlmesh_example.py_model
+  outputs:
+    query:
+      rows:
+      - id: 1
+""",
+        encoding="utf-8",
+    )
+
+    mock = _patch_state_access(mocker)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "py_model.py")],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+    mock.assert_not_called()
+
+    # A Python file that is not a model is still an error rather than a silent no-op.
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--local", str(tmp_path / "models" / "nope.py")]
+    )
+    assert result.exit_code != 0
+    assert "is not a known model or test file" in result.output
     mock.assert_not_called()

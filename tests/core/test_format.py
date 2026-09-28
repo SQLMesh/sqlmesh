@@ -1,4 +1,6 @@
+import os
 import pathlib
+import stat
 
 from pytest_mock.plugin import MockerFixture
 from sqlmesh.core.config import Config
@@ -144,6 +146,25 @@ def test_ignore_formating_files(tmp_path: pathlib.Path):
         model3.read_text(encoding="utf-8")
         == "MODEL (\n  name this.model3,\n  dialect 'duckdb',\n  formatting TRUE\n);\n\nSELECT\n  1 AS col"
     )
+
+
+def test_format_check_read_only_files(tmp_path: pathlib.Path, mocker: MockerFixture):
+    models_dir = pathlib.Path("models")
+
+    model_text = "MODEL(name this.model, dialect 'duckdb'); SELECT 1 AS col"
+    model = create_temp_file(
+        tmp_path,
+        pathlib.Path(models_dir, "model.sql"),
+        model_text,
+    )
+    os.chmod(model, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+
+    context = Context(paths=tmp_path, config=Config())
+    context.console = mocker.Mock()
+    context.load()
+
+    assert not context.format(check=True)
+    assert model.read_text(encoding="utf-8") == model_text
 
 
 def test_format_without_state_load(tmp_path: pathlib.Path, mocker: MockerFixture):
