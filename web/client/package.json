@@ -62,7 +62,7 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react-swc": "^3.11.0",
     "ajv": "^8.17.1",
-    "autoprefixer": "^10.4.21",
+    "autoprefixer": "^10.6.1",
     "eslint": "^9.31.0",
     "jsdom": "^26.1.0",
     "orval": "^7.10.0",
