@@ -1,3 +1,4 @@
+import importlib.util
 import sys
 import pytest
 from sqlglot import Dialect, ParseError, exp, parse_one
@@ -1051,9 +1052,11 @@ def test_parse_snowflake_create_schema_ddl():
 
 @pytest.mark.parametrize("dialect", sorted(set(DIALECT_TO_TYPE.values())))
 def test_sqlglot_extended_correctly(dialect: str) -> None:
-    # Skip Db2 on Python 3.9 since db2-sqlglot-dialect requires Python 3.10+
-    if dialect == "db2" and sys.version_info < (3, 10):
-        pytest.skip("DB2 dialect requires Python 3.10+ for db2-sqlglot-dialect")
+    # Skip Db2 if db2-sqlglot-dialect is not installed
+    if dialect == "db2" and (
+        sys.version_info < (3, 10) or importlib.util.find_spec("db2_sqlglot") is None
+    ):
+        pytest.skip("db2-sqlglot-dialect is not installed")
 
     # MODEL is a SQLMesh extension and not part of SQLGlot
     # If we can roundtrip an expression containing MODEL across every dialect, then the SQLMesh extensions have been registered correctly

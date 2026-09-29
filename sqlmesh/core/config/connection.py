@@ -2643,11 +2643,13 @@ class Db2ConnectionConfig(ConnectionConfig):
 
     @property
     def _engine_adapter(self) -> t.Type[EngineAdapter]:
-        # DB2 adapter requires Python 3.10+ for db2-sqlglot-dialect
-        # Use getattr to avoid mypy errors on Python 3.9
-        return t.cast(
-            t.Type[EngineAdapter], getattr(engine_adapter, "Db2EngineAdapter", EngineAdapter)
-        )
+        adapter = getattr(engine_adapter, "Db2EngineAdapter", None)
+        if adapter is None:
+            raise ConfigError(
+                "The Db2 engine adapter requires Python 3.10+ and the 'db2' extra. "
+                "Please install it with: pip install 'sqlmesh[db2]'"
+            )
+        return t.cast(t.Type[EngineAdapter], adapter)
 
     def get_catalog(self) -> t.Optional[str]:
         """Db2 stores catalog names in uppercase; normalise here so the default_catalog

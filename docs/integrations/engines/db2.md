@@ -5,6 +5,8 @@ This page provides information about how to use SQLMesh with [IBM Db2](https://w
 !!! info
     The Db2 engine adapter is a community contribution. Due to this, only limited community support is available.
 
+    This adapter depends on the external `db2-sqlglot-dialect` package, which pins its own SQLGlot version range. It isn't covered by SQLMesh's core CI and may temporarily break or fail to install after SQLMesh upgrades SQLGlot, until the plugin catches up.
+
 ## Local/Built-in Scheduler
 
 **Engine Adapter Type**: `db2`
@@ -63,6 +65,7 @@ physical_table_naming_convention: hash_md5
 
 ## Limitations
 
+- **SCD Type 2 unsupported**: SCD Type 2 models are currently not supported on Db2.
 - **Single catalog only**: Db2 operates in single-catalog mode; cross-catalog queries are not supported.
 - **No inline column comments**: Column-level comments cannot be set inline during table creation.
 - **No atomic table replacement**: Db2 does not support `CREATE OR REPLACE TABLE`, so full model refreshes are not atomic. There is a brief window during which the table may be empty or partially populated.

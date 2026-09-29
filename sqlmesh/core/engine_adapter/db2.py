@@ -65,21 +65,21 @@ class Db2EngineAdapter(
     SCHEMA_DIFFER_KWARGS = {
         "parameterized_type_defaults": {
             # DECIMAL without precision defaults to (5, 0)
-            exp.DataType.build("DECIMAL", dialect=DIALECT).this: [(5, 0), (0,)],
+            exp.DataType.Type.DECIMAL: [(5, 0), (0,)],
             # CHAR without length defaults to 1
-            exp.DataType.build("CHAR", dialect=DIALECT).this: [(1,)],
+            exp.DataType.Type.CHAR: [(1,)],
             # VARCHAR without length defaults to 1
-            exp.DataType.build("VARCHAR", dialect=DIALECT).this: [(1,)],
+            exp.DataType.Type.VARCHAR: [(1,)],
             # TIMESTAMP defaults to 6 digits of fractional seconds
-            exp.DataType.build("TIMESTAMP", dialect=DIALECT).this: [(6,)],
+            exp.DataType.Type.TIMESTAMP: [(6,)],
             # TIME defaults to 0 digits of fractional seconds
-            exp.DataType.build("TIME", dialect=DIALECT).this: [(0,)],
+            exp.DataType.Type.TIME: [(0,)],
         },
         "types_with_unlimited_length": {
             # CLOB can be used for unlimited text
-            exp.DataType.build("CLOB", dialect=DIALECT).this: {
-                exp.DataType.build("VARCHAR", dialect=DIALECT).this,
-                exp.DataType.build("CHAR", dialect=DIALECT).this,
+            exp.DataType.Type.TEXT: {
+                exp.DataType.Type.VARCHAR,
+                exp.DataType.Type.CHAR,
             },
         },
         "drop_cascade": False,

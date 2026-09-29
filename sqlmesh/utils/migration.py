@@ -4,7 +4,6 @@ from sqlglot.dialects.dialect import DialectType
 MAX_TEXT_INDEX_LENGTH = {
     "mysql": "250",  # 250 characters per column, <= 767 byte index size limit
     "tsql": "450",  # 450 bytes per column, <= 900 byte index size limit
-    "db2": "255",  # Db2 has strict primary key size limits, keep it conservative
 }
 
 
@@ -24,8 +23,4 @@ def index_text_type(dialect: DialectType) -> str:
 
 
 def blob_text_type(dialect: DialectType) -> str:
-    if dialect == "mysql":
-        return "LONGTEXT"
-    if dialect == "db2":
-        return "VARCHAR(32000)"
-    return "TEXT"
+    return "LONGTEXT" if dialect == "mysql" else "TEXT"

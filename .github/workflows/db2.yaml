@@ -10,6 +10,7 @@ on:
       - 'tests/core/engine_adapter/integration/test_integration_db2.py'
       - 'tests/core/engine_adapter/integration/docker/compose.db2.yaml'
       - '.github/workflows/db2.yaml'
+      - 'pyproject.toml'
   pull_request:
     branches:
       - main
@@ -19,6 +20,7 @@ on:
       - 'tests/core/engine_adapter/integration/test_integration_db2.py'
       - 'tests/core/engine_adapter/integration/docker/compose.db2.yaml'
       - '.github/workflows/db2.yaml'
+      - 'pyproject.toml'
 
 concurrency:
   group: db2-${{ github.event.pull_request.number || github.sha }}
