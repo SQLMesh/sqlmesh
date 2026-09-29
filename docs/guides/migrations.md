@@ -58,3 +58,4 @@ Keep the following in mind before rolling back:
 - Only the most recent migration can be rolled back. Restoring consumes the backup tables, so running `sqlmesh rollback` a second time fails with `There are no prior migrations to roll back to.`
 - The backups are taken at the moment of migration. Any changes made to the project metadata after the migration, such as plans applied with the newer version, are discarded.
 - Like `sqlmesh migrate`, rolling back affects all users of the project and should be issued manually by a single user.
+- Rollback is not possible if the migration was run with `--skip-backup`. It also does nothing useful after an upgrade that required no migration, such as a patch release, because no new backup was taken. In that case the backup tables, if present, come from an earlier migration.
