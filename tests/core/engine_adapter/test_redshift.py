@@ -152,22 +152,33 @@ def test_create_table_physical_properties_with_string_columns(
     ]
 
 
+@pytest.mark.parametrize(
+    "sortkey, expected_sortkey",
+    [
+        ('"batch_time"', 'SORTKEY("batch_time")'),
+        ("batch_time", 'SORTKEY("batch_time")'),
+        ('("batch_time")', 'SORTKEY("batch_time")'),
+        ("(batch_time)", 'SORTKEY("batch_time")'),
+        ('("batch_time", "id_file")', 'SORTKEY("batch_time", "id_file")'),
+        ('["batch_time", "id_file"]', 'SORTKEY("batch_time", "id_file")'),
+    ],
+)
 def test_create_table_physical_properties_from_model_definition(
-    make_mocked_engine_adapter: t.Callable,
+    make_mocked_engine_adapter: t.Callable, sortkey: str, expected_sortkey: str
 ):
     adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
     model: SqlModel = t.cast(
         SqlModel,
         load_sql_based_model(
             d.parse(
-                """
+                f"""
 MODEL (
     name test_schema.test_table,
     kind full,
     physical_properties (
         diststyle = key,
         distkey = "id_file",
-        sortkey = ("batch_time")
+        sortkey = {sortkey}
     )
 );
 SELECT id_file::INT, batch_time::TIMESTAMP;
@@ -183,7 +194,7 @@ SELECT id_file::INT, batch_time::TIMESTAMP;
     )
 
     assert to_sql_calls(adapter) == [
-        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER, "batch_time" TIMESTAMP) DISTSTYLE KEY DISTKEY("id_file") SORTKEY("batch_time")',
+        f'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER, "batch_time" TIMESTAMP) DISTSTYLE KEY DISTKEY("id_file") {expected_sortkey}',
     ]
 
 
