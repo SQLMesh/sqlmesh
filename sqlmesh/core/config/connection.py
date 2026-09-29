@@ -2657,7 +2657,8 @@ connection_config_validator: t.Callable = field_validator(
     "state_connection",
     "test_connection",
     "default_connection",
-    "default_test_connection",
+    # field_validator matches field names, not aliases
+    "default_test_connection_",
     mode="before",
     check_fields=False,
 )(_connection_config_validator)
