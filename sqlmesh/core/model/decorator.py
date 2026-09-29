@@ -125,8 +125,12 @@ class model(registry_decorator):
 
             blueprints = blueprints[0]
 
+        gateway = self.kwargs.get("gateway")
+        if isinstance(gateway, str) and gateway.lstrip().startswith("@"):
+            gateway = parse_one(gateway, dialect=dialect)
+
         return create_models_from_blueprints(
-            gateway=self.kwargs.get("gateway"),
+            gateway=gateway,
             blueprints=blueprints,
             get_variables=get_variables,
             loader=self.model,

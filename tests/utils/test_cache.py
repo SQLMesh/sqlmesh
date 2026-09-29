@@ -42,6 +42,22 @@ def test_file_cache(tmp_path: Path, mocker: MockerFixture):
     assert "客户数据" in cache._cache_entry_path("客户数据").name
 
 
+def test_file_cache_put_is_atomic(tmp_path: Path, mocker: MockerFixture) -> None:
+    cache: FileCache[_TestEntry] = FileCache(tmp_path)
+
+    old_entry = _TestEntry(value="old")
+    cache.put("test_name", value=old_entry)
+
+    # Simulate os.replace failing, e.g. on Windows when a concurrent reader still has the
+    # target file open. The existing entry must never be truncated / partially overwritten.
+    mocker.patch("sqlmesh.utils.cache.os.replace", side_effect=PermissionError("file in use"))
+    cache.put("test_name", value=_TestEntry(value="new"))
+
+    assert cache.get("test_name") == old_entry
+    # The temporary file should have been cleaned up.
+    assert len(list(tmp_path.glob("*"))) == 1
+
+
 def test_optimized_query_cache(tmp_path: Path, mocker: MockerFixture):
     model = SqlModel(
         name="test_model",

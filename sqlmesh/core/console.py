@@ -2232,6 +2232,9 @@ class TerminalConsole(Console):
         message = (
             f"Ran {result.testsRun} tests against {target_dialect} in {result.duration} seconds."
         )
+        if result.tests_skipped:
+            message = f"{message}\nSkipped {result.tests_skipped} tests"
+
         if result.wasSuccessful():
             self._print("=" * divider_length)
             self._print(
@@ -2920,7 +2923,10 @@ class NotebookMagicConsole(TerminalConsole):
 
         super().__init__(console, **kwargs)
 
-        self.display = display or get_ipython().user_ns.get("display", ipython_display)
+        ipython = get_ipython()
+        self.display = display or (
+            ipython.user_ns.get("display", ipython_display) if ipython else ipython_display
+        )
         self.missing_dates_output = widgets.Output()
         self.dynamic_options_after_categorization_output = widgets.VBox()
 
@@ -3157,6 +3163,8 @@ class NotebookMagicConsole(TerminalConsole):
         message = (
             f"Ran {result.testsRun} tests against {target_dialect} in {result.duration} seconds."
         )
+        if result.tests_skipped:
+            message = f"{message}\nSkipped {result.tests_skipped} tests"
 
         if result.wasSuccessful():
             success_color = {"color": "#008000"}
@@ -3597,6 +3605,8 @@ class MarkdownConsole(CaptureTerminalConsole):
             return
 
         message = f"Ran `{result.testsRun}` Tests Against `{target_dialect}`"
+        if result.tests_skipped:
+            message = f"{message}\n**Skipped `{result.tests_skipped}` Tests**"
 
         if result.wasSuccessful():
             self._print(f"**Successfully {message}**\n\n")

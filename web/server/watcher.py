@@ -55,7 +55,7 @@ async def watch_project() -> None:
                     changes.append(
                         models.ArtifactChange(
                             change=Change.deleted,
-                            path=str(relative_path),
+                            path=relative_path.as_posix(),
                         )
                     )
                 elif change == Change.added:
@@ -69,9 +69,9 @@ async def watch_project() -> None:
                         models.ArtifactChange(
                             type=models.ArtifactType.file,
                             change=change,
-                            path=str(relative_path),
+                            path=relative_path.as_posix(),
                             file=_get_file_with_content(
-                                settings.project_path / relative_path, str(relative_path)
+                                settings.project_path / relative_path, relative_path.as_posix()
                             ),
                         )
                     )

@@ -1,10 +1,11 @@
+import json
 import logging
 import pathlib
 import typing as t
 import re
 from datetime import date, timedelta, datetime
 from tempfile import TemporaryDirectory
-from unittest.mock import PropertyMock, call, patch
+from unittest.mock import ANY, PropertyMock, call, patch
 
 import time_machine
 import pytest
@@ -36,11 +37,13 @@ from sqlmesh.core.console import create_console, get_console
 from sqlmesh.core.dialect import parse, schema_
 from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.environment import Environment, EnvironmentNamingInfo, EnvironmentStatements
+from sqlmesh.core.loader import SqlMeshLoader
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
-from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model
+from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model, update_model_schemas
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.cache import OptimizedQueryCache
+from sqlmesh.core.snapshot import SnapshotChangeCategory
 from sqlmesh.core.renderer import render_statements
 from sqlmesh.core.model.kind import ModelKindName
 from sqlmesh.core.state_sync.cache import CachingStateSync
@@ -559,6 +562,322 @@ def test_snapshot_evaluator_calls_ensure_virtual_catalog_injection(mocker):
     _ = ctx.snapshot_evaluator
 
     inject_spy.assert_called_once()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize(
+    ("virtual_catalog", "expected_catalog"),
+    [
+        (None, "__clickhouse_gw__"),
+        ("my_custom_catalog", "my_custom_catalog"),
+        ("new_catalog", "old_catalog"),
+    ],
+)
+def test_cleanup_environments_initializes_virtual_catalog_without_probing_unrelated_gateway(
+    mocker: MockerFixture,
+    make_mocked_engine_adapter: t.Callable,
+    make_snapshot: t.Callable,
+    virtual_catalog: t.Optional[str],
+    expected_catalog: str,
+):
+    """Cleanup must initialize the selected ClickHouse gateway without probing unrelated ones."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(
+        DuckDBEngineAdapter,
+        default_catalog="main",
+    )
+    clickhouse_adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog=virtual_catalog,
+    )
+    unavailable_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    unavailable_adapter.cursor.execute.side_effect = RuntimeError("unrelated gateway unavailable")
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+        "unavailable_gw": unavailable_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name=f"{expected_catalog}.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="clickhouse_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert clickhouse_adapter._default_catalog is None
+    unavailable_adapter.cursor.execute.assert_not_called()
+    clickhouse_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
+
+
+@pytest.mark.fast
+def test_cleanup_environments_does_not_leak_historical_virtual_catalog(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Historical cleanup catalogs must not mutate root or evaluator adapters."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    clickhouse_adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="new_catalog",
+    )
+    clickhouse_adapter.inject_virtual_catalog("clickhouse_gw")
+
+    context = Context(config=Config(), load=False)
+    context.selected_gateway = "duckdb_gw"
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="old_catalog.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="clickhouse_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    evaluator_before_cleanup = context.snapshot_evaluator
+    assert evaluator_before_cleanup.adapters["clickhouse_gw"]._default_catalog == "new_catalog"
+
+    assert context._cleanup_environments(name="dev") == []
+    assert clickhouse_adapter._default_catalog == "new_catalog"
+    assert evaluator_before_cleanup.adapters["clickhouse_gw"]._default_catalog == "new_catalog"
+
+    context._snapshot_evaluator = None
+    assert context.snapshot_evaluator.adapters["clickhouse_gw"]._default_catalog == "new_catalog"
+
+
+@pytest.mark.fast
+def test_cleanup_environments_supports_legacy_virtual_catalog_adapter(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup must support opt-in adapters whose injection override accepts only a gateway."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    class LegacyVirtualCatalogAdapter(ClickhouseEngineAdapter):
+        def inject_virtual_catalog(self, gateway: str) -> None:
+            self._default_catalog = f"__{gateway}__"
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    legacy_adapter = make_mocked_engine_adapter(LegacyVirtualCatalogAdapter)
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "legacy_gw": legacy_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="old_catalog.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="legacy_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert legacy_adapter._default_catalog is None
+    legacy_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
+
+
+@pytest.mark.fast
+def test_cleanup_environments_initializes_scoped_third_party_adapter(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup clones must run the virtual-catalog hook before restoring persisted state."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    class StatefulVirtualCatalogAdapter(ClickhouseEngineAdapter):
+        def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
+            self.virtual_catalog_enabled = False
+            super().__init__(*args, **kwargs)
+
+        @property
+        def catalog_support(self) -> CatalogSupport:
+            return (
+                CatalogSupport.SINGLE_CATALOG_ONLY
+                if self.virtual_catalog_enabled
+                else CatalogSupport.UNSUPPORTED
+            )
+
+        def supports_virtual_catalog(self) -> bool:
+            return True
+
+        def inject_virtual_catalog(self, gateway: str) -> None:
+            self.virtual_catalog_enabled = True
+            self._default_catalog = f"__{gateway}__"
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    stateful_adapter = make_mocked_engine_adapter(StatefulVirtualCatalogAdapter)
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "stateful_gw": stateful_adapter,
+    }
+
+    snapshot = make_snapshot(
+        SqlModel(
+            name="old_catalog.my_db.connection_test",
+            query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+            gateway="stateful_gw",
+            dialect="clickhouse",
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=[snapshot.table_info],
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    assert context._cleanup_environments(name="dev") == []
+    assert stateful_adapter.virtual_catalog_enabled is False
+    assert stateful_adapter._default_catalog is None
+    stateful_adapter.cursor.execute.assert_called_once_with(
+        'DROP VIEW IF EXISTS "my_db"."connection_test__dev"'
+    )
+
+
+@pytest.mark.fast
+def test_cleanup_environments_rejects_ambiguous_persisted_virtual_catalogs(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable, make_snapshot: t.Callable
+):
+    """Cleanup must not partially drop views when one gateway has multiple persisted catalogs."""
+    from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
+
+    duck_adapter = make_mocked_engine_adapter(DuckDBEngineAdapter, default_catalog="main")
+    clickhouse_adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="old_catalog",
+    )
+
+    context = Context(config=Config(), load=False)
+    context._engine_adapter = duck_adapter
+    context.engine_adapters = {
+        "duckdb_gw": duck_adapter,
+        "clickhouse_gw": clickhouse_adapter,
+    }
+
+    snapshots = []
+    for catalog, model_name in (("old_catalog", "one"), ("other_catalog", "two")):
+        snapshot = make_snapshot(
+            SqlModel(
+                name=f"{catalog}.my_db.{model_name}",
+                query=parse_one("SELECT 1 AS id", dialect="clickhouse"),
+                gateway="clickhouse_gw",
+                dialect="clickhouse",
+            )
+        )
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots.append(snapshot.table_info)
+
+    environment = Environment(
+        name="dev",
+        suffix_target=EnvironmentSuffixTarget.TABLE,
+        snapshots=snapshots,
+        start_at="2024-01-01",
+        end_at="2024-01-01",
+        plan_id="test_plan_id",
+        previous_plan_id="test_plan_id",
+        gateway_managed=True,
+    )
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_expired_environments.return_value = [mocker.Mock(name="dev")]
+    state_sync.get_expired_environments.return_value[0].name = "dev"
+    state_sync.get_environment.return_value = environment
+    context._state_sync = state_sync
+
+    failures = context._cleanup_environments(name="dev")
+
+    assert len(failures) == 1
+    assert "multiple virtual catalogs" in failures[0]
+    assert clickhouse_adapter._default_catalog is None
+    clickhouse_adapter.cursor.execute.assert_not_called()
+    state_sync.delete_expired_environments.assert_not_called()
 
 
 @pytest.mark.fast
@@ -1609,6 +1928,40 @@ def test_invalidate_environment_no_sync_skips_cleanup(sushi_context, mocker: Moc
 
     state_sync_mock.invalidate_environment.assert_called_once_with("dev")
     state_sync_mock.delete_expired_environments.assert_not_called()
+
+
+def test_invalidate_environment_nonexistent_raises(sushi_context, mocker: MockerFixture) -> None:
+    """Invalidating an environment that does not exist should error instead of
+    reporting success, so a mistyped name is caught rather than silently accepted."""
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_environment.return_value = None
+
+    with pytest.raises(SQLMeshError, match="Environment 'doesnotexist' was not found"):
+        sushi_context.invalidate_environment("doesnotexist", must_exist=True)
+
+    state_sync_mock.invalidate_environment.assert_not_called()
+
+
+def test_invalidate_environment_nonexistent_is_a_noop_by_default(
+    sushi_context, mocker: MockerFixture
+) -> None:
+    """Without must_exist, invalidating a missing environment stays a no-op.
+
+    Internal callers depend on this. `GithubController.try_invalidate_pr_environment`
+    invalidates the PR environment after a prod deploy, and that environment may never
+    have been created — a forward-only deploy, for instance. Raising there turns a
+    routine cleanup into a failed deploy.
+    """
+    state_sync_mock = mocker.patch.object(
+        type(sushi_context), "state_sync", new_callable=mocker.PropertyMock
+    ).return_value
+    state_sync_mock.get_environment.return_value = None
+
+    sushi_context.invalidate_environment("doesnotexist")
+
+    state_sync_mock.invalidate_environment.assert_called_once_with("doesnotexist")
 
 
 @pytest.mark.slow
@@ -2937,6 +3290,189 @@ def test_model_linting(tmp_path: pathlib.Path, sushi_context) -> None:
             sushi_context.plan(environment="dev", auto_apply=True, no_prompts=True)
 
 
+def test_lint_models_scoped_schema_resolution(tmp_path: pathlib.Path) -> None:
+    def create_context() -> Context:
+        return Context(
+            config=Config(
+                model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+                linter=LinterConfig(enabled=True, rules=["noselectstar"]),
+            ),
+            paths=tmp_path,
+            load=False,
+        )
+
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a); SELECT 1 AS col FROM raw.unregistered_source;",
+    )
+    create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT * FROM b;")
+    create_temp_file(tmp_path, pathlib.Path("models", "d.sql"), "MODEL(name d); SELECT 2 AS col;")
+
+    # Case: Without the opt-in, linting a specific model preserves the full-load behavior.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        violations = ctx.lint_models(["b"])
+
+    assert violations == []
+    assert schemas_mock.call_count == 1
+    assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+    # Case: The project-index opt-in scopes schema resolution to the target and its
+    # upstream dependencies. The initial full file load also creates the index.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        violations = ctx.lint_models(["b"], use_project_index=True)
+
+    assert violations == []
+    assert schemas_mock.call_count == 1
+    updated_models = schemas_mock.call_args.kwargs["models"]
+    assert set(updated_models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+    # Case: Once a full load has populated the model index, an edited target still
+    # loads only its file and upstream dependencies. If the edit introduces a new
+    # dependency outside this set, Context.load safely retries with a full load.
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col + 1 AS col FROM a;",
+    )
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert ctx.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_count == 1
+    selected_paths = load_sql_models_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(ctx.models) == {
+        ctx.get_model("a", raise_if_missing=True).fqn,
+        ctx.get_model("b", raise_if_missing=True).fqn,
+    }
+
+    # Case: A newly introduced dependency that is known to the index triggers a safe
+    # full reload instead of leaving the context incomplete.
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col FROM d;",
+    )
+    ctx = create_context()
+    loader = t.cast(SqlMeshLoader, ctx._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert ctx.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_count == 2
+    assert set(ctx.models) == {
+        ctx.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b", "c", "d")
+    }
+
+    # Case: Violations are still detected when linting specific models.
+    with pytest.raises(
+        LinterError, match="Linter detected errors in the code. Please fix them before proceeding."
+    ):
+        create_context().lint_models(["c"], use_project_index=True)
+
+    # Case: Linting without a model selection triggers a full load and lints every model.
+    ctx = create_context()
+    with patch(
+        "sqlmesh.core.context.update_model_schemas", wraps=update_model_schemas
+    ) as schemas_mock:
+        with pytest.raises(
+            LinterError,
+            match="Linter detected errors in the code. Please fix them before proceeding.",
+        ):
+            ctx.lint_models()
+
+    assert schemas_mock.call_count == 1
+    assert set(schemas_mock.call_args.kwargs["models"]) == set(ctx.models)
+
+
+def test_lint_models_project_index_reloads_loaded_context(tmp_path: pathlib.Path) -> None:
+    create_temp_file(tmp_path, pathlib.Path("models", "a.sql"), "MODEL(name a); SELECT 1 AS col;")
+    create_temp_file(tmp_path, pathlib.Path("models", "b.sql"), "MODEL(name b); SELECT col FROM a;")
+    create_temp_file(tmp_path, pathlib.Path("models", "c.sql"), "MODEL(name c); SELECT 2 AS col;")
+
+    context = Context(
+        config=Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            linter=LinterConfig(enabled=True, use_project_index=True),
+        ),
+        paths=tmp_path,
+    )
+    context.load(use_project_index=True)
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+
+    with patch.object(loader, "_load_sql_models", wraps=loader._load_sql_models) as load_mock:
+        assert context.lint_models(["b"]) == []
+
+    assert load_mock.call_count == 1
+    selected_paths = load_mock.call_args.kwargs["selected_paths"]
+    assert {path.name for path in selected_paths} == {"a.sql", "b.sql"}
+    assert set(context.models) == {
+        context.get_model(model_name, raise_if_missing=True).fqn for model_name in ("a", "b")
+    }
+
+
+@pytest.mark.parametrize("invalid_files_shape", ["file_list", "model_list"])
+def test_invalid_model_index_falls_back_to_full_load(
+    tmp_path: pathlib.Path, invalid_files_shape: str
+) -> None:
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "a.sql"),
+        "MODEL(name a); SELECT 1 AS col;",
+    )
+    create_temp_file(
+        tmp_path,
+        pathlib.Path("models", "b.sql"),
+        "MODEL(name b); SELECT col FROM a;",
+    )
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+
+    indexed_context = Context(config=config, paths=tmp_path, load=False)
+    indexed_context.load(use_project_index=True)
+    indexed_loader = t.cast(SqlMeshLoader, indexed_context._loaders[0])
+    index = json.loads(indexed_loader._model_index_path.read_text(encoding="utf-8"))
+    if invalid_files_shape == "file_list":
+        index["files"] = list(index["files"])
+    else:
+        relative_path = next(iter(index["files"]))
+        index["files"][relative_path] = []
+    indexed_loader._model_index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    context = Context(config=config, paths=tmp_path, load=False)
+    loader = t.cast(SqlMeshLoader, context._loaders[0])
+    with patch.object(
+        loader,
+        "_load_sql_models",
+        wraps=loader._load_sql_models,
+    ) as load_sql_models_mock:
+        assert context.lint_models(["b"], use_project_index=True) == []
+
+    assert load_sql_models_mock.call_args.kwargs["selected_paths"] is None
+    assert set(context.models) == {
+        context.get_model("a", raise_if_missing=True).fqn,
+        context.get_model("b", raise_if_missing=True).fqn,
+    }
+
+
 def test_plan_selector_expression_no_match(sushi_context: Context) -> None:
     with pytest.raises(
         PlanError,
@@ -3252,11 +3788,19 @@ def test_prompt_if_uncategorized_snapshot(mocker: MockerFixture, tmp_path: Path)
     assert context.config.plan.no_prompts == True
 
 
+def test_plan_skip_tests_and_test_changed_only(sushi_context: Context) -> None:
+    with pytest.raises(
+        PlanError,
+        match="Cannot combine --skip-tests with --test-changed-only.",
+    ):
+        sushi_context.plan("dev", skip_tests=True, test_changed_only=True, no_prompts=True)
+
+
 def test_plan_explain_skips_tests(sushi_context: Context, mocker: MockerFixture) -> None:
     sushi_context.console = TerminalConsole()
     spy = mocker.spy(sushi_context, "_run_plan_tests")
     sushi_context.plan(environment="dev", explain=True, no_prompts=True, include_unmodified=True)
-    spy.assert_called_once_with(skip_tests=True)
+    spy.assert_called_once_with(skip_tests=True, test_changed_only=False, model_names=ANY)
 
 
 def test_dev_environment_virtual_update_with_environment_statements(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ Initial TSC voting members are the project's Maintainers:
 |---------------------|---------------|----------------|------------| 
 | Alexander Butler    | z3z1ma        | Harness        | TSC Member |
 | Alexander Filipchik | afilipchik    | Cloud Kitchens | TSC Member |
-| Reid Hooper         | rhooper9711   | Benzinga       | TSC Member |
+| Cortland Goffena    | cmgoffena13   | Benzinga       | TSC Member |
 | Yuki Kakegawa       | StuffbyYuki   | Jump.ai        | TSC Member |
 | Toby Mao            | tobymao       | Fivetran       | TSC Chair  |
 | Alex Wilde          | alexminerv    | Minerva        | TSC Member |
@@ -65,9 +65,11 @@ See [docs/development.md](docs/development.md) for full setup instructions. Key 
 python -m venv .venv
 source .venv/bin/activate
 make install-dev
-make style    # Run before submitting
+make style     # Run before submitting
 make fast-test # Quick test suite
 ```
+
+Optionally, `make install-pre-commit` installs git hooks so ruff and mypy run on `git commit`. Hooks do not replace `make style`: they run on staged files, while CI runs `make style` across the tree.
 
 ## Coding Standards
 

@@ -1,4 +1,6 @@
 import typing as t
+from unittest import mock
+
 import pytest
 from pathlib import Path
 from sqlglot import exp
@@ -441,7 +443,7 @@ def test_table_diff_table_name_matches_column_name(ctx: TestContext):
     assert row_diff.full_match_count == 1
 
 
-def test_correlation_id_in_job_labels(ctx: TestContext):
+def test_plan_correlation_id_in_job_labels(ctx: TestContext):
     model_name = ctx.table("test")
 
     sqlmesh = ctx.create_context()
@@ -468,4 +470,52 @@ def test_correlation_id_in_job_labels(ctx: TestContext):
     # Case 2: Ensure that the correlation id is set in the job labels
     labels = adapter._job_params.get("labels")
     correlation_id = CorrelationId.from_plan_id(plan.plan_id)
+    assert labels == {correlation_id.job_type.value.lower(): correlation_id.job_id}
+
+
+def test_run_correlation_id_in_job_labels(ctx: TestContext):
+    run_id = "test_run_id"
+    model_name = ctx.table("run_test")
+
+    sqlmesh = ctx.create_context()
+    sqlmesh.upsert_model(
+        load_sql_based_model(
+            d.parse(
+                f"""
+MODEL (
+    name {model_name},
+    kind INCREMENTAL_BY_TIME_RANGE (
+        time_column event_ts
+    ),
+    cron '@daily',
+    start '2023-01-07'
+);
+SELECT 1 AS col, CAST('2023-01-07' AS DATE) AS event_ts
+"""
+            )
+        )
+    )
+    sqlmesh.plan(auto_apply=True, no_prompts=True, execution_time="2023-01-08 15:00:00")
+
+    captured_evaluators: t.List = []
+    original_scheduler = sqlmesh.scheduler
+
+    def scheduler_wrapper(
+        environment: t.Optional[str] = None,
+        snapshot_evaluator: t.Optional[t.Any] = None,
+    ):
+        if snapshot_evaluator is not None:
+            captured_evaluators.append(snapshot_evaluator)
+        return original_scheduler(environment=environment, snapshot_evaluator=snapshot_evaluator)
+
+    with mock.patch("sqlmesh.core.context.analytics.collector.on_run_start", return_value=run_id):
+        with mock.patch.object(sqlmesh, "scheduler", scheduler_wrapper):
+            sqlmesh.run(execution_time="2023-01-09 00:00:00")
+
+    assert captured_evaluators
+    adapter = t.cast(BigQueryEngineAdapter, captured_evaluators[-1].adapter)
+
+    assert adapter.correlation_id is not None
+    labels = adapter._job_params.get("labels")
+    correlation_id = CorrelationId.from_run_id(run_id)
     assert labels == {correlation_id.job_type.value.lower(): correlation_id.job_id}

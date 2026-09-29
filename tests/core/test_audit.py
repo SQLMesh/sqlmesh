@@ -413,6 +413,30 @@ def test_macro(model: Model):
     assert model.render_audit_query(audit_jinja).sql() == expected_query
 
 
+def test_resolve_template(model_default_catalog: Model):
+    # @this_model is rendered as a subquery for models with a time column, but @resolve_template
+    # should still resolve to the underlying physical table
+    audit = ModelAudit(
+        name="test_audit",
+        query="SELECT * FROM @resolve_template('@{catalog_name}.@{schema_name}.@{table_name}$partitions', mode := 'table') WHERE a IS NULL",
+    )
+
+    assert (
+        model_default_catalog.render_audit_query(audit).sql()
+        == """SELECT * FROM "test_catalog"."db"."test_model$partitions" AS "test_model$partitions" WHERE "a" IS NULL"""
+    )
+
+    literal_audit = ModelAudit(
+        name="test_audit",
+        query="SELECT @resolve_template('s3://bucket/@{catalog_name}/@{schema_name}/@{table_name}') AS path FROM @this_model",
+    )
+
+    assert (
+        model_default_catalog.render_audit_query(literal_audit).sql()
+        == """SELECT 's3://bucket/test_catalog/db/test_model' AS "path" FROM (SELECT * FROM "test_catalog"."db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0\""""
+    )
+
+
 def test_load_with_defaults(model, assert_exp_eq):
     expressions = parse(
         """

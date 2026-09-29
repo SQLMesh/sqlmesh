@@ -158,7 +158,38 @@ AUDIT (name price_is_not_null);
 SELECT * FROM @this_model
 WHERE price IS NULL;
 ```
+### Standalone audits
 
+Standalone audits are defined independently rather than being attached to a specific model. They specify the models they depend on using the `depends_on` property.
+
+Unlike model-level audits, standalone audits can be used to validate data across one or more models without being associated with a single model.
+
+Standalone audits run as scheduled nodes during both `sqlmesh plan` and `sqlmesh run`.
+
+```sql linenums="1"
+AUDIT (
+  name assert_item_price_is_not_null,
+  dialect spark,
+  standalone TRUE,
+  depends_on (
+    sushi.items
+  )
+);
+
+SELECT *
+FROM sushi.items
+WHERE
+  ds BETWEEN @start_ds AND @end_ds
+  AND price IS NULL;
+```
+
+In this example, the audit checks that the `price` column in `sushi.items` does not contain `NULL` values for the selected date range.
+
+Standalone audits can declare dependencies using the `depends_on` property. SQLMesh can often infer dependencies directly from the audit query, but using `depends_on` is recommended when inference isn't sufficient.
+
+!!! note
+
+    Standalone audits are non-blocking only. Because they are not associated with a single model, SQLMesh cannot determine which model should be blocked if the audit fails.
 ## Built-in audits
 SQLMesh comes with a suite of built-in generic audits that cover a broad set of common use cases. Built-in audits are blocking by default, but they all have non-blocking counterparts which you can use by appending `_non_blocking` - see [Non-blocking audits](#non-blocking-audits).
 
