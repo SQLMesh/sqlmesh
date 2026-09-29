@@ -39,7 +39,7 @@ Therefore, it is not recommended to issue migrations from CI/CD pipelines.
 
 ## Rolling back a migration
 
-Before `sqlmesh migrate` changes the project metadata, it copies each state table to a backup table with a `_backup` suffix. The `sqlmesh rollback` command restores the metadata from those backups, returning it to the format used by the SQLMesh version that was installed before the migration. If a migration fails partway through, SQLMesh rolls it back automatically.
+When `sqlmesh migrate` needs to change the project metadata, it first copies each state table to a backup table with a `_backup` suffix, unless `--skip-backup` is passed. The `sqlmesh rollback` command restores the metadata from those backups, returning it to the format used by the SQLMesh version that was installed before the migration. If a migration fails partway through, SQLMesh rolls it back automatically from the same backups.
 
 To undo a migration:
 
