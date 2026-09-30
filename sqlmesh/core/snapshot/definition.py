@@ -1280,10 +1280,11 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
         auto_restatement_end_ts = to_timestamp(
             self.node.interval_unit.cron_floor(execution_time_ts)
         )
-        auto_restatement_start_ts = (
-            auto_restatement_end_ts
-            - num_intervals_to_restate * self.node.interval_unit.milliseconds
-        )
+        # Step back one interval at a time, since intervals like months don't have a fixed length
+        croniter = self.node.interval_unit.croniter(auto_restatement_end_ts)
+        auto_restatement_start_ts = auto_restatement_end_ts
+        for _ in range(num_intervals_to_restate):
+            auto_restatement_start_ts = to_timestamp(croniter.get_prev(estimate=True))
         return (auto_restatement_start_ts, auto_restatement_end_ts)
 
     def update_next_auto_restatement_ts(self, execution_time: TimeLike) -> t.Optional[int]:
