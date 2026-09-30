@@ -1,15 +1,13 @@
 # Managed models
-Unlike normal tables where the user is responsible for managing the data within the table, some database engines have a concept of a table where the engine itself ensures that the data within the table is up to date. These tables are typically based on a query that reads from other tables within the database. Each time these other tables are updated, the database will ensure that the managed table reflects the changes without the user having to do anything special (such as issue a `REFRESH` command).
+Some database engines support tables whose data is kept up to date by the engine itself, rather than by the user. These tables are typically defined by a query that reads from other tables in the database. When the source tables are updated, the engine automatically updates the managed table to reflect the changes, without requiring the user to issue a `REFRESH` command.
 
-Under the hood, each supported database engine achieves this in a slightly different way but most of them have background processes that run and automatically keep the tables up to date, within the parameters you define when you create the table.
+Each supported database engine handles these updates differently, but most use background processes to keep the tables up to date according to the parameters you specify when creating the table.
 
-For supported engines, we expose this functionality through Managed models. This indicates to SQLMesh that the underlying database engine will ensure that the data remains up to date and all SQLMesh needs to do is maintain the schema.
-
-Due to this, managed models would typically be built off an [External Model](./external_models.md) rather than another SQLMesh model. Since SQLMesh already ensures that models it's tracking are kept up to date, the main benefit of managed models comes when they read from external tables that arent tracked by SQLMesh.
+SQLMesh exposes this functionality through managed models for supported engines. Setting a model's kind to `MANAGED` tells SQLMesh that the database engine is responsible for keeping the data up to date and that SQLMesh only needs to maintain the schema. Managed models are therefore typically built on an [external model](./external_models.md) rather than another SQLMesh model.
 
 !!! warning "Not supported in Python models"
 
-    Python models do not support the `MANAGED` [model kind](./model_kinds.md) - use a SQL model isntead.
+  Python models do not support the `MANAGED` [model kind](./model_kinds.md). Use a SQL model instead.
 
 ## Difference from materialized views
 The difference between an Managed model and a materialized view is down to semantics and in some engines there is no difference.
