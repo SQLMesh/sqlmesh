@@ -1,11 +1,12 @@
 # Auditing
-Audits are one of the tools SQLMesh provides to validate your models. Along with [tests](tests.md), they are a great way to ensure the quality of your data and to build trust in it across your organization.
 
-Unlike tests, audits are used to validate the output of a model after every run. When you apply a [plan](./plans.md), SQLMesh will automatically run each model's audits.
+Audits validate model outputs against predefined data quality expectations. Along with [tests](tests.md), they help ensure data quality and build trust in your data across your organization.
 
-By default, SQLMesh will halt plan application when an audit fails so potentially invalid data does not propagate further downstream. This behavior can be changed for individual audits - refer to [Non-blocking audits](#non-blocking-audits).
+Unlike tests, which verify a model's transformation logic using predefined inputs and expected outputs, audits check that the model's actual output data meets the specified quality criteria.
 
-A comprehensive suite of audits can identify data issues upstream, whether they are from your vendors or other teams. Audits also empower your data engineers and analysts to work with confidence by catching problems early as they work on new features or make updates to your models.
+When you apply a [plan](./plans.md), SQLMesh automatically runs each model's audits. By default, SQLMesh halts plan application when an audit fails so potentially invalid data does not propagate further downstream. This behavior can be changed for individual audits; refer to [Non-blocking audits](#non-blocking-audits).
+
+A comprehensive suite of audits can identify data issues upstream, whether they originate with vendors or other teams. Audits also empower your data practitioners to work with confidence by catching data quality issues early as they work on new features or make updates to your models.
 
 **NOTE**: For incremental by time range models, audits are only applied to intervals being processed - not for the entire underlying table.
 
