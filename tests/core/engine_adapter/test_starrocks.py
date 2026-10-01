@@ -2180,6 +2180,96 @@ class TestExcludedTablesResolution:
         calls = to_sql_calls(adapter)
         return calls[-1]
 
+    @pytest.mark.parametrize("key", ["excluded_trigger_tables", "excluded_refresh_tables"])
+    @pytest.mark.parametrize("deployable", [True, False])
+    @pytest.mark.parametrize(
+        "value, refs",
+        [
+            ("starrocks.upstream", ["managed"]),
+            ("'starrocks.upstream'", ["managed"]),
+            ("' starrocks.upstream, ,external.raw, '", ["managed", "external.raw"]),
+            ("(starrocks.upstream, external.raw)", ["managed", "external.raw"]),
+            ("('starrocks.upstream', 'external.raw')", ["managed", "external.raw"]),
+            ("(starrocks.upstream, 'external.raw')", ["managed", "external.raw"]),
+            ("[starrocks.upstream, external.raw]", ["managed", "external.raw"]),
+            ("['starrocks.upstream', 'external.raw']", ["managed", "external.raw"]),
+            ("[starrocks.upstream, 'external.raw']", ["managed", "external.raw"]),
+            (
+                "['external.raw', starrocks.upstream, 'starrocks.upstream']",
+                ["external.raw", "managed", "managed"],
+            ),
+            ("[' ', starrocks.upstream, '']", ["managed"]),
+            ("('', ' ')", []),
+            ("[]", []),
+            ("[starrocks.upstream]", ["managed"]),
+            ("['starrocks.upstream']", ["managed"]),
+            ("''", []),
+        ],
+    )
+    def test_reference_syntax(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., EngineAdapter],
+        key: str,
+        deployable: bool,
+        value: str,
+        refs: t.List[str],
+    ) -> None:
+        snapshot = self._make_snapshot(
+            _load_sql_model(
+                "MODEL (name starrocks.upstream, kind FULL, dialect starrocks); SELECT 1 AS a"
+            )
+        )
+        model = _load_sql_model(
+            f"""
+            MODEL (
+                name starrocks.mv,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    {key} = {value},
+                    untouched = ('x', 'y')
+                )
+            );
+            SELECT a FROM starrocks.upstream;
+            """
+        )
+        original = {k: v.copy() for k, v in model.physical_properties.items()}
+        snapshots = {snapshot.name: snapshot}
+        index = (
+            DeployabilityIndex.all_deployable()
+            if deployable
+            else DeployabilityIndex.none_deployable()
+        )
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        rendered = model.render_physical_properties(
+            snapshots=snapshots, engine_adapter=adapter, deployability_index=index
+        )
+        physical = exp.table_name(
+            exp.to_table(snapshot.table_name(is_deployable=deployable)), identify=False
+        )
+        expected = ",".join(physical if ref == "managed" else ref for ref in refs)
+        assert rendered[key] == exp.Literal.string(expected)
+        assert rendered["untouched"] == original["untouched"]
+        assert model.physical_properties == original
+
+        # Adapters without opted-in property keys keep the original values.
+        assert model.render_physical_properties(
+            snapshots=snapshots,
+            engine_adapter=make_mocked_engine_adapter(DuckDBEngineAdapter),
+            deployability_index=index,
+        ) == model.render_physical_properties(snapshots=snapshots, deployability_index=index)
+
+        adapter.create_view(
+            model.name,
+            model.render_query(),
+            replace=False,
+            materialized=True,
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+            view_properties=rendered,
+        )
+        assert f"'{key}'='{expected}'" in to_sql_calls(adapter)[-1]
+
     def test_single_managed_model_ref_is_resolved_to_physical_name(
         self,
         make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
