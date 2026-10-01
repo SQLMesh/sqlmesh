@@ -21,6 +21,8 @@ class PlanConfig(BaseConfig):
         use_finalized_state: Whether to compare against the latest finalized environment state, or to use
             whatever state the target environment is currently in.
         always_recreate_environment: Whether to always recreate the target environment from the `create_from` environment.
+        use_project_index: Whether to use the persistent project index and related planning
+            optimizations.
     """
 
     forward_only: bool = False
@@ -32,3 +34,4 @@ class PlanConfig(BaseConfig):
     auto_apply: bool = False
     use_finalized_state: bool = False
     always_recreate_environment: bool = False
+    use_project_index: bool = False

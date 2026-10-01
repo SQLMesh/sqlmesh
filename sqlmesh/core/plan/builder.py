@@ -98,6 +98,8 @@ class PlanBuilder:
         end_override_per_model: A mapping of model FQNs to target end dates.
         ignore_cron: Whether to ignore the node's cron schedule when computing missing intervals.
         explain: Whether to explain the plan instead of applying it.
+        scope_to_changed_lineage: Whether to scope plan graph work to changed or selected
+            model lineage without changing the resulting plan.
     """
 
     def __init__(
@@ -138,6 +140,7 @@ class PlanBuilder:
         console: t.Optional[PlanBuilderConsole] = None,
         user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None,
         selected_models: t.Optional[t.Set[str]] = None,
+        scope_to_changed_lineage: bool = False,
     ):
         self._context_diff = context_diff
         self._no_gaps = no_gaps
@@ -183,6 +186,7 @@ class PlanBuilder:
         self._choices: t.Dict[SnapshotId, SnapshotChangeCategory] = {}
         self._user_provided_flags = user_provided_flags
         self._selected_models = selected_models
+        self._scope_to_changed_lineage = scope_to_changed_lineage
         self._explain = explain
 
         self._start = start
@@ -380,9 +384,65 @@ class PlanBuilder:
         return plan
 
     def _build_dag(self) -> DAG[SnapshotId]:
+        snapshots = self._context_diff.snapshots
+        if not self._scope_to_changed_lineage or self._restate_all_snapshots:
+            relevant_snapshot_ids = set(snapshots)
+        else:
+            model_fqn_to_snapshot_id = {
+                snapshot.name: snapshot_id for snapshot_id, snapshot in snapshots.items()
+            }
+            relevant_snapshot_ids = {
+                *self._context_diff.added,
+                *self._context_diff.new_snapshots,
+                *(new.snapshot_id for new, _ in self._context_diff.modified_snapshots.values()),
+            }
+
+            selected_model_names = {
+                *(self._restate_models or set()),
+                *(self._backfill_models or set()),
+                *(self._selected_models or set()),
+            }
+            relevant_snapshot_ids.update(
+                model_fqn_to_snapshot_id[name]
+                for name in selected_model_names
+                if name in model_fqn_to_snapshot_id
+            )
+
+            children: t.Dict[SnapshotId, t.Set[SnapshotId]] = defaultdict(set)
+            for s_id, snapshot in snapshots.items():
+                for parent_id in snapshot.parents:
+                    if parent_id in snapshots:
+                        children[parent_id].add(s_id)
+
+            root_snapshot_ids = relevant_snapshot_ids.copy()
+            upstream_stack = list(relevant_snapshot_ids)
+            while upstream_stack:
+                s_id = upstream_stack.pop()
+                for parent_id in snapshots[s_id].parents:
+                    if parent_id in snapshots and parent_id not in relevant_snapshot_ids:
+                        relevant_snapshot_ids.add(parent_id)
+                        upstream_stack.append(parent_id)
+
+            downstream_snapshot_ids = root_snapshot_ids.copy()
+            downstream_stack = list(root_snapshot_ids)
+            while downstream_stack:
+                s_id = downstream_stack.pop()
+                for child_id in children.get(s_id, set()) - downstream_snapshot_ids:
+                    downstream_snapshot_ids.add(child_id)
+                    relevant_snapshot_ids.add(child_id)
+                    downstream_stack.append(child_id)
+
         dag: DAG[SnapshotId] = DAG()
-        for s_id, context_snapshot in self._context_diff.snapshots.items():
-            dag.add(s_id, context_snapshot.parents)
+        for s_id in relevant_snapshot_ids:
+            context_snapshot = snapshots[s_id]
+            dag.add(
+                s_id,
+                (
+                    parent_id
+                    for parent_id in context_snapshot.parents
+                    if parent_id in relevant_snapshot_ids
+                ),
+            )
         return dag
 
     def _build_restatements(
