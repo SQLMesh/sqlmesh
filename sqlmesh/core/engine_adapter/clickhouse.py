@@ -538,7 +538,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     ) -> None:
         """Creates a table in the database.
 
-        Clickhouse Cloud requires doing CTAS in two steps.
+        ClickHouse Cloud and cluster modes require doing CTAS in two steps.
 
         First, we add the `EMPTY` property to the CTAS call to create a table with the proper
         schema, then insert the data with the CTAS query.
@@ -569,16 +569,19 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             table_description,
             column_descriptions,
             table_kind,
-            empty_ctas=(self.engine_run_mode.is_cloud and expression is not None),
+            empty_ctas=(
+                (self.engine_run_mode.is_cloud or self.engine_run_mode.is_cluster)
+                and expression is not None
+            ),
             track_rows_processed=track_rows_processed,
             **kwargs,
         )
 
-        # execute the second INSERT step if on cloud and creating a table
+        # execute the second INSERT step if on cloud or cluster and creating a table
         # - Additional clause is to avoid clickhouse-connect HTTP client bug where CTAS LIMIT 0
         #     returns a success code but malformed response
         if (
-            self.engine_run_mode.is_cloud
+            (self.engine_run_mode.is_cloud or self.engine_run_mode.is_cluster)
             and table_kind != "VIEW"
             and expression
             and not (
