@@ -55,7 +55,7 @@ export const createVirtualEnvironment = async (
   venvDir: string,
 ): Promise<PythonEnvironment> => {
   // Try to use uv first, fallback to python -m venv
-  const { exitCode, stderr } = await execAsync(`uv venv "${venvDir}"`)
+  const { exitCode, stderr } = await execAsync('uv', ['venv', venvDir])
   if (exitCode !== 0) {
     throw new Error(`Failed to create venv with uv: ${stderr}`)
   }
@@ -81,9 +81,13 @@ export const pipInstall = async (
   pythonDetails: PythonEnvironment,
   packagePaths: string[],
 ): Promise<void> => {
-  const packages = packagePaths.map(pkg => `-e "${pkg}"`).join(' ')
-  const execString = `uv pip install --python "${pythonDetails.pythonPath}" ${packages}`
-  const { stderr, exitCode } = await execAsync(execString)
+  const { stderr, exitCode } = await execAsync('uv', [
+    'pip',
+    'install',
+    '--python',
+    pythonDetails.pythonPath,
+    ...packagePaths.flatMap(pkg => ['-e', pkg]),
+  ])
   if (exitCode !== 0) {
     throw new Error(`Failed to install package with uv: ${stderr}`)
   }
