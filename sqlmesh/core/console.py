@@ -407,6 +407,20 @@ class Console(
 
     INDIRECTLY_MODIFIED_DISPLAY_THRESHOLD = 10
 
+    def get_execution_observer(
+        self,
+    ) -> t.Optional[
+        t.Callable[
+            [t.Literal["start", "finish"], t.Mapping[str, t.Any], t.Optional[BaseException]], None
+        ]
+    ]:
+        """Optional start/finish hook receiving native facts and original errors.
+
+        May run concurrently. No IDs, clocks or product status are supplied.
+        Implementations must return promptly; ordinary hook errors are isolated.
+        """
+        return None
+
     @abc.abstractmethod
     def start_plan_evaluation(self, plan: EvaluatablePlan) -> None:
         """Indicates that a new evaluation has begun."""
