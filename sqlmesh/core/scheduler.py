@@ -930,6 +930,20 @@ class Scheduler:
             else:
                 audit_errors_to_warn.append(error)
 
+        model = snapshot.model_or_none
+        model_name = model.name if model else None
+        for audit_result in audit_results:
+            if audit_result.skipped or audit_result.count:
+                continue
+            audit_name = audit_result.audit.name
+            self.notification_target_manager.notify(
+                NotificationEvent.AUDIT_PASS, audit_name, model_name
+            )
+            if is_deployable and snapshot.node.owner:
+                self.notification_target_manager.notify_user(
+                    NotificationEvent.AUDIT_PASS, snapshot.node.owner, audit_name, model_name
+                )
+
         if audit_errors_to_raise:
             raise NodeAuditsErrors(audit_errors_to_raise)
 
