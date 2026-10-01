@@ -2314,6 +2314,38 @@ def start_date(
     return earliest
 
 
+def missing_intervals_for_no_gaps(
+    target_snapshots: t.Iterable[Snapshot],
+    previous_snapshots: t.Iterable[Snapshot],
+    snapshot_names: t.Optional[t.Set[str]] = None,
+) -> t.Dict[Snapshot, Intervals]:
+    """Find intervals target snapshots need to reach the previous snapshots' frontiers."""
+    target_snapshots_by_name = {snapshot.name: snapshot for snapshot in target_snapshots}
+    cache: t.Dict[str, datetime] = {}
+    missing_intervals_by_snapshot: t.Dict[Snapshot, Intervals] = {}
+
+    for previous_snapshot in previous_snapshots:
+        target_snapshot = target_snapshots_by_name.get(previous_snapshot.name)
+        if (
+            target_snapshot is None
+            or target_snapshot.version == previous_snapshot.version
+            or (snapshot_names is not None and previous_snapshot.name not in snapshot_names)
+            or not target_snapshot.is_incremental
+            or not previous_snapshot.is_incremental
+            or not previous_snapshot.intervals
+        ):
+            continue
+
+        start = to_timestamp(start_date(target_snapshot, target_snapshots_by_name.values(), cache))
+        end = previous_snapshot.intervals[-1][1]
+        if start < end:
+            missing_intervals = target_snapshot.missing_intervals(start, end, end_bounded=True)
+            if missing_intervals:
+                missing_intervals_by_snapshot[target_snapshot] = missing_intervals
+
+    return missing_intervals_by_snapshot
+
+
 def snapshots_to_dag(snapshots: t.Collection[Snapshot]) -> DAG[SnapshotId]:
     dag: DAG[SnapshotId] = DAG()
     for snapshot in snapshots:
