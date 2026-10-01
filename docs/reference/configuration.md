@@ -264,13 +264,15 @@ If a configuration contains multiple gateways, SQLMesh will use the first one in
 
 ### Default connections/scheduler
 
-The `default_connection`, `default_test_connection`, and `default_scheduler` keys are used to specify shared defaults across multiple gateways.
+The `default_connection`, `default_test_connection`, and `default_scheduler` keys specify a connection or scheduler for gateways that do not define their own.
 
 For example, you might have a specific connection where your tests should run regardless of which gateway is being used. Instead of duplicating the test connection information in each gateway specification, specify it once in the `default_test_connection` key.
 
+A default is only used when a gateway omits the corresponding key entirely. If a gateway specifies its own `connection`, `test_connection`, or `scheduler`, SQLMesh uses that configuration as written and ignores the default. Fields are not merged, so a gateway connection cannot inherit individual fields such as `type` from `default_connection`.
+
 | Option                    | Description                                                                                                                                            |    Type     | Required |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | :---------: | :------: |
-| `default_connection`      | The default connection to use if one is not specified in a gateway (Default: A DuckDB connection that creates an in-memory database)                   | connection  |    N     |
+| `default_connection`      | The connection to use for any gateway that does not specify a `connection`                                                                             | connection  |    N     |
 | `default_test_connection` | The default connection to use when running tests if one is not specified in a gateway (Default: A DuckDB connection that creates an in-memory database) | connection |    N     |
 | `default_scheduler`       | The default scheduler configuration to use if one is not specified in a gateway (Default: built-in scheduler)                                          |  scheduler  |    N     |
 
