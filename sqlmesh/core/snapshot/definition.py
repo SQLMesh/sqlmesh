@@ -760,8 +760,10 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             List of target snapshots with hydrated intervals.
         """
         intervals_by_name_version = defaultdict(list)
+        intervals_by_dev_version = defaultdict(list)
         for interval in intervals:
             intervals_by_name_version[(interval.name, interval.version)].append(interval)
+            intervals_by_dev_version[(interval.name, interval.dev_version)].append(interval)
 
         result = []
         for snapshot in snapshots:
@@ -771,6 +773,17 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             for interval in snapshot_intervals:
                 snapshot.merge_intervals(interval)
 
+            for interval in intervals_by_dev_version.get((snapshot.name, snapshot.dev_version), []):
+                if interval.version != snapshot.version_get_or_generate():
+                    snapshot.merge_intervals(
+                        interval.copy(
+                            update={
+                                "intervals": [],
+                                "last_altered_ts": None,
+                                "pending_restatement_intervals": [],
+                            }
+                        )
+                    )
             result.append(snapshot)
 
         return result
@@ -1555,6 +1568,28 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
 class SnapshotTableCleanupTask(PydanticModel):
     snapshot: SnapshotTableInfo
     dev_table_only: bool
+    # Default preserves the behavior of tasks serialized before independent cleanup.
+    delete_dev_table: bool = True
+    # Physical objects and logical interval versions have different ownership.
+    # None retains the meaning of cleanup tasks persisted before these fields.
+    delete_prod_intervals: t.Optional[bool] = None
+    delete_dev_intervals: t.Optional[bool] = None
+
+    @property
+    def clears_prod_intervals(self) -> bool:
+        return (
+            not self.dev_table_only
+            if self.delete_prod_intervals is None
+            else self.delete_prod_intervals
+        )
+
+    @property
+    def clears_dev_intervals(self) -> bool:
+        return (
+            self.delete_dev_table
+            if self.delete_dev_intervals is None
+            else self.delete_dev_intervals
+        )
 
 
 SnapshotIdLike = t.Union[SnapshotId, SnapshotIdAndVersion, SnapshotTableInfo, Snapshot]
