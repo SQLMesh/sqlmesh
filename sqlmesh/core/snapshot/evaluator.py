@@ -103,7 +103,7 @@ class SnapshotCreationFailedError(SQLMeshError):
     def __init__(
         self, errors: t.List[NodeExecutionFailedError[SnapshotId]], skipped: t.List[SnapshotId]
     ):
-        messages = "\n\n".join(f"{error}\n  {error.__cause__}" for error in errors)
+        messages = "\n\n".join(str(error) for error in errors)
         super().__init__(f"Physical table creation failed:\n\n{messages}")
         self.errors = errors
         self.skipped = skipped
