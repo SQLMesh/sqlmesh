@@ -40,6 +40,7 @@ from sqlmesh.core.state_sync import StateSync
 from sqlmesh.core.plan.common import identify_restatement_intervals_across_snapshot_versions
 from sqlmesh.utils import CorrelationId
 from sqlmesh.utils.concurrency import NodeExecutionFailedError
+from sqlmesh.core.config.ownership import OwnershipConfig
 from sqlmesh.utils.errors import PlanError, ConflictingPlanError, SQLMeshError
 from sqlmesh.utils.date import now, to_timestamp
 
@@ -74,12 +75,14 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         create_scheduler: t.Callable[[t.Iterable[Snapshot], SnapshotEvaluator], Scheduler],
         default_catalog: t.Optional[str],
         console: t.Optional[Console] = None,
+        ownership_config: t.Optional[OwnershipConfig] = None,
     ):
         self.state_sync = state_sync
         self.snapshot_evaluator = snapshot_evaluator
         self.create_scheduler = create_scheduler
         self.default_catalog = default_catalog
         self.console = console or get_console()
+        self.ownership_config = ownership_config
         self._circuit_breaker: t.Optional[t.Callable[[], bool]] = None
 
     def evaluate(
@@ -172,6 +175,11 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             self.console.log_success(skip_message)
             return
 
+        physical_owner = (
+            self.ownership_config.resolve_physical_owner(self.snapshot_evaluator.adapter)
+            if self.ownership_config
+            else None
+        )
         completion_status = None
         progress_stopped = False
         try:
@@ -185,6 +193,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
                     x, plan.environment, self.default_catalog
                 ),
                 on_complete=self.console.update_creation_progress,
+                owner=physical_owner,
             )
             if completion_status.is_nothing_to_do:
                 self.console.log_success(skip_message)
@@ -209,9 +218,14 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def visit_physical_layer_schema_creation_stage(
         self, stage: stages.PhysicalLayerSchemaCreationStage, plan: EvaluatablePlan
     ) -> None:
+        physical_owner = (
+            self.ownership_config.resolve_physical_owner(self.snapshot_evaluator.adapter)
+            if self.ownership_config
+            else None
+        )
         try:
             self.snapshot_evaluator.create_physical_schemas(
-                stage.snapshots, stage.deployability_index
+                stage.snapshots, stage.deployability_index, owner=physical_owner
             )
         except Exception as ex:
             raise PlanError("Plan application failed.") from ex
@@ -434,6 +448,11 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         deployability_index: t.Optional[DeployabilityIndex] = None,
         on_complete: t.Optional[t.Callable[[SnapshotInfoLike], None]] = None,
     ) -> None:
+        owner: t.Optional[str] = None
+        if self.ownership_config:
+            owner = self.ownership_config.resolve_owner(
+                environment_naming_info.name, self.snapshot_evaluator.adapter
+            )
         self.snapshot_evaluator.promote(
             target_snapshots,
             start=plan.start,
@@ -449,6 +468,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             environment_naming_info=environment_naming_info,
             deployability_index=deployability_index,
             on_complete=on_complete,
+            owner=owner,
         )
 
     def _demote_snapshots(
