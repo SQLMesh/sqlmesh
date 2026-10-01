@@ -68,6 +68,28 @@ def test_replace_query_pandas(adapter: EngineAdapter, duck_conn):
     pd.testing.assert_frame_equal(adapter.fetchdf("SELECT * FROM test_table"), df)
 
 
+def test_replace_query_attached_postgres(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    fetchone = mocker.patch.object(adapter, "fetchone", return_value=("postgres",))
+
+    adapter.replace_query(
+        "attached_postgres.test_schema.test_table",
+        parse_one("SELECT 1 AS a"),
+    )
+
+    assert fetchone.call_count == 1
+    assert (
+        fetchone.call_args.args[0].sql(dialect=adapter.dialect)
+        == "SELECT type FROM DUCKDB_DATABASES() WHERE database_name = 'attached_postgres'"
+    )
+    assert to_sql_calls(adapter) == [
+        'DROP TABLE IF EXISTS "attached_postgres"."test_schema"."test_table" CASCADE',
+        'CREATE TABLE IF NOT EXISTS "attached_postgres"."test_schema"."test_table" AS SELECT 1 AS "a"',
+    ]
+
+
 def test_set_current_catalog(make_mocked_engine_adapter: t.Callable, duck_conn):
     adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
     adapter.set_current_catalog("test_catalog")
