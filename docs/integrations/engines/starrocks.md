@@ -1,5 +1,8 @@
 # StarRocks
 
+!!! info
+    The StarRocks engine adapter is a community contribution. Due to this, only limited community support is available.
+
 ## Overview
 
 [StarRocks](https://www.starrocks.io/) is a next-generation sub-second MPP OLAP database designed for real-time analytics. It provides high concurrency, low latency, and supports both batch and stream processing.
