@@ -389,6 +389,52 @@ def test_no_internal_model_conversion(tmp_path: Path, mocker: MockerFixture):
         create_external_model(**row, dialect="bigquery")
 
 
+@pytest.mark.parametrize(
+    "dialect, columns, expected_keys",
+    [
+        (
+            "postgres",
+            ["ID", "MixedCase", "lower_case", "a.b"],
+            ['"ID"', '"MixedCase"', "lower_case", "a.b"],
+        ),
+        ("snowflake", ["ID", "lower_case"], ["ID", '"lower_case"']),
+        ("clickhouse", ["a\\b"], ["a\\b"]),
+    ],
+)
+def test_create_external_models_quotes_case_sensitive_columns(
+    tmp_path: Path,
+    mocker: MockerFixture,
+    dialect: str,
+    columns: t.List[str],
+    expected_keys: t.List[str],
+):
+    engine_adapter_mock = mocker.Mock()
+    engine_adapter_mock.columns.return_value = {
+        name: exp.DataType.build("text") for name in columns
+    }
+
+    state_reader_mock = mocker.Mock()
+    state_reader_mock.nodes_exist.return_value = set()
+
+    model = SqlModel(name="a", query=parse_one("select * FROM tbl"))
+
+    filename = tmp_path / c.EXTERNAL_MODELS_YAML
+    create_external_models_file(
+        filename,
+        {"a": model},  # type: ignore
+        engine_adapter_mock,
+        state_reader_mock,
+        dialect,
+    )
+
+    schema = yaml.load(filename)
+    assert list(schema[0]["columns"]) == expected_keys
+
+    external_model = create_external_model(**schema[0], dialect=dialect)
+    assert external_model.columns_to_types is not None
+    assert list(external_model.columns_to_types) == columns
+
+
 def test_missing_table(tmp_path: Path):
     config = Config(gateways=GatewayConfig(connection=DuckDBConnectionConfig()))
     context = Context(paths=[str(tmp_path.absolute())], config=config)
