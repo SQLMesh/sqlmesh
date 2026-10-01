@@ -3014,6 +3014,26 @@ def test_parse(assert_exp_eq):
     )
 
 
+def test_parse_jinja_query_with_quoted_macro_argument():
+    expressions = d.parse(
+        """
+        MODEL (
+            name sushi.items,
+            kind FULL,
+        );
+
+        JINJA_QUERY_BEGIN;
+        SELECT {{ alias(identity(x), 'flag') }};
+        JINJA_END;
+        """
+    )
+
+    model = load_sql_based_model(expressions)
+
+    assert isinstance(model.query, d.JinjaQuery)
+    assert "{{ alias(identity(x), 'flag') }}" in model.query.this.this
+
+
 def test_dialect_pattern():
     def make_test_sql(text: str) -> str:
         return f"""
