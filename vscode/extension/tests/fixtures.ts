@@ -7,12 +7,36 @@ import {
   stopCodeServer,
   CodeServerContext,
 } from './utils_code_server'
+import {
+  createVirtualEnvironment,
+  pipInstall,
+  PythonEnvironment,
+  REPO_ROOT,
+  warmUpVirtualEnvironment,
+} from './utils'
+
+/**
+ * A virtual environment with sqlmesh installed, shared by every test in a
+ * worker that does not need an environment of its own.
+ */
+export interface SharedPythonEnvironment extends PythonEnvironment {
+  venvDir: string
+}
+
+// Creating the environment installs sqlmesh from source, which is far slower
+// than a test. Give it a budget of its own so it is not charged to the first
+// test that happens to ask for it.
+const SHARED_PYTHON_ENVIRONMENT_TIMEOUT_MS = 300_000
 
 // Worker-scoped fixture to start/stop VS Code server once per worker
 export const test = base.extend<
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   {},
-  { sharedCodeServer: CodeServerContext; tempDir: string }
+  {
+    sharedCodeServer: CodeServerContext
+    sharedPythonEnvironment: SharedPythonEnvironment
+    tempDir: string
+  }
 >({
   sharedCodeServer: [
     // eslint-disable-next-line no-empty-pattern
@@ -39,6 +63,33 @@ export const test = base.extend<
       await stopCodeServer(context)
     },
     { scope: 'worker', auto: true },
+  ],
+  sharedPythonEnvironment: [
+    // eslint-disable-next-line no-empty-pattern
+    async ({}, use) => {
+      // The environment lives outside the per-test temporary directory, which
+      // is removed after every test.
+      const envDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'vscode-test-shared-python-env-'),
+      )
+      const venvDir = path.join(envDir, '.venv')
+      const pythonDetails = await createVirtualEnvironment(venvDir)
+      await pipInstall(pythonDetails, [
+        `${REPO_ROOT}[lsp,bigquery]`,
+        path.join(REPO_ROOT, 'examples', 'custom_materializations'),
+      ])
+      await warmUpVirtualEnvironment(pythonDetails)
+
+      console.log(
+        `Created shared Python environment for worker ${test.info().workerIndex} at ${venvDir}`,
+      )
+
+      await use({ ...pythonDetails, venvDir })
+
+      console.log(`Removing shared Python environment: ${envDir}`)
+      await fs.remove(envDir)
+    },
+    { scope: 'worker', timeout: SHARED_PYTHON_ENVIRONMENT_TIMEOUT_MS },
   ],
   tempDir: [
     // eslint-disable-next-line no-empty-pattern

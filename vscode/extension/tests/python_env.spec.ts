@@ -1,4 +1,4 @@
-import { test, Page } from './fixtures'
+import { test, Page, SharedPythonEnvironment } from './fixtures'
 import fs from 'fs-extra'
 import {
   createVirtualEnvironment,
@@ -40,6 +40,42 @@ async function runTest(
   await openLineageView(page)
 }
 
+async function writeSettings(
+  tempDir: string,
+  pythonDetails: PythonEnvironment,
+  pythonEnvDir: string,
+): Promise<void> {
+  const settings = {
+    'python.defaultInterpreterPath': pythonDetails.pythonPath,
+    'sqlmesh.environmentPath': pythonEnvDir,
+  }
+  await fs.ensureDir(path.join(tempDir, '.vscode'))
+  await fs.writeJson(path.join(tempDir, '.vscode', 'settings.json'), settings, {
+    spaces: 2,
+  })
+}
+
+/**
+ * Copy the sushi project into the test directory and point it at the shared
+ * virtual environment.
+ */
+async function setupSharedEnvironment(
+  tempDir: string,
+  sharedPythonEnvironment: SharedPythonEnvironment,
+): Promise<void> {
+  await fs.copy(SUSHI_SOURCE_PATH, tempDir)
+  await writeSettings(
+    tempDir,
+    sharedPythonEnvironment,
+    sharedPythonEnvironment.venvDir,
+  )
+}
+
+/**
+ * Copy the sushi project into the test directory and give it a virtual
+ * environment of its own. Used by the tcloud tests, which install a mock
+ * tcloud package that must not leak into other tests.
+ */
 async function setupEnvironment(tempDir: string): Promise<{
   pythonDetails: PythonEnvironment
 }> {
@@ -54,27 +90,30 @@ async function setupEnvironment(tempDir: string): Promise<{
   const sqlmeshWithExtras = `${REPO_ROOT}[bigquery,lsp]`
   await pipInstall(pythonDetails, [sqlmeshWithExtras, custom_materializations])
 
-  const settings = {
-    'python.defaultInterpreterPath': pythonDetails.pythonPath,
-    'sqlmesh.environmentPath': pythonEnvDir,
-  }
-  await fs.ensureDir(path.join(tempDir, '.vscode'))
-  await fs.writeJson(path.join(tempDir, '.vscode', 'settings.json'), settings, {
-    spaces: 2,
-  })
+  await writeSettings(tempDir, pythonDetails, pythonEnvDir)
   return { pythonDetails }
 }
 
 test.describe('python environment variable injection on sqlmesh_lsp', () => {
-  test('normal setup - error ', async ({ page, sharedCodeServer, tempDir }) => {
-    await setupEnvironment(tempDir)
+  test('normal setup - error ', async ({
+    page,
+    sharedCodeServer,
+    sharedPythonEnvironment,
+    tempDir,
+  }) => {
+    await setupSharedEnvironment(tempDir, sharedPythonEnvironment)
     writeEnvironmentConfig(tempDir)
     await runTest(page, sharedCodeServer, tempDir)
     await page.waitForSelector('text=Error creating context')
   })
 
-  test('normal setup - set', async ({ page, sharedCodeServer, tempDir }) => {
-    await setupEnvironment(tempDir)
+  test('normal setup - set', async ({
+    page,
+    sharedCodeServer,
+    sharedPythonEnvironment,
+    tempDir,
+  }) => {
+    await setupSharedEnvironment(tempDir, sharedPythonEnvironment)
     writeEnvironmentConfig(tempDir)
     const env_file = path.join(tempDir, '.env')
     fs.writeFileSync(env_file, 'TEST_VAR=test_value')

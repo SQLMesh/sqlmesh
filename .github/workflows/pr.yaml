@@ -427,10 +427,12 @@ jobs:
       - name: Run CI
         run: pnpm run ci
   test-vscode-e2e:
+    needs: changes
+    if:
+      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
     runs-on:
       labels: [ubuntu-2204-8]
-    # As at 2026-01-12 this job flakes 100% of the time. It needs investigation
-    if: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -453,7 +455,9 @@ jobs:
           source .venv/bin/activate
           make install-dev
       - name: Install code-server
-        run: curl -fsSL https://code-server.dev/install.sh | sh
+        # Pinned so that a code-server release cannot change the editor UI the
+        # tests drive without the change showing up here first.
+        run: curl -fsSL https://code-server.dev/install.sh | sh -s -- --version 4.137.0
       - name: Install Playwright browsers
         working-directory: ./vscode/extension
         run: pnpm exec playwright install
