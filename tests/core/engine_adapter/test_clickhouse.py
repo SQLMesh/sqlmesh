@@ -1605,10 +1605,6 @@ def test_virtual_catalog_stripped_in_alter_table(make_mocked_engine_adapter: t.C
             'INSERT INTO "mydb"."target" ("id") SELECT "mydb"."source"."id" FROM "mydb"."source"',
         ),
         (
-            "SELECT __ch_gw__.mydb.source.id FROM __ch_gw__.mydb.source",
-            'SELECT "mydb"."source"."id" FROM "mydb"."source"',
-        ),
-        (
             "SELECT __ch_gw__.mydb.source.id, '__ch_gw__.literal' FROM __ch_gw__.mydb.source "
             "JOIN other_catalog.otherdb.source ON __ch_gw__.mydb.source.id = "
             "other_catalog.otherdb.source.id",
