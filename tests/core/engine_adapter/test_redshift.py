@@ -198,6 +198,44 @@ SELECT id_file::INT, batch_time::TIMESTAMP;
     ]
 
 
+@pytest.mark.parametrize(
+    "distkey",
+    ['"id_file"', "id_file", "'id_file'", '("id_file")', "(id_file)"],
+)
+def test_create_table_physical_properties_distkey_from_model_definition(
+    make_mocked_engine_adapter: t.Callable, distkey: str
+):
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+    model: SqlModel = t.cast(
+        SqlModel,
+        load_sql_based_model(
+            d.parse(
+                f"""
+MODEL (
+    name test_schema.test_table,
+    kind full,
+    physical_properties (
+        diststyle = key,
+        distkey = {distkey}
+    )
+);
+SELECT id_file::INT;
+    """
+            )
+        ),
+    )
+
+    adapter.create_table(
+        model.name,
+        target_columns_to_types=model.columns_to_types_or_raise,
+        table_properties=model.physical_properties,
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test_schema"."test_table" ("id_file" INTEGER) DISTSTYLE KEY DISTKEY("id_file")',
+    ]
+
+
 def test_varchar_size_workaround(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
 
