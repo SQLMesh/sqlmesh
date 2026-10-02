@@ -1066,7 +1066,7 @@ def test_insert_overwrite_by_condition_replace_partitioned(
     )
 
     assert to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
@@ -1104,7 +1104,7 @@ def test_insert_overwrite_by_condition_replace(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
@@ -1153,7 +1153,7 @@ def test_insert_overwrite_by_condition_where_partitioned(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         """INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30'""",
         """CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30' UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions\"""",
         """INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("ds" BETWEEN '2024-02-15' AND '2024-04-30') AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")""",
@@ -1204,12 +1204,12 @@ def test_insert_overwrite_by_condition_by_key(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd"))',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd"))',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
@@ -1267,13 +1267,13 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
         'CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")',
         """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")',
@@ -1316,7 +1316,7 @@ def test_insert_overwrite_by_condition_inc_by_partition(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd\"""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
@@ -1653,6 +1653,69 @@ def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapte
         'DELETE FROM "mydb"."target" WHERE "mydb"."target"."id" IN '
         '(SELECT "id" FROM "mydb"."source")',
     ]
+
+
+def test_virtual_catalog_stripped_from_insert_overwrite(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table",
+        return_value=exp.to_table("__ch_gw__.mydb.__temp_target_abcd"),
+    )
+    mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone", return_value=None)
+
+    source_queries, columns_to_types = adapter._get_source_queries_and_columns_to_types(
+        parse_one("SELECT * FROM __ch_gw__.mydb.source"),
+        {"id": exp.DataType.build("Int8", dialect="clickhouse")},
+        "__ch_gw__.mydb.target",
+    )
+    adapter._insert_overwrite_by_condition(
+        "__ch_gw__.mydb.target", source_queries, columns_to_types
+    )
+
+    assert [call.args[0] for call in adapter.cursor.execute.call_args_list] == [
+        'CREATE TABLE "mydb"."__temp_target_abcd" AS "mydb"."target"',
+        'INSERT INTO "mydb"."__temp_target_abcd" ("id") SELECT "id" FROM '
+        '(SELECT * FROM "mydb"."source") AS "_subquery"',
+        'EXCHANGE TABLES "mydb"."target" AND "mydb"."__temp_target_abcd"',
+        'DROP TABLE IF EXISTS "mydb"."__temp_target_abcd"',
+    ]
+
+
+def test_virtual_catalog_stripped_from_rename_table(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+
+    adapter.rename_table("__ch_gw__.mydb.old_table", "__ch_gw__.mydb.new_table")
+
+    assert [call.args[0] for call in adapter.cursor.execute.call_args_list] == [
+        'RENAME TABLE "mydb"."old_table" TO "mydb"."new_table"',
+    ]
+
+
+def test_virtual_catalog_stripped_from_comments(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+
+    adapter._create_table_comment("__ch_gw__.mydb.target", "table comment")
+    adapter._create_column_comments("__ch_gw__.mydb.target", {"id": "column comment"})
+
+    assert [call.args[0] for call in adapter.cursor.execute.call_args_list] == [
+        'ALTER TABLE "mydb"."target" MODIFY COMMENT \'table comment\'',
+        'ALTER TABLE "mydb"."target" COMMENT COLUMN "id" \'column comment\'',
+    ]
+
+
+def test_three_part_names_unchanged_without_virtual_catalog(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+
+    adapter.execute(parse_one("SELECT * FROM __ch_gw__.mydb.source", dialect="clickhouse"))
+
+    assert to_sql_calls(adapter) == ['SELECT * FROM "__ch_gw__"."mydb"."source"']
 
 
 def test_virtual_catalog_stripped_from_create_view_source(
