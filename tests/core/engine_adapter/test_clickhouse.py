@@ -1428,6 +1428,64 @@ def test_exchange_tables(
     ]
 
 
+def _executed_sql(execute_mock: t.Any) -> t.List[str]:
+    return [
+        quote_identifiers(call.args[0]).sql("clickhouse")
+        if isinstance(call.args[0], exp.Expr)
+        else call.args[0]
+        for call in execute_mock.call_args_list
+    ]
+
+
+def test_insert_overwrite_by_condition_replace_exchange_error_propagates(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, make_temp_table_name: t.Callable
+):
+    from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore
+
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+
+    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table")
+    temp_table_mock.return_value = make_temp_table_name("target", "abcd")
+
+    fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
+    fetchone_mock.return_value = None
+
+    insert_table_name = make_temp_table_name("new_records", "abcd")
+    existing_table_name = make_temp_table_name("existing_records", "abcd")
+
+    source_queries, columns_to_types = adapter._get_source_queries_and_columns_to_types(
+        parse_one(f"SELECT * FROM {insert_table_name}"),
+        {
+            "id": exp.DataType.build("Int8", dialect="clickhouse"),
+            "ds": exp.DataType.build("Date", dialect="clickhouse"),
+        },
+        existing_table_name,
+    )
+
+    def execute_side_effect(sql: t.Any, *args: t.Any, **kwargs: t.Any) -> None:
+        if str(sql).startswith("EXCHANGE TABLES"):
+            raise DatabaseError("DB::Exception: Not enough privileges. (ACCESS_DENIED)")
+
+    execute_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.execute")
+    execute_mock.side_effect = execute_side_effect
+
+    with pytest.raises(DatabaseError, match="ACCESS_DENIED"):
+        adapter._insert_overwrite_by_condition(
+            existing_table_name.sql(),
+            source_queries,
+            columns_to_types,
+        )
+
+    executed = _executed_sql(execute_mock)
+    assert executed[-2:] == [
+        'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
+        'DROP TABLE IF EXISTS "__temp_target_abcd"',
+    ]
+    assert not any(sql.startswith("RENAME") for sql in executed)
+    dropped = [sql for sql in executed if sql.startswith("DROP")]
+    assert dropped == ['DROP TABLE IF EXISTS "__temp_target_abcd"']
+
+
 def test_virtual_catalog_ddl_stripping(make_mocked_engine_adapter: t.Callable):
     """After inject_virtual_catalog(), create_schema() with the virtual catalog prefix must strip
     the catalog and execute without raising, and with a wrong catalog must raise SQLMeshError."""

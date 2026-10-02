@@ -668,17 +668,19 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 f"EXCHANGE TABLES {old_table_sql} AND {new_table_sql}{self._on_cluster_sql()}"
             )
         except DatabaseError as e:
-            if "NOT_IMPLEMENTED" in str(e):
-                # If someone is using an old Clickhouse version, an OS that doesn't support atomic exchanges,
-                # or a database engine that doesn't support atomic exchanges, we do a non-atomic rename instead.
-                #
-                # Executing multiple renames in one call like `RENAME TABLE a to b, c to a` is supported
-                # but not an atomic operation. Because it is not atomic, doing it in two calls is equivalent
-                # and does not require defining an additional method.
-                throwaway_table_name = self._get_temp_table(old_table_name)
-                self._rename_table(old_table_name, throwaway_table_name)
-                self._rename_table(new_table_name, old_table_name)
-                self.drop_table(throwaway_table_name)
+            if "NOT_IMPLEMENTED" not in str(e):
+                raise
+
+            # If someone is using an old Clickhouse version, an OS that doesn't support atomic exchanges,
+            # or a database engine that doesn't support atomic exchanges, we do a non-atomic rename instead.
+            #
+            # Executing multiple renames in one call like `RENAME TABLE a to b, c to a` is supported
+            # but not an atomic operation. Because it is not atomic, doing it in two calls is equivalent
+            # and does not require defining an additional method.
+            throwaway_table_name = self._get_temp_table(old_table_name)
+            self._rename_table(old_table_name, throwaway_table_name)
+            self._rename_table(new_table_name, old_table_name)
+            self.drop_table(throwaway_table_name)
 
     def _rename_table(
         self,
