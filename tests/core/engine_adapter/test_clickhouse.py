@@ -1437,31 +1437,6 @@ def _executed_sql(execute_mock: t.Any) -> t.List[str]:
     ]
 
 
-def test_exchange_tables_reraises_other_errors(
-    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, make_temp_table_name: t.Callable
-):
-    from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore
-
-    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
-
-    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table")
-    temp_table_mock.return_value = make_temp_table_name("table1", "abcd")
-
-    execute_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.execute")
-    execute_mock.side_effect = [
-        DatabaseError("DB::Exception: Not enough privileges. (ACCESS_DENIED)"),
-        None,
-        None,
-        None,
-    ]
-
-    with pytest.raises(DatabaseError, match="ACCESS_DENIED"):
-        adapter._exchange_tables("table1", "table2")
-
-    # No RENAME fallback and no throwaway table drop
-    assert _executed_sql(execute_mock) == ['EXCHANGE TABLES "table1" AND "table2"']
-
-
 def test_insert_overwrite_by_condition_replace_exchange_error_propagates(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, make_temp_table_name: t.Callable
 ):
@@ -1507,6 +1482,8 @@ def test_insert_overwrite_by_condition_replace_exchange_error_propagates(
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
     assert not any(sql.startswith("RENAME") for sql in executed)
+    dropped = [sql for sql in executed if sql.startswith("DROP")]
+    assert dropped == ['DROP TABLE IF EXISTS "__temp_target_abcd"']
 
 
 def test_virtual_catalog_ddl_stripping(make_mocked_engine_adapter: t.Callable):
