@@ -553,6 +553,30 @@ def test_connection_config_serialization():
     }
 
 
+def test_default_test_connection_from_yaml(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+default_test_connection:
+    type: duckdb
+    database: test.db
+    concurrent_tasks: 4
+
+model_defaults:
+    dialect: duckdb
+"""
+    )
+
+    config = load_config_from_paths(Config, project_paths=[config_path])
+
+    assert config.default_test_connection_ == DuckDBConnectionConfig(
+        database="test.db", concurrent_tasks=4
+    )
+    assert config.get_test_connection() == DuckDBConnectionConfig(
+        database="test.db", concurrent_tasks=4
+    )
+
+
 def test_variables():
     variables = {
         "int_var": 1,
