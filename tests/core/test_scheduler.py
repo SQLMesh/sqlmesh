@@ -6,6 +6,7 @@ from sqlglot import parse_one, parse
 from sqlglot.helper import first
 
 from sqlmesh.core.context import Context, ExecutionContext
+from sqlmesh.core.console import NoopConsole
 from sqlmesh.core.environment import EnvironmentNamingInfo
 from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.model import load_sql_based_model
@@ -1213,3 +1214,216 @@ def test_dag_upstream_dependency_caching_with_complex_diamond(mocker: MockerFixt
         expected_g_node: {expected_a_node},
         expected_h_node: {expected_a_node},
     }
+
+
+def test_snapshot_evaluation_progress_start_hooks(mocker: MockerFixture, make_snapshot) -> None:
+    """The stable model hook and the batch hook run before evaluate()."""
+    model = SqlModel(
+        name="test.hourly_model",
+        kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds")),
+        cron="@hourly",
+        query=parse_one("SELECT ds FROM tbl"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mock_console = mocker.MagicMock()
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.get_snapshots_to_create.return_value = []
+    mock_evaluator.adapter = mocker.MagicMock()
+
+    call_order: t.List[str] = []
+
+    def record_start(snapshot_arg: t.Any, **kwargs: t.Any) -> None:
+        call_order.append("start")
+
+    mock_console.start_snapshot_evaluation_progress.side_effect = record_start
+
+    def record_batch_start(snapshot_arg: t.Any, interval_arg: t.Any, batch_idx_arg: int) -> None:
+        call_order.append("batch_start")
+
+    mock_console.start_snapshot_evaluation_batch.side_effect = record_batch_start
+
+    interval = (to_timestamp("2026-07-17 13:00:00"), to_timestamp("2026-07-17 14:00:00"))
+
+    scheduler = Scheduler(
+        snapshots=[snapshot],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        console=mock_console,
+    )
+
+    def mock_evaluate(snapshot: t.Any, **kwargs: t.Any) -> t.List:
+        call_order.append("evaluate")
+        return []
+
+    mocker.patch.object(scheduler, "evaluate", side_effect=mock_evaluate)
+
+    merged_intervals = {snapshot: [interval]}
+    deployability_index = DeployabilityIndex.create([snapshot])
+
+    errors, skipped_intervals = scheduler.run_merged_intervals(
+        merged_intervals=merged_intervals,
+        deployability_index=deployability_index,
+        environment_naming_info=EnvironmentNamingInfo(),
+    )
+
+    assert not errors
+    assert not skipped_intervals
+
+    # Keep the existing start hook contract stable for custom Console implementations.
+    mock_console.start_snapshot_evaluation_progress.assert_called_once_with(snapshot)
+
+    # The new optional hook receives the exact interval and zero-based batch index.
+    mock_console.start_snapshot_evaluation_batch.assert_called_once_with(
+        snapshot,
+        interval,
+        0,
+    )
+
+    # Both start hooks must run before evaluate.
+    assert call_order == ["start", "batch_start", "evaluate"], (
+        f"Unexpected call order: {call_order}"
+    )
+
+    # completion update runs after evaluation
+    mock_console.update_snapshot_evaluation_progress.assert_called_once()
+
+
+def test_snapshot_evaluation_progress_supports_legacy_console(
+    mocker: MockerFixture, make_snapshot
+) -> None:
+    """A custom Console with the historical start-hook signature remains usable."""
+
+    class LegacyConsole(NoopConsole):
+        def __init__(self) -> None:
+            self.started_snapshots: t.List[Snapshot] = []
+            self.updated_snapshots: t.List[Snapshot] = []
+
+        def start_snapshot_evaluation_progress(  # type: ignore[override]
+            self, snapshot: Snapshot
+        ) -> None:
+            self.started_snapshots.append(snapshot)
+
+        def update_snapshot_evaluation_progress(  # type: ignore[override]
+            self,
+            snapshot: Snapshot,
+            interval: t.Tuple[int, int],
+            batch_idx: int,
+            duration_ms: t.Optional[int],
+            num_audits_passed: int,
+            num_audits_failed: int,
+            execution_stats: t.Any = None,
+            auto_restatement_triggers: t.Any = None,
+        ) -> None:
+            self.updated_snapshots.append(snapshot)
+
+    model = SqlModel(
+        name="test.legacy_console_model",
+        kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds")),
+        cron="@hourly",
+        query=parse_one("SELECT ds FROM tbl"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    interval = (to_timestamp("2026-07-17 13:00:00"), to_timestamp("2026-07-17 14:00:00"))
+    console = LegacyConsole()
+    mock_evaluator = mocker.MagicMock()
+    mock_evaluator.get_snapshots_to_create.return_value = []
+
+    scheduler = Scheduler(
+        snapshots=[snapshot],
+        snapshot_evaluator=mock_evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        console=console,
+    )
+    mocker.patch.object(scheduler, "evaluate", return_value=[])
+
+    errors, skipped_intervals = scheduler.run_merged_intervals(
+        merged_intervals={snapshot: [interval]},
+        deployability_index=DeployabilityIndex.create([snapshot]),
+        environment_naming_info=EnvironmentNamingInfo(),
+    )
+
+    assert not errors
+    assert not skipped_intervals
+    assert console.started_snapshots == [snapshot]
+    assert console.updated_snapshots == [snapshot]
+
+
+def test_snapshot_evaluation_progress_audit_only(mocker: MockerFixture, make_snapshot) -> None:
+    """Audit-only runs preserve audit semantics and never emit a running batch row."""
+    model = SqlModel(
+        name="test.audit_model",
+        kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds")),
+        cron="@hourly",
+        query=parse_one("SELECT ds FROM tbl"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    interval = (to_timestamp("2026-07-17 13:00:00"), to_timestamp("2026-07-17 14:00:00"))
+
+    console = mocker.MagicMock()
+    evaluator = mocker.MagicMock()
+    evaluator.get_snapshots_to_create.return_value = []
+    scheduler = Scheduler(
+        snapshots=[snapshot],
+        snapshot_evaluator=evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        console=console,
+    )
+    mocker.patch.object(scheduler, "_audit_snapshot", return_value=[])
+
+    errors, skipped_intervals = scheduler.run_merged_intervals(
+        merged_intervals={snapshot: [interval]},
+        deployability_index=DeployabilityIndex.create([snapshot]),
+        environment_naming_info=EnvironmentNamingInfo(),
+        audit_only=True,
+    )
+
+    assert not errors
+    assert not skipped_intervals
+    console.start_snapshot_evaluation_progress.assert_called_once_with(snapshot, audit_only=True)
+    console.start_snapshot_evaluation_batch.assert_not_called()
+    assert console.update_snapshot_evaluation_progress.call_args.kwargs["audit_only"] is True
+
+
+def test_snapshot_evaluation_failure_reports_no_duration(
+    mocker: MockerFixture, make_snapshot
+) -> None:
+    """Evaluation failures reach the console with no duration so it can print Failed."""
+    model = SqlModel(
+        name="test.failed_model",
+        kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds")),
+        cron="@hourly",
+        query=parse_one("SELECT ds FROM tbl"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    interval = (to_timestamp("2026-07-17 13:00:00"), to_timestamp("2026-07-17 14:00:00"))
+
+    console = mocker.MagicMock()
+    evaluator = mocker.MagicMock()
+    evaluator.get_snapshots_to_create.return_value = []
+    scheduler = Scheduler(
+        snapshots=[snapshot],
+        snapshot_evaluator=evaluator,
+        state_sync=mocker.MagicMock(),
+        default_catalog=None,
+        console=console,
+    )
+    mocker.patch.object(scheduler, "evaluate", side_effect=RuntimeError("evaluation failed"))
+
+    errors, _ = scheduler.run_merged_intervals(
+        merged_intervals={snapshot: [interval]},
+        deployability_index=DeployabilityIndex.create([snapshot]),
+        environment_naming_info=EnvironmentNamingInfo(),
+    )
+
+    assert len(errors) == 1
+    update_args = console.update_snapshot_evaluation_progress.call_args.args
+    assert update_args[:3] == (snapshot, interval, 0)
+    assert update_args[3] is None

@@ -431,6 +431,15 @@ class Console(
     ) -> None:
         """Starts the snapshot evaluation progress."""
 
+    def start_snapshot_evaluation_batch(
+        self, snapshot: Snapshot, interval: Interval, batch_idx: int
+    ) -> None:
+        """Starts progress for a snapshot evaluation batch.
+
+        Consoles without per-batch output can inherit this default no-op implementation.
+        """
+        pass
+
     @abc.abstractmethod
     def update_snapshot_evaluation_progress(
         self,
@@ -1083,6 +1092,63 @@ class TerminalConsole(Console):
             self.environment_naming_info = environment_naming_info
             self.default_catalog = default_catalog
 
+    def _print_evaluation_row(
+        self,
+        snapshot: Snapshot,
+        interval: Interval,
+        batch_idx: int,
+        status: str,
+        audit_only: bool = False,
+        num_audits_passed: int = 0,
+        num_audits_failed: int = 0,
+        execution_stats: t.Optional[QueryExecutionStats] = None,
+    ) -> None:
+        """Print one evaluation row (Running or completion) to the live console.
+
+        Both start and completion rows share this formatter so their columns align.
+        """
+        if not (
+            self.evaluation_total_progress
+            and self.evaluation_model_progress
+            and self.evaluation_progress_live
+        ):
+            return
+
+        total_batches = self.evaluation_model_batch_sizes[snapshot]
+        batch_num = str(batch_idx + 1).rjust(len(str(total_batches)))
+        batch = f"[{batch_num}/{total_batches}]".ljust(self.evaluation_column_widths["batch"])
+
+        display_name = snapshot.display_name(
+            self.environment_naming_info,
+            self.default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None,
+            dialect=self.dialect,
+        ).ljust(self.evaluation_column_widths["name"])
+
+        annotation = _create_evaluation_model_annotation(
+            snapshot,
+            _format_evaluation_model_interval(snapshot, interval),
+            execution_stats,
+        )
+        audits_str = ""
+        if num_audits_passed:
+            audits_str += f" {self.AUDIT_PASS_MARK}{num_audits_passed}"
+        if num_audits_failed:
+            audits_str += f" {self.AUDIT_FAIL_MARK}{num_audits_failed}"
+        audits_str = f", audits{audits_str}" if audits_str else ""
+        annotation_len = self.evaluation_column_widths["annotation"]
+        # don't adjust the annotation_len if we're using AUDIT_PADDING
+        annotation = f"\\[{annotation + audits_str}]".ljust(
+            annotation_len - 1 if num_audits_failed and self.AUDIT_PADDING == 0 else annotation_len
+        )
+
+        status_col = status.ljust(self.evaluation_column_widths["duration"])
+
+        msg = (
+            f"{f'{batch} ' if not audit_only else ''}{display_name}   {annotation}   {status_col}"
+        ).replace(self.AUDIT_PASS_MARK, self.GREEN_AUDIT_PASS_MARK)
+
+        self.evaluation_progress_live.console.print(msg, soft_wrap=True)
+
     def start_snapshot_evaluation_progress(
         self, snapshot: Snapshot, audit_only: bool = False
     ) -> None:
@@ -1097,6 +1163,12 @@ class TerminalConsole(Console):
                 view_name=display_name,
                 total=self.evaluation_model_batch_sizes[snapshot],
             )
+
+    def start_snapshot_evaluation_batch(
+        self, snapshot: Snapshot, interval: Interval, batch_idx: int
+    ) -> None:
+        """Print a durable running row so the active batch appears in captured output."""
+        self._print_evaluation_row(snapshot, interval, batch_idx, "Running")
 
     def update_snapshot_evaluation_progress(
         self,
@@ -1117,42 +1189,21 @@ class TerminalConsole(Console):
             and self.evaluation_progress_live
         ):
             total_batches = self.evaluation_model_batch_sizes[snapshot]
-            batch_num = str(batch_idx + 1).rjust(len(str(total_batches)))
-            batch = f"[{batch_num}/{total_batches}]".ljust(self.evaluation_column_widths["batch"])
 
-            if duration_ms:
-                display_name = snapshot.display_name(
-                    self.environment_naming_info,
-                    self.default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None,
-                    dialect=self.dialect,
-                ).ljust(self.evaluation_column_widths["name"])
-
-                annotation = _create_evaluation_model_annotation(
-                    snapshot, _format_evaluation_model_interval(snapshot, interval), execution_stats
+            if duration_ms is not None:
+                duration = f"{(duration_ms / 1000.0):.2f}s"
+                self._print_evaluation_row(
+                    snapshot,
+                    interval,
+                    batch_idx,
+                    duration,
+                    audit_only=audit_only,
+                    num_audits_passed=num_audits_passed,
+                    num_audits_failed=num_audits_failed,
+                    execution_stats=execution_stats,
                 )
-                audits_str = ""
-                if num_audits_passed:
-                    audits_str += f" {self.AUDIT_PASS_MARK}{num_audits_passed}"
-                if num_audits_failed:
-                    audits_str += f" {self.AUDIT_FAIL_MARK}{num_audits_failed}"
-                audits_str = f", audits{audits_str}" if audits_str else ""
-                annotation_len = self.evaluation_column_widths["annotation"]
-                # don't adjust the annotation_len if we're using AUDIT_PADDING
-                annotation = f"\\[{annotation + audits_str}]".ljust(
-                    annotation_len - 1
-                    if num_audits_failed and self.AUDIT_PADDING == 0
-                    else annotation_len
-                )
-
-                duration = f"{(duration_ms / 1000.0):.2f}s".ljust(
-                    self.evaluation_column_widths["duration"]
-                )
-
-                msg = f"{f'{batch} ' if not audit_only else ''}{display_name}   {annotation}   {duration}".replace(
-                    self.AUDIT_PASS_MARK, self.GREEN_AUDIT_PASS_MARK
-                )
-
-                self.evaluation_progress_live.console.print(msg)
+            elif not audit_only:
+                self._print_evaluation_row(snapshot, interval, batch_idx, "Failed")
 
             self.evaluation_total_progress.update(
                 self.evaluation_total_task or TaskID(0), refresh=True, advance=1
@@ -1160,10 +1211,7 @@ class TerminalConsole(Console):
 
             model_task_id = self.evaluation_model_tasks[snapshot.name]
             self.evaluation_model_progress.update(model_task_id, refresh=True, advance=1)
-            if (
-                self.evaluation_model_progress._tasks[model_task_id].completed >= total_batches
-                or audit_only
-            ):
+            if self.evaluation_model_progress._tasks[model_task_id].completed >= total_batches:
                 self.evaluation_model_progress.remove_task(model_task_id)
 
     def stop_evaluation_progress(self, success: bool = True) -> None:
@@ -3924,6 +3972,13 @@ class DebuggerTerminalConsole(TerminalConsole):
         self, snapshot: Snapshot, audit_only: bool = False
     ) -> None:
         self._write(f"{'Evaluating' if not audit_only else 'Auditing'} {snapshot.name}")
+
+    def start_snapshot_evaluation_batch(
+        self, snapshot: Snapshot, interval: Interval, batch_idx: int
+    ) -> None:
+        # The debugger console already logs the model start above and intentionally has no
+        # TerminalConsole progress state because it doesn't call TerminalConsole.__init__.
+        pass
 
     def update_snapshot_evaluation_progress(
         self,
