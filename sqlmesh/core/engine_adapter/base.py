@@ -2288,7 +2288,14 @@ class EngineAdapter:
         else:
             match_expressions = when_matched.copy().expressions
 
-        match_expressions.append(
+        # Engines like Databricks require WHEN NOT MATCHED [BY TARGET] clauses to come before
+        # any WHEN NOT MATCHED BY SOURCE clause, so the insert goes in front of those
+        insert_index = next(
+            (i for i, when in enumerate(match_expressions) if when.args.get("source")),
+            len(match_expressions),
+        )
+        match_expressions.insert(
+            insert_index,
             exp.When(
                 matched=False,
                 source=False,
@@ -2302,7 +2309,7 @@ class EngineAdapter:
                         ]
                     ),
                 ),
-            )
+            ),
         )
         for source_query in source_queries:
             with source_query as query:
