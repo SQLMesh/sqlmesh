@@ -187,6 +187,27 @@ def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, duck_conn, tmp_p
     assert not adapter.table_exists("memory.main.native_v")
 
 
+def test_drop_table_ducklake_no_cascade_mixed_case_alias(
+    adapter: EngineAdapter, duck_conn, tmp_path
+):
+    # Catalog aliases keep their case in duckdb_databases(), but SQLMesh normalizes
+    # table names to lowercase, so the catalog type lookup must be case-insensitive.
+    duck_conn.install_extension("ducklake")
+    duck_conn.load_extension("ducklake")
+    duck_conn.execute(
+        f"ATTACH 'ducklake:{tmp_path}/my_lake.ducklake' AS \"MyLake\" (DATA_PATH '{tmp_path}');"
+    )
+    duck_conn.execute("CREATE SCHEMA MyLake.phys")
+    duck_conn.execute("CREATE TABLE MyLake.phys.t (i INTEGER)")
+    duck_conn.execute("CREATE VIEW MyLake.phys.v AS SELECT * FROM MyLake.phys.t")
+
+    adapter.drop_table("mylake.phys.t", cascade=True)
+    adapter.drop_view("mylake.phys.v", cascade=True)
+
+    assert not adapter.table_exists("mylake.phys.t")
+    assert not adapter.table_exists("mylake.phys.v")
+
+
 def test_drop_object_cascade_by_catalog_type(make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
     adapter.fetchone = lambda *_args, **_kwargs: ("ducklake",)  # type: ignore

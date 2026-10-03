@@ -232,7 +232,11 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         catalog_type_tuple = self.fetchone(
             exp.select("type")
             .from_("duckdb_databases()")
-            .where(exp.column("database_name").eq(catalog))
+            .where(
+                exp.func("LOWER", exp.column("database_name")).eq(
+                    exp.func("LOWER", exp.Literal.string(catalog))
+                )
+            )
         )
         return catalog_type_tuple[0] if catalog_type_tuple else None
 
