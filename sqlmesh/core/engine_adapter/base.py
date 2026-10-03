@@ -18,7 +18,7 @@ from functools import cached_property, partial
 
 from sqlglot import Dialect, exp
 from sqlglot.errors import ErrorLevel
-from sqlglot.helper import ensure_list, seq_get
+from sqlglot.helper import ensure_list, find_new_name, seq_get
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 
 from sqlmesh.core.dialect import (
@@ -2073,6 +2073,11 @@ class EngineAdapter:
                 prefixed_col = exp.column(column).copy()
                 prefixed_col.this.set("this", f"t_{prefixed_col.name}")
                 prefixed_unmanaged_columns.append(prefixed_col)
+            target_exists_column = find_new_name(
+                {col.name.lower() for col in prefixed_columns_to_types}
+                | {col.lower() for col in unmanaged_columns_to_types},
+                "t__exists",
+            )
             query = (
                 exp.Select()  # type: ignore
                 .select(*table_columns)
@@ -2141,6 +2146,7 @@ class EngineAdapter:
                     "joined",
                     exp.select(
                         exp.column("_exists", table="source").as_("_exists"),
+                        exp.column("_exists", table="latest").as_(target_exists_column),
                         *(
                             exp.column(col, table="latest").as_(prefixed_columns_to_types[i].this)
                             for i, col in enumerate(target_columns_to_types)
@@ -2164,6 +2170,7 @@ class EngineAdapter:
                     .union(
                         exp.select(
                             exp.column("_exists", table="source").as_("_exists"),
+                            exp.column("_exists", table="latest").as_(target_exists_column),
                             *(
                                 exp.column(col, table="latest").as_(
                                     prefixed_columns_to_types[i].this
@@ -2195,11 +2202,15 @@ class EngineAdapter:
                     "updated_rows",
                     exp.select(
                         *(
-                            exp.func(
-                                "COALESCE",
+                            exp.Case()
+                            .when(
+                                exp.column(target_exists_column, table="joined")
+                                .is_(exp.Null())
+                                .not_(),
                                 exp.column(prefixed_unmanaged_columns[i].this, table="joined"),
-                                exp.column(col, table="joined"),
-                            ).as_(col)
+                            )
+                            .else_(exp.column(col, table="joined"))
+                            .as_(col)
                             for i, col in enumerate(unmanaged_columns_to_types)
                         ),
                         valid_from_case_stmt,
