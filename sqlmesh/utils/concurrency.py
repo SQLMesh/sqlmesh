@@ -1,6 +1,7 @@
 import typing as t
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from threading import Lock
+from contextvars import Context
 
 from sqlmesh.core.snapshot import SnapshotId, SnapshotInfoLike
 from sqlmesh.utils.dag import DAG
@@ -30,6 +31,9 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         raise_on_error: If set to True raises an exception on a first encountered error,
             otherwises returns a tuple which contains a list of failed nodes and a list of
             skipped nodes.
+        context_factory: Optional factory called at each run admission. Each node runs
+            in a separate copy of that context, including serial execution. By default
+            no context is captured or copied.
     """
 
     def __init__(
@@ -38,11 +42,14 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         fn: t.Callable[[H], None],
         tasks_num: int,
         raise_on_error: bool,
+        context_factory: t.Optional[t.Callable[[], Context]] = None,
     ):
         self.dag = dag
         self.fn = fn
         self.tasks_num = tasks_num
         self.raise_on_error = raise_on_error
+        self.context_factory = context_factory
+        self._context: t.Optional[Context] = None
 
         self._init_state()
 
@@ -55,14 +62,18 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         Returns:
             A pair which contains a list of node errors and a list of skipped nodes.
         """
+        self._context = self.context_factory() if self.context_factory else None
         if self._finished_future.done():
             self._init_state()
 
-        with ThreadPoolExecutor(max_workers=self.tasks_num) as pool:
-            with self._unprocessed_nodes_lock:
-                self._submit_next_nodes(pool)
-            self._finished_future.result()
-        return self._node_errors, self._skipped_nodes
+        try:
+            with ThreadPoolExecutor(max_workers=self.tasks_num) as pool:
+                with self._unprocessed_nodes_lock:
+                    self._submit_next_nodes(pool)
+                self._finished_future.result()
+            return self._node_errors, self._skipped_nodes
+        finally:
+            self._context = None
 
     def _process_node(self, node: H, executor: Executor) -> None:
         try:
@@ -98,7 +109,12 @@ class ConcurrentDAGExecutor(t.Generic[H]):
 
         for submitted_node in submitted_nodes:
             self._unprocessed_nodes.pop(submitted_node)
-            executor.submit(self._process_node, submitted_node, executor)
+            if self._context is None:
+                executor.submit(self._process_node, submitted_node, executor)
+            else:
+                executor.submit(
+                    self._context.copy().run, self._process_node, submitted_node, executor
+                )
 
     def _skip_next_nodes(self, parent: H) -> None:
         if not self._unprocessed_nodes_num:
@@ -139,6 +155,7 @@ def concurrent_apply_to_snapshots(
     tasks_num: int,
     reverse_order: bool = False,
     raise_on_error: bool = True,
+    context_factory: t.Optional[t.Callable[[], Context]] = None,
 ) -> t.Tuple[t.List[NodeExecutionFailedError[SnapshotId]], t.List[SnapshotId]]:
     """Applies a function to the given collection of snapshots concurrently while
     preserving the topological order between snapshots.
@@ -151,6 +168,9 @@ def concurrent_apply_to_snapshots(
         raise_on_error: If set to True raises an exception on a first encountered error,
             otherwises returns a tuple which contains a list of failed nodes and a list of
             skipped nodes.
+        context_factory: Optional factory called at each run admission. Each node runs
+            in a separate copy of that context, including serial execution. By default
+            no context is captured or copied.
 
     Raises:
         NodeExecutionFailedError if `raise_on_error` is set to True and execution fails for any snapshot.
@@ -172,6 +192,7 @@ def concurrent_apply_to_snapshots(
         lambda s_id: fn(snapshots_by_id[s_id]),
         tasks_num,
         raise_on_error=raise_on_error,
+        context_factory=context_factory,
     )
 
 
@@ -180,6 +201,7 @@ def concurrent_apply_to_dag(
     fn: t.Callable[[H], None],
     tasks_num: int,
     raise_on_error: bool = True,
+    context_factory: t.Optional[t.Callable[[], Context]] = None,
 ) -> t.Tuple[t.List[NodeExecutionFailedError[H]], t.List[H]]:
     """Applies a function to the given DAG concurrently while preserving the topological
     order between snapshots.
@@ -191,6 +213,9 @@ def concurrent_apply_to_dag(
         raise_on_error: If set to True raises an exception on a first encountered error,
             otherwises returns a tuple which contains a list of failed nodes and a list of
             skipped nodes.
+        context_factory: Optional factory called at each run admission. Each node runs
+            in a separate copy of that context, including serial execution. By default
+            no context is captured or copied.
 
     Raises:
         NodeExecutionFailedError if `raise_on_error` is set to True and execution fails for any snapshot.
@@ -202,13 +227,14 @@ def concurrent_apply_to_dag(
         raise ConfigError(f"Invalid number of concurrent tasks {tasks_num}")
 
     if tasks_num == 1:
-        return sequential_apply_to_dag(dag, fn, raise_on_error)
+        return sequential_apply_to_dag(dag, fn, raise_on_error, context_factory)
 
     return ConcurrentDAGExecutor(
         dag,
         fn,
         tasks_num,
         raise_on_error,
+        context_factory,
     ).run()
 
 
@@ -216,7 +242,9 @@ def sequential_apply_to_dag(
     dag: DAG[H],
     fn: t.Callable[[H], None],
     raise_on_error: bool = True,
+    context_factory: t.Optional[t.Callable[[], Context]] = None,
 ) -> t.Tuple[t.List[NodeExecutionFailedError[H]], t.List[H]]:
+    context = context_factory() if context_factory else None
     dependencies = dag.graph
 
     node_errors: t.List[NodeExecutionFailedError[H]] = []
@@ -231,7 +259,10 @@ def sequential_apply_to_dag(
             continue
 
         try:
-            fn(node)
+            if context is None:
+                fn(node)
+            else:
+                context.copy().run(fn, node)
         except Exception as ex:
             error = NodeExecutionFailedError(node)
             error.__cause__ = ex
