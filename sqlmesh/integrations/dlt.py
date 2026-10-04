@@ -64,16 +64,19 @@ def generate_dlt_models_and_settings(
         connection_config = None
     else:
         client = pipeline.destination_client()
-        config = client.config
-        credentials = config.credentials
-        configs = {
-            key: value
-            for key in dir(credentials)
-            if not key.startswith("_")
-            and not callable(value := getattr(credentials, key))
-            and value is not None
-        }
-        connection_config = format_config(configs, db_type)
+        if db_type == "ducklake":
+            connection_config = format_ducklake_config(client.config)
+        else:
+            config = client.config
+            credentials = config.credentials
+            configs = {
+                key: value
+                for key in dir(credentials)
+                if not key.startswith("_")
+                and not callable(value := getattr(credentials, key))
+                and value is not None
+            }
+            connection_config = format_config(configs, db_type)
 
     dlt_tables = {
         name: table
@@ -207,6 +210,33 @@ FROM
 WHERE
   {time_column} BETWEEN @start_ts AND @end_ts
 """
+
+
+def format_ducklake_config(client_config: t.Any) -> str:
+    """Generate a duckdb-gateway connection block with the DuckLake attached as catalog."""
+    creds = client_config.credentials
+    catalog = creds.catalog
+    drivername = getattr(catalog, "drivername", "") or ""
+    if drivername not in ("duckdb", "sqlite"):
+        raise click.ClickException(
+            f"Unsupported DuckLake catalog '{drivername}'. SQLMesh dlt init currently supports "
+            "file-backed catalogs (duckdb, sqlite); postgres/mysql/MotherDuck catalogs are not "
+            "yet mapped. Tracked in SQLMesh/sqlmesh#5914."
+        )
+    alias = creds.ducklake_name or "ducklake"
+    lines = [
+        "      type: duckdb",
+        "      catalogs:",
+        f"        {alias}:",
+        "          type: ducklake",
+        f"          path: {catalog.database}",
+        f"          data_path: {creds.storage_url}",
+    ]
+    metadata_schema = creds.metadata_schema or alias
+    lines.append(f"          metadata_schema: {metadata_schema}")
+    if getattr(client_config, "override_data_path", False):
+        lines.append("          override_data_path: true")
+    return "\n".join(lines)
 
 
 def format_config(configs: t.Dict[str, str], db_type: str) -> str:

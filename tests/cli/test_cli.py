@@ -1457,6 +1457,92 @@ WHERE
         remove(dataset_path)
 
 
+def _stub_ducklake_dlt(monkeypatch, drivername="sqlite"):
+    """Install a fake `dlt` module exposing a ducklake pipeline. No dlt install needed."""
+    import sys
+    import types
+
+    catalog = types.SimpleNamespace(drivername=drivername, database="/tmp/x/mre_ducklake.sqlite")
+    credentials = types.SimpleNamespace(
+        ducklake_name="mre_ducklake",
+        metadata_schema=None,
+        catalog=catalog,
+        storage_url="/tmp/x/mre_ducklake.files",
+    )
+    client_config = types.SimpleNamespace(credentials=credentials, override_data_path=False)
+    pipeline = types.SimpleNamespace(
+        destination=types.SimpleNamespace(to_name=lambda dest: "ducklake"),
+        default_schema=types.SimpleNamespace(
+            tables={}, _dlt_tables_prefix="_dlt", loads_table_name="_dlt_loads"
+        ),
+        dataset_name="mre",
+    )
+    pipeline._get_load_storage = lambda: types.SimpleNamespace(list_loaded_packages=lambda: [])
+    pipeline.destination_client = lambda: types.SimpleNamespace(config=client_config)
+
+    dlt_fake = types.ModuleType("dlt")
+    dlt_fake.attach = lambda pipeline_name, pipelines_dir="": pipeline
+
+    schema_utils = types.ModuleType("dlt.common.schema.utils")
+    schema_utils.has_table_seen_data = lambda table: True
+    schema_utils.is_complete_column = lambda col: True
+
+    pipeline_exceptions = types.ModuleType("dlt.pipeline.exceptions")
+    pipeline_exceptions.CannotRestorePipelineException = type(
+        "CannotRestorePipelineException", (Exception,), {}
+    )
+
+    for name, module in {
+        "dlt": dlt_fake,
+        "dlt.common": types.ModuleType("dlt.common"),
+        "dlt.common.schema": types.ModuleType("dlt.common.schema"),
+        "dlt.common.schema.utils": schema_utils,
+        "dlt.pipeline": types.ModuleType("dlt.pipeline"),
+        "dlt.pipeline.exceptions": pipeline_exceptions,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+@pytest.mark.parametrize(
+    "drivername", ["sqlite", "duckdb"], ids=["sqlite-catalog", "duckdb-catalog"]
+)
+def test_dlt_ducklake_pipeline(monkeypatch, drivername):
+    import yaml
+
+    from sqlmesh.core.config.connection import DuckDBConnectionConfig, parse_connection_config
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, drivername=drivername)
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+
+    assert "type: duckdb" in connection_config
+    assert "type: ducklake" in connection_config
+    assert "path: /tmp/x/mre_ducklake.sqlite" in connection_config
+    assert "data_path: /tmp/x/mre_ducklake.files" in connection_config
+
+    # Round-trip: the exact ConfigError from #5914 no longer fires
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    config = parse_connection_config(parsed)
+    assert isinstance(config, DuckDBConnectionConfig)
+    attach_sql = next(iter(config.catalogs.values())).to_sql("mre_ducklake")
+    assert attach_sql == (
+        "ATTACH IF NOT EXISTS 'ducklake:/tmp/x/mre_ducklake.sqlite' AS mre_ducklake "
+        "(DATA_PATH '/tmp/x/mre_ducklake.files', METADATA_SCHEMA 'mre_ducklake')"
+    )
+
+
+def test_dlt_ducklake_unsupported_catalog(monkeypatch):
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, drivername="postgres")
+
+    with pytest.raises(ClickException, match="Unsupported DuckLake catalog"):
+        dlt_module.generate_dlt_models_and_settings(pipeline_name="mre_ducklake", dialect="duckdb")
+
+
 @time_machine.travel(FREEZE_TIME)
 def test_environments(runner, tmp_path):
     create_example_project(tmp_path)
