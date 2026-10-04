@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SQLMesh Core Architecture",
+    "output": ".archify/architecture-sqlmesh-20261004-134418/sqlmesh-architecture.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/SQLMesh/sqlmesh",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "271b855b70cebfff35d9f2c247c32876d12cff77"
+    }
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "Data engineer", "sublabel": "plan · run · test", "pos": [40, 300], "size": [140, 64], "icon": "person" },
+    { "id": "entry", "type": "frontend", "label": "CLI · Web UI · LSP", "sublabel": "constructs Context", "pos": [260, 300], "size": [150, 64],
+      "sources": [
+        { "path": "sqlmesh/cli/main.py", "line": 154, "end_line": 166, "label": "CLI builds Context" },
+        { "path": "web/server/settings.py", "line": 71, "label": "Web UI builds Context" }
+      ] },
+    { "id": "project", "type": "external", "label": "Project files", "sublabel": "SQL · Python · dbt", "pos": [40, 110], "size": [140, 64],
+      "sources": [
+        { "path": "sqlmesh/core/loader.py", "line": 723, "label": "_load_sql_models" },
+        { "path": "sqlmesh/core/loader.py", "line": 810, "label": "_load_python_models" }
+      ] },
+    { "id": "loader", "type": "backend", "label": "Loader", "sublabel": "SqlMeshLoader · DbtLoader", "pos": [260, 110], "size": [150, 64],
+      "sources": [
+        { "path": "sqlmesh/core/loader.py", "line": 168, "end_line": 200, "label": "Loader.load" },
+        { "path": "sqlmesh/core/loader.py", "line": 499, "label": "SqlMeshLoader" },
+        { "path": "sqlmesh/dbt/loader.py", "line": 127, "label": "DbtLoader" }
+      ] },
+    { "id": "context", "type": "backend", "label": "Context", "sublabel": "orchestrator", "pos": [490, 300], "size": [150, 64], "tag": "core/context.py",
+      "sources": [
+        { "path": "sqlmesh/core/context.py", "line": 356, "label": "GenericContext" },
+        { "path": "sqlmesh/core/context.py", "line": 458, "end_line": 461, "label": "one loader per project" },
+        { "path": "sqlmesh/core/context.py", "line": 666, "end_line": 672, "label": "load() calls loaders" }
+      ] },
+    { "id": "builder", "type": "backend", "label": "PlanBuilder", "sublabel": "diff · categorize changes", "pos": [740, 110], "size": [160, 64],
+      "sources": [
+        { "path": "sqlmesh/core/plan/builder.py", "line": 55, "label": "PlanBuilder" },
+        { "path": "sqlmesh/core/context.py", "line": 1867, "label": "plan_builder() returns it" },
+        { "path": "sqlmesh/core/context.py", "line": 3125, "label": "ContextDiff vs state" }
+      ] },
+    { "id": "evaluator", "type": "backend", "label": "PlanEvaluator", "sublabel": "BuiltInPlanEvaluator", "pos": [740, 300], "size": [160, 64],
+      "sources": [
+        { "path": "sqlmesh/core/plan/evaluator.py", "line": 69, "label": "BuiltInPlanEvaluator" },
+        { "path": "sqlmesh/core/context.py", "line": 2784, "end_line": 2787, "label": "_apply evaluates plan" },
+        { "path": "sqlmesh/core/config/scheduler.py", "line": 130, "end_line": 137, "label": "wired with state + evaluator" }
+      ] },
+    { "id": "snapshots", "type": "backend", "label": "SnapshotEvaluator", "sublabel": "per model-kind strategy", "pos": [1000, 300], "size": [160, 64],
+      "sources": [
+        { "path": "sqlmesh/core/snapshot/evaluator.py", "line": 112, "label": "SnapshotEvaluator" },
+        { "path": "sqlmesh/core/snapshot/evaluator.py", "line": 150, "label": "evaluate" },
+        { "path": "sqlmesh/core/snapshot/evaluator.py", "line": 2019, "label": "promote: create_view" }
+      ] },
+    { "id": "adapter", "type": "backend", "label": "EngineAdapter", "sublabel": "dialect-specific SQL", "pos": [1250, 300], "size": [150, 64],
+      "sources": [
+        { "path": "sqlmesh/core/engine_adapter/base.py", "line": 84, "label": "EngineAdapter" },
+        { "path": "sqlmesh/core/context.py", "line": 489, "end_line": 509, "label": "adapter + evaluator wiring" }
+      ] },
+    { "id": "warehouse", "type": "database", "label": "Data warehouse", "sublabel": "physical tables · views", "pos": [1250, 500], "size": [150, 64],
+      "sources": [
+        { "path": "sqlmesh/core/engine_adapter/base.py", "line": 2617, "label": "execute" },
+        { "path": "sqlmesh/core/engine_adapter/base.py", "line": 2675, "label": "_execute on cursor" }
+      ] },
+    { "id": "scheduler", "type": "backend", "label": "Scheduler", "sublabel": "missing intervals · DAG", "pos": [490, 500], "size": [150, 64],
+      "sources": [
+        { "path": "sqlmesh/core/scheduler.py", "line": 99, "label": "Scheduler" },
+        { "path": "sqlmesh/core/scheduler.py", "line": 229, "label": "snapshot_evaluator.evaluate" },
+        { "path": "sqlmesh/core/scheduler.py", "line": 254, "label": "state_sync.add_interval" }
+      ] },
+    { "id": "state", "type": "database", "label": "State sync", "sublabel": "snapshots · envs · intervals", "pos": [740, 500], "size": [160, 64],
+      "sources": [
+        { "path": "sqlmesh/core/state_sync/db/facade.py", "line": 74, "end_line": 97, "label": "EngineAdapterStateSync" },
+        { "path": "sqlmesh/core/config/scheduler.py", "line": 67, "end_line": 70, "label": "state_connection or warehouse" },
+        { "path": "sqlmesh/core/plan/evaluator.py", "line": 158, "label": "push_snapshots" }
+      ] }
+  ],
+  "connections": [
+    { "id": "user-entry", "from": "user", "to": "entry", "label": "commands", "variant": "emphasis" },
+    { "id": "entry-context", "from": "entry", "to": "context", "label": "Context()", "variant": "emphasis" },
+    { "id": "context-loader", "from": "context", "to": "loader", "label": "load()", "fromSide": "top", "toSide": "right" },
+    { "id": "loader-project", "from": "loader", "to": "project", "label": "parse" },
+    { "id": "context-builder", "from": "context", "to": "builder", "label": "plan()", "fromSide": "top", "toSide": "left" },
+    { "id": "context-evaluator", "from": "context", "to": "evaluator", "label": "apply(plan)", "variant": "emphasis" },
+    { "id": "evaluator-snapshots", "from": "evaluator", "to": "snapshots", "label": "create · promote", "variant": "emphasis" },
+    { "id": "snapshots-adapter", "from": "snapshots", "to": "adapter", "label": "DDL / DML", "variant": "emphasis" },
+    { "id": "adapter-warehouse", "from": "adapter", "to": "warehouse", "label": "SQL", "fromSide": "bottom", "toSide": "top" },
+    { "id": "context-scheduler", "from": "context", "to": "scheduler", "label": "run()", "fromSide": "bottom", "toSide": "top" },
+    { "id": "evaluator-state", "from": "evaluator", "to": "state", "label": "push · promote", "fromSide": "bottom", "toSide": "top" },
+    { "id": "evaluator-scheduler", "from": "evaluator", "to": "scheduler", "label": "backfill", "variant": "dashed", "fromSide": "left", "toSide": "right" },
+    { "id": "scheduler-state", "from": "scheduler", "to": "state", "label": "add_interval", "fromSide": "right", "toSide": "left" },
+    { "id": "scheduler-snapshots", "from": "scheduler", "to": "snapshots", "label": "evaluate()", "fromSide": "bottom", "toSide": "bottom" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "plan / apply", "items": [
+      "Context diffs loaded models against state (ContextDiff) and PlanBuilder categorizes changes",
+      "PlanEvaluator pushes new snapshots, creates tables, backfills via the Scheduler, then promotes"
+    ] },
+    { "dot": "emerald", "title": "Virtual environments", "items": [
+      "Snapshots are versioned by content fingerprint",
+      "Promotion points environment views at physical snapshot tables (create_view)"
+    ] },
+    { "dot": "amber", "title": "State", "items": [
+      "State uses state_connection, or the warehouse connection when none is set",
+      "sqlmesh run builds a Scheduler from the environment's stored snapshots"
+    ] }
+  ]
+}
