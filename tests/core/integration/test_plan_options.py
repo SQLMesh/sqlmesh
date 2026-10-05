@@ -115,7 +115,8 @@ def test_empty_backfill_new_model(init_and_plan_context: t.Callable):
 @time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_plan_explain(init_and_plan_context: t.Callable, caplog):
     old_console = get_console()
-    set_console(TerminalConsole())
+    console = TerminalConsole()
+    set_console(console)
 
     context, plan = init_and_plan_context("examples/sushi")
     context.apply(plan)
@@ -131,9 +132,13 @@ def test_plan_explain(init_and_plan_context: t.Callable, caplog):
 
     common_kwargs = dict(skip_tests=True, no_prompts=True, explain=True)
 
-    # For now just making sure the plan doesn't error
+    # Verify the schema creation stage is rendered, not only that dispatch succeeds.
     with caplog.at_level(logging.ERROR, logger="sqlmesh.core.plan.explainer"):
-        context.plan("dev", **common_kwargs)
+        with console.console.capture() as output:
+            context.plan("dev", **common_kwargs)
+        explanation = output.get()
+        assert "Create physical schemas if they do not exist" in explanation
+        assert "memory.sqlmesh__sushi" in explanation
         context.plan("dev", **common_kwargs, skip_backfill=True)
         context.plan("dev", **common_kwargs, empty_backfill=True)
         context.plan("dev", **common_kwargs, forward_only=True, enable_preview=True)
