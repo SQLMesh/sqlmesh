@@ -173,7 +173,12 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         track_rows_processed: bool = True,
         **kwargs: t.Any,
     ) -> None:
-        catalog = self.get_current_catalog()
+        table = (
+            table_name_or_schema.this
+            if isinstance(table_name_or_schema, exp.Schema)
+            else exp.to_table(table_name_or_schema)
+        )
+        catalog = table.catalog or self.get_current_catalog()
         catalog_type_tuple = self.fetchone(
             exp.select("type")
             .from_("duckdb_databases()")
@@ -184,6 +189,9 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         partitioned_by_exps = None
         if catalog_type == "ducklake":
             partitioned_by_exps = kwargs.pop("partitioned_by", None)
+        elif catalog_type == "postgres" and replace:
+            self.execute(exp.Drop(this=table, kind="TABLE", exists=True, cascade=True))
+            replace = False
 
         super()._create_table(
             table_name_or_schema,
@@ -199,16 +207,8 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         )
 
         if partitioned_by_exps:
-            # Schema object contains column definitions, so we extract Table
-            table_name = (
-                table_name_or_schema.this
-                if isinstance(table_name_or_schema, exp.Schema)
-                else table_name_or_schema
-            )
             table_name_str = (
-                table_name.sql(dialect=self.dialect)
-                if isinstance(table_name, exp.Table)
-                else table_name
+                table.sql(dialect=self.dialect) if isinstance(table, exp.Table) else table
             )
             partitioned_by_str = ", ".join(
                 expr.sql(dialect=self.dialect) for expr in partitioned_by_exps
