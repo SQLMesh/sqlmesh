@@ -528,6 +528,9 @@ def load_multiple_audits(
     yield load_audit(
         expressions=audit_block,
         path=path,
+        module_path=module_path,
+        macros=macros,
+        jinja_macros=jinja_macros,
         dialect=dialect,
         default_catalog=default_catalog,
         variables=variables,
