@@ -1197,6 +1197,219 @@ def test_data_diff_sample_limit():
     assert len(diff.joined_sample) == 3
 
 
+def test_data_diff_non_lowercase_key_columns():
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    columns_to_types = {
+        "KEY1": exp.DataType.build("int"),
+        "Key2": exp.DataType.build("varchar"),
+        "VALUE": exp.DataType.build("varchar"),
+    }
+
+    engine_adapter.create_table("src", columns_to_types)
+    engine_adapter.create_table("target", columns_to_types)
+
+    src_records = [
+        (1, "a", "value"),
+        (2, "b", "source"),
+        (3, "c", "source only"),
+    ]
+
+    target_records = [
+        (1, "a", "value"),
+        (2, "b", "target"),
+        (4, "d", "target only"),
+    ]
+
+    src_df = pd.DataFrame(data=src_records, columns=columns_to_types.keys())
+    target_df = pd.DataFrame(data=target_records, columns=columns_to_types.keys())
+
+    engine_adapter.insert_append("src", src_df)
+    engine_adapter.insert_append("target", target_df)
+
+    # casing of the supplied key should not matter
+    for on in (["KEY1", "Key2"], ["key1", "KEY2"]):
+        table_diff = TableDiff(adapter=engine_adapter, source="src", target="target", on=on)
+
+        _, _, col_names = table_diff.key_columns
+        assert col_names == ["KEY1", "Key2"]
+
+        diff = table_diff.row_diff()
+
+        assert diff.join_count == 2
+        assert diff.full_match_count == 1
+        assert diff.partial_match_count == 1
+        assert diff.s_only_count == 1
+        assert diff.t_only_count == 1
+
+    table_diff = TableDiff(adapter=engine_adapter, source="src", target="target", on=["KEY1"])
+
+    _, _, col_names = table_diff.key_columns
+    assert col_names == ["KEY1"]
+
+    diff = table_diff.row_diff()
+
+    assert diff.join_count == 2
+    assert diff.full_match_count == 1
+    assert diff.partial_match_count == 1
+    assert diff.s_only_count == 1
+    assert diff.t_only_count == 1
+
+
+def test_data_diff_non_lowercase_skip_columns():
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    columns_to_types = {
+        "KEY": exp.DataType.build("int"),
+        "VALUE": exp.DataType.build("varchar"),
+        "IGNORED": exp.DataType.build("varchar"),
+    }
+
+    engine_adapter.create_table("src", columns_to_types)
+    engine_adapter.create_table("target", columns_to_types)
+    engine_adapter.insert_append(
+        "src",
+        pd.DataFrame([(1, "same", "source")], columns=columns_to_types),
+    )
+    engine_adapter.insert_append(
+        "target",
+        pd.DataFrame([(1, "same", "target")], columns=columns_to_types),
+    )
+
+    diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="target",
+        on=["key"],
+        skip_columns=["ignored"],
+    ).row_diff()
+
+    assert diff.full_match_count == 1
+    assert diff.partial_match_count == 0
+    assert diff.column_stats.index.tolist() == ["VALUE"]
+
+
+def test_skip_columns_across_schemas():
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+    table_diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="target",
+        on=["key"],
+        skip_columns=["foo"],
+    )
+    data_type = exp.DataType.build("varchar")
+    table_diff.__dict__["source_schema"] = {"foo": data_type, "FOO": data_type}
+    table_diff.__dict__["target_schema"] = {"FOO": data_type}
+
+    source_skip_columns = {
+        table_diff._resolve_column_name(c, table_diff.source_schema)
+        for c in table_diff.skip_columns
+    }
+    target_skip_columns = {
+        table_diff._resolve_column_name(c, table_diff.target_schema)
+        for c in table_diff.skip_columns
+    }
+
+    assert source_skip_columns == {"foo"}
+    assert target_skip_columns == {"FOO"}
+    assert "FOO" not in source_skip_columns
+
+
+def test_data_diff_key_columns_with_differing_case_between_source_and_target():
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    source_columns_to_types = {
+        "KEY1": exp.DataType.build("int"),
+        "Key2": exp.DataType.build("varchar"),
+        "value": exp.DataType.build("varchar"),
+    }
+    target_columns_to_types = {
+        "key1": exp.DataType.build("int"),
+        "KEY2": exp.DataType.build("varchar"),
+        "value": exp.DataType.build("varchar"),
+    }
+
+    engine_adapter.create_table("src", source_columns_to_types)
+    engine_adapter.create_table("target", target_columns_to_types)
+
+    engine_adapter.insert_append(
+        "src",
+        pd.DataFrame(
+            data=[(1, "a", "value"), (2, "b", "source")],
+            columns=source_columns_to_types.keys(),
+        ),
+    )
+    engine_adapter.insert_append(
+        "target",
+        pd.DataFrame(
+            data=[(1, "a", "value"), (2, "b", "target")],
+            columns=target_columns_to_types.keys(),
+        ),
+    )
+
+    table_diff = TableDiff(
+        adapter=engine_adapter, source="src", target="target", on=["key1", "KEY2"]
+    )
+
+    s_index, t_index, col_names = table_diff.key_columns
+    assert [c.sql() for c in s_index] == ["s.KEY1", "s.Key2"]
+    assert [c.sql() for c in t_index] == ["t.key1", "t.KEY2"]
+    assert col_names == ["KEY1", "Key2"]
+
+    diff = table_diff.row_diff()
+
+    assert diff.join_count == 2
+    assert diff.full_match_count == 1
+    assert diff.partial_match_count == 1
+    assert diff.s_only_count == 0
+    assert diff.t_only_count == 0
+
+    # the key columns are excluded from the per column match stats
+    assert diff.column_stats.index.tolist() == ["value"]
+
+
+def test_data_diff_non_lowercase_key_columns_in_on_condition():
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    columns_to_types = {
+        "KEY1": exp.DataType.build("int"),
+        "Key2": exp.DataType.build("varchar"),
+        "VALUE": exp.DataType.build("varchar"),
+    }
+
+    engine_adapter.create_table("src", columns_to_types)
+    engine_adapter.create_table("target", columns_to_types)
+
+    src_df = pd.DataFrame(
+        data=[(1, "a", "value"), (2, "b", "source")], columns=columns_to_types.keys()
+    )
+    target_df = pd.DataFrame(
+        data=[(1, "a", "value"), (2, "b", "target")], columns=columns_to_types.keys()
+    )
+
+    engine_adapter.insert_append("src", src_df)
+    engine_adapter.insert_append("target", target_df)
+
+    table_diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="target",
+        on=exp.condition('s."KEY1" = t."KEY1" AND s."Key2" = t."Key2"'),
+    )
+
+    _, _, col_names = table_diff.key_columns
+    assert col_names == ["KEY1", "Key2"]
+
+    diff = table_diff.row_diff()
+
+    assert diff.join_count == 2
+    assert diff.full_match_count == 1
+    assert diff.partial_match_count == 1
+    assert diff.s_only_count == 0
+    assert diff.t_only_count == 0
+
+
 def test_data_diff_nulls_in_some_grain_columns():
     engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
 
