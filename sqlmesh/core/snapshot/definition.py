@@ -24,6 +24,7 @@ from sqlmesh.core.macros import call_macro
 from sqlmesh.core.model import Model, ModelKindMixin, ModelKindName, ViewKind, CustomKind
 from sqlmesh.core.model.definition import _Model
 from sqlmesh.core.node import IntervalUnit, NodeType
+from sqlmesh.core.renderer import TableMapping
 from sqlmesh.utils import sanitize_name, unique
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -2007,14 +2008,17 @@ def to_view_mapping(
     environment_naming_info: EnvironmentNamingInfo,
     default_catalog: t.Optional[str] = None,
     dialect: t.Optional[str] = None,
-) -> t.Dict[str, str]:
-    return {
-        snapshot.name: snapshot.display_name(
-            environment_naming_info, default_catalog=default_catalog, dialect=dialect
+) -> TableMapping:
+    return TableMapping(
+        (
+            snapshot.name,
+            snapshot.display_name(
+                environment_naming_info, default_catalog=default_catalog, dialect=dialect
+            ),
         )
         for snapshot in snapshots
         if snapshot.is_model
-    }
+    )
 
 
 def has_paused_forward_only(
