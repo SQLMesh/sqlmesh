@@ -136,8 +136,8 @@ importers:
         specifier: ^2.1.1
         version: 2.1.1
       elkjs:
-        specifier: ^0.8.2
-        version: 0.8.2
+        specifier: ^0.12.0
+        version: 0.12.0
       orval:
         specifier: ^7.10.0
         version: 7.10.0(openapi-types@12.1.3)(supports-color@9.4.0)
@@ -290,8 +290,8 @@ importers:
         specifier: ^8.0.2
         version: 8.0.2
       elkjs:
-        specifier: ^0.8.2
-        version: 0.8.2
+        specifier: ^0.12.0
+        version: 0.12.0
       pluralize:
         specifier: ^8.0.0
         version: 8.0.0
@@ -3839,8 +3839,8 @@ packages:
   electron-to-chromium@1.5.227:
     resolution: {integrity: sha512-ITxuoPfJu3lsNWUi2lBM2PaBPYgH3uqmxut5vmBxgYvyI4AlJ6P3Cai1O76mOrkJCBzq0IxWg/NtqOrpu/0gKA==}
 
-  elkjs@0.8.2:
-    resolution: {integrity: sha512-L6uRgvZTH+4OF5NE/MBbzQx/WYpru1xCBE9respNj6qznEewGUIfhzmm7horWWxbNO2M0WckQypGctR8lH79xQ==}
+  elkjs@0.12.0:
+    resolution: {integrity: sha512-YZcKynxVxYoKIOEpywEPwCFdg+BTbxQRNf3pbwdDCvc8O3kQD8bmIwSxKU1eOTVc4Xo+VG9Te+575mlfvOrhEQ==}
 
   emoji-regex@10.4.0:
     resolution: {integrity: sha512-EC+0oUMY1Rqm4O6LLrgjtYDvcVYTy7chDnM4Q7030tP4Kwj3u/pR6gP9ygnp2CJMK5Gq+9Q2oqmrFJAz01DXjw==}
@@ -10948,7 +10948,7 @@ snapshots:
 
   electron-to-chromium@1.5.227: {}
 
-  elkjs@0.8.2: {}
+  elkjs@0.12.0: {}
 
   emoji-regex@10.4.0: {}
 
