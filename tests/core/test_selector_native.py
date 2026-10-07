@@ -9,15 +9,170 @@ from pytest_mock.plugin import MockerFixture
 import subprocess
 
 from sqlmesh.core import dialect as d
+from sqlmesh.core.model import schema as schema_module
+from sqlmesh.core import selector as selector_module
 from sqlmesh.core.audit import StandaloneAudit
 from sqlmesh.core.environment import Environment
-from sqlmesh.core.model import Model, SqlModel
+from sqlmesh.core.model import ExternalModel, Model, SqlModel, create_external_model
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.selector import NativeSelector
-from sqlmesh.core.snapshot import SnapshotChangeCategory
+from sqlmesh.core.snapshot import Snapshot, SnapshotChangeCategory
+from sqlmesh.core.snapshot.cache import SnapshotCache
+from sqlmesh.core.snapshot.definition import Node
 from sqlmesh.utils import UniqueKeyDict
 from sqlmesh.utils.date import now_timestamp
 from sqlmesh.utils.git import GitClient
+
+
+def _external_schema_refresh_case(
+    mocker: MockerFixture, tmp_path: Path
+) -> t.Tuple[
+    ExternalModel,
+    ExternalModel,
+    SqlModel,
+    t.Dict[str, Snapshot],
+    UniqueKeyDict[str, Model],
+    NativeSelector,
+]:
+    external_a = create_external_model("db.external_a", columns={"id": "int"})
+    external_b = create_external_model("db.external_b", columns={"id": "int"})
+    child = SqlModel(
+        name="db.child",
+        query=d.parse_one(
+            "SELECT a.id FROM db.external_a AS a JOIN db.external_b AS b ON a.id = b.id"
+        ),
+    )
+
+    # Inject inconsistent persisted state for this invariant test: the stored external model
+    # has optimize_query=False, but its fingerprint is seeded from the model with None. This
+    # synthetic mismatch does not imply that an upstream migration produces this state.
+    stored_b = t.cast(ExternalModel, external_b.copy(update={"optimize_query": False}))
+    stored_b._data_hash = external_b.data_hash
+    stored_b._metadata_hash = external_b.metadata_hash
+
+    old_nodes: t.Dict[str, Node] = {
+        external_a.fqn: external_a,
+        stored_b.fqn: stored_b,
+        child.fqn: child,
+    }
+    old_snapshots = {
+        name: Snapshot.from_node(node, nodes=old_nodes) for name, node in old_nodes.items()
+    }
+    for snapshot in old_snapshots.values():
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    current_models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+    current_models[external_a.fqn] = external_a
+    current_models[external_b.fqn] = external_b
+    current_models[child.fqn] = child
+
+    # Simulate the process worker's fresh fingerprint calculation synchronously. This avoids
+    # forking from pytest while still exercising the schema worker's hash recomputation.
+    mocker.patch("sqlmesh.core.constants.MAX_FORK_WORKERS", 1)
+    original_load = schema_module.load_optimized_query_and_mapping
+
+    def load_with_fresh_hashes(model: Model, mapping: t.Dict) -> t.Any:
+        model._data_hash = None
+        model._metadata_hash = None
+        return original_load(model, mapping)
+
+    mocker.patch(
+        "sqlmesh.core.model.schema.load_optimized_query_and_mapping",
+        side_effect=load_with_fresh_hashes,
+    )
+
+    state_reader = mocker.Mock()
+    state_reader.get_environment.return_value = Environment(
+        name="prod",
+        snapshots=[snapshot.table_info for snapshot in old_snapshots.values()],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="test_plan",
+    )
+
+    snapshot_cache = SnapshotCache(tmp_path / "snapshot_cache")
+
+    def load_snapshots(infos):
+        snapshot_ids = {info.snapshot_id for info in infos}
+        snapshots, _ = snapshot_cache.get_or_load(
+            snapshot_ids,
+            lambda ids: [
+                snapshot.copy(deep=True)
+                for snapshot in old_snapshots.values()
+                if snapshot.snapshot_id in ids
+            ],
+        )
+        return snapshots
+
+    state_reader.get_snapshots.side_effect = load_snapshots
+
+    selector = NativeSelector(
+        state_reader,
+        current_models,
+        context_path=tmp_path,
+        cache_dir=tmp_path,
+    )
+    return external_a, external_b, child, old_snapshots, current_models, selector
+
+
+def _current_snapshots(models: UniqueKeyDict[str, Model]) -> t.Dict[str, Snapshot]:
+    nodes = t.cast(t.Dict[str, Node], dict(models))
+    return {model.fqn: Snapshot.from_node(model, nodes=nodes) for model in models.values()}
+
+
+def test_unselected_external_coparent_is_not_directly_modified_by_schema_refresh(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    external_a, external_b, child, old_snapshots, _, selector = _external_schema_refresh_case(
+        mocker, tmp_path
+    )
+
+    schema_refresh = mocker.spy(selector_module, "update_model_schemas")
+    models, selected_fqns = selector.select_models([external_a.fqn], "prod")
+    current = _current_snapshots(models)
+
+    assert external_a.fqn in selected_fqns
+    schema_refresh.assert_called_once()
+    assert not current[external_b.fqn].is_directly_modified(old_snapshots[external_b.fqn])
+    assert (
+        current[external_b.fqn].fingerprint.metadata_hash
+        == old_snapshots[external_b.fqn].fingerprint.metadata_hash
+    )
+    assert not current[child.fqn].is_indirectly_modified(old_snapshots[child.fqn])
+
+
+def test_selected_external_change_remains_directly_modified(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    _, external_b, _, old_snapshots, current_models, selector = _external_schema_refresh_case(
+        mocker, tmp_path
+    )
+    changed_b = create_external_model("db.external_b", columns={"id": "int", "new": "text"})
+    current_models.update({changed_b.fqn: changed_b})
+
+    models, selected_fqns = selector.select_models([external_b.fqn], "prod")
+    current = _current_snapshots(models)
+
+    assert external_b.fqn in selected_fqns
+    assert current[external_b.fqn].is_directly_modified(old_snapshots[external_b.fqn])
+
+
+def test_selected_dependency_schema_change_remains_visible(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    external_a, external_b, child, old_snapshots, current_models, selector = (
+        _external_schema_refresh_case(mocker, tmp_path)
+    )
+    changed_a = create_external_model("db.external_a", columns={"id": "int", "new": "text"})
+    current_models.update({changed_a.fqn: changed_a})
+
+    models, selected_fqns = selector.select_models([external_a.fqn], "prod")
+    current = _current_snapshots(models)
+
+    assert external_a.fqn in selected_fqns
+    assert current[external_a.fqn].is_directly_modified(old_snapshots[external_a.fqn])
+    assert not current[external_b.fqn].is_directly_modified(old_snapshots[external_b.fqn])
+    assert current[child.fqn].is_indirectly_modified(old_snapshots[child.fqn])
 
 
 @pytest.mark.parametrize(
