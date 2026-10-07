@@ -104,6 +104,7 @@ class ContextDiff(PydanticModel):
         gateway_managed_virtual_layer: bool = False,
         infer_python_dependencies: bool = True,
         always_recreate_environment: bool = False,
+        stored_snapshot_ids: t.Optional[t.Set[SnapshotId]] = None,
     ) -> ContextDiff:
         """Create a ContextDiff object.
 
@@ -124,6 +125,9 @@ class ContextDiff(PydanticModel):
                 model-specific gateway rather than the default gateway.
             infer_python_dependencies: Whether to statically analyze Python code to automatically infer Python
                 package requirements.
+            stored_snapshot_ids: The IDs of the provided snapshots that are known to exist in the state.
+                When provided, the given snapshots are assumed to have already been hydrated from the state,
+                so only the previous versions of the modified snapshots are fetched.
 
         Returns:
             The ContextDiff object.
@@ -177,9 +181,21 @@ class ContextDiff(PydanticModel):
             and snapshot.fingerprint != remote_snapshot_name_to_info[snapshot.name].fingerprint
         }
 
-        stored = state_reader.get_snapshots(
-            [*snapshots.values(), *modified_snapshot_name_to_snapshot_info.values()]
-        )
+        if stored_snapshot_ids is None:
+            stored = state_reader.get_snapshots(
+                [*snapshots.values(), *modified_snapshot_name_to_snapshot_info.values()]
+            )
+        else:
+            # The provided snapshots have already been hydrated from the state, so only the
+            # previous versions of the modified snapshots need to be fetched.
+            stored = {
+                snapshot.snapshot_id: snapshot.copy()
+                for snapshot in snapshots.values()
+                if snapshot.snapshot_id in stored_snapshot_ids
+            }
+            stored.update(
+                state_reader.get_snapshots(modified_snapshot_name_to_snapshot_info.values())
+            )
 
         merged_snapshots = {}
         modified_snapshots = {}
