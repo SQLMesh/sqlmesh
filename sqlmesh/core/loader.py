@@ -858,6 +858,8 @@ class SqlMeshLoader(Loader):
                             virtual_environment_mode=self.config.virtual_environment_mode,
                         ):
                             if model.enabled:
+                                if model.fqn in models:
+                                    raise ValueError(f"Duplicate name: '{model.fqn}'.")
                                 models[model.fqn] = model
                 except Exception as ex:
                     raise ConfigError(self._failed_to_load_model_error(path, ex), path)
