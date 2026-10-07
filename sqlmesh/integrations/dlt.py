@@ -211,9 +211,7 @@ WHERE
 
 def format_config(configs: t.Dict[str, str], db_type: str) -> str:
     """Generate a string for the gateway connection config."""
-    config = {
-        "type": db_type,
-    }
+    config: t.Dict[str, t.Any] = {}
 
     for key, value in configs.items():
         if key == "password":
@@ -222,6 +220,11 @@ def format_config(configs: t.Dict[str, str], db_type: str) -> str:
             config["user"] = value
         else:
             config[key] = value
+
+    # Set db_type after iterating credentials so that credential attributes
+    # with a conflicting name (e.g. GCP service-account JSON contains
+    # "type": "service_account") cannot overwrite the connection type.
+    config["type"] = db_type
 
     # Validate the connection config fields
     invalid_fields = []
