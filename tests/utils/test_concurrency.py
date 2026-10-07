@@ -66,6 +66,13 @@ def test_concurrent_apply_to_snapshots_exception(mocker: MockerFixture, tasks_nu
         )
 
 
+def test_node_execution_failed_error_includes_cause():
+    error = NodeExecutionFailedError(SnapshotId(name="model", identifier="snapshot"))
+    error.__cause__ = RuntimeError("driver error")
+
+    assert str(error) == ("Execution failed for node SnapshotId<model: snapshot>: driver error")
+
+
 @pytest.mark.parametrize("tasks_num", [1, 2])
 def test_concurrent_apply_to_snapshots_return_failed_skipped(mocker: MockerFixture, tasks_num: int):
     snapshot_a = mocker.Mock()
