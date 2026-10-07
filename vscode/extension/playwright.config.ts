@@ -2,7 +2,10 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: 'tests',
-  timeout: 60_000,
+  // The first test a worker runs pays for the editor and extension host starting
+  // up, which measured at 2.5-4 minutes locally against 21-39 seconds for every
+  // later test in the same worker. 60 seconds only ever fit the latter.
+  timeout: 180_000,
   // TODO: When stable, allow retries in CI
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 2 : 4,
