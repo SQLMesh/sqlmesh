@@ -1254,6 +1254,38 @@ test_a:
     )
 
 
+def test_json_column_missing_from_input_rows(sushi_context: Context) -> None:
+    _check_successful_or_raise(
+        _create_test(
+            body=load_yaml(
+                """
+test_a:
+  model: a
+  inputs:
+    b:
+      columns:
+        id: int
+        payload: json
+      rows:
+        - id: 1
+  outputs:
+    query:
+      - id: 1
+        payload_is_null: true
+                """
+            ),
+            test_name="test_a",
+            model=sushi_context.upsert_model(
+                _create_model(
+                    "SELECT id, payload IS NULL AS payload_is_null FROM b",
+                    default_catalog="memory",
+                )
+            ),
+            context=Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))),
+        ).run()
+    )
+
+
 @pytest.mark.parametrize("full_model_without_ctes", ["snowflake"], indirect=True)
 def test_normalization(full_model_without_ctes: SqlModel) -> None:
     normalized_body = _create_test(

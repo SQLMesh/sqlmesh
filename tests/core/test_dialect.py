@@ -1116,6 +1116,26 @@ def test_select_from_values_for_batch_range_json():
     )
 
 
+def test_select_from_values_for_batch_range_json_values():
+    values = [
+        (1, None),
+        (2, {"name": "O'Brien", "tags": ["a"]}),
+        (3, '{"name": "O\'Brien"}'),
+    ]
+    columns_to_types = {
+        "id": exp.DataType.build("int"),
+        "json_col": exp.DataType.build("json"),
+    }
+
+    assert select_from_values_for_batch_range(values, columns_to_types, 0, len(values)).sql() == (
+        "SELECT CAST(id AS INT) AS id, CAST(json_col AS JSON) AS json_col "
+        "FROM (VALUES (1, CAST(NULL AS JSON)), "
+        """(2, PARSE_JSON('{"name": "O''Brien", "tags": ["a"]}')), """
+        """(3, PARSE_JSON('{"name": "O''Brien"}'))) """
+        "AS t(id, json_col)"
+    )
+
+
 def test_select_from_values_that_include_null():
     values = [(1, exp.null())]
     columns_to_types = {
