@@ -101,6 +101,33 @@ def test_create_table(adapter: ClickhouseEngineAdapter, mocker):
     ]
 
 
+def test_ctas_in_cluster_mode_uses_empty_ctas_then_single_insert(
+    adapter: ClickhouseEngineAdapter, mocker: MockerFixture
+):
+    """A distributed CREATE must not execute its SELECT once per cluster node."""
+    mocker.patch.object(
+        ClickhouseEngineAdapter,
+        "cluster",
+        new_callable=mocker.PropertyMock(return_value="default"),
+    )
+    mocker.patch.object(
+        ClickhouseEngineAdapter,
+        "engine_run_mode",
+        new_callable=mocker.PropertyMock(return_value=EngineRunMode.CLUSTER),
+    )
+
+    adapter.ctas(
+        "foo",
+        parse_one("SELECT 1 AS a", dialect=adapter.dialect),
+        {"a": exp.DataType.build("Int8", dialect=adapter.dialect)},
+    )
+
+    create_sql, insert_sql = to_sql_calls(adapter)
+    assert 'ON CLUSTER "default"' in create_sql
+    assert " EMPTY AS SELECT" in create_sql
+    assert insert_sql.startswith('INSERT INTO "foo" ("a") SELECT')
+
+
 def test_rename_table(adapter: ClickhouseEngineAdapter, mocker):
     mocker.patch.object(
         ClickhouseEngineAdapter,
