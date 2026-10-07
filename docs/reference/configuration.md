@@ -67,6 +67,12 @@ See all the keys allowed in `model_defaults` at the [model configuration referen
 | `linter.enabled`          | Whether linting is enabled (Default: `False`)                                                                                                      | boolean | N        |
 | `linter.use_project_index` | Whether to use the persistent project index for linting. Targeted linting loads selected models and their upstream dependencies. (Default: `False`) | boolean | N        |
 
+### Render
+
+| Option                     | Description                                                                                                                                                       | Type    | Required |
+|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|----------|
+| `render.use_project_index` | Whether to use the persistent project index when rendering. Only the target model and its upstream dependencies are loaded. (Default: `False`)                    | boolean | N        |
+
 ### Variables
 
 The `variables` key can be used to provide values for user-defined variables, accessed using the [`@VAR` macro function](../concepts/macros/sqlmesh_macros.md#global-variables) in SQL model definitions, [`context.var` method](../concepts/models/python_models.md#global-variables) in Python model definitions, and [`evaluator.var` method](../concepts/macros/sqlmesh_macros.md#accessing-global-variable-values) in Python macro functions.
