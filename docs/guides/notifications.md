@@ -130,7 +130,7 @@ This example stops all notifications other than those for `User1`:
 
 SQLMesh notifications are triggered by events. The events that should trigger a notification are specified in the notification target's `notify_on` field.
 
-Notifications are supported for [`plan` application](../concepts/plans.md) start/end/failure, [`run`](../reference/cli.md#run) start/end/failure, and [`audit`](../concepts/audits.md) failures.
+Notifications are supported for [`plan` application](../concepts/plans.md) start/end/failure, [`run`](../reference/cli.md#run) start/end/failure, and [`audit`](../concepts/audits.md) passes and failures.
 
 For `plan` and `run` start/end, the target environment name is included in the notification message. For failures, the Python exception or error text is included in the notification message.
 
@@ -145,6 +145,7 @@ This table lists each event, its associated `notify_on` value, and its notificat
 | SQLMesh run end               | run_end                | "SQLMesh run finished for environment `{environment}`."  |
 | SQLMesh run failure           | run_failure            | "Failed to run SQLMesh.\n{exception}"                    |
 | Audit failure                 | audit_failure          | "{audit_error}"                                          |
+| Audit pass                    | audit_pass             | "Audit `{audit_name}` passed for model `{model_name}`."  |
 
 Any combination of these events can be specified in a notification target's `notify_on` field.
 
@@ -269,6 +270,7 @@ Each of those notification target classes is a subclass of `BaseNotificationTarg
 | notify_run_end       | Environment name: `env`          |
 | notify_run_failure   | Exception stack trace: `exc`     |
 | notify_audit_failure | Audit error trace: `audit_error` |
+| notify_audit_pass    | Audit name: `audit_name`, model name: `model_name` |
 
 This example creates a new notification target class `CustomSMTPNotificationTarget`.
 
