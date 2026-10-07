@@ -18,6 +18,8 @@ from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils import optional_import
 from tests.core.engine_adapter import to_sql_calls
 from sqlmesh.core.model.kind import ViewKind
+from sqlmesh.core.snapshot import DeployabilityIndex
+from sqlmesh.core.snapshot.evaluator import EngineManagedStrategy
 
 pytestmark = [pytest.mark.engine, pytest.mark.snowflake]
 
@@ -607,6 +609,85 @@ def test_ctas_skips_dynamic_table_properties(make_mocked_engine_adapter: t.Calla
     assert to_sql_calls(adapter) == [
         'CREATE TABLE IF NOT EXISTS "test_table" AS SELECT CAST("a" AS INT) AS "a", CAST("b" AS INT) AS "b" FROM (SELECT "a", "b" FROM "source_table") AS "_subquery"'
     ]
+
+
+@pytest.mark.parametrize(
+    "operation", ["create_annotated", "create_ctas", "insert", "create_managed"]
+)
+def test_managed_preview_dynamic_table_properties(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, operation: str
+):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+    model = load_sql_based_model(
+        d.parse("""
+        MODEL (
+            name test_schema.test_model,
+            dialect snowflake,
+            kind MANAGED,
+            physical_properties (
+                warehouse = 'SMALL',
+                target_lag = '10 minutes',
+                refresh_mode = 'AUTO',
+                initialize = 'ON_CREATE',
+                initialization_warehouse = 'INITIAL_WH',
+                data_retention_time_in_days = 1,
+                max_data_extension_time_in_days = 2
+            )
+        );
+        SELECT a FROM source_table;
+    """)
+    )
+    properties = model.physical_properties
+    original_properties = {key: value.copy() for key, value in properties.items()}
+    strategy = EngineManagedStrategy(adapter)
+    mocker.patch.object(adapter, "columns", return_value={"A": exp.DataType.build("INT")})
+    if operation == "create_annotated":
+        model = model.copy(update={"columns_to_types_": {"A": exp.DataType.build("INT")}})
+    if operation == "insert":
+        strategy.insert(
+            "test_table",
+            model.render_query_or_raise(),
+            model,
+            True,
+            {},
+            deployability_index=DeployabilityIndex.none_deployable(),
+            snapshot=mocker.Mock(),
+            physical_properties=properties,
+        )
+    else:
+        strategy.create(
+            "test_table",
+            model,
+            operation == "create_managed",
+            {},
+            skip_grants=True,
+            is_snapshot_deployable=operation == "create_managed",
+            physical_properties=properties,
+        )
+    shared_properties = "DATA_RETENTION_TIME_IN_DAYS=1 MAX_DATA_EXTENSION_TIME_IN_DAYS=2"
+    query = 'SELECT "A" AS "A" FROM "SOURCE_TABLE" AS "SOURCE_TABLE"'
+    if operation == "create_annotated":
+        expected_sql = [
+            f'CREATE TABLE IF NOT EXISTS "test_table" ("A" INT) {shared_properties}',
+            f"{query} WHERE FALSE LIMIT 0",
+        ]
+    elif operation == "create_ctas":
+        expected_sql = [
+            f'CREATE TABLE IF NOT EXISTS "test_table" {shared_properties} AS {query} WHERE FALSE LIMIT 0'
+        ]
+    elif operation == "insert":
+        expected_sql = [
+            f'CREATE OR REPLACE TABLE "test_table" {shared_properties} AS SELECT CAST("A" AS INT) AS "A" FROM ({query}) AS "_subquery"'
+        ]
+    else:
+        expected_sql = [
+            'CREATE OR REPLACE DYNAMIC TABLE "test_table" '
+            "WAREHOUSE='SMALL' TARGET_LAG='10 minutes' REFRESH_MODE='AUTO' "
+            "INITIALIZE='ON_CREATE' INITIALIZATION_WAREHOUSE='INITIAL_WH' "
+            f"{shared_properties} AS {query}"
+        ]
+    assert to_sql_calls(adapter) == expected_sql
+    assert properties == original_properties
 
 
 def test_set_current_catalog(make_mocked_engine_adapter: t.Callable):
