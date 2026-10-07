@@ -10,7 +10,7 @@ import sqlmesh.core.dialect as d
 from sqlmesh.core.dialect import normalize_model_name
 from sqlmesh.core.engine_adapter import SnowflakeEngineAdapter
 from sqlmesh.core.engine_adapter.base import EngineAdapter
-from sqlmesh.core.engine_adapter.shared import DataObjectType
+from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 from sqlmesh.core.model import load_sql_based_model
 from sqlmesh.core.model.definition import SqlModel
 from sqlmesh.core.node import IntervalUnit
@@ -1047,6 +1047,45 @@ def test_alter_table_iceberg(mocker: MockerFixture, make_mocked_engine_adapter: 
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter, default_catalog="test_catalog")
     adapter.alter_table(alter_operations)
     assert to_sql_calls(adapter) == ['ALTER TABLE "test_table" ADD "b" INT']
+
+
+def test_alter_table_drops_clustering_key_before_drop_column(
+    mocker: MockerFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch("sqlmesh.core.engine_adapter.snowflake.SnowflakeEngineAdapter.set_current_catalog")
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter, default_catalog="test_catalog")
+
+    current_table = {"a": "INT", "b": "INT"}
+    target_table = {"a": "INT"}
+    adapter.columns = lambda table_name, **kwargs: {
+        k: exp.DataType.build(v)
+        for k, v in (current_table if table_name == "test_table" else target_table).items()
+    }
+
+    def _get_data_objects(schema_name, object_names=None, **kwargs):
+        table_name = next(iter(object_names or []))
+        return [
+            DataObject(
+                catalog="test_catalog",
+                schema="test_schema",
+                name=table_name,
+                type=DataObjectType.TABLE,
+                # the current table is clustered by the column being dropped
+                clustering_key='"b"' if table_name == "test_table" else None,
+            )
+        ]
+
+    mocker.patch.object(adapter, "get_data_objects", side_effect=_get_data_objects)
+
+    alter_operations = adapter.get_alter_operations("test_table", "target_table")
+    adapter.alter_table(alter_operations)
+
+    # Snowflake rejects dropping a column that belongs to a clustering key, so the
+    # clustering key must be dropped before the column is dropped.
+    assert to_sql_calls(adapter) == [
+        'ALTER TABLE "test_table" DROP CLUSTERING KEY',
+        'ALTER TABLE "test_table" DROP COLUMN "b"',
+    ]
 
 
 def test_create_view_with_schema_and_grants(
