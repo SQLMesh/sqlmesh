@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 import typing as t
 import click
 from datetime import datetime, timedelta, timezone
@@ -6,6 +9,10 @@ from sqlglot import exp, parse_one
 from sqlmesh.core.config.connection import parse_connection_config
 from sqlmesh.core.context import Context
 from sqlmesh.utils.date import yesterday_ds
+
+
+if t.TYPE_CHECKING:
+    from dlt.destinations.impl.ducklake.configuration import DuckLakeClientConfiguration
 
 
 def generate_dlt_models_and_settings(
@@ -64,16 +71,23 @@ def generate_dlt_models_and_settings(
         connection_config = None
     else:
         client = pipeline.destination_client()
-        config = client.config
-        credentials = config.credentials
-        configs = {
-            key: value
-            for key in dir(credentials)
-            if not key.startswith("_")
-            and not callable(value := getattr(credentials, key))
-            and value is not None
-        }
-        connection_config = format_config(configs, db_type)
+        if db_type == "ducklake":
+            # Cast: reachable only for ducklake pipelines, so client.config is the
+            # DuckLake client configuration at runtime (statically the base type).
+            connection_config = format_ducklake_config(
+                t.cast("DuckLakeClientConfiguration", client.config)
+            )
+        else:
+            config = client.config
+            credentials = config.credentials
+            configs = {
+                key: value
+                for key in dir(credentials)
+                if not key.startswith("_")
+                and not callable(value := getattr(credentials, key))
+                and value is not None
+            }
+            connection_config = format_config(configs, db_type)
 
     dlt_tables = {
         name: table
@@ -209,8 +223,62 @@ WHERE
 """
 
 
+def _yaml_inline(value: str) -> str:
+    """Emit one YAML scalar inline, quoting only when plain would not round-trip.
+
+    Ordinary locators (alphanumerics plus / _ . -) are returned unchanged so the
+    generated config stays byte-identical; anything else (leading quote, newline,
+    ': ', ' #', spaces, etc.) is double-quoted via JSON (single line, valid YAML)
+    so yaml.safe_load round-trips instead of raising ScannerError. No PyYAML
+    dependency: json double-quotes are valid YAML double-quotes.
+    """
+    if (
+        value
+        and (value[0].isalnum() or value[0] in "/_")
+        and all(ch.isalnum() or ch in "_./-" for ch in value)
+    ):
+        return value
+    return json.dumps(value)
+
+
+def format_ducklake_config(client_config: DuckLakeClientConfiguration) -> str:
+    """Generate a duckdb-gateway connection block with the DuckLake attached as catalog."""
+    creds = client_config.credentials
+    catalog = creds.catalog
+    drivername = getattr(catalog, "drivername", "") or ""
+    if drivername not in ("duckdb", "sqlite"):
+        raise click.ClickException(
+            f"Unsupported DuckLake catalog '{drivername}'. SQLMesh dlt init currently supports "
+            "file-backed catalogs (duckdb, sqlite); postgres/mysql/MotherDuck catalogs are not "
+            "yet mapped. Tracked in SQLMesh/sqlmesh#5914."
+        )
+    alias = creds.ducklake_name or "ducklake"
+    catalog_database = str(catalog.database or "")
+    storage_url = str(creds.storage_url or "")
+    lines = [
+        "      type: duckdb",
+        "      catalogs:",
+        f"        {_yaml_inline(alias)}:",
+        "          type: ducklake",
+        f"          path: {_yaml_inline(catalog_database)}",
+        f"          data_path: {_yaml_inline(storage_url)}",
+    ]
+    metadata_schema = creds.metadata_schema or alias
+    lines.append(f"          metadata_schema: {_yaml_inline(str(metadata_schema))}")
+    if getattr(client_config, "override_data_path", False):
+        lines.append("          override_data_path: true")
+    return "\n".join(lines)
+
+
 def format_config(configs: t.Dict[str, str], db_type: str) -> str:
     """Generate a string for the gateway connection config."""
+    # NOTE (SQLMesh#5914 scope cut): only the `ducklake` destination is mapped
+    # (see format_ducklake_config). Any other unrecognised dlt `db_type`
+    # (e.g. weaviate, pandas, qdrant, typos) still falls through to
+    # parse_connection_config below and surfaces as
+    # ConfigError("Unknown connection type '<type>'."). That is a known
+    # limitation, not a regression introduced here; #5914 reports only the
+    # ducklake destination ("When using dlt with a `ducklake` destination ...").
     config = {
         "type": db_type,
     }
