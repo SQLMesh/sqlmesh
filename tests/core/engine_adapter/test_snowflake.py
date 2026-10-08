@@ -171,6 +171,18 @@ def test_session(
         assert to_sql_calls(adapter) == expected_exception_calls
 
 
+def test_alter_session_parameters_are_not_quoted(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    adapter.execute(parse_one("ALTER SESSION SET TIMEZONE = 'UTC'", read="snowflake"))
+    adapter.execute(parse_one("ALTER SESSION UNSET TIMEZONE", read="snowflake"))
+
+    assert to_sql_calls(adapter) == [
+        "ALTER SESSION SET TIMEZONE = 'UTC'",
+        "ALTER SESSION UNSET TIMEZONE",
+    ]
+
+
 def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
 

@@ -1395,6 +1395,41 @@ def test_tsql_alter_column_nullability():
     )
 
 
+def test_snowflake_alter_session_parameters_are_not_quoted():
+    # Issue #5666: session parameter names are not identifiers, so Snowflake rejects them when
+    # quoted, e.g. ALTER SESSION SET "TIMEZONE" = 'UTC' is a syntax error.
+    for sql, expected in [
+        (
+            "ALTER SESSION SET TIMEZONE = 'UTC', query_tag = @tag",
+            "ALTER SESSION SET TIMEZONE = 'UTC', query_tag = @tag",
+        ),
+        ("ALTER SESSION UNSET TIMEZONE, query_tag", "ALTER SESSION UNSET TIMEZONE, query_tag"),
+        # Explicit quoting is left as written
+        ("ALTER SESSION SET \"TIMEZONE\" = 'UTC'", "ALTER SESSION SET \"TIMEZONE\" = 'UTC'"),
+    ]:
+        assert parse_one(sql, read="snowflake").sql(dialect="snowflake", identify=True) == expected
+
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL (name db.t, kind FULL, dialect snowflake);
+
+            ALTER SESSION SET TIMEZONE = 'UTC';
+
+            SELECT 1 AS a;
+
+            ALTER SESSION UNSET TIMEZONE;
+            """
+        )
+    )
+    assert [s.sql(dialect="snowflake") for s in model.render_pre_statements()] == [
+        "ALTER SESSION SET TIMEZONE = 'UTC'"
+    ]
+    assert [s.sql(dialect="snowflake") for s in model.render_post_statements()] == [
+        "ALTER SESSION UNSET TIMEZONE"
+    ]
+
+
 def test_model_name_cannot_be_string():
     with pytest.raises(ParseError) as parse_error:
         parse(
