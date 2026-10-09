@@ -935,6 +935,136 @@ def test_duckdb_config_json_strings(make_config):
     assert config.catalogs.get("test2").path == "test2.duckdb"
 
 
+@patch("duckdb.connect")
+def test_duckdb_extension_settings_applied_before_install(mock_connect, make_config):
+    """Settings that control where extensions are fetched from must be applied before INSTALL/LOAD,
+    otherwise DuckDB will try to reach the default repository before e.g. `custom_extension_repository`
+    or `extension_directory` has been configured. All other connector_config settings keep being applied
+    after the extensions have been loaded."""
+    mock_cursor = MagicMock()
+    # No settings are currently set, so every connector_config entry should be SET
+    mock_cursor.fetchall.return_value = []
+    mock_connection = MagicMock()
+    mock_connection.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_connection
+
+    config = make_config(
+        type="duckdb",
+        extensions=["httpfs"],
+        connector_config={
+            "memory_limit": "1GB",
+            "custom_extension_repository": "/opt/duckdb/extensions",
+            "autoinstall_known_extensions": "false",
+        },
+    )
+    assert isinstance(config, DuckDBConnectionConfig)
+
+    # Create cursor which triggers _cursor_init
+    config.create_engine_adapter().cursor
+
+    execute_calls = [call[0][0] for call in mock_cursor.execute.call_args_list]
+
+    set_repository_idx = execute_calls.index(
+        "SET custom_extension_repository = '/opt/duckdb/extensions'"
+    )
+    set_autoinstall_idx = execute_calls.index("SET autoinstall_known_extensions = 'false'")
+    install_idx = execute_calls.index("INSTALL httpfs")
+    load_idx = execute_calls.index("LOAD httpfs")
+    set_memory_limit_idx = execute_calls.index("SET memory_limit = '1GB'")
+
+    # extension management settings run before the extensions are installed
+    assert set_repository_idx < install_idx
+    assert set_autoinstall_idx < install_idx
+    assert install_idx < load_idx
+    # the remaining connector_config settings still run after the extensions are loaded
+    assert load_idx < set_memory_limit_idx
+
+
+@patch("duckdb.connect")
+def test_duckdb_connector_config_without_extensions(mock_connect, make_config):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_connection = MagicMock()
+    mock_connection.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_connection
+
+    config = make_config(
+        type="duckdb",
+        connector_config={
+            "custom_extension_repository": "/opt/duckdb/extensions",
+            "memory_limit": "1GB",
+        },
+    )
+    assert isinstance(config, DuckDBConnectionConfig)
+
+    config.create_engine_adapter().cursor
+
+    execute_calls = [call[0][0] for call in mock_cursor.execute.call_args_list]
+
+    assert "SET custom_extension_repository = '/opt/duckdb/extensions'" in execute_calls
+    assert "SET memory_limit = '1GB'" in execute_calls
+    assert not any(call.startswith(("INSTALL", "LOAD")) for call in execute_calls)
+
+
+@pytest.mark.parametrize(
+    "repository, expected_install",
+    [
+        ("community", "INSTALL httpfs FROM community"),
+        ("core_nightly", "INSTALL httpfs FROM core_nightly"),
+        ("/opt/duckdb/extensions", "INSTALL httpfs FROM '/opt/duckdb/extensions'"),
+        (
+            "https://artifactory.example.com/duckdb-extensions",
+            "INSTALL httpfs FROM 'https://artifactory.example.com/duckdb-extensions'",
+        ),
+        ("s3://bucket/extensions", "INSTALL httpfs FROM 's3://bucket/extensions'"),
+        ("/path/with'quote", "INSTALL httpfs FROM '/path/with''quote'"),
+    ],
+)
+@patch("duckdb.connect")
+def test_duckdb_extension_repository_quoting(
+    mock_connect, make_config, repository: str, expected_install: str
+):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_connection = MagicMock()
+    mock_connection.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_connection
+
+    config = make_config(
+        type="duckdb",
+        extensions=[{"name": "httpfs", "repository": repository}],
+    )
+    assert isinstance(config, DuckDBConnectionConfig)
+
+    config.create_engine_adapter().cursor
+
+    execute_calls = [call[0][0] for call in mock_cursor.execute.call_args_list]
+    assert expected_install in execute_calls
+    assert "LOAD httpfs" in execute_calls
+
+
+@patch("duckdb.connect")
+def test_duckdb_extension_force_install_with_repository(mock_connect, make_config):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_connection = MagicMock()
+    mock_connection.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_connection
+
+    config = make_config(
+        type="duckdb",
+        extensions=[
+            {"name": "httpfs", "repository": "/opt/duckdb/extensions", "force_install": True}
+        ],
+    )
+    assert isinstance(config, DuckDBConnectionConfig)
+
+    config.create_engine_adapter().cursor
+
+    execute_calls = [call[0][0] for call in mock_cursor.execute.call_args_list]
+    assert "FORCE INSTALL httpfs FROM '/opt/duckdb/extensions'" in execute_calls
+
+
 def test_motherduck_attach_catalog(make_config):
     config = make_config(
         type="motherduck",
