@@ -90,6 +90,20 @@ risingwave_ready() {
     probe_port 4566
 }
 
+db2_ready() {
+    probe_port 50001
+
+    echo "Waiting for Db2 to finish initialising (this can take 2-4 minutes)..."
+    while true; do
+        if docker exec db2 su - db2inst1 -c "db2 connect to TESTDB" > /dev/null 2>&1; then
+            echo "Db2 is accepting connections"
+            break
+        fi
+        echo "Db2 not yet ready; sleeping 15s..."
+        sleep 15
+    done
+}
+
 echo "Waiting for $ENGINE to be ready..."
 
 READINESS_FUNC="${ENGINE}_ready"

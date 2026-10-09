@@ -61,6 +61,21 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         configured = self._extra_config.get("virtual_catalog")
         self._default_catalog = f"__{gateway}__" if configured is None else configured
 
+    def _to_sql(self, expression: exp.Expr, quote: bool = True, **kwargs: t.Any) -> str:
+        """Render SQL without the virtual catalog, which ClickHouse does not support."""
+        if self._default_catalog and any(self._virtual_catalog_references(expression)):
+            expression = expression.copy()
+            for reference in list(self._virtual_catalog_references(expression)):
+                reference.set("catalog", None)
+        return super()._to_sql(expression, quote=quote, **kwargs)
+
+    def _virtual_catalog_references(self, expression: exp.Expr) -> t.Iterator[exp.Expr]:
+        return (
+            reference
+            for reference in expression.find_all(exp.Table, exp.Column)
+            if reference.text("catalog") == self._default_catalog
+        )
+
     @property
     def engine_run_mode(self) -> EngineRunMode:
         if self._extra_config.get("cloud_mode"):
@@ -502,8 +517,14 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         **kwargs: t.Any,
     ) -> None:
         """Create table with identical structure as source table"""
+        target_table_sql = self._strip_virtual_catalog(target_table_name).sql(
+            dialect=self.dialect, identify=True
+        )
+        source_table_sql = self._strip_virtual_catalog(source_table_name).sql(
+            dialect=self.dialect, identify=True
+        )
         self.execute(
-            f"CREATE TABLE {target_table_name}{self._on_cluster_sql()} AS {source_table_name}"
+            f"CREATE TABLE {target_table_sql}{self._on_cluster_sql()} AS {source_table_sql}"
         )
 
     def _get_partition_ids(
@@ -648,7 +669,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         SQL is sent to the wire, since ClickHouse only supports a two-level
         ``[database].[table]`` naming scheme.
         """
-        table = exp.to_table(name)
+        table = exp.to_table(name, dialect=self.dialect)
         if self._default_catalog and table.catalog == self._default_catalog:
             table.set("catalog", None)
         return table
@@ -660,8 +681,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     ) -> None:
         from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore
 
-        old_table_sql = exp.to_table(old_table_name).sql(dialect=self.dialect, identify=True)
-        new_table_sql = exp.to_table(new_table_name).sql(dialect=self.dialect, identify=True)
+        old_table_sql = self._strip_virtual_catalog(old_table_name).sql(
+            dialect=self.dialect, identify=True
+        )
+        new_table_sql = self._strip_virtual_catalog(new_table_name).sql(
+            dialect=self.dialect, identify=True
+        )
 
         try:
             self.execute(
@@ -685,8 +710,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         old_table_name: TableName,
         new_table_name: TableName,
     ) -> None:
-        old_table_sql = exp.to_table(old_table_name).sql(dialect=self.dialect, identify=True)
-        new_table_sql = exp.to_table(new_table_name).sql(dialect=self.dialect, identify=True)
+        old_table_sql = self._strip_virtual_catalog(old_table_name).sql(
+            dialect=self.dialect, identify=True
+        )
+        new_table_sql = self._strip_virtual_catalog(new_table_name).sql(
+            dialect=self.dialect, identify=True
+        )
 
         self.execute(f"RENAME TABLE {old_table_sql} TO {new_table_sql}{self._on_cluster_sql()}")
 
@@ -974,7 +1003,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
     def _build_create_comment_table_exp(
         self, table: exp.Table, table_comment: str, table_kind: str, **kwargs: t.Any
     ) -> exp.Comment | str:
-        table_sql = table.sql(dialect=self.dialect, identify=True)
+        table_sql = self._strip_virtual_catalog(table).sql(dialect=self.dialect, identify=True)
 
         truncated_comment = self._truncate_table_comment(table_comment)
         comment_sql = exp.Literal.string(truncated_comment).sql(dialect=self.dialect)
@@ -989,7 +1018,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         table_kind: str = "TABLE",
         **kwargs: t.Any,
     ) -> exp.Comment | str:
-        table_sql = table.sql(dialect=self.dialect, identify=True)
+        table_sql = self._strip_virtual_catalog(table).sql(dialect=self.dialect, identify=True)
         column_sql = exp.to_column(column_name).sql(dialect=self.dialect, identify=True)
 
         truncated_comment = self._truncate_table_comment(column_comment)
