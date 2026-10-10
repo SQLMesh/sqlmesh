@@ -50,6 +50,10 @@ class RedshiftEngineAdapter(
     # Redshift doesn't support comments for VIEWs WITH NO SCHEMA BINDING (which we always use)
     COMMENT_CREATION_VIEW = CommentCreationView.UNSUPPORTED
     SUPPORTS_REPLACE_TABLE = False
+    # Replacing a view (DROP + CREATE) gives it a new OID, which breaks concurrent queries that read through it.
+    # Views WITH NO SCHEMA BINDING resolve their dependencies at query time, so an existing view only needs to be
+    # recreated on the first insert of a snapshot version.
+    RECREATE_VIEW_ON_EVALUATION = False
     SUPPORTS_GRANTS = True
     SUPPORTS_MULTIPLE_GRANT_PRINCIPALS = True
 

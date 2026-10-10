@@ -2750,6 +2750,16 @@ class ViewStrategy(PromotableStrategy):
         ):
             must_recreate_view = False
 
+        # Some engines (e.g. Redshift) replace views via DROP + CREATE, which breaks concurrent queries that read
+        # through the view. For those, an existing view must not be recreated on routine evaluation; only on the
+        # first insert, which also covers rebuilds forced by `should_force_rebuild`.
+        if (
+            not is_materialized_view
+            and not is_first_insert
+            and not self.adapter.RECREATE_VIEW_ON_EVALUATION
+        ):
+            must_recreate_view = False
+
         if self.adapter.table_exists(table_name) and not must_recreate_view:
             logger.info("Skipping creation of the view '%s'", table_name)
             return
