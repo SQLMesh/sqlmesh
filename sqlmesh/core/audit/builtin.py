@@ -524,7 +524,7 @@ WHERE
     """,
 )
 
-# kl_divergence(column=age, target_column=normalized_age, threshold=0.1)
+# kl_divergence(source_column=age, target_column=normalized_age, threshold=0.1)
 kl_divergence_audit = ModelAudit(
     name="kl_divergence",
     defaults={"condition": exp.true()},
