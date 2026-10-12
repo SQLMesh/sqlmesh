@@ -45,6 +45,65 @@ if t.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class TableMapping(t.Dict[str, str]):
+    """A table name mapping that caches the dialect-normalized form of its keys.
+
+    `exp.replace_tables` normalizes every key of the mapping it's given, so resolving a single
+    table against a mapping of every model in an environment costs O(N). Resolving it against
+    this mapping costs a dictionary lookup, since each key is normalized once per dialect.
+    """
+
+    def __init__(self, *args: t.Any, **kwargs: t.Any):
+        super().__init__(*args, **kwargs)
+        self._normalized_keys: t.Dict[DialectType, t.Dict[str, str]] = {}
+
+    def normalized_keys(self, dialect: DialectType) -> t.Dict[str, str]:
+        """Returns a mapping from each normalized key to the last key that normalizes to it."""
+        normalized_keys = self._normalized_keys.get(dialect)
+        if normalized_keys is None:
+            normalized_keys = {exp.normalize_table_name(key, dialect=dialect): key for key in self}
+            self._normalized_keys[dialect] = normalized_keys
+        return normalized_keys
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._normalized_keys.clear()
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        self._normalized_keys.clear()
+        super().__delitem__(key)
+
+    def __ior__(self, other: t.Any) -> TableMapping:  # type: ignore[override,misc]
+        self._normalized_keys.clear()
+        return super().__ior__(other)
+
+    def update(self, *args: t.Any, **kwargs: t.Any) -> None:
+        self._normalized_keys.clear()
+        super().update(*args, **kwargs)
+
+    def setdefault(self, key: str, default: str) -> str:  # type: ignore[override]
+        self._normalized_keys.clear()
+        return super().setdefault(key, default)
+
+    def pop(self, key: str, *args: t.Any) -> t.Any:
+        self._normalized_keys.clear()
+        return super().pop(key, *args)
+
+    def popitem(self) -> t.Tuple[str, str]:
+        self._normalized_keys.clear()
+        return super().popitem()
+
+    def clear(self) -> None:
+        self._normalized_keys.clear()
+        super().clear()
+
+
+def _normalize_keys(mapping: t.Dict[str, str], dialect: DialectType) -> t.Dict[str, str]:
+    if isinstance(mapping, TableMapping):
+        return mapping.normalized_keys(dialect)
+    return {exp.normalize_table_name(key, dialect=dialect): key for key in mapping}
+
+
 class BaseExpressionRenderer:
     def __init__(
         self,
@@ -325,20 +384,35 @@ class BaseExpressionRenderer:
 
     def _resolve_table(
         self,
-        table_name: str | exp.Expr,
+        table_name: str,
         snapshots: t.Optional[t.Dict[str, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
     ) -> exp.Table:
-        table = exp.replace_tables(
-            t.cast(exp.Table, exp.maybe_parse(table_name, into=exp.Table, dialect=self._dialect)),
-            {
-                **self._to_table_mapping((snapshots or {}).values(), deployability_index),
-                **(table_mapping or {}),
-            },
-            dialect=self._dialect,
-            copy=False,
+        table = t.cast(
+            exp.Table, exp.maybe_parse(table_name, into=exp.Table, dialect=self._dialect)
         )
+
+        mapping: t.Dict[str, str] = {}
+        if table_mapping:
+            # An explicit mapping takes precedence over snapshots, so when one of its keys matches
+            # the table, that key alone decides the result. Among equivalent keys, the last wins.
+            key = _normalize_keys(table_mapping, self._dialect).get(
+                exp.normalize_table_name(table, dialect=self._dialect)
+            )
+            if key is not None:
+                mapping = {key: table_mapping[key]}
+
+        if not mapping and snapshots:
+            # An exact FQN match avoids scanning unrelated snapshots.
+            snapshot = snapshots.get(table_name)
+            # Keys normalized under different dialects may differ in casing or quoting.
+            # Fall back to the full mapping so exp.replace_tables can reconcile them.
+            mapping = self._to_table_mapping(
+                [snapshot] if snapshot else snapshots.values(), deployability_index
+            )
+
+        table = exp.replace_tables(table, mapping, dialect=self._dialect, copy=False)
         # We quote the table here to mimic the behavior of _resolve_tables, otherwise we may end
         # up normalizing twice, because _to_table_mapping returns the mapped names unquoted.
         return (
@@ -363,6 +437,11 @@ class BaseExpressionRenderer:
 
         expression = expression.copy()
         with self._normalize_and_quote(expression) as expression:
+            # An expression with no table (e.g. most session or virtual properties) has nothing
+            # to expand or replace, so skip building the O(N) expand set and mapping.
+            if not expression.find(exp.Table):
+                return expression
+
             snapshots = snapshots or {}
             table_mapping = table_mapping or {}
             mapping = {

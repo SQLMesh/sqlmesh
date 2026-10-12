@@ -558,7 +558,8 @@ jobs:
         run: |
           source ../../.venv/bin/activate
           sed -i 's/target: in_memory/target: postgres/g' profiles.yml
-          if [[ $(echo -e "${{ matrix.dbt-version }}\n1.5.0" | sort -V | head -n1) == "${{ matrix.dbt-version }}" ]] && [[ "${{ matrix.dbt-version }}" != "1.5.0" ]]; then
+          if [[ "${{ matrix.dbt-version }}" == "1.3" ]] || \
+             [[ "${{ matrix.dbt-version }}" == "1.4" ]]; then
             echo "DBT version is ${{ matrix.dbt-version }} (< 1.5.0), removing version parameters..."
             sed -i -e 's/, version=1) }}/) }}/g' -e 's/, v=1) }}/) }}/g' models/top_waiters.sql
           else
