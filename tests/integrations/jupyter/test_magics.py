@@ -12,8 +12,11 @@ from IPython.testing.globalipapp import start_ipython
 from IPython.utils.capture import CapturedIO, capture_output
 from pytest_mock.plugin import MockerFixture
 from rich.console import Console as RichConsole
+from sqlglot import __version__ as SQLGLOT_VERSION
 
 from sqlmesh import Context, RuntimeEnv
+from sqlmesh._version import __version__ as SQLMESH_VERSION
+from sqlmesh.core.state_sync.base import SCHEMA_VERSION, Versions
 from sqlmesh.magics import register_magics
 from pathlib import Path
 
@@ -740,7 +743,8 @@ def test_info(notebook, sushi_context, convert_all_html_output_to_text, get_all_
 
     assert not output.stdout
     assert not output.stderr
-    assert len(output.outputs) == 6
+    assert len(output.outputs) == 10
+    # No plan has been applied, so the state backend is still empty and reports the defaults.
     assert convert_all_html_output_to_text(output) == [
         "Models: 20",
         "Macros: 8",
@@ -748,6 +752,10 @@ def test_info(notebook, sushi_context, convert_all_html_output_to_text, get_all_
         "Connection:\n  type: duckdb\n  concurrent_tasks: 1\n  register_comments: true\n  pre_ping: false\n  pretty_sql: false\n  extensions: []\n  connector_config: {}\n  secrets: None\n  filesystems: []\n  shared_connection: true",
         "Test Connection:\n  type: duckdb\n  concurrent_tasks: 1\n  register_comments: true\n  pre_ping: false\n  pretty_sql: false\n  extensions: []\n  connector_config: {}\n  secrets: None\n  filesystems: []\n  shared_connection: true",
         "Data warehouse connection succeeded",
+        "State backend versions:",
+        "Schema version: 0",
+        "SQLGlot version: 0.0.0",
+        "SQLMesh version: 0.0.0",
     ]
     assert get_all_html_output(output) == [
         "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\">Models: <span style=\"color: #008080; text-decoration-color: #008080; font-weight: bold\">20</span></pre>",
@@ -756,6 +764,10 @@ def test_info(notebook, sushi_context, convert_all_html_output_to_text, get_all_
         '<pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,\'DejaVu Sans Mono\',consolas,\'Courier New\',monospace">Connection:  type: duckdb  concurrent_tasks: <span style="color: #008080; text-decoration-color: #008080; font-weight: bold">1</span>  register_comments: true  pre_ping: false  pretty_sql: false  extensions: <span style="font-weight: bold">[]</span>  connector_config: <span style="font-weight: bold">{}</span>  secrets: <span style="color: #800080; text-decoration-color: #800080; font-style: italic">None</span>  filesystems: <span style="font-weight: bold">[]</span>  shared_connection: true</pre>',
         '<pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,\'DejaVu Sans Mono\',consolas,\'Courier New\',monospace">Test Connection:  type: duckdb  concurrent_tasks: <span style="color: #008080; text-decoration-color: #008080; font-weight: bold">1</span>  register_comments: true  pre_ping: false  pretty_sql: false  extensions: <span style="font-weight: bold">[]</span>  connector_config: <span style="font-weight: bold">{}</span>  secrets: <span style="color: #800080; text-decoration-color: #800080; font-style: italic">None</span>  filesystems: <span style="font-weight: bold">[]</span>  shared_connection: true</pre>',
         "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\">Data warehouse connection <span style=\"color: #008000; text-decoration-color: #008000\">succeeded</span></pre>",
+        "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\">State backend versions:</pre>",
+        "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\">Schema version: <span style=\"color: #008080; text-decoration-color: #008080; font-weight: bold\">0</span></pre>",
+        '<pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,\'DejaVu Sans Mono\',consolas,\'Courier New\',monospace">SQLGlot version: <span style="color: #008080; text-decoration-color: #008080; font-weight: bold">0.0</span>.<span style="color: #008080; text-decoration-color: #008080; font-weight: bold">0</span></pre>',
+        '<pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,\'DejaVu Sans Mono\',consolas,\'Courier New\',monospace">SQLMesh version: <span style="color: #008080; text-decoration-color: #008080; font-weight: bold">0.0</span>.<span style="color: #008080; text-decoration-color: #008080; font-weight: bold">0</span></pre>',
     ]
 
 
@@ -768,25 +780,36 @@ def test_migrate(
 
     assert not output.stdout
     assert not output.stderr
-    assert len(output.outputs) == 1
+    assert len(output.outputs) == 5
+    # The sushi state lives in an in-memory DuckDB database, so the state sync that `migrate`
+    # opens starts empty and the versions move from the defaults to the running ones.
+    empty = Versions()
     assert convert_all_html_output_to_text(output) == [
+        "State backend versions:",
+        f"Schema version: {empty.schema_version} -> {SCHEMA_VERSION}",
+        f"SQLGlot version: {empty.sqlglot_version} -> {SQLGLOT_VERSION}",
+        f"SQLMesh version: {empty.sqlmesh_version} -> {SQLMESH_VERSION}",
         "Migration complete",
     ]
-    assert get_all_html_output(output) == [
-        str(
+    # Rich highlights the numbers inside the version lines, and that markup depends on the
+    # running versions, so only the fixed lines are compared as HTML.
+    html_output = get_all_html_output(output)
+    assert html_output[0] == str(
+        h("pre", {"style": RICH_PRE_STYLE}, "State backend versions:", autoescape=False)
+    )
+    assert html_output[-1] == str(
+        h(
+            "pre",
+            {"style": RICH_PRE_STYLE},
             h(
-                "pre",
-                {"style": RICH_PRE_STYLE},
-                h(
-                    "span",
-                    {"style": SUCCESS_STYLE},
-                    "Migration complete",
-                    autoescape=False,
-                ),
+                "span",
+                {"style": SUCCESS_STYLE},
+                "Migration complete",
                 autoescape=False,
-            )
+            ),
+            autoescape=False,
         )
-    ]
+    )
 
 
 # TODO: Add test for rollback

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import typing as t
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlglot import exp
@@ -12,6 +13,7 @@ from sqlmesh.core.model import Model
 from sqlmesh.utils.date import now, to_datetime
 from web.server import models
 from web.server.settings import get_loaded_context
+from web.server.utils import is_relative_to
 
 router = APIRouter()
 
@@ -125,7 +127,7 @@ def serialize_model(context: Context, model: Model, render_query: bool = False) 
     return models.Model(
         name=model.name,
         fqn=model.fqn,
-        path=str(path.absolute().relative_to(context.path).as_posix()) if path else None,
+        path=_path_relative_to_project(context, path) if path else None,
         full_path=str(path.absolute().as_posix()) if path else None,
         dialect=dialect,
         columns=columns,
@@ -136,6 +138,23 @@ def serialize_model(context: Context, model: Model, render_query: bool = False) 
         default_catalog=default_catalog,
         hash=model.data_hash,
     )
+
+
+def _path_relative_to_project(context: Context, path: Path) -> str:
+    """Returns a model's path relative to the project root that defines it.
+
+    `context.path` is only the first of the configured projects, so it isn't necessarily an
+    ancestor of every model when the context is loaded with more than one of them.
+    """
+    absolute_path = path.absolute()
+    project_roots = [root for root in context.configs if is_relative_to(absolute_path, root)]
+    if not project_roots:
+        # The model lives outside of every configured project, so there is nothing to be
+        # relative to.
+        return absolute_path.as_posix()
+    # The deepest root wins so that nested projects report the closest one.
+    closest_root = max(project_roots, key=lambda root: len(root.parts))
+    return absolute_path.relative_to(closest_root).as_posix()
 
 
 def _get_model_type(model: Model) -> str:

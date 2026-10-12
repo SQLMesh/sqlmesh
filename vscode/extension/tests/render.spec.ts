@@ -38,7 +38,9 @@ test('Render works correctly', async ({ page, sharedCodeServer, tempDir }) => {
 
   // Check if the model is rendered by check if "`oi`.`order_id` AS `order_id`," is in the window
   await expect(page.locator('text="marketing"."customer_id" AS')).toBeVisible()
-  await expect(page.locator('text=sushi.customers (rendered)')).toBeVisible()
+  await expect(
+    page.getByRole('tab', { name: 'sushi.customers (rendered)' }),
+  ).toBeVisible()
 })
 
 test('Render works correctly with model without a description', async ({
@@ -74,7 +76,9 @@ test('Render works correctly with model without a description', async ({
 
   // Check if the model is rendered correctly
   await expect(page.locator('text="orders"."id" AS "id",')).toBeVisible()
-  await expect(page.locator('text=sushi.latest_order (rendered)')).toBeVisible()
+  await expect(
+    page.getByRole('tab', { name: 'sushi.latest_order (rendered)' }),
+  ).toBeVisible()
 })
 
 test('Render works correctly with every rendered model opening a new tab', async ({
@@ -104,7 +108,9 @@ test('Render works correctly with every rendered model opening a new tab', async
   await runCommand(page, 'Render Model')
 
   // Check if the model is rendered correctly
-  await expect(page.locator('text=sushi.latest_order (rendered)')).toBeVisible()
+  await expect(
+    page.getByRole('tab', { name: 'sushi.latest_order (rendered)' }),
+  ).toBeVisible()
 
   // Open the customers model
   await page
@@ -117,8 +123,12 @@ test('Render works correctly with every rendered model opening a new tab', async
   await runCommand(page, 'Render Model')
 
   // Assert both tabs exist
-  await expect(page.locator('text=sushi.latest_order (rendered)')).toBeVisible()
-  await expect(page.locator('text=sushi.customers (rendered)')).toBeVisible()
+  await expect(
+    page.getByRole('tab', { name: 'sushi.latest_order (rendered)' }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('tab', { name: 'sushi.customers (rendered)' }),
+  ).toBeVisible()
 })
 
 test('Render shows model picker when no active editor is open', async ({
@@ -146,7 +156,9 @@ test('Render shows model picker when no active editor is open', async ({
   await page.locator('text=sushi.customers').click()
 
   // Verify the rendered model is shown
-  await expect(page.locator('text=sushi.customers (rendered)')).toBeVisible({
+  await expect(
+    page.getByRole('tab', { name: 'sushi.customers (rendered)' }),
+  ).toBeVisible({
     timeout: 2_000,
   })
 })
