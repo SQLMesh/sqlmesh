@@ -11,6 +11,7 @@ import time_machine
 from pytest_mock.plugin import MockerFixture
 from sqlglot import exp
 
+from sqlmesh.core import analytics
 from sqlmesh.core import constants as c
 from sqlmesh.core.config import EnvironmentSuffixTarget
 from sqlmesh.core.dialect import parse_one
@@ -2852,6 +2853,28 @@ def test_first_migration_failure(duck_conn, mocker: MockerFixture, tmp_path) -> 
     )
     assert not state_sync.engine_adapter.table_exists(state_sync.version_state.versions_table)
     assert not state_sync.engine_adapter.table_exists(state_sync.interval_state.intervals_table)
+
+
+def test_migration_failure_after_update_versions(
+    duck_conn, mocker: MockerFixture, tmp_path
+) -> None:
+    state_sync = EngineAdapterStateSync(
+        create_engine_adapter(lambda: duck_conn, "duckdb"),
+        schema=c.SQLMESH,
+        cache_dir=tmp_path / c.CACHE,
+    )
+    # The first call happens inside the try block right after update_versions() and
+    # raises; the second call happens in the exception handler and succeeds.
+    mocker.patch.object(
+        analytics.collector,
+        "on_migration_end",
+        side_effect=[Exception("mocked error"), None],
+    )
+    with pytest.raises(SQLMeshError, match="SQLMesh migration failed.") as exc_info:
+        state_sync.migrate()
+    assert "mocked error" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, Exception)
+    assert "mocked error" in str(exc_info.value.__cause__)
 
 
 def test_migrate_rows(state_sync: EngineAdapterStateSync, mocker: MockerFixture) -> None:

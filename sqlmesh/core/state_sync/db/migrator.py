@@ -120,19 +120,25 @@ class StateMigrator:
             if skip_backup:
                 logger.error("Backup was skipped so no rollback was attempted.")
             else:
-                self.rollback()
+                try:
+                    self.rollback()
+                except Exception:
+                    logger.exception("Migration rollback failed.")
 
-            analytics.collector.on_migration_end(
-                from_sqlmesh_version=versions.sqlmesh_version,
-                state_sync_type=self.engine_adapter.dialect,
-                migration_time_sec=time.perf_counter() - migration_start_ts,
-                error=e,
-            )
+            try:
+                analytics.collector.on_migration_end(
+                    from_sqlmesh_version=versions.sqlmesh_version,
+                    state_sync_type=self.engine_adapter.dialect,
+                    migration_time_sec=time.perf_counter() - migration_start_ts,
+                    error=e,
+                )
+            except Exception:
+                logger.exception("Failed to record the migration end analytics event.")
 
             self.console.log_migration_status(success=False)
             if isinstance(e, StateMigrationError):
                 raise
-            raise SQLMeshError("SQLMesh migration failed.") from e
+            raise SQLMeshError(f"SQLMesh migration failed: {e}") from e
 
         self.console.log_migration_status()
 
