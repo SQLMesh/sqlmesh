@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from contextvars import ContextVar, copy_context
 from pathlib import Path
 
 import pytest
@@ -362,3 +363,52 @@ def test_concurrent_dag_fail_fast_stops_queued_work_while_aggregate_mode_continu
         assert set(called) == {"running", "queued", "running_child", "queued_child"}
         """
     )
+
+
+@pytest.mark.parametrize("tasks_num", [1, 3])
+def test_concurrent_apply_to_values_copies_admission_context(tasks_num: int):
+    value = ContextVar("admission", default="worker")
+    token = value.set("admitted")
+
+    def process(item: int) -> str:
+        assert value.get() == "admitted"
+        value.set(str(item))
+        return value.get()
+
+    try:
+        assert concurrent_apply_to_values(
+            [1, 2, 3], process, tasks_num, context_factory=copy_context
+        ) == ["1", "2", "3"]
+        assert value.get() == "admitted"
+        default_results = concurrent_apply_to_values([1, 2, 3], lambda _: value.get(), tasks_num)
+        expected = "admitted" if tasks_num == 1 else "worker"
+        assert default_results == [expected, expected, expected]
+    finally:
+        value.reset(token)
+
+
+@pytest.mark.parametrize("tasks_num", [1, 2])
+def test_context_admission_and_sibling_isolation(tasks_num: int):
+    from sqlmesh.utils.concurrency import ConcurrentDAGExecutor, concurrent_apply_to_dag
+    from sqlmesh.utils.dag import DAG
+
+    consumer = ContextVar("admission", default="construction")
+    dag: DAG[str] = DAG()
+    dag.add("second", {"first"})
+    seen = []
+
+    def execute(node):
+        seen.append(consumer.get())
+        consumer.set(node)
+
+    executor = ConcurrentDAGExecutor(dag, execute, tasks_num, False, copy_context)
+    token = consumer.set("first admission")
+    try:
+        executor.run()
+        consumer.set("second admission")
+        executor.run()
+        concurrent_apply_to_dag(dag, execute, tasks_num, context_factory=copy_context)
+        assert consumer.get() == "second admission"
+    finally:
+        consumer.reset(token)
+    assert seen == ["first admission"] * 2 + ["second admission"] * 4
