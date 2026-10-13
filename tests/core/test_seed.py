@@ -118,6 +118,15 @@ def test_declared_text_keeps_leading_zeros():
     assert df["undeclared"].to_list() == [7, 8, 9]
 
 
+@pytest.mark.parametrize("blank", [False, True])
+def test_declared_text_keeps_boolean_like_values(blank):
+    # pandas reads TRUE/FALSE as bools, in an object column when there are blanks
+    seed = Seed(content="flag,other\nFALSE,1\nTRUE,2\n" + (",3\n" if blank else ""))
+    df = next(seed.reader(columns_to_types=_declared(flag="text")).read())
+
+    assert _values(df["flag"]) == ["FALSE", "TRUE"] + ([None] if blank else [])
+
+
 def test_declared_int_with_blank_stays_integer():
     seed = Seed(content="n,big,ok\n1,9007199254740993,1\n,,2\n3,3,3\n")
     df = next(seed.reader(columns_to_types=_declared(n="int", big="bigint", ok="int")).read())

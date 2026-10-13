@@ -170,10 +170,9 @@ class CsvSeedReader:
                     continue
             column = df[name]
             if data_type.this in exp.DataType.TEXT_TYPES:
-                # read_csv object columns hold raw strings; is_string_dtype covers string dtypes
-                if not (
-                    pd.api.types.is_object_dtype(column) or pd.api.types.is_string_dtype(column)
-                ):
+                # Unless every value is already a string: e.g. 00123 is read as an int, and
+                # TRUE/FALSE as bools (in an object column when the column has blanks)
+                if pd.api.types.infer_dtype(column, skipna=True) != "string":
                     text_columns.append(name)
             elif data_type.is_type(*exp.DataType.INTEGER_TYPES):
                 if pd.api.types.is_float_dtype(column):
