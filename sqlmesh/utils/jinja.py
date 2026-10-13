@@ -542,9 +542,12 @@ class JinjaMacroRegistry(PydanticModel):
             macro = self._get_macro(name, package)
 
             definition: nodes.Template = self._environment.parse(macro.definition)
-            if _is_private_macro(name):
-                # A workaround to expose private jinja macros.
-                definition = self._to_non_private_macro_def(name, definition)
+            # Define the macro under an internal name, so that references to it from its own body
+            # (e.g. recursive calls) resolve to its _MacroWrapper, which handles return(). This
+            # also exposes private macros, since names starting with "_" are not exported by Jinja.
+            for node in definition.find_all(nodes.Macro):
+                if node.name == name:
+                    node.name = _internal_macro_name(name)
 
             self._parser_cache[cache_key] = self._environment.from_string(definition)
         return self._parser_cache[cache_key]
@@ -600,15 +603,6 @@ class JinjaMacroRegistry(PydanticModel):
     def _get_macro(self, name: str, package: t.Optional[str]) -> MacroInfo:
         return self.packages[package][name] if package is not None else self.root_macros[name]
 
-    def _to_non_private_macro_def(self, name: str, template: nodes.Template) -> nodes.Template:
-        for node in template.find_all((nodes.Macro, nodes.Call)):
-            if isinstance(node, nodes.Macro):
-                node.name = _non_private_name(name)
-            elif isinstance(node, nodes.Call) and isinstance(node.node, nodes.Name):
-                node.node.name = _non_private_name(name)
-
-        return template
-
     def _create_builtin_globals(self, global_vars: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
         """Creates Jinja builtin globals using a factory function defined in the provided module."""
         engine_adapter = global_vars.pop("engine_adapter", None)
@@ -647,7 +641,7 @@ class JinjaMacroRegistry(PydanticModel):
 
             template = self.registry._parse_macro(self.name, self.package)
             macro_callable = getattr(
-                template.make_module(vars=context), _non_private_name(self.name)
+                template.make_module(vars=context), _internal_macro_name(self.name)
             )
             try:
                 return macro_callable(*args, **kwargs)
@@ -655,12 +649,11 @@ class JinjaMacroRegistry(PydanticModel):
                 return ret.value
 
 
-def _is_private_macro(name: str) -> bool:
-    return name.startswith("_")
+_INTERNAL_MACRO_NAME_PREFIX = "sqlmesh_macro__"
 
 
-def _non_private_name(name: str) -> str:
-    return name.lstrip("_")
+def _internal_macro_name(name: str) -> str:
+    return f"{_INTERNAL_MACRO_NAME_PREFIX}{name}"
 
 
 JINJA_REGEX = re.compile(r"({{|{%)")
@@ -741,7 +734,8 @@ def extract_error_details(ex: Exception) -> str:
                 if frame.f_code.co_name == "_invoke":
                     macro = frame.f_locals.get("self")
                     if isinstance(macro, Macro):
-                        error_details += f" in macro: '{macro.name}'\n"
+                        macro_name = macro.name.removeprefix(_INTERNAL_MACRO_NAME_PREFIX)
+                        error_details += f" in macro: '{macro_name}'\n"
                         break
         except:
             # to fall back to the generic error message if frame analysis fails
