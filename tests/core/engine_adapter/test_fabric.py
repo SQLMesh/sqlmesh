@@ -11,7 +11,7 @@ from sqlglot import exp, parse_one
 from sqlmesh.core.engine_adapter import FabricEngineAdapter
 from sqlmesh.core.engine_adapter.fabric import FabricHttpClient
 from tests.core.engine_adapter import to_sql_calls
-from sqlmesh.core.engine_adapter.shared import DataObject
+from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 
 pytestmark = [pytest.mark.engine, pytest.mark.fabric]
 
@@ -494,3 +494,31 @@ def test_create_warehouse_unrelated_conflict_still_raises(
 
     with pytest.raises(requests.HTTPError):
         fabric_http_client.create_warehouse("my_warehouse")
+
+
+def test_get_data_objects_uses_default_catalog_when_current_is_none(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+        patch_get_data_objects=False,
+    )
+    assert adapter.get_current_catalog() is None
+
+    mocker.patch.object(
+        adapter,
+        "fetchdf",
+        return_value=pd.DataFrame([{"name": "test_table", "schema_name": "dbo", "type": "TABLE"}]),
+    )
+
+    assert adapter._get_data_objects("dbo") == [
+        DataObject(
+            catalog="ci_abc",
+            schema="dbo",
+            name="test_table",
+            type=DataObjectType.TABLE,
+        )
+    ]
