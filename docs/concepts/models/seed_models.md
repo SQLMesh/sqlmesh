@@ -66,6 +66,8 @@ MODEL (
 ```
 **Note:** The dataset schema provided in the definition takes precedence over column names defined in the header of the CSV file. This means that the order in which columns are provided in the `MODEL` definition must match the order of columns in the CSV file.
 
+Declaring `columns` also controls how the CSV values are read. Columns with a text type such as `VARCHAR` or `TEXT` keep their values exactly as written in the CSV, so identifiers like ZIP codes or account numbers keep their leading zeros (`00123` is loaded as `00123`, not `123`). Empty values, and the NA markers controlled by `csv_settings` such as `na_values` and `keep_default_na`, are still loaded as `NULL`. Integer columns that contain empty values are loaded as integers with `NULL`s rather than floats. If `columns` is omitted, types are inferred by Pandas as described above.
+
 ### Markers
 
 The `$root` marker can be used in the `path` attribute to indicate that the CSV file path is relative to the root of the SQLMesh project:
