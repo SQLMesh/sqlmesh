@@ -87,12 +87,13 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         )
 
     def _resolved_catalog(self) -> t.Optional[str]:
-        return (
-            self.get_current_catalog()
-            or self._normalize_catalog(self._connected_catalog)
-            or self._default_catalog
-            or self._extra_config.get("database")
-        )
+        # A lazy restore sets the logical target back to the default but leaves
+        # the open connection on the previous warehouse. Name that connection,
+        # because that is the warehouse the query hits.
+        connected_catalog = self._normalize_catalog(self._connected_catalog)
+        if self._normalize_catalog(self._target_catalog) is None and connected_catalog:
+            return connected_catalog
+        return self.get_current_catalog()
 
     @property
     def api_client(self) -> FabricHttpClient:
@@ -154,9 +155,28 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         if warehouse_name in in_use:
             self.close()
 
-    def get_current_catalog(self) -> t.Optional[str]:
-        """Return the explicit Fabric catalog target for the current thread."""
+    def _get_current_catalog_for_set_catalog(self) -> t.Optional[str]:
+        """Override of EngineAdapter._get_current_catalog_for_set_catalog.
+
+        The base method returns get_current_catalog(). @set_catalog saves that
+        value and writes it back with set_current_catalog. Fabric's public method
+        returns the configured warehouse name, so restoring it would reconnect.
+        This returns the normalized internal target instead. None is that default,
+        and restoring None skips the reconnect.
+        """
         return self._normalize_catalog(self._target_catalog)
+
+    def get_current_catalog(self) -> t.Optional[str]:
+        """Return the warehouse name for the current thread.
+
+        The configured default stays None internally so set_current_catalog can
+        skip a reconnect. Callers still receive that warehouse's name. None is
+        returned only when no warehouse is configured.
+        """
+        explicit_catalog = self._normalize_catalog(self._target_catalog)
+        if explicit_catalog:
+            return explicit_catalog
+        return self._default_catalog or self._extra_config.get("database")
 
     def set_current_catalog(self, catalog_name: t.Optional[str]) -> None:
         """
@@ -182,10 +202,12 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         explicit_default_catalog = catalog_name is not None and target_catalog is None
         connected_catalog = self._normalize_catalog(self._connected_catalog)
 
+        # Compare the internal sentinel, not get_current_catalog(). That method
+        # returns the configured warehouse name when this sentinel is None.
         # An explicit request for the default catalog must also match the catalog
         # used by the open connection. A lazy restore with None only updates the
         # logical target and intentionally leaves that connection in place.
-        if self.get_current_catalog() == target_catalog and (
+        if self._normalize_catalog(self._target_catalog) == target_catalog and (
             not explicit_default_catalog or connected_catalog is None
         ):
             logger.debug("Already using requested Fabric catalog state, no action needed")
@@ -233,16 +255,40 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
 
         self._target_catalog = target_catalog
 
+    def _get_data_objects(
+        self, schema_name: t.Union[str, exp.Table], object_names: t.Optional[t.Set[str]] = None
+    ) -> t.List[DataObject]:
+        objects = super()._get_data_objects(schema_name, object_names)
+        # Runs before EngineAdapter.get_data_objects writes the cache. @set_catalog
+        # has already stripped the catalog, so the lookup key is schema.table.
+        # MSSQL stamps get_current_catalog() here, which is now the default warehouse
+        # name, and that would store catalog.schema.table instead. Blank that name so the
+        # stored key matches. get_data_objects puts it back on the objects it returns.
+        default_catalog = self._default_catalog or self._extra_config.get("database")
+        if not default_catalog:
+            return objects
+        return [
+            DataObject(
+                catalog=None if obj.catalog == default_catalog else obj.catalog,
+                schema=obj.schema_name,
+                name=obj.name,
+                type=obj.type,
+                clustering_key=obj.clustering_key,
+            )
+            for obj in objects
+        ]
+
     def get_data_objects(
         self,
         schema_name: t.Union[str, exp.Table],
         object_names: t.Optional[t.Set[str]] = None,
         safe_to_cache: bool = False,
     ) -> t.List[DataObject]:
-        # Fabric uses None as "default catalog" so we skip reconnects. Other engines
-        # return a real warehouse name here.
-        # Cache on schema.table due to @set_catalog stripping the catalog. Then put a
-        # warehouse name on the returned objects so listing matches other engines.
+        # Runs after the cache read. _get_data_objects blanked the default warehouse
+        # so the cached key stays schema.table. Callers still need that name on the
+        # returned objects. A schema that already names a warehouse wins; otherwise
+        # use the connection actually queried, which may still be the previous
+        # warehouse after a lazy restore.
         objects = super().get_data_objects(schema_name, object_names, safe_to_cache)
         catalog = to_schema(schema_name).catalog or self._resolved_catalog()
         if not catalog:
