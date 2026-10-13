@@ -81,6 +81,18 @@ class MSSQLEngineAdapter(
     VARIABLE_LENGTH_DATA_TYPES = {"binary", "varbinary", "char", "varchar", "nchar", "nvarchar"}
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.MERGE
 
+    def normalize_value(
+        self,
+        expr: exp.Expr,
+        type: exp.DataType,
+        decimal_precision: int = 3,
+        timestamp_precision: int = RowDiffMixin.MAX_TIMESTAMP_PRECISION,
+    ) -> exp.Expr:
+        # T-SQL truncates CAST(x AS VARCHAR) to 30 characters when no length is given
+        normalized = super().normalize_value(expr, type, decimal_precision, timestamp_precision)
+        normalized.set("to", exp.DataType.build("VARCHAR(MAX)", dialect=self.dialect))
+        return normalized
+
     @property
     def catalog_support(self) -> CatalogSupport:
         # MSSQL and AzureSQL both use this engine adapter, but they differ in catalog support.
