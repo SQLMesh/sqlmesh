@@ -412,3 +412,80 @@ def test_context_admission_and_sibling_isolation(tasks_num: int):
     finally:
         consumer.reset(token)
     assert seen == ["first admission"] * 2 + ["second admission"] * 4
+
+
+@pytest.mark.parametrize("phase", ["start", "finish"])
+def test_concurrent_dag_propagates_observer_base_exception_and_can_be_reused(phase: str):
+    _run_bounded_python(
+        f"""
+        from threading import Event, Thread
+
+        from sqlmesh.core.execution_observation import action, observer_scope
+        from sqlmesh.utils.concurrency import ConcurrentDAGExecutor
+        from sqlmesh.utils.dag import DAG
+
+        dag = DAG()
+        dag.add("cancel")
+        dag.add("sibling")
+        dag.add("dependent", ["sibling"])
+        error = KeyboardInterrupt("cancel execution")
+        release_sibling = Event()
+        sibling_started = Event()
+        called = []
+        failing_phase = {phase!r}
+
+        def observe(current_phase, facts, callback_error):
+            if current_phase == failing_phase:
+                raise error
+
+        def execute(node):
+            if node == "cancel":
+                assert sibling_started.wait(timeout=3)
+                with observer_scope(observe), action("query", "execute"):
+                    pass
+            if node == "sibling":
+                sibling_started.set()
+                assert release_sibling.wait(timeout=6)
+            called.append(node)
+
+        executor = ConcurrentDAGExecutor(dag, execute, 2, True)
+        run_errors = []
+
+        def run():
+            try:
+                executor.run()
+            except BaseException as ex:
+                run_errors.append(ex)
+
+        runner = Thread(target=run)
+        runner.start()
+        assert sibling_started.wait(timeout=3)
+        try:
+            try:
+                executor._finished_future.result(timeout=3)
+            except KeyboardInterrupt as raised:
+                assert raised is error
+            else:
+                raise AssertionError("the worker cancellation was not propagated")
+        finally:
+            release_sibling.set()
+
+        runner.join(timeout=3)
+        assert not runner.is_alive()
+        assert run_errors == [error]
+        assert "dependent" not in called
+
+        second_error = SystemExit("cancel reused executor")
+
+        def cancel_again(node):
+            raise second_error
+
+        executor.fn = cancel_again
+        try:
+            executor.run()
+        except SystemExit as raised:
+            assert raised is second_error
+        else:
+            raise AssertionError("the reused executor did not propagate cancellation")
+        """
+    )
