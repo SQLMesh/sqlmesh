@@ -348,8 +348,11 @@ def set_catalog(override_mapping: t.Optional[t.Dict[str, CatalogSupport]] = None
                         f"{engine_adapter.dialect} requires that all catalog operations be against a single catalog: {engine_adapter._default_catalog}. Provided catalog: {catalog_name}"
                     )
                 return func(*list_args, **kwargs)
-            # Set the catalog name on the engine adapter if needed
-            current_catalog = engine_adapter.get_current_catalog()
+            # Set the catalog name on the engine adapter if needed.
+            # See EngineAdapter._get_current_catalog_for_set_catalog. Fabric reports
+            # the configured warehouse name from get_current_catalog() and keeps None
+            # internally, so a restore of the default warehouse can skip a reconnect.
+            current_catalog = engine_adapter._get_current_catalog_for_set_catalog()
             if catalog_name != current_catalog:
                 engine_adapter.set_current_catalog(catalog_name)
                 resp = func(*list_args, **kwargs)

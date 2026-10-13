@@ -40,6 +40,7 @@ def _conflict_response(mocker: MockerFixture, error_code: str) -> t.Any:
     resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
     return resp
 
+
 def _record_catalogs_at_execute(adapter: FabricEngineAdapter) -> t.List[t.Optional[str]]:
     catalogs: t.List[t.Optional[str]] = []
     real_execute = adapter.execute
@@ -52,7 +53,7 @@ def _record_catalogs_at_execute(adapter: FabricEngineAdapter) -> t.List[t.Option
     return catalogs
 
 
-def test_get_current_catalog_uses_only_explicit_target_catalog(
+def test_get_current_catalog_returns_configured_database_when_target_is_default(
     make_mocked_engine_adapter: t.Callable,
 ):
     adapter = make_mocked_engine_adapter(
@@ -60,7 +61,10 @@ def test_get_current_catalog_uses_only_explicit_target_catalog(
         database="default_catalog",
     )
 
-    assert adapter.get_current_catalog() is None
+    current_catalog = adapter.get_current_catalog()
+    assert current_catalog is not None
+    assert current_catalog.lower() == "default_catalog"
+    assert adapter._target_catalog is None
 
     adapter._target_catalog = "switched_catalog"
 
@@ -69,8 +73,29 @@ def test_get_current_catalog_uses_only_explicit_target_catalog(
     adapter._connection_pool.close()
 
     assert adapter._connection_pool.get_attribute("target_catalog") is None
-    assert adapter.get_current_catalog() is None
+    assert adapter.get_current_catalog() == "default_catalog"
     adapter.cursor.execute.assert_not_called()
+
+
+def test_shared_catalog_operations_can_lowercase_the_default_warehouse(
+    make_mocked_engine_adapter: t.Callable,
+):
+    """test_catalog_operations lowercases the current catalog, then restores it."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        database="ci_abc",
+    )
+
+    current_catalog = adapter.get_current_catalog().lower()
+    assert current_catalog == "ci_abc"
+    assert adapter._target_catalog is None
+
+    adapter.set_current_catalog("testing")
+    assert adapter.get_current_catalog().lower() == "testing"
+
+    adapter.set_current_catalog(current_catalog)
+    assert adapter.get_current_catalog().lower() == current_catalog
+    assert adapter._target_catalog is None
 
 
 def test_get_current_catalog_returns_none_without_target_or_database(
@@ -108,7 +133,8 @@ def test_set_current_catalog_to_default_clears_explicit_target(
     adapter.set_current_catalog("planning")
     adapter.set_current_catalog("core")
 
-    assert adapter.get_current_catalog() is None
+    assert adapter._target_catalog is None
+    assert adapter.get_current_catalog() == "core"
     adapter.cursor.execute.assert_not_called()
 
 
@@ -130,8 +156,9 @@ def test_catalog_scoped_call_restores_to_neutral_without_close(
     # Decorator calls set_current_catalog("planning") then set_current_catalog(None).
     # Only the first call (None→planning) should trigger a connection close.
     assert close_spy.call_count == 1
+    assert adapter._target_catalog is None
     assert adapter._connected_catalog == "planning"
-    assert adapter.get_current_catalog() is None
+    assert adapter.get_current_catalog() == "core"
 
 
 def test_default_catalog_after_non_default_catalog_reconnects(
@@ -150,8 +177,9 @@ def test_default_catalog_after_non_default_catalog_reconnects(
     adapter.table_exists("core.db.table")
 
     assert close_spy.call_count == 2
+    assert adapter._target_catalog is None
     assert adapter._connected_catalog is None
-    assert adapter.get_current_catalog() is None
+    assert adapter.get_current_catalog() == "core"
 
 
 def test_repeated_same_catalog_reuses_connection(
@@ -507,7 +535,7 @@ def test_create_warehouse_unrelated_conflict_still_raises(
         fabric_http_client.create_warehouse("my_warehouse")
 
 
-def test_get_data_objects_uses_default_catalog_when_current_is_none(
+def test_get_data_objects_uses_configured_default_catalog(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,
 ) -> None:
@@ -517,7 +545,8 @@ def test_get_data_objects_uses_default_catalog_when_current_is_none(
         database="ci_abc",
         patch_get_data_objects=False,
     )
-    assert adapter.get_current_catalog() is None
+    assert adapter._target_catalog is None
+    assert adapter.get_current_catalog() == "ci_abc"
 
     mocker.patch.object(
         adapter,
@@ -564,9 +593,11 @@ def test_get_data_objects_labels_connected_warehouse_after_lazy_restore(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,
 ) -> None:
-    """Logical catalog is None; the connection is still on planning.
+    """Logical target is the default; the connection is still on planning.
 
-    Unqualified list must be planning. ci_abc.dbo must still switch.
+    The public catalog is the configured warehouse. The unqualified list must
+    still be planning, because that is the warehouse the query hits.
+    ci_abc.dbo must still switch.
     """
     adapter = make_mocked_engine_adapter(
         FabricEngineAdapter,
@@ -576,7 +607,9 @@ def test_get_data_objects_labels_connected_warehouse_after_lazy_restore(
     )
     adapter.set_current_catalog("planning")
     adapter.set_current_catalog(None)
-    assert adapter.get_current_catalog() is None
+    assert adapter._target_catalog is None
+    assert adapter._connected_catalog == "planning"
+    assert adapter.get_current_catalog() == "ci_abc"
 
     fetchdf = mocker.patch.object(
         adapter,
