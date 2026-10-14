@@ -837,3 +837,76 @@ def test_databricks_connect_cluster_id_not_overridden_by_falsy_serverless(
         token="mytoken",
         cluster_id="0123-456789-mycluster",
     )
+
+
+def test_fetch_native_df_uses_arrow_to_pandas(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    arrow_table = pd.DataFrame({"name": ["orders"]})
+    fetchall_arrow = adapter.cursor.fetchall_arrow
+    fetchall_arrow.return_value.to_pandas.return_value = arrow_table
+
+    df = adapter._fetch_native_df("SELECT 1")
+
+    assert df.to_dict(orient="records") == [{"name": "orders"}]
+    fetchall_arrow.return_value.to_pandas.assert_called_once_with()
+
+
+def test_fetch_native_df_column_table_without_to_pandas(make_mocked_engine_adapter: t.Callable):
+    """PyArrow 25 fails to import on NumPy < 2, so the connector returns a ColumnTable."""
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    class _ColumnTable:
+        column_names = ["name", "schema", "catalog", "type"]
+        column_table = [("orders",), ("analytics",), ("main",), ("table",)]
+
+    adapter.cursor.fetchall_arrow.return_value = _ColumnTable()
+
+    df = adapter._fetch_native_df("SELECT 1")
+
+    assert df.to_dict(orient="records") == [
+        {"name": "orders", "schema": "analytics", "catalog": "main", "type": "table"}
+    ]
+
+
+def test_fetch_native_df_empty_column_table(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    class _ColumnTable:
+        column_names = ["name", "schema", "catalog", "type"]
+        column_table = [(), (), (), ()]
+
+    adapter.cursor.fetchall_arrow.return_value = _ColumnTable()
+
+    df = adapter._fetch_native_df("SELECT 1")
+
+    assert list(df.columns) == ["name", "schema", "catalog", "type"]
+    assert df.empty
+
+
+def test_fetch_native_df_column_table_keeps_duplicate_columns(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    class _ColumnTable:
+        column_names = ["a", "a"]
+        column_table = [("x",), ("y",)]
+
+    adapter.cursor.fetchall_arrow.return_value = _ColumnTable()
+
+    df = adapter._fetch_native_df("SELECT 1")
+
+    assert list(df.columns) == ["a", "a"]
+    assert df.iloc[0].tolist() == ["x", "y"]
+
+
+def test_fetch_native_df_rejects_unknown_arrow_result(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+
+    class _Weird:
+        pass
+
+    adapter.cursor.fetchall_arrow.return_value = _Weird()
+
+    with pytest.raises(SQLMeshError, match="Unexpected Databricks fetchall_arrow"):
+        adapter._fetch_native_df("SELECT 1")

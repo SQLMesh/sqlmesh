@@ -31,6 +31,34 @@ if t.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _to_pandas(table: t.Any) -> pd.DataFrame:
+    """Convert a databricks-sql-connector fetchall_arrow() result to pandas.
+
+    Connector 4.x makes PyArrow optional. When PyArrow cannot be imported (PyArrow 25
+    requires NumPy >= 2), fetchall_arrow() returns a ColumnTable with ``column_names``
+    and ``column_table`` instead of a PyArrow table.
+    """
+    import pandas as pd
+
+    to_pandas = getattr(table, "to_pandas", None)
+    if callable(to_pandas):
+        return to_pandas()
+
+    column_names = getattr(table, "column_names", None)
+    column_table = getattr(table, "column_table", None)
+    if column_names is None or column_table is None:
+        raise SQLMeshError(
+            f"Unexpected Databricks fetchall_arrow() result {type(table).__name__!r} "
+            "with no to_pandas(). PyArrow may be missing or incompatible with the "
+            "installed NumPy (PyArrow 25+ requires NumPy >= 2)."
+        )
+
+    # Build from rows so duplicate names are kept. A dict would collapse them,
+    # which is not what PyArrow's to_pandas() does.
+    columns = [list(values) for values in column_table]
+    return pd.DataFrame(list(zip(*columns)), columns=list(column_names))
+
+
 def _query_tags(
     query_tags: t.Optional[t.Union[exp.Expr, str, int, float, bool]],
 ) -> t.Optional[t.Dict[str, t.Optional[str]]]:
@@ -277,7 +305,7 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
                 query, quote_identifiers=quote_identifiers
             )
         self.execute(query)
-        return self.cursor.fetchall_arrow().to_pandas()
+        return _to_pandas(self.cursor.fetchall_arrow())
 
     def fetchdf(
         self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False

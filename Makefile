@@ -238,7 +238,10 @@ bigquery-test: guard-BIGQUERY_KEYFILE engine-bigquery-install
 	pytest -n auto -m "bigquery" --reruns 3 --junitxml=test-results/junit-bigquery.xml
 
 databricks-test: guard-DATABRICKS_CATALOG guard-DATABRICKS_SERVER_HOSTNAME guard-DATABRICKS_HTTP_PATH guard-DATABRICKS_CONNECT_VERSION engine-databricks-install
-	$(PIP) install 'databricks-connect==${DATABRICKS_CONNECT_VERSION}'
+	# Connect 15.3.x requires numpy<2 and pyarrow>=4 (no upper bound). Cap PyArrow
+	# in the same resolve that downgrades NumPy, or PyArrow 25+ is left installed
+	# and cannot be imported.
+	$(PIP) install 'databricks-connect==${DATABRICKS_CONNECT_VERSION}' 'pyarrow<25'
 	pytest -n auto -m "databricks" --reruns 3 --junitxml=test-results/junit-databricks.xml
 
 redshift-test: guard-REDSHIFT_HOST guard-REDSHIFT_USER guard-REDSHIFT_PASSWORD guard-REDSHIFT_DATABASE engine-redshift-install
