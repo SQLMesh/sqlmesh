@@ -1,4 +1,5 @@
 # type: ignore
+import threading
 import typing as t
 
 import pandas as pd  # noqa: TID253
@@ -667,6 +668,7 @@ def test_table_exists_db_table(mocker: MockerFixture):
     cursor_mock = mocker.Mock()
     connection_mock.cursor.return_value = cursor_mock
     connection_mock.cursor.return_value.fetchone.return_value = (1,)
+    mocker.patch.object(RedshiftEngineAdapter, "_backend_pid", return_value=None)
 
     adapter = RedshiftEngineAdapter(lambda: connection_mock)
     assert adapter.table_exists(table_name=exp.to_table("some_db.some_table"))
@@ -681,6 +683,7 @@ def test_table_exists_table_only(mocker: MockerFixture):
     cursor_mock = mocker.Mock()
     connection_mock.cursor.return_value = cursor_mock
     connection_mock.cursor.return_value.fetchone.return_value = None
+    mocker.patch.object(RedshiftEngineAdapter, "_backend_pid", return_value=None)
 
     adapter = RedshiftEngineAdapter(lambda: connection_mock)
     assert not adapter.table_exists(table_name=exp.to_table("some_table"))
@@ -912,3 +915,109 @@ def test_merge_logical(
         'INSERT INTO "target" ("ID", "ts") SELECT "ID", "ts" FROM (SELECT "ID" AS "ID", "ts" AS "ts", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "ID") AS _row_number FROM "__temp_test_abcdefgh") AS _t WHERE _row_number = 1',
         'DROP TABLE IF EXISTS "__temp_test_abcdefgh"',
     ]
+
+
+def _mock_connections(
+    mocker: MockerFixture, run_query: t.Callable[[str], None]
+) -> t.Tuple[t.Callable, t.List[t.Any]]:
+    """A connection factory whose connections have backend PIDs 100, 101, and so on."""
+    connections = []
+
+    def connect():
+        cursor = mocker.Mock()
+        cursor.fetchone.return_value = (100 + len(connections),)
+        cursor.execute.side_effect = lambda sql, **kwargs: (
+            None if sql == "SELECT pg_backend_pid()" else run_query(sql)
+        )
+        connection = mocker.NonCallableMock()
+        connection.cursor.return_value = cursor
+        connections.append(connection)
+        return connection
+
+    return connect, connections
+
+
+def _executed_sql(connection: t.Any) -> t.List[str]:
+    return [call[0][0] for call in connection.cursor.return_value.execute.call_args_list]
+
+
+def test_close_terminates_session_of_interrupted_query(mocker: MockerFixture):
+    def run_query(sql: str) -> None:
+        if sql == "SELECT long_running()":
+            raise KeyboardInterrupt
+
+    connect, connections = _mock_connections(mocker, run_query)
+    adapter = RedshiftEngineAdapter(connect)
+
+    with pytest.raises(KeyboardInterrupt):
+        adapter.execute("SELECT long_running()")
+    adapter.close()
+
+    # The interrupted connection is mid-query, so the session is terminated from a new one.
+    connections[0].close.assert_called_once()
+    assert _executed_sql(connections[1]) == [
+        "SELECT pg_backend_pid()",
+        "SELECT PG_TERMINATE_BACKEND(100)",
+    ]
+    connections[1].close.assert_called_once()
+
+
+def test_close_terminates_sessions_of_queries_running_in_other_threads(mocker: MockerFixture):
+    query_started = threading.Event()
+    session_terminated = threading.Event()
+
+    def run_query(sql: str) -> None:
+        if sql == "SELECT long_running()":
+            query_started.set()
+            session_terminated.wait(timeout=10)
+            raise Exception("terminating connection due to administrator command")
+        if sql == "SELECT PG_TERMINATE_BACKEND(100)":
+            session_terminated.set()
+
+    connect, connections = _mock_connections(mocker, run_query)
+    adapter = RedshiftEngineAdapter(connect, multithreaded=True)
+    errors = []
+
+    def run_long_query() -> None:
+        try:
+            adapter.execute("SELECT long_running()")
+        except Exception as ex:
+            errors.append(ex)
+
+    thread = threading.Thread(target=run_long_query)
+    thread.start()
+    assert query_started.wait(timeout=10)
+    adapter.close()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert _executed_sql(connections[1]) == [
+        "SELECT pg_backend_pid()",
+        "SELECT PG_TERMINATE_BACKEND(100)",
+    ]
+    connections[0].close.assert_called_once()
+    connections[1].close.assert_called_once()
+
+
+def test_close_without_running_queries(mocker: MockerFixture):
+    def run_query(sql: str) -> None:
+        if sql == "SELECT fail()":
+            raise Exception("query failed")
+
+    connect, connections = _mock_connections(mocker, run_query)
+    adapter = RedshiftEngineAdapter(connect)
+
+    adapter.execute("SELECT 1")
+    with pytest.raises(Exception, match="query failed"):
+        adapter.execute("SELECT fail()")
+    adapter.close()
+
+    # The backend PID is looked up once per connection, and nothing is terminated.
+    assert len(connections) == 1
+    assert _executed_sql(connections[0]) == [
+        "SELECT pg_backend_pid()",
+        "SELECT 1",
+        "SELECT fail()",
+    ]
+    connections[0].close.assert_called_once()

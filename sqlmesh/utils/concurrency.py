@@ -1,5 +1,6 @@
 import typing as t
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Lock
 
 from sqlmesh.core.snapshot import SnapshotId, SnapshotInfoLike
@@ -58,7 +59,7 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         if self._finished_future.done():
             self._init_state()
 
-        with ThreadPoolExecutor(max_workers=self.tasks_num) as pool:
+        with _thread_pool(self.tasks_num) as pool:
             with self._unprocessed_nodes_lock:
                 self._submit_next_nodes(pool)
             self._finished_future.result()
@@ -271,8 +272,30 @@ def concurrent_apply_to_values(
         except Exception as ex:
             futures[index].set_exception(ex)
 
-    with ThreadPoolExecutor(max_workers=tasks_num) as pool:
+    with _thread_pool(tasks_num) as pool:
         for index, value in enumerate(values):
             pool.submit(_process_value, value, index)
 
     return [f.result() for f in futures]
+
+
+@contextmanager
+def _thread_pool(max_workers: int) -> t.Iterator[ThreadPoolExecutor]:
+    """A thread pool that, like `ThreadPoolExecutor`, waits for its tasks on exit unless the
+    calling thread is interrupted (e.g. by `KeyboardInterrupt`).
+
+    When interrupted, pending tasks are cancelled and the interrupt propagates without waiting for
+    running tasks, so that the caller can release resources such as engine adapter connections,
+    which cancels the queries those tasks are blocked on.
+    """
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        try:
+            yield pool
+        except Exception:
+            pool.shutdown(wait=True)
+            raise
+        pool.shutdown(wait=True)
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise

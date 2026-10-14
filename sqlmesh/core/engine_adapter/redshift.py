@@ -144,6 +144,50 @@ class RedshiftEngineAdapter(
         cursor.paramstyle = "qmark"
         return cursor
 
+    def close(self) -> t.Any:
+        # Redshift keeps running a query after its client disconnects, holding its locks until it
+        # finishes, so queries that are still running (e.g. after a KeyboardInterrupt) are stopped
+        # explicitly. PG_CANCEL_BACKEND can't cancel a query inside a transaction block, so the
+        # session is terminated instead, which also rolls back its transaction.
+        running_backend_pids = [
+            pid
+            for pid in self._connection_pool.get_all_attributes("running_query_backend_pid")
+            if pid is not None
+        ]
+        if running_backend_pids:
+            if self._connection_pool.get_attribute("running_query_backend_pid") is not None:
+                # The calling thread was interrupted mid-query, so its connection can't be reused.
+                self._connection_pool.close()
+            for pid in running_backend_pids:
+                try:
+                    self.execute(
+                        exp.select(exp.func("pg_terminate_backend", exp.Literal.number(pid)))
+                    )
+                    logger.info("Terminated Redshift session %s to stop its running query", pid)
+                except Exception:
+                    logger.warning("Failed to terminate Redshift session %s", pid, exc_info=True)
+
+        return super().close()
+
+    def _execute(self, sql: str, track_rows_processed: bool = False, **kwargs: t.Any) -> None:
+        self._connection_pool.set_attribute("running_query_backend_pid", self._backend_pid())
+        try:
+            super()._execute(sql, track_rows_processed=track_rows_processed, **kwargs)
+        except Exception:
+            self._connection_pool.set_attribute("running_query_backend_pid", None)
+            raise
+        # Not cleared on KeyboardInterrupt or SystemExit: the query is still running on the server.
+        self._connection_pool.set_attribute("running_query_backend_pid", None)
+
+    def _backend_pid(self) -> t.Optional[int]:
+        """The process ID of the current connection's Redshift session."""
+        pid = self._connection_pool.get_attribute("backend_pid")
+        if pid is None:
+            self.cursor.execute("SELECT pg_backend_pid()")
+            pid = self.cursor.fetchone()[0]
+            self._connection_pool.set_attribute("backend_pid", pid)
+        return pid
+
     def _fetch_native_df(
         self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> pd.DataFrame:

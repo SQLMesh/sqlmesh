@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
+import threading
 import typing as t
 from pathlib import Path
 
@@ -119,6 +121,12 @@ def cli(
     """SQLMesh command line tool."""
     if "--help" in sys.argv:
         return
+
+    if threading.current_thread() is threading.main_thread():
+        # Handle SIGTERM (e.g. from CI cancellation or container shutdown) like Ctrl-C, so that the
+        # context is closed and running queries are cancelled before exiting.
+        previous_sigterm_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
+        ctx.call_on_close(lambda: signal.signal(signal.SIGTERM, previous_sigterm_handler))
 
     configure_logging(
         debug,

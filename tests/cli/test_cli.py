@@ -1,6 +1,7 @@
 import json
 import os
 import pytest
+import signal
 import string
 import time_machine
 from os import getcwd, path, remove
@@ -2976,3 +2977,22 @@ test_py_model:
     assert result.exit_code != 0
     assert "is not a known model or test file" in result.output
     mock.assert_not_called()
+
+
+def test_sigterm_handled_like_keyboard_interrupt(runner, tmp_path, mocker):
+    create_example_project(tmp_path)
+    sigterm_handlers = []
+    mocker.patch.object(
+        Context,
+        "plan",
+        side_effect=lambda *args, **kwargs: sigterm_handlers.append(
+            signal.getsignal(signal.SIGTERM)
+        ),
+    )
+    previous_handler = signal.getsignal(signal.SIGTERM)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan"])
+
+    assert result.exit_code == 0, result.output
+    assert sigterm_handlers == [signal.default_int_handler]
+    assert signal.getsignal(signal.SIGTERM) is previous_handler
