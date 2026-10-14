@@ -26,7 +26,11 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlmesh.core.config import Config, BaseDuckDBConnectionConfig, DuckDBConnectionConfig
 from sqlmesh.core.config.connection import ConnectionConfig
 from sqlmesh.core.context import Context
-from sqlmesh.core.engine_adapter import MSSQLEngineAdapter, SparkEngineAdapter
+from sqlmesh.core.engine_adapter import (
+    MSSQLEngineAdapter,
+    RedshiftEngineAdapter,
+    SparkEngineAdapter,
+)
 from sqlmesh.core.engine_adapter.base import EngineAdapter
 from sqlmesh.core.environment import EnvironmentNamingInfo
 from sqlmesh.core import lineage
@@ -555,6 +559,12 @@ def make_mocked_engine_adapter(mocker: MockerFixture) -> t.Callable:
             mocker.patch(
                 "sqlmesh.core.engine_adapter.mssql.MSSQLEngineAdapter.catalog_support",
                 new_callable=PropertyMock(return_value=CatalogSupport.REQUIRES_SET_CATALOG),
+            )
+        if isinstance(adapter, RedshiftEngineAdapter):
+            # Keeps the session lookup out of the mocked cursor's executed statements.
+            mocker.patch(
+                "sqlmesh.core.engine_adapter.redshift.RedshiftEngineAdapter._backend_pid",
+                return_value=None,
             )
         if patch_get_data_objects:
             mocker.patch.object(adapter, "_get_data_objects", return_value=[])

@@ -1,12 +1,18 @@
+import signal
+import threading
+import typing as t
+
 import pytest
 from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.core.snapshot import SnapshotId
 from sqlmesh.utils.concurrency import (
     NodeExecutionFailedError,
+    concurrent_apply_to_dag,
     concurrent_apply_to_snapshots,
     concurrent_apply_to_values,
 )
+from sqlmesh.utils.dag import DAG
 
 
 @pytest.mark.parametrize("tasks_num", [1, 2])
@@ -147,3 +153,48 @@ def test_concurrent_apply(tasks_num: int):
     values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     results = concurrent_apply_to_values(values, lambda x: x * 2, tasks_num)
     assert results == [x * 2 for x in values]
+
+
+@pytest.mark.parametrize(
+    "apply",
+    [
+        lambda fn: concurrent_apply_to_values([1, 2, 3, 4], fn, 2),
+        lambda fn: concurrent_apply_to_dag(DAG({1: set(), 2: set(), 3: {1}, 4: {2}}), fn, 2),
+    ],
+    ids=["values", "dag"],
+)
+def test_interrupt_does_not_wait_for_running_tasks(apply: t.Callable):
+    started = []
+    finished = []
+    started_lock = threading.Lock()
+    both_started = threading.Event()
+    release = threading.Event()
+
+    def fn(value: int) -> None:
+        with started_lock:
+            started.append(value)
+            if len(started) == 2:
+                both_started.set()
+        release.wait(timeout=10)
+        finished.append(value)
+
+    def interrupt_main_thread() -> None:
+        both_started.wait(timeout=10)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+    previous_sigint_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        threading.Thread(target=interrupt_main_thread).start()
+        with pytest.raises(KeyboardInterrupt):
+            apply(fn)
+        # The interrupt propagates while the running tasks are still blocked.
+        assert not finished
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
+        release.set()
+
+    for thread in threading.enumerate():
+        if thread.name.startswith("ThreadPoolExecutor"):
+            thread.join(timeout=10)
+    # Tasks that were pending when the interrupt arrived never start.
+    assert sorted(started) == [1, 2]
