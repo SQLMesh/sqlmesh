@@ -1095,34 +1095,25 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         `ON CLUSTER` decision short-circuits without resolving a target or querying
         `system.databases` again.
         """
-        try:
-            row = self.fetchone(
-                exp.select(exp.func("count"))
-                .from_("system.databases")
-                .where(
-                    exp.column("engine").like(
-                        exp.Literal.string(f"{REPLICATED_DATABASE_ENGINE_PREFIX}%")
-                    )
+        row = self.fetchone(
+            exp.select(exp.func("count"))
+            .from_("system.databases")
+            .where(
+                exp.column("engine").like(
+                    exp.Literal.string(f"{REPLICATED_DATABASE_ENGINE_PREFIX}%")
                 )
             )
-        except Exception:
-            return False
+        )
         return bool(row and row[0])
 
     @cached_property
     def _connection_database(self) -> t.Optional[str]:
         """The database an unqualified object resolves to on this connection."""
-        try:
-            row = self.fetchone("SELECT currentDatabase()")
-        except Exception:
-            return None
+        row = self.fetchone("SELECT currentDatabase()")
         return str(row[0]) if row and row[0] else None
 
-    def _clear_database_engine_cache(self, database: t.Optional[str] = None) -> None:
-        if database is None:
-            self._database_engine_cache.clear()
-        else:
-            self._database_engine_cache.pop(database, None)
+    def _clear_database_engine_cache(self) -> None:
+        self._database_engine_cache.clear()
         # Creating or dropping a database can also change whether any Replicated one
         # exists, which is what the short-circuit above depends on.
         self.__dict__.pop("_has_replicated_database", None)
@@ -1148,9 +1139,8 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             if row and row[0]:
                 engine = str(row[0])
         except Exception:
-            # Unresolvable for any reason - absent, permission-denied, introspection
-            # failure. Cache the miss but let the caller fall back to emitting.
-            engine = None
+            # Keep this call fail-open, but retry the lookup on the next DDL.
+            return None
 
         cache[database] = engine
         return engine
@@ -1167,7 +1157,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         table = self._strip_virtual_catalog(table)
         database = table.db
         # An unqualified name resolves to the connection's database, not to "unknown".
-        return database or self._connection_database
+        if database:
+            return database
+        try:
+            return self._connection_database
+        except Exception:
+            return None
 
     def _should_use_on_cluster(self, target: t.Optional[TableName] = None) -> bool:
         """Whether object DDL for `target` should carry `ON CLUSTER`.
@@ -1187,7 +1182,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
         if not self.engine_run_mode.is_cluster:
             return False
 
-        if not self._has_replicated_database:
+        try:
+            has_replicated_database = self._has_replicated_database
+        except Exception:
+            return True
+
+        if not has_replicated_database:
             return True
 
         database = self._on_cluster_target_database(target)

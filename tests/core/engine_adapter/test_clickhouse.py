@@ -15,6 +15,8 @@ from sqlmesh.utils.errors import SQLMeshError
 
 pytestmark = [pytest.mark.clickhouse, pytest.mark.engine]
 
+_HAS_REPLICATED_DATABASE_PROPERTY = ClickhouseEngineAdapter.__dict__["_has_replicated_database"]
+
 
 @pytest.fixture(autouse=True)
 def no_replicated_database_by_default(mocker) -> None:
@@ -1859,6 +1861,60 @@ def test_database_engine_lookup_is_cached_and_fails_open(
     mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
     mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", "default")
     assert adapter._should_use_on_cluster(exp.to_table("other_db.t")) is True
+
+
+@pytest.mark.parametrize(
+    ("target", "metadata_results"),
+    [
+        pytest.param(
+            "replicated_db.t",
+            [RuntimeError("probe unavailable"), (1,), ("Replicated",)],
+            id="replicated-database-probe",
+        ),
+        pytest.param(
+            "replicated_db.t",
+            [(1,), RuntimeError("engine unavailable"), ("Replicated",)],
+            id="database-engine",
+        ),
+        pytest.param(
+            "t",
+            [
+                (1,),
+                RuntimeError("current database unavailable"),
+                ("replicated_db",),
+                ("Replicated",),
+            ],
+            id="current-database",
+        ),
+    ],
+)
+def test_object_ddl_retries_failed_metadata_lookups(
+    make_mocked_engine_adapter: t.Callable,
+    mocker,
+    target: str,
+    metadata_results: t.List[t.Any],
+):
+    """A transient metadata failure affects one DDL, then a successful result is cached."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+    # Restore the real probe because the module fixture stubs it for other tests.
+    mocker.patch.object(
+        ClickhouseEngineAdapter,
+        "_has_replicated_database",
+        _HAS_REPLICATED_DATABASE_PROPERTY,
+    )
+
+    fetchone = mocker.patch.object(adapter, "fetchone", side_effect=metadata_results)
+
+    for _ in range(3):
+        adapter.drop_table(target)
+
+    target_sql = '"replicated_db"."t"' if "." in target else '"t"'
+    assert to_sql_calls(adapter) == [
+        f'DROP TABLE IF EXISTS {target_sql} ON CLUSTER "my_cluster"',
+        f"DROP TABLE IF EXISTS {target_sql}",
+        f"DROP TABLE IF EXISTS {target_sql}",
+    ]
+    assert fetchone.call_count == len(metadata_results)
 
 
 def test_on_cluster_suppressed_for_replicated_object_ddl(
