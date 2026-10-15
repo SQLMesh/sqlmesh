@@ -17,6 +17,7 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       client: ${{ steps.filter.outputs.client }}
       vscode: ${{ steps.filter.outputs.vscode }}
+      lsp: ${{ steps.filter.outputs.lsp }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v7
@@ -37,6 +38,8 @@ jobs:
               - 'web/client/**'
             vscode:
               - 'vscode/**'
+            lsp:
+              - 'sqlmesh/lsp/**'
             ci:
               - '.github/**'
               - 'Makefile'
@@ -429,10 +432,10 @@ jobs:
   test-vscode-e2e:
     needs: changes
     if:
-      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.ci ==
-      'true' || github.ref == 'refs/heads/main'
-    runs-on:
-      labels: [ubuntu-2204-8]
+      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.lsp ==
+      'true' || needs.changes.outputs.ci == 'true' || github.ref ==
+      'refs/heads/main'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
