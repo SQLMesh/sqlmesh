@@ -28,6 +28,33 @@ export interface SharedPythonEnvironment extends PythonEnvironment {
 // test that happens to ask for it.
 const SHARED_PYTHON_ENVIRONMENT_TIMEOUT_MS = 300_000
 
+const REMOVE_RETRY_DELAYS_MS = [100, 250, 500, 1000, 2000]
+
+/**
+ * Remove a directory, retrying with a backoff.
+ *
+ * When a test finishes, the extension host may still be writing into its
+ * temporary directory - the language server is shutting down, or uv is
+ * finishing off a virtual environment it created there. A single `fs.remove`
+ * then fails with `ENOTEMPTY`, which fails an otherwise passing test.
+ */
+const removeWithRetry = async (dir: string): Promise<void> => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.remove(dir)
+      return
+    } catch (error) {
+      if (attempt >= REMOVE_RETRY_DELAYS_MS.length) {
+        console.warn(`Failed to remove directory ${dir}:`, error)
+        return
+      }
+      await new Promise(resolve =>
+        setTimeout(resolve, REMOVE_RETRY_DELAYS_MS[attempt]),
+      )
+    }
+  }
+}
+
 // Worker-scoped fixture to start/stop VS Code server once per worker
 export const test = base.extend<
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type
@@ -103,7 +130,7 @@ export const test = base.extend<
 
       // Clean up after each test
       console.log(`Cleaning up temporary directory: ${tempDir}`)
-      await fs.remove(tempDir)
+      await removeWithRetry(tempDir)
     },
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-expect-error

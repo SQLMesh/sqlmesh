@@ -112,6 +112,10 @@ dev = [
 ]
 dbt = ["dbt-core<2"]
 dlt = ["dlt"]
+db2 = [
+    "ibm_db",
+    "db2-sqlglot-dialect;python_version>=\"3.10\""
+]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
 fabric-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
@@ -270,6 +274,7 @@ markers = [
     "clickhouse: test for Clickhouse (standalone mode / cluster mode)",
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
+    "db2: test for Db2",
     "duckdb: test for DuckDB",
     "fabric: test for Fabric",
     "motherduck: test for MotherDuck",
