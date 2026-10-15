@@ -51,16 +51,7 @@ bigquery = [
 # pinned an older SQLGlot which is incompatible with SQLMesh
 bigframes = ["bigframes>=1.32.0"]
 clickhouse = ["clickhouse-connect"]
-# PyArrow 25+ requires NumPy >= 2. install-dev currently resolves PyArrow 26
-# with NumPy 2.5. databricks-connect 15.3.6 then requires numpy<2 and
-# pyarrow>=4 with no upper bound, so it replaces NumPy with 1.26.4 and leaves
-# PyArrow 26 installed. PyArrow fails to import, the SQL connector disables
-# Arrow, and fetchall_arrow() returns a ColumnTable with no to_pandas().
-# PyArrow 24.x imports on both NumPy 1.26 and NumPy 2.
-databricks = [
-    "databricks-sql-connector[pyarrow]>=4.2.6",
-    "pyarrow<25",
-]
+databricks = ["databricks-sql-connector[pyarrow]>=4.2.6"]
 dev = [
     "agate",
     "beautifulsoup4",
