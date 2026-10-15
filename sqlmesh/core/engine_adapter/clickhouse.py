@@ -771,8 +771,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 altered_table = (
                     alter_expression.this if isinstance(alter_expression.this, exp.Table) else None
                 )
-                # Replicated databases propagate metadata ALTERs, but not partition
-                # operations. Partition overwrites must still reach every shard.
+                # Partition overwrites retain cluster fan-out to reach every shard.
                 alters_partitions = any(
                     isinstance(action, (exp.DropPartition, exp.ReplacePartition))
                     for action in alter_expression.args.get("actions", [])
@@ -1138,7 +1137,12 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             )
             if row and row[0]:
                 engine = str(row[0])
-        except Exception:
+        except Exception as ex:
+            logger.warning(
+                "Failed to determine engine for ClickHouse database '%s'; keeping ON CLUSTER: %s",
+                database,
+                ex,
+            )
             # Keep this call fail-open, but retry the lookup on the next DDL.
             return None
 
@@ -1161,7 +1165,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             return database
         try:
             return self._connection_database
-        except Exception:
+        except Exception as ex:
+            logger.warning(
+                "Failed to determine current ClickHouse database; keeping ON CLUSTER: %s",
+                ex,
+            )
             return None
 
     def _should_use_on_cluster(self, target: t.Optional[TableName] = None) -> bool:
@@ -1184,7 +1192,11 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
         try:
             has_replicated_database = self._has_replicated_database
-        except Exception:
+        except Exception as ex:
+            logger.warning(
+                "Failed to check for Replicated ClickHouse databases; keeping ON CLUSTER: %s",
+                ex,
+            )
             return True
 
         if not has_replicated_database:

@@ -1864,16 +1864,18 @@ def test_database_engine_lookup_is_cached_and_fails_open(
 
 
 @pytest.mark.parametrize(
-    ("target", "metadata_results"),
+    ("target", "metadata_results", "expected_diagnostic"),
     [
         pytest.param(
             "replicated_db.t",
             [RuntimeError("probe unavailable"), (1,), ("Replicated",)],
+            "Failed to check for Replicated ClickHouse databases; keeping ON CLUSTER: probe unavailable",
             id="replicated-database-probe",
         ),
         pytest.param(
             "replicated_db.t",
             [(1,), RuntimeError("engine unavailable"), ("Replicated",)],
+            "Failed to determine engine for ClickHouse database 'replicated_db'; keeping ON CLUSTER: engine unavailable",
             id="database-engine",
         ),
         pytest.param(
@@ -1884,6 +1886,7 @@ def test_database_engine_lookup_is_cached_and_fails_open(
                 ("replicated_db",),
                 ("Replicated",),
             ],
+            "Failed to determine current ClickHouse database; keeping ON CLUSTER: current database unavailable",
             id="current-database",
         ),
     ],
@@ -1891,10 +1894,12 @@ def test_database_engine_lookup_is_cached_and_fails_open(
 def test_object_ddl_retries_failed_metadata_lookups(
     make_mocked_engine_adapter: t.Callable,
     mocker,
+    caplog,
     target: str,
     metadata_results: t.List[t.Any],
+    expected_diagnostic: str,
 ):
-    """A transient metadata failure affects one DDL, then a successful result is cached."""
+    """A transient metadata failure warns once, then a successful result is cached."""
     adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
     # Restore the real probe because the module fixture stubs it for other tests.
     mocker.patch.object(
@@ -1904,9 +1909,15 @@ def test_object_ddl_retries_failed_metadata_lookups(
     )
 
     fetchone = mocker.patch.object(adapter, "fetchone", side_effect=metadata_results)
+    caplog.set_level("WARNING", logger="sqlmesh.core.engine_adapter.clickhouse")
+    caplog.clear()
 
-    for _ in range(3):
-        adapter.drop_table(target)
+    adapter.drop_table(target)
+    assert [record.getMessage() for record in caplog.records] == [expected_diagnostic]
+
+    adapter.drop_table(target)
+    adapter.drop_table(target)
+    assert [record.getMessage() for record in caplog.records] == [expected_diagnostic]
 
     target_sql = '"replicated_db"."t"' if "." in target else '"t"'
     assert to_sql_calls(adapter) == [
