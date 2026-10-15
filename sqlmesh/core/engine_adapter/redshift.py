@@ -144,30 +144,50 @@ class RedshiftEngineAdapter(
         cursor.paramstyle = "qmark"
         return cursor
 
+    def recycle(self) -> None:
+        """Closes all open connections and releases all allocated resources associated with any thread
+        except the calling one, after terminating the queries that are still running on any thread.
+
+        This includes the calling thread's query, if it has one. The calling thread can't be waiting on
+        a query while it runs this method, so a query recorded for it was probably abandoned by a signal
+        (e.g. KeyboardInterrupt). That query might still running on Redshift and holding its locks, and its
+        connection still has unread responses, so it can't be reused. The connection is replaced instead
+        of kept, which leaves the calling thread with a usable connection.
+        """
+        self._terminate_running_queries()
+        super().recycle()
+
     def close(self) -> t.Any:
+        self._terminate_running_queries()
+        return super().close()
+
+    def _terminate_running_queries(self) -> None:
         # Redshift keeps running a query after its client disconnects, holding its locks until it
         # finishes, so queries that are still running (e.g. after a KeyboardInterrupt) are stopped
-        # explicitly. PG_CANCEL_BACKEND can't cancel a query inside a transaction block, so the
+        # explicitly. This must happen before the connection pool is closed, which discards the
+        # backend PIDs. PG_CANCEL_BACKEND can't cancel a query inside a transaction block, so the
         # session is terminated instead, which also rolls back its transaction.
         running_backend_pids = [
             pid
             for pid in self._connection_pool.get_all_attributes("running_query_backend_pid")
             if pid is not None
         ]
-        if running_backend_pids:
-            if self._connection_pool.get_attribute("running_query_backend_pid") is not None:
-                # The calling thread was interrupted mid-query, so its connection can't be reused.
-                self._connection_pool.close()
-            for pid in running_backend_pids:
-                try:
-                    self.execute(
-                        exp.select(exp.func("pg_terminate_backend", exp.Literal.number(pid)))
-                    )
-                    logger.info("Terminated Redshift session %s to stop its running query", pid)
-                except Exception:
-                    logger.warning("Failed to terminate Redshift session %s", pid, exc_info=True)
+        if not running_backend_pids:
+            return
 
-        return super().close()
+        if (
+            self._connection_pool.get_attribute("running_query_backend_pid") is not None
+            or self._connection_pool.is_transaction_active
+        ):
+            # The calling thread was interrupted mid-query or mid-transaction, so its connection
+            # can't be reused.
+            self._connection_pool.close()
+        for pid in running_backend_pids:
+            try:
+                self.execute(exp.select(exp.func("pg_terminate_backend", exp.Literal.number(pid))))
+                logger.info("Terminated Redshift session %s to stop its running query", pid)
+            except Exception:
+                logger.warning("Failed to terminate Redshift session %s", pid, exc_info=True)
 
     def _execute(self, sql: str, track_rows_processed: bool = False, **kwargs: t.Any) -> None:
         self._connection_pool.set_attribute("running_query_backend_pid", self._backend_pid())

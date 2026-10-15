@@ -962,7 +962,20 @@ def test_close_terminates_session_of_interrupted_query(mocker: MockerFixture):
     connections[1].close.assert_called_once()
 
 
-def test_close_terminates_sessions_of_queries_running_in_other_threads(mocker: MockerFixture):
+def _recycle_then_close(adapter: RedshiftEngineAdapter) -> None:
+    # On KeyboardInterrupt, SnapshotEvaluator.concurrent_context() recycles before the context closes.
+    adapter.recycle()
+    adapter.close()
+
+
+@pytest.mark.parametrize(
+    "teardown",
+    [lambda adapter: adapter.close(), _recycle_then_close],
+    ids=["close", "recycle_then_close"],
+)
+def test_teardown_terminates_sessions_of_queries_running_in_other_threads(
+    mocker: MockerFixture, teardown: t.Callable
+):
     query_started = threading.Event()
     session_terminated = threading.Event()
 
@@ -987,7 +1000,7 @@ def test_close_terminates_sessions_of_queries_running_in_other_threads(mocker: M
     thread = threading.Thread(target=run_long_query)
     thread.start()
     assert query_started.wait(timeout=10)
-    adapter.close()
+    teardown(adapter)
     thread.join(timeout=10)
 
     assert not thread.is_alive()
@@ -998,6 +1011,48 @@ def test_close_terminates_sessions_of_queries_running_in_other_threads(mocker: M
     ]
     connections[0].close.assert_called_once()
     connections[1].close.assert_called_once()
+
+
+def test_recycle_terminates_sessions_from_new_connection_after_interrupted_transaction(
+    mocker: MockerFixture,
+):
+    query_started = threading.Event()
+    session_terminated = threading.Event()
+
+    def run_query(sql: str) -> None:
+        if sql == "SELECT long_running()":
+            query_started.set()
+            session_terminated.wait(timeout=10)
+            raise Exception("terminating connection due to administrator command")
+        if sql == "SELECT PG_TERMINATE_BACKEND(100)":
+            session_terminated.set()
+
+    connect, connections = _mock_connections(mocker, run_query)
+    adapter = RedshiftEngineAdapter(connect, multithreaded=True)
+
+    def run_long_query() -> None:
+        with pytest.raises(Exception, match="terminating connection"):
+            adapter.execute("SELECT long_running()")
+
+    thread = threading.Thread(target=run_long_query)
+    thread.start()
+    assert query_started.wait(timeout=10)
+
+    with pytest.raises(KeyboardInterrupt):
+        with adapter.transaction():
+            adapter.execute("SELECT 1")
+            raise KeyboardInterrupt
+    adapter.recycle()
+    thread.join(timeout=10)
+
+    # The interrupted transaction is left open, so the session is terminated from a new connection.
+    assert not thread.is_alive()
+    connections[0].close.assert_called_once()
+    connections[1].close.assert_called_once()
+    assert _executed_sql(connections[2]) == [
+        "SELECT pg_backend_pid()",
+        "SELECT PG_TERMINATE_BACKEND(100)",
+    ]
 
 
 def test_close_without_running_queries(mocker: MockerFixture):
