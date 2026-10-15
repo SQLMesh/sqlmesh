@@ -65,26 +65,40 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         return self._node_errors, self._skipped_nodes
 
     def _process_node(self, node: H, executor: Executor) -> None:
+        with self._unprocessed_nodes_lock:
+            if self._finished_future.done():
+                return
+
         try:
             self.fn(node)
 
             with self._unprocessed_nodes_lock:
+                if self._finished_future.done():
+                    return
                 self._unprocessed_nodes_num -= 1
                 self._submit_next_nodes(executor, node)
         except Exception as ex:
             error = NodeExecutionFailedError(node)
             error.__cause__ = ex
 
-            if self.raise_on_error:
-                self._finished_future.set_exception(error)
-                return
-
             with self._unprocessed_nodes_lock:
+                if self._finished_future.done():
+                    return
+                if self.raise_on_error:
+                    self._finished_future.set_exception(error)
+                    return
                 self._unprocessed_nodes_num -= 1
                 self._node_errors.append(error)
                 self._skip_next_nodes(node)
+        except BaseException as ex:
+            with self._unprocessed_nodes_lock:
+                if not self._finished_future.done():
+                    self._finished_future.set_exception(ex)
 
     def _submit_next_nodes(self, executor: Executor, processed_node: t.Optional[H] = None) -> None:
+        if self._finished_future.done():
+            return
+
         if not self._unprocessed_nodes_num:
             self._finished_future.set_result(None)
             return
@@ -101,6 +115,9 @@ class ConcurrentDAGExecutor(t.Generic[H]):
             executor.submit(self._process_node, submitted_node, executor)
 
     def _skip_next_nodes(self, parent: H) -> None:
+        if self._finished_future.done():
+            return
+
         if not self._unprocessed_nodes_num:
             self._finished_future.set_result(None)
             return
@@ -267,9 +284,11 @@ def concurrent_apply_to_values(
 
     def _process_value(value: A, index: int) -> None:
         try:
-            futures[index].set_result(fn(value))
-        except Exception as ex:
+            result = fn(value)
+        except BaseException as ex:
             futures[index].set_exception(ex)
+        else:
+            futures[index].set_result(result)
 
     with ThreadPoolExecutor(max_workers=tasks_num) as pool:
         for index, value in enumerate(values):
