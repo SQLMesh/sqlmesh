@@ -1139,9 +1139,8 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 engine = str(row[0])
         except Exception as ex:
             logger.warning(
-                "Failed to determine engine for ClickHouse database '%s'; keeping ON CLUSTER: %s",
-                database,
-                ex,
+                f"Failed to determine engine for ClickHouse database '{database}'; "
+                f"keeping ON CLUSTER: {ex}"
             )
             # Keep this call fail-open, but retry the lookup on the next DDL.
             return None
@@ -1167,8 +1166,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             return self._connection_database
         except Exception as ex:
             logger.warning(
-                "Failed to determine current ClickHouse database; keeping ON CLUSTER: %s",
-                ex,
+                f"Failed to determine current ClickHouse database; keeping ON CLUSTER: {ex}"
             )
             return None
 
@@ -1194,8 +1192,7 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             has_replicated_database = self._has_replicated_database
         except Exception as ex:
             logger.warning(
-                "Failed to check for Replicated ClickHouse databases; keeping ON CLUSTER: %s",
-                ex,
+                f"Failed to check for Replicated ClickHouse databases; keeping ON CLUSTER: {ex}"
             )
             return True
 
