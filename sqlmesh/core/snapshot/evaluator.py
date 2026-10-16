@@ -331,6 +331,7 @@ class SnapshotEvaluator:
                     on_complete=on_complete,
                 ),
                 self.ddl_concurrent_tasks,
+                on_interrupt=self.stop_workers,
             )
 
     def demote(
@@ -359,6 +360,7 @@ class SnapshotEvaluator:
                     table_mapping=table_mapping,
                 ),
                 self.ddl_concurrent_tasks,
+                on_interrupt=self.stop_workers,
             )
 
     def create(
@@ -470,6 +472,7 @@ class SnapshotEvaluator:
                 ),
                 self.ddl_concurrent_tasks,
                 raise_on_error=False,
+                on_interrupt=self.stop_workers,
             )
             if errors:
                 raise SnapshotCreationFailedError(errors, skipped)
@@ -516,6 +519,7 @@ class SnapshotEvaluator:
                     deployability_index,
                 ),
                 self.ddl_concurrent_tasks,
+                on_interrupt=self.stop_workers,
             )
 
     def cleanup(
@@ -562,6 +566,7 @@ class SnapshotEvaluator:
                 self.ddl_concurrent_tasks,
                 reverse_order=True,
                 raise_on_error=False,
+                on_interrupt=self.stop_workers,
             )
         if errors:
             errored_snapshots = "\n".join(f"  {e.node.name}: {e.__cause__}" for e in errors)
@@ -664,19 +669,21 @@ class SnapshotEvaluator:
 
     @contextmanager
     def concurrent_context(self) -> t.Iterator[None]:
-        # Each context gets its own event, so that workers abandoned by an interrupted context stay
-        # stopped even if a new context starts before they finish.
-        interrupted = self._interrupted = Event()
+        # Each context gets its own event, so that workers that weren't waited for (e.g. after a
+        # second interrupt) stay stopped even if a new context starts before they finish.
+        self._interrupted = Event()
         try:
             yield
-        except BaseException as ex:
-            if not isinstance(ex, Exception):
-                # Unlike failures, interrupts (e.g. KeyboardInterrupt) don't wait for worker threads
-                # to finish, so they're told to stop before they start running a snapshot's statements.
-                interrupted.set()
-            raise
         finally:
             self.recycle()
+
+    def stop_workers(self) -> None:
+        """Stops the worker threads of the current concurrent context. Meant to be passed as the
+        `on_interrupt` of the concurrent operations run in it."""
+        # Workers stop before they start a snapshot's main transaction, and recycling the adapters
+        # stops the queries and transactions the workers are running.
+        self._interrupted.set()
+        self.recycle()
 
     def recycle(self) -> None:
         """Closes all open connections and releases all allocated resources associated with any thread
@@ -1494,6 +1501,7 @@ class SnapshotEvaluator:
                 list(unique_schemas),
                 lambda item: _create_schema(item[0], item[1], item[2]),
                 self.ddl_concurrent_tasks,
+                on_interrupt=self.stop_workers,
             )
 
     def get_adapter(self, gateway: t.Optional[str] = None) -> EngineAdapter:
@@ -1668,6 +1676,7 @@ class SnapshotEvaluator:
                         schema=s, object_names=tables_by_schema.get(s), gateway=gateway
                     ),
                     self.ddl_concurrent_tasks,
+                    on_interrupt=self.stop_workers,
                 )
 
                 for schema, objs in zip(schema_list, results):

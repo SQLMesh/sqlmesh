@@ -1,4 +1,5 @@
 from __future__ import annotations
+import signal
 import threading
 import typing as t
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -5770,31 +5771,27 @@ def test_promote_resolves_this_model_with_single_mapping_entry(
         assert len(call.args[1]) == 1
 
 
-def _interrupt_while_worker_is_blocked(
+def _stop_workers_while_worker_is_blocked(
     evaluator: SnapshotEvaluator, blocking_mock: Mock, work: t.Callable[[], t.Any]
 ) -> Future:
-    """Runs `work` in a worker thread started inside `concurrent_context()`, interrupts the context
-    with a KeyboardInterrupt while the worker is blocked in `blocking_mock`, then unblocks it."""
+    """Runs `work` in a worker thread started inside `concurrent_context()`, stops the context's
+    workers while the worker is blocked in `blocking_mock`, then unblocks it."""
     blocked = threading.Event()
-    interrupted = threading.Event()
+    stopped = threading.Event()
 
     def block(*args: t.Any, **kwargs: t.Any) -> t.Any:
         blocked.set()
-        assert interrupted.wait(timeout=10)
+        assert stopped.wait(timeout=10)
 
     blocking_mock.side_effect = block
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            with evaluator.concurrent_context():
-                future = executor.submit(work)
-                assert blocked.wait(timeout=10)
-                raise KeyboardInterrupt
-        interrupted.set()
-        future.exception(timeout=10)
-    finally:
-        executor.shutdown(wait=True)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with evaluator.concurrent_context():
+            future = executor.submit(work)
+            assert blocked.wait(timeout=10)
+            evaluator.stop_workers()
+            stopped.set()
+            future.exception(timeout=10)
     return future
 
 
@@ -5807,7 +5804,7 @@ def test_evaluate_stops_before_pre_statements_when_interrupted(
     )
     snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
 
-    future = _interrupt_while_worker_is_blocked(
+    future = _stop_workers_while_worker_is_blocked(
         evaluator,
         adapter_mock.table_exists,
         lambda: evaluator.evaluate(snapshot, snapshots={}, **date_kwargs),
@@ -5826,7 +5823,7 @@ def test_create_snapshot_stops_before_transaction_when_interrupted(adapter_mock,
     )
     snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
 
-    future = _interrupt_while_worker_is_blocked(
+    future = _stop_workers_while_worker_is_blocked(
         evaluator,
         adapter_mock.execute,
         lambda: evaluator.create_snapshot(
@@ -5844,7 +5841,7 @@ def test_create_snapshot_stops_before_transaction_when_interrupted(adapter_mock,
     adapter_mock.create_table.assert_not_called()
 
 
-def test_evaluate_runs_after_previous_run_was_interrupted(
+def test_evaluate_runs_after_previous_run_was_stopped(
     adapter_mock, make_snapshot, date_kwargs: t.Dict[str, str]
 ):
     evaluator = SnapshotEvaluator(adapter_mock)
@@ -5853,12 +5850,60 @@ def test_evaluate_runs_after_previous_run_was_interrupted(
     )
     snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
 
-    with pytest.raises(KeyboardInterrupt):
-        with evaluator.concurrent_context():
-            raise KeyboardInterrupt
+    with evaluator.concurrent_context():
+        evaluator.stop_workers()
 
     with evaluator.concurrent_context():
         with ThreadPoolExecutor(max_workers=1) as executor:
             executor.submit(evaluator.evaluate, snapshot, snapshots={}, **date_kwargs).result()
 
     adapter_mock.transaction.assert_called()
+
+
+def test_interrupted_create_stops_workers_and_waits_for_them(
+    mocker: MockerFixture, adapter_mock, make_snapshot
+):
+    evaluator = SnapshotEvaluator(adapter_mock, ddl_concurrent_tasks=2)
+    snapshot = make_snapshot(
+        SqlModel(name="db.model", kind=FullKind(), query=parse_one("SELECT 1"))
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    blocked = threading.Event()
+    recycled = threading.Event()
+    worker_finished = threading.Event()
+
+    def block_in_pre_statements(*args: t.Any, **kwargs: t.Any) -> None:
+        blocked.set()
+        assert recycled.wait(timeout=10)
+
+    adapter_mock.execute.side_effect = block_in_pre_statements
+    adapter_mock.recycle.side_effect = lambda: blocked.is_set() and recycled.set()
+
+    create_snapshot = evaluator.create_snapshot
+
+    def create_snapshot_and_record_finish(*args: t.Any, **kwargs: t.Any) -> None:
+        try:
+            create_snapshot(*args, **kwargs)
+        finally:
+            worker_finished.set()
+
+    mocker.patch.object(evaluator, "create_snapshot", side_effect=create_snapshot_and_record_finish)
+
+    def interrupt_main_thread() -> None:
+        assert blocked.wait(timeout=10)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+    previous_sigint_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        threading.Thread(target=interrupt_main_thread).start()
+        with pytest.raises(KeyboardInterrupt):
+            evaluator.create([snapshot], {})
+        # The worker was unblocked by the cancellation and waited for before the interrupt propagated.
+        assert worker_finished.is_set()
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
+        recycled.set()
+
+    adapter_mock.transaction.assert_not_called()
+    adapter_mock.create_table.assert_not_called()

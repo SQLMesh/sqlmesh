@@ -1,5 +1,6 @@
 import signal
 import threading
+import time
 import typing as t
 
 import pytest
@@ -163,7 +164,7 @@ def test_concurrent_apply(tasks_num: int):
     ],
     ids=["values", "dag"],
 )
-def test_interrupt_does_not_wait_for_running_tasks(apply: t.Callable):
+def test_interrupt_without_on_interrupt_waits_for_running_tasks(apply: t.Callable):
     started = []
     finished = []
     started_lock = threading.Lock()
@@ -175,7 +176,55 @@ def test_interrupt_does_not_wait_for_running_tasks(apply: t.Callable):
             started.append(value)
             if len(started) == 2:
                 both_started.set()
-        release.wait(timeout=10)
+        assert release.wait(timeout=10)
+        finished.append(value)
+
+    def interrupt_main_thread_then_release() -> None:
+        both_started.wait(timeout=10)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+        time.sleep(0.1)
+        release.set()
+
+    previous_sigint_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        threading.Thread(target=interrupt_main_thread_then_release).start()
+        with pytest.raises(KeyboardInterrupt):
+            apply(fn)
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
+        release.set()
+
+    # The running tasks were waited for before the interrupt propagated, and the pending ones
+    # never started.
+    assert sorted(finished) == [1, 2]
+    assert sorted(started) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "apply",
+    [
+        lambda fn, on_interrupt: concurrent_apply_to_values(
+            [1, 2, 3, 4], fn, 2, on_interrupt=on_interrupt
+        ),
+        lambda fn, on_interrupt: concurrent_apply_to_dag(
+            DAG({1: set(), 2: set(), 3: {1}, 4: {2}}), fn, 2, on_interrupt=on_interrupt
+        ),
+    ],
+    ids=["values", "dag"],
+)
+def test_interrupt_calls_on_interrupt_then_waits_for_running_tasks(apply: t.Callable):
+    started = []
+    finished = []
+    started_lock = threading.Lock()
+    both_started = threading.Event()
+    release = threading.Event()
+
+    def fn(value: int) -> None:
+        with started_lock:
+            started.append(value)
+            if len(started) == 2:
+                both_started.set()
+        assert release.wait(timeout=10)
         finished.append(value)
 
     def interrupt_main_thread() -> None:
@@ -186,15 +235,24 @@ def test_interrupt_does_not_wait_for_running_tasks(apply: t.Callable):
     try:
         threading.Thread(target=interrupt_main_thread).start()
         with pytest.raises(KeyboardInterrupt):
-            apply(fn)
-        # The interrupt propagates while the running tasks are still blocked.
-        assert not finished
+            apply(fn, release.set)
     finally:
         signal.signal(signal.SIGINT, previous_sigint_handler)
         release.set()
 
-    for thread in threading.enumerate():
-        if thread.name.startswith("ThreadPoolExecutor"):
-            thread.join(timeout=10)
-    # Tasks that were pending when the interrupt arrived never start.
+    # The running tasks were released by `on_interrupt` and waited for before the interrupt
+    # propagated, and the pending ones never started.
+    assert sorted(finished) == [1, 2]
     assert sorted(started) == [1, 2]
+
+
+def test_error_does_not_call_on_interrupt(mocker: MockerFixture):
+    on_interrupt = mocker.Mock()
+
+    def fn(value: int) -> None:
+        raise RuntimeError("failed")
+
+    with pytest.raises(NodeExecutionFailedError):
+        concurrent_apply_to_dag(DAG({1: set()}), fn, 2, on_interrupt=on_interrupt)
+
+    on_interrupt.assert_not_called()

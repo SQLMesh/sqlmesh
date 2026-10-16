@@ -602,6 +602,7 @@ class Scheduler:
                     run_node,
                     self.max_workers,
                     raise_on_error=False,
+                    on_interrupt=self.snapshot_evaluator.stop_workers,
                 )
                 self.console.stop_evaluation_progress(success=not errors)
 

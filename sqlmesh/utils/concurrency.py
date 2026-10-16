@@ -1,7 +1,7 @@
 import typing as t
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
-from contextlib import contextmanager
-from threading import Lock
+from threading import Condition, Lock
+from types import TracebackType
 
 from sqlmesh.core.snapshot import SnapshotId, SnapshotInfoLike
 from sqlmesh.utils.dag import DAG
@@ -31,6 +31,8 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         raise_on_error: If set to True raises an exception on a first encountered error,
             otherwises returns a tuple which contains a list of failed nodes and a list of
             skipped nodes.
+        on_interrupt: Called when the calling thread is interrupted, to stop the running tasks
+            before they're waited for.
     """
 
     def __init__(
@@ -39,11 +41,13 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         fn: t.Callable[[H], None],
         tasks_num: int,
         raise_on_error: bool,
+        on_interrupt: t.Optional[t.Callable[[], None]] = None,
     ):
         self.dag = dag
         self.fn = fn
         self.tasks_num = tasks_num
         self.raise_on_error = raise_on_error
+        self.on_interrupt = on_interrupt
 
         self._init_state()
 
@@ -59,7 +63,7 @@ class ConcurrentDAGExecutor(t.Generic[H]):
         if self._finished_future.done():
             self._init_state()
 
-        with _thread_pool(self.tasks_num) as pool:
+        with _StoppableThreadPool(self.tasks_num, self.on_interrupt) as pool:
             with self._unprocessed_nodes_lock:
                 self._submit_next_nodes(pool)
             self._finished_future.result()
@@ -140,6 +144,7 @@ def concurrent_apply_to_snapshots(
     tasks_num: int,
     reverse_order: bool = False,
     raise_on_error: bool = True,
+    on_interrupt: t.Optional[t.Callable[[], None]] = None,
 ) -> t.Tuple[t.List[NodeExecutionFailedError[SnapshotId]], t.List[SnapshotId]]:
     """Applies a function to the given collection of snapshots concurrently while
     preserving the topological order between snapshots.
@@ -152,6 +157,8 @@ def concurrent_apply_to_snapshots(
         raise_on_error: If set to True raises an exception on a first encountered error,
             otherwises returns a tuple which contains a list of failed nodes and a list of
             skipped nodes.
+        on_interrupt: Called when the calling thread is interrupted, to stop the running tasks
+            before they're waited for.
 
     Raises:
         NodeExecutionFailedError if `raise_on_error` is set to True and execution fails for any snapshot.
@@ -173,6 +180,7 @@ def concurrent_apply_to_snapshots(
         lambda s_id: fn(snapshots_by_id[s_id]),
         tasks_num,
         raise_on_error=raise_on_error,
+        on_interrupt=on_interrupt,
     )
 
 
@@ -181,6 +189,7 @@ def concurrent_apply_to_dag(
     fn: t.Callable[[H], None],
     tasks_num: int,
     raise_on_error: bool = True,
+    on_interrupt: t.Optional[t.Callable[[], None]] = None,
 ) -> t.Tuple[t.List[NodeExecutionFailedError[H]], t.List[H]]:
     """Applies a function to the given DAG concurrently while preserving the topological
     order between snapshots.
@@ -192,6 +201,8 @@ def concurrent_apply_to_dag(
         raise_on_error: If set to True raises an exception on a first encountered error,
             otherwises returns a tuple which contains a list of failed nodes and a list of
             skipped nodes.
+        on_interrupt: Called when the calling thread is interrupted, to stop the running tasks
+            before they're waited for.
 
     Raises:
         NodeExecutionFailedError if `raise_on_error` is set to True and execution fails for any snapshot.
@@ -210,6 +221,7 @@ def concurrent_apply_to_dag(
         fn,
         tasks_num,
         raise_on_error,
+        on_interrupt,
     ).run()
 
 
@@ -250,6 +262,7 @@ def concurrent_apply_to_values(
     values: t.Sequence[A],
     fn: t.Callable[[A], R],
     tasks_num: int,
+    on_interrupt: t.Optional[t.Callable[[], None]] = None,
 ) -> t.List[R]:
     """Applies a function to the given collection of values concurrently.
 
@@ -257,6 +270,8 @@ def concurrent_apply_to_values(
         values: Target values.
         fn: The function that will be applied concurrently to each value.
         tasks_num: The number of concurrent tasks.
+        on_interrupt: Called when the calling thread is interrupted, to stop the running tasks
+            before they're waited for.
 
     Returns:
         A list of results.
@@ -272,30 +287,78 @@ def concurrent_apply_to_values(
         except Exception as ex:
             futures[index].set_exception(ex)
 
-    with _thread_pool(tasks_num) as pool:
+    with _StoppableThreadPool(tasks_num, on_interrupt) as pool:
         for index, value in enumerate(values):
             pool.submit(_process_value, value, index)
 
     return [f.result() for f in futures]
 
 
-@contextmanager
-def _thread_pool(max_workers: int) -> t.Iterator[ThreadPoolExecutor]:
-    """A thread pool that, like `ThreadPoolExecutor`, waits for its tasks on exit unless the
-    calling thread is interrupted (e.g. by `KeyboardInterrupt`).
+class _StoppableThreadPool(ThreadPoolExecutor):
+    """A `ThreadPoolExecutor` that, like its parent, waits for its tasks on exit, but handles an
+    interrupt of the calling thread (e.g. `KeyboardInterrupt`) differently.
 
-    When interrupted, pending tasks are cancelled and the interrupt propagates without waiting for
-    running tasks, so that the caller can release resources such as engine adapter connections,
-    which cancels the queries those tasks are blocked on.
+    When interrupted, pending tasks are cancelled and `on_interrupt`, if set, is called to stop the
+    running tasks (e.g. by cancelling the queries they're blocked on). The running tasks are then
+    waited for before the interrupt propagates.
+
+    The running tasks are counted rather than waited for by joining the pool's threads, because a
+    join can't be relied on after an interrupt:
+    - An interrupted `Thread.join` marks the thread as stopped even if it's still running, in
+      CPython < 3.13 (https://github.com/python/cpython/issues/90882).
+    - A thread whose start was interrupted isn't tracked by the pool. `ThreadPoolExecutor` starts
+      a thread and only then adds it to the threads that `shutdown(wait=True)` joins:
+
+          t.start()  # `start` waits for the thread to run, so an interrupt can land here
+          self._threads.add(t)  # skipped, though the thread may already be running a task
     """
-    pool = ThreadPoolExecutor(max_workers=max_workers)
-    try:
-        try:
-            yield pool
-        except Exception:
-            pool.shutdown(wait=True)
-            raise
-        pool.shutdown(wait=True)
-    except BaseException:
-        pool.shutdown(wait=False, cancel_futures=True)
-        raise
+
+    def __init__(self, max_workers: int, on_interrupt: t.Optional[t.Callable[[], None]] = None):
+        super().__init__(max_workers=max_workers)
+        self._on_interrupt = on_interrupt
+        self._tasks_condition = Condition()
+        self._running_tasks = 0
+        self._stopped = False
+
+    def submit(self, fn: t.Callable[..., R], /, *args: t.Any, **kwargs: t.Any) -> Future:
+        def run() -> t.Optional[R]:
+            with self._tasks_condition:
+                if self._stopped:
+                    return None
+                self._running_tasks += 1
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                with self._tasks_condition:
+                    self._running_tasks -= 1
+                    self._tasks_condition.notify_all()
+
+        return super().submit(run)
+
+    def __exit__(
+        self,
+        exc_type: t.Optional[t.Type[BaseException]],
+        exc_val: t.Optional[BaseException],
+        exc_tb: t.Optional[TracebackType],
+    ) -> None:
+        if exc_type is None or issubclass(exc_type, Exception):
+            try:
+                self.shutdown(wait=True)
+            except BaseException:
+                self._stop()
+                raise
+        else:
+            self._stop()
+
+    def _stop(self) -> None:
+        # Make sure no new task starts: the tasks still in the queue are cancelled, and a task that a
+        # worker has already taken off the queue sees `_stopped` and skips its work.
+        with self._tasks_condition:
+            self._stopped = True
+        self.shutdown(wait=False, cancel_futures=True)
+        # Ask the running tasks to stop early (e.g. by cancelling their queries).
+        if self._on_interrupt is not None:
+            self._on_interrupt()
+        # Wait for the running tasks to finish.
+        with self._tasks_condition:
+            self._tasks_condition.wait_for(lambda: self._running_tasks == 0)
