@@ -249,6 +249,39 @@ def test_interrupt_calls_on_interrupt_then_waits_for_running_tasks(apply: t.Call
     assert sorted(started) == [1, 2]
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
+def test_second_interrupt_stops_waiting_for_running_tasks():
+    started = threading.Semaphore(0)
+    ended = threading.Event()
+    on_interrupt_called = threading.Event()
+    release = threading.Event()
+
+    def fn(value: int) -> None:
+        started.release()
+        try:
+            release.wait(timeout=10)
+        finally:
+            ended.set()
+
+    def interrupt_main_thread_twice() -> None:
+        for _ in range(2):
+            assert started.acquire(timeout=10)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+        assert on_interrupt_called.wait(timeout=10)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+    previous_sigint_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        threading.Thread(target=interrupt_main_thread_twice).start()
+        with pytest.raises(KeyboardInterrupt):
+            # `on_interrupt` doesn't stop the running tasks, so only the second interrupt ends the wait.
+            concurrent_apply_to_values([1, 2], fn, 2, on_interrupt=on_interrupt_called.set)
+        assert not ended.is_set()
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
+        release.set()
+
+
 def test_error_does_not_call_on_interrupt(mocker: MockerFixture):
     on_interrupt = mocker.Mock()
 
