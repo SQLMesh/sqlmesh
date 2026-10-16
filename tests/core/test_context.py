@@ -2609,8 +2609,6 @@ def test_requirements(copy_to_temp_path: t.Callable):
         "dev", no_prompts=True, skip_tests=True, skip_backfill=True, auto_apply=True
     ).environment
     requirements = {"ipywidgets", "numpy", "pandas", "test_package"}
-    if IS_WINDOWS:
-        requirements.add("pendulum")
     assert environment.requirements["pandas"] == "2.2.2"
     assert set(environment.requirements) == requirements
 
@@ -2618,10 +2616,7 @@ def test_requirements(copy_to_temp_path: t.Callable):
     context._excluded_requirements = {"ipywidgets", "ruamel.yaml", "ruamel.yaml.clib"}
     diff = context.plan_builder("dev", skip_tests=True, skip_backfill=True).build().context_diff
     assert set(diff.previous_requirements) == requirements
-    reqs = {"numpy", "pandas"}
-    if IS_WINDOWS:
-        reqs.add("pendulum")
-    assert set(diff.requirements) == reqs
+    assert set(diff.requirements) == {"numpy", "pandas"}
 
 
 def test_deactivate_automatic_requirement_inference(copy_to_temp_path: t.Callable):
