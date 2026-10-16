@@ -41,6 +41,7 @@ from sqlmesh.core.dialect import schema_
 from sqlmesh.core.engine_adapter.shared import InsertOverwriteStrategy, DataObjectType, DataObject
 from sqlmesh.core.model.meta import GrantsTargetLayer
 from sqlmesh.core.macros import RuntimeStage
+from sqlmesh.core.renderer import TableMapping
 from sqlmesh.core.model import (
     AuditResult,
     IncrementalUnmanagedKind,
@@ -286,6 +287,8 @@ class SnapshotEvaluator:
             on_complete: A callback to call on each successfully promoted snapshot.
         """
 
+        from sqlmesh.core.snapshot import to_table_mapping
+
         tables_by_gateway: t.Dict[t.Union[str, None], t.List[exp.Table]] = defaultdict(list)
         for snapshot in target_snapshots:
             if snapshot.is_model and not snapshot.is_symbolic:
@@ -314,6 +317,16 @@ class SnapshotEvaluator:
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         # Renderers look snapshots up by model name, not by SnapshotId.
         snapshots_by_name = {s.name: s for s in (snapshots or {}).values()}
+        # Share the physical mapping and overrides across all promotion renders and workers.
+        render_table_mapping = TableMapping(
+            {
+                **to_table_mapping(snapshots_by_name.values(), deployability_index),
+                **(table_mapping or {}),
+            }
+        )
+        for snapshot in target_snapshots:
+            if snapshot.is_model:
+                render_table_mapping.normalized_keys(snapshot.model.dialect)
         with self.concurrent_context():
             concurrent_apply_to_snapshots(
                 target_snapshots,
@@ -324,6 +337,7 @@ class SnapshotEvaluator:
                     execution_time=execution_time,
                     snapshots=snapshots_by_name,
                     table_mapping=table_mapping,
+                    render_table_mapping=render_table_mapping,
                     environment_naming_info=environment_naming_info,
                     deployability_index=deployability_index,  # type: ignore
                     on_complete=on_complete,
@@ -1264,6 +1278,7 @@ class SnapshotEvaluator:
         execution_time: t.Optional[TimeLike] = None,
         snapshots: t.Optional[t.Dict[str, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
+        render_table_mapping: t.Optional[TableMapping] = None,
     ) -> None:
         if not snapshot.is_model:
             return
@@ -1298,11 +1313,16 @@ class SnapshotEvaluator:
                 environment=environment_naming_info.name,
                 snapshots=snapshots,
                 snapshot=snapshot,
+                render_table_mapping=render_table_mapping,
                 **render_kwargs,
             )
 
             adapter.execute(
-                snapshot.model.render_on_virtual_update(snapshots=snapshots, **render_kwargs)
+                snapshot.model.render_on_virtual_update(
+                    snapshots=snapshots,
+                    render_table_mapping=render_table_mapping,
+                    **render_kwargs,
+                )
             )
 
         if on_complete is not None:
@@ -2016,6 +2036,7 @@ class PromotableStrategy(EvaluationStrategy, abc.ABC):
             snapshots=kwargs.get("snapshots"),
             deployability_index=kwargs.get("deployability_index"),
             table_mapping=kwargs.get("table_mapping"),
+            render_table_mapping=kwargs.get("render_table_mapping"),
             runtime_stage=kwargs.get("runtime_stage"),
         )
         self.adapter.create_view(

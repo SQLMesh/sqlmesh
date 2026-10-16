@@ -58,6 +58,7 @@ from sqlmesh.core.snapshot import (
     SnapshotTableCleanupTask,
 )
 from sqlmesh.core.snapshot.definition import to_view_mapping
+from sqlmesh.core import snapshot as snapshot_module
 from sqlmesh.core.snapshot.evaluator import (
     CustomMaterialization,
     EngineManagedStrategy,
@@ -5766,3 +5767,95 @@ def test_promote_resolves_this_model_with_single_mapping_entry(
     assert spy.call_count == 20
     for call in spy.call_args_list:
         assert len(call.args[1]) == 1
+
+
+@pytest.mark.parametrize("ddl_concurrent_tasks", [1, 4])
+@pytest.mark.parametrize("use_view_mapping", [False, True])
+def test_promote_reuses_table_mapping(
+    mocker: MockerFixture, make_snapshot, ddl_concurrent_tasks, use_view_mapping
+):
+    @macro()
+    def resolve_upstream_query(evaluator):
+        return evaluator.resolve_tables(
+            exp.select("COUNT(*)").from_("test_schema.model_0").subquery()
+        )
+
+    adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
+    adapter_mock.dialect = "duckdb"
+    adapter_mock.with_settings.return_value = adapter_mock
+    evaluator = SnapshotEvaluator(adapter_mock, ddl_concurrent_tasks=ddl_concurrent_tasks)
+
+    snapshots = {}
+    for i in range(10):
+        model = load_sql_based_model(
+            d.parse(
+                f"""
+                MODEL (
+                    name test_schema.model_{i},
+                    kind FULL,
+                    virtual_properties (
+                        upstream_count = (SELECT COUNT(*) FROM test_schema.model_0),
+                        macro_count = @resolve_upstream_query()
+                    ),
+                );
+                SELECT 1 AS a;
+                ON_VIRTUAL_UPDATE_BEGIN;
+                GRANT SELECT ON VIEW test_schema.model_0 TO ROLE owner;
+                ON_VIRTUAL_UPDATE_END;
+                """
+            )
+        )
+        snapshot = make_snapshot(model)
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[snapshot.snapshot_id] = snapshot
+
+    upstream = next(iter(snapshots.values()))
+    upstream.dev_version_ = "preview"
+    # Representative snapshots use the production table even when they are not deployable.
+    deployability_index = DeployabilityIndex(
+        indexed_ids=frozenset(), representative_shared_version_ids={upstream.snapshot_id}
+    )
+    mapping_spy = mocker.spy(snapshot_module, "to_table_mapping")
+    replacement_spy = mocker.spy(exp, "replace_tables")
+
+    for environment_name in ("first", "second"):
+        environment_naming_info = EnvironmentNamingInfo(name=environment_name)
+        view_mapping = (
+            to_view_mapping(snapshots.values(), environment_naming_info)
+            if use_view_mapping
+            else None
+        )
+        expected_table = (
+            view_mapping[upstream.name]
+            if view_mapping is not None
+            else upstream.table_name(deployability_index.is_representative(upstream))
+        )
+        mapping_spy.reset_mock()
+        replacement_spy.reset_mock()
+        adapter_mock.create_view.reset_mock()
+        adapter_mock.execute.reset_mock()
+
+        evaluator.promote(
+            list(snapshots.values()),
+            environment_naming_info,
+            snapshots=snapshots,
+            table_mapping=view_mapping,
+            deployability_index=deployability_index,
+        )
+
+        full_mapping_calls = [
+            call for call in mapping_spy.call_args_list if len(call.args[0]) == len(snapshots)
+        ]
+        assert len(full_mapping_calls) == 1
+        assert all(len(call.args[1]) <= 1 for call in replacement_spy.call_args_list)
+        assert adapter_mock.create_view.call_count == len(snapshots)
+        for call in adapter_mock.create_view.call_args_list:
+            for query in call.kwargs["view_properties"].values():
+                assert exp.table_name(query.find(exp.Table)) == expected_table
+        for call in adapter_mock.execute.call_args_list:
+            for statement in call.args[0]:
+                assert exp.table_name(statement.find(exp.Table)) == expected_table
+
+        # A later promotion must see changed versions, deployability and environment overrides.
+        upstream.version = "updated"
+        deployability_index = DeployabilityIndex.none_deployable()

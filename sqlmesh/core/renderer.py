@@ -149,6 +149,7 @@ class BaseExpressionRenderer:
         table_mapping: t.Optional[t.Dict[str, str]] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
         runtime_stage: RuntimeStage = RuntimeStage.LOADING,
+        render_table_mapping: t.Optional[TableMapping] = None,
         **kwargs: t.Any,
     ) -> t.List[t.Optional[exp.Expr]]:
         """Renders a expression, expanding macros with provided kwargs
@@ -161,6 +162,7 @@ class BaseExpressionRenderer:
             table_mapping: Table mapping of physical locations. Takes precedence over snapshot mappings.
             deployability_index: Determines snapshots that are deployable in the context of this evaluation.
             runtime_stage: Indicates the current runtime stage, for example if we're still loading the project, etc.
+            render_table_mapping: Shared snapshot mapping and overrides prepared for this promotion.
             kwargs: Additional kwargs to pass to the renderer.
 
         Returns:
@@ -232,6 +234,7 @@ class BaseExpressionRenderer:
                 end=end,
                 execution_time=execution_time,
                 runtime_stage=runtime_stage,
+                render_table_mapping=render_table_mapping,
             ),
             snapshots=snapshots,
             default_catalog=self._default_catalog,
@@ -430,6 +433,7 @@ class BaseExpressionRenderer:
         table_mapping: t.Optional[t.Dict[str, str]] = None,
         expand: t.Iterable[str] = tuple(),
         deployability_index: t.Optional[DeployabilityIndex] = None,
+        render_table_mapping: t.Optional[TableMapping] = None,
         **kwargs: t.Any,
     ) -> E:
         if not snapshots and not table_mapping and not expand:
@@ -444,10 +448,14 @@ class BaseExpressionRenderer:
 
             snapshots = snapshots or {}
             table_mapping = table_mapping or {}
-            mapping = {
-                **self._to_table_mapping(snapshots.values(), deployability_index),
-                **table_mapping,
-            }
+            mapping: t.Dict[str, str] = (
+                render_table_mapping
+                if render_table_mapping is not None
+                else {
+                    **self._to_table_mapping(snapshots.values(), deployability_index),
+                    **table_mapping,
+                }
+            )
             expand = set(expand) | {
                 name for name, snapshot in snapshots.items() if snapshot.is_embedded
             }
@@ -477,6 +485,7 @@ class BaseExpressionRenderer:
                                 table_mapping=table_mapping,
                                 expand=expand,
                                 deployability_index=deployability_index,
+                                render_table_mapping=render_table_mapping,
                                 **kwargs,
                             )
                             if nested_query is not None:
@@ -488,6 +497,20 @@ class BaseExpressionRenderer:
                     return node
 
                 expression = expression.transform(_expand, copy=False)  # type: ignore
+
+            if isinstance(mapping, TableMapping):
+                # Normalize the shared mapping once, then replace only tables in this expression.
+                normalized_keys = mapping.normalized_keys(self._dialect)
+                mapping = {
+                    key: mapping[key]
+                    for table in expression.find_all(exp.Table)
+                    if (
+                        key := normalized_keys.get(
+                            exp.normalize_table_name(table, dialect=self._dialect)
+                        )
+                    )
+                    is not None
+                }
 
             if mapping:
                 expression = exp.replace_tables(

@@ -15,7 +15,7 @@ from sqlglot.errors import ParseError
 from sqlglot.schema import MappingSchema
 from sqlmesh.cli.project_init import init_example_project, ProjectTemplate
 from sqlmesh.core.environment import EnvironmentNamingInfo
-from sqlmesh.core.renderer import TableMapping
+from sqlmesh.core.renderer import ExpressionRenderer, TableMapping
 from sqlmesh.core.model.kind import TimeColumn, ModelKindName, SeedKind
 
 from sqlmesh import CustomMaterialization, CustomKind
@@ -9900,7 +9900,10 @@ def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
     )
 
 
-def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.Callable):
+@pytest.mark.parametrize("use_cached_mapping", [False, True])
+def test_resolve_tables_expand_reveals_table_after_find_check(
+    make_snapshot: t.Callable, use_cached_mapping: bool
+):
     """Embedded-model expansion (`expand=`) runs as an `expression.transform` *before* the new
     `expression.find(exp.Table)` short-circuit in `_resolve_tables`, so a table reference that
     only exists *after* inlining an embedded model's query must still be seen by `find()` and
@@ -9908,6 +9911,8 @@ def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.C
     `child`'s original query -- it only appears once the embedded `mid` model is expanded -- and
     must still resolve to its physical table name, not be silently skipped because it wasn't
     present at the time `_resolve_tables` was first called."""
+
+    from sqlmesh.core.snapshot import to_table_mapping
 
     grandparent = load_sql_based_model(d.parse("MODEL (name grandparent); SELECT 1 AS c"))
     grandparent_snapshot = make_snapshot(grandparent)
@@ -9922,7 +9927,12 @@ def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.C
     child = load_sql_based_model(d.parse("MODEL (name child); SELECT c FROM mid;"))
 
     snapshots = {'"grandparent"': grandparent_snapshot, '"mid"': mid_snapshot}
-    query = child.render_query(snapshots=snapshots)
+    query = child.render_query(
+        snapshots=snapshots,
+        render_table_mapping=(
+            TableMapping(to_table_mapping(snapshots.values(), None)) if use_cached_mapping else None
+        ),
+    )
     assert query is not None
     rendered_sql = query.sql()
 
@@ -10069,6 +10079,28 @@ def test_resolve_tables_skips_expand_computation_without_table_refs(
     # snapshots) and `model_mapping` must not happen for a table-less expression, even though
     # this environment has an embedded snapshot that would otherwise trigger both.
     assert ItemsCountingDict.items_call_count == 0
+
+
+@pytest.mark.parametrize(
+    "dialect",
+    [
+        "duckdb,normalization_strategy=case_insensitive",
+        "snowflake,normalization_strategy=uppercase",
+    ],
+)
+def test_cached_table_mapping_preserves_key_order(dialect):
+    # Updating an existing raw key must not move it after a later dialect-equivalent key.
+    table_mapping = {'"DB"."T"': "early_table", "DB.T": "last_table"}
+    table_mapping.update({'"DB"."T"': "override_table"})
+    renderer = ExpressionRenderer(parse_one("SELECT * FROM DB.T", dialect=dialect), dialect, [])
+
+    uncached = renderer.render(table_mapping=table_mapping)
+    cached = renderer.render(
+        table_mapping=table_mapping, render_table_mapping=TableMapping(table_mapping)
+    )
+
+    assert cached == uncached
+    assert exp.table_name(cached[0].find(exp.Table)) == "last_table"
 
 
 def test_table_mapping_normalized_keys():
@@ -10414,7 +10446,8 @@ def test_gateway_specific_render(assert_exp_eq) -> None:
     assert len(context.engine_adapters) == 2
 
 
-def test_model_on_virtual_update(make_snapshot: t.Callable):
+@pytest.mark.parametrize("use_cached_mapping", [False, True])
+def test_model_on_virtual_update(make_snapshot: t.Callable, use_cached_mapping: bool):
     # Macro to test resolution within virtual statement
     @macro()
     def resolve_parent_name(evaluator, name):
@@ -10495,6 +10528,7 @@ def test_model_on_virtual_update(make_snapshot: t.Callable):
     rendered_on_virtual_update = model.render_on_virtual_update(
         snapshots=snapshots,
         table_mapping=table_mapping,
+        render_table_mapping=TableMapping(table_mapping) if use_cached_mapping else None,
         this_model=model_snapshot.qualified_view_name.table_for_environment(
             environment_naming_info, dialect=dialect
         ),
@@ -10526,6 +10560,7 @@ def test_model_on_virtual_update(make_snapshot: t.Callable):
     rendered_parent_on_virtual_update = parent.render_on_virtual_update(
         snapshots=snapshots,
         table_mapping=table_mapping,
+        render_table_mapping=TableMapping(table_mapping) if use_cached_mapping else None,
         this_model=parent_snapshot.qualified_view_name.table_for_environment(
             environment_naming_info, dialect=dialect
         ),
