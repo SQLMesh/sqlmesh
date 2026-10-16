@@ -1,5 +1,7 @@
 from __future__ import annotations
+import threading
 import typing as t
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from typing_extensions import Self
 from unittest.mock import call, patch, Mock
@@ -5766,3 +5768,97 @@ def test_promote_resolves_this_model_with_single_mapping_entry(
     assert spy.call_count == 20
     for call in spy.call_args_list:
         assert len(call.args[1]) == 1
+
+
+def _interrupt_while_worker_is_blocked(
+    evaluator: SnapshotEvaluator, blocking_mock: Mock, work: t.Callable[[], t.Any]
+) -> Future:
+    """Runs `work` in a worker thread started inside `concurrent_context()`, interrupts the context
+    with a KeyboardInterrupt while the worker is blocked in `blocking_mock`, then unblocks it."""
+    blocked = threading.Event()
+    interrupted = threading.Event()
+
+    def block(*args: t.Any, **kwargs: t.Any) -> t.Any:
+        blocked.set()
+        assert interrupted.wait(timeout=10)
+
+    blocking_mock.side_effect = block
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            with evaluator.concurrent_context():
+                future = executor.submit(work)
+                assert blocked.wait(timeout=10)
+                raise KeyboardInterrupt
+        interrupted.set()
+        future.exception(timeout=10)
+    finally:
+        executor.shutdown(wait=True)
+    return future
+
+
+def test_evaluate_stops_before_pre_statements_when_interrupted(
+    adapter_mock, make_snapshot, date_kwargs: t.Dict[str, str]
+):
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        SqlModel(name="db.model", kind=FullKind(), query=parse_one("SELECT 1"))
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    future = _interrupt_while_worker_is_blocked(
+        evaluator,
+        adapter_mock.table_exists,
+        lambda: evaluator.evaluate(snapshot, snapshots={}, **date_kwargs),
+    )
+
+    with pytest.raises(SQLMeshError, match="interrupted"):
+        future.result()
+    adapter_mock.execute.assert_not_called()
+    adapter_mock.transaction.assert_not_called()
+
+
+def test_create_snapshot_stops_before_transaction_when_interrupted(adapter_mock, make_snapshot):
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        SqlModel(name="db.model", kind=FullKind(), query=parse_one("SELECT 1"))
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    future = _interrupt_while_worker_is_blocked(
+        evaluator,
+        adapter_mock.execute,
+        lambda: evaluator.create_snapshot(
+            snapshot,
+            snapshots={},
+            deployability_index=DeployabilityIndex.all_deployable(),
+            allow_destructive_snapshots=set(),
+            allow_additive_snapshots=set(),
+        ),
+    )
+
+    with pytest.raises(SQLMeshError, match="interrupted"):
+        future.result()
+    adapter_mock.transaction.assert_not_called()
+    adapter_mock.create_table.assert_not_called()
+
+
+def test_evaluate_runs_after_previous_run_was_interrupted(
+    adapter_mock, make_snapshot, date_kwargs: t.Dict[str, str]
+):
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        SqlModel(name="db.model", kind=FullKind(), query=parse_one("SELECT 1"))
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    with pytest.raises(KeyboardInterrupt):
+        with evaluator.concurrent_context():
+            raise KeyboardInterrupt
+
+    with evaluator.concurrent_context():
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(evaluator.evaluate, snapshot, snapshots={}, **date_kwargs).result()
+
+    adapter_mock.transaction.assert_called()

@@ -29,6 +29,7 @@ import sys
 from collections import defaultdict
 from contextlib import contextmanager
 from functools import reduce
+from threading import Event
 
 from sqlglot import exp, select
 from sqlglot.executor import execute
@@ -146,6 +147,7 @@ class SnapshotEvaluator:
         )
         self.selected_gateway = selected_gateway
         self.ddl_concurrent_tasks = ddl_concurrent_tasks
+        self._interrupted = Event()
 
     def evaluate(
         self,
@@ -662,8 +664,17 @@ class SnapshotEvaluator:
 
     @contextmanager
     def concurrent_context(self) -> t.Iterator[None]:
+        # Each context gets its own event, so that workers abandoned by an interrupted context stay
+        # stopped even if a new context starts before they finish.
+        interrupted = self._interrupted = Event()
         try:
             yield
+        except BaseException as ex:
+            if not isinstance(ex, Exception):
+                # Unlike failures, interrupts (e.g. KeyboardInterrupt) don't wait for worker threads
+                # to finish, so they're told to stop before they start running a snapshot's statements.
+                interrupted.set()
+            raise
         finally:
             self.recycle()
 
@@ -727,6 +738,7 @@ class SnapshotEvaluator:
         if not snapshot.is_model:
             return None
 
+        interrupted = self._interrupted
         model = snapshot.model
 
         logger.info("Evaluating snapshot %s", snapshot.snapshot_id)
@@ -772,11 +784,13 @@ class SnapshotEvaluator:
         )
 
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
+        _raise_if_interrupted(interrupted, snapshot)
         evaluation_strategy.run_pre_statements(
             snapshot=snapshot,
             render_kwargs={**render_statements_kwargs, "inside_transaction": False},
         )
 
+        _raise_if_interrupted(interrupted, snapshot)
         with (
             adapter.transaction(),
             adapter.session(snapshot.model.render_session_properties(**render_statements_kwargs)),
@@ -888,6 +902,7 @@ class SnapshotEvaluator:
         if not snapshot.is_model:
             return
 
+        interrupted = self._interrupted
         logger.info("Creating a physical table for snapshot %s", snapshot.snapshot_id)
 
         adapter = self.get_adapter(snapshot.model.gateway)
@@ -899,10 +914,12 @@ class SnapshotEvaluator:
         )
 
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
+        _raise_if_interrupted(interrupted, snapshot)
         evaluation_strategy.run_pre_statements(
             snapshot=snapshot, render_kwargs={**create_render_kwargs, "inside_transaction": False}
         )
 
+        _raise_if_interrupted(interrupted, snapshot)
         with (
             adapter.transaction(),
             adapter.session(snapshot.model.render_session_properties(**create_render_kwargs)),
@@ -3339,6 +3356,20 @@ def _intervals(snapshot: Snapshot, deployability_index: DeployabilityIndex) -> I
         if deployability_index.is_deployable(snapshot)
         else snapshot.dev_intervals
     )
+
+
+def _raise_if_interrupted(interrupted: Event, snapshot: Snapshot) -> None:
+    # Only checked before the outer pre-statements and before the main transaction:
+    # - Before these points, the worker has only read from the database (e.g. table_exists).
+    # - The pre-statements and the main transaction each run in a single transaction. If the worker
+    #   is inside one when SQLMesh is interrupted, it stops anyway: its running query is terminated,
+    #   or its next statement fails because its connection was closed.
+    # - After the main transaction commits, the data is written, so the worker must keep going and
+    #   record the interval.
+    if interrupted.is_set():
+        raise SQLMeshError(
+            f"Stopped processing snapshot {snapshot.snapshot_id} because SQLMesh was interrupted."
+        )
 
 
 def _check_destructive_schema_change(
