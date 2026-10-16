@@ -37,7 +37,6 @@ from sqlmesh.core.state_sync.common import (
 )
 from sqlmesh.utils.migration import index_text_type, blob_text_type
 from sqlmesh.utils.date import now_timestamp, TimeLike, to_timestamp
-from sqlmesh.utils import unique
 
 if t.TYPE_CHECKING:
     import pandas as pd
@@ -225,12 +224,6 @@ class SnapshotState:
         if not expired_candidates:
             return None
 
-        def _is_snapshot_used(snapshot: SnapshotIdAndVersion) -> bool:
-            return (
-                snapshot.snapshot_id in promoted_snapshot_ids
-                or snapshot.snapshot_id not in expired_candidates
-            )
-
         # Extract cursor values from last row for pagination
         last_row = rows[-1]
         last_row_boundary = RowBoundary(
@@ -244,51 +237,66 @@ class SnapshotState:
             end=last_row_boundary,
         )
 
-        unique_expired_versions = unique(expired_candidates.values())
         expired_snapshot_ids: t.Set[SnapshotId] = set()
         cleanup_tasks: t.List[SnapshotTableCleanupTask] = []
-
-        snapshots = self._get_snapshots_with_same_version(unique_expired_versions)
-
+        # A version identifies interval state, not a physical object. The same
+        # version may exist in different schemas or gateways. Load the table
+        # metadata for peers as well as candidates before determining ownership.
+        peers = self.get_snapshots_by_names(
+            {s.name for s in expired_candidates}, exclude_expired=False
+        )
+        full_snapshots = self._get_snapshots([s.snapshot_id for s in peers])
+        snapshots = list(full_snapshots.values())
         snapshots_by_version = defaultdict(set)
         snapshots_by_dev_version = defaultdict(set)
+        table_owners = defaultdict(set)
+
+        def table_key(snapshot: Snapshot, deployable: bool) -> t.Tuple[t.Optional[str], str]:
+            return (
+                snapshot.model_gateway,
+                snapshot.table_name(is_deployable=deployable),
+            )
+
         for s in snapshots:
             snapshots_by_version[(s.name, s.version)].add(s.snapshot_id)
             snapshots_by_dev_version[(s.name, s.dev_version)].add(s.snapshot_id)
+            if s.is_model and not s.is_symbolic:
+                for deployable in (True, False):
+                    table_owners[table_key(s, deployable)].add(s.snapshot_id)
 
-        expired_snapshots = [s for s in snapshots if not _is_snapshot_used(s)]
-        all_expired_snapshot_ids = {s.snapshot_id for s in expired_snapshots}
-
-        cleanup_targets: t.List[t.Tuple[SnapshotId, bool]] = []
+        expired_snapshots = [
+            full_snapshots[sid] for sid in expired_candidates if sid in full_snapshots
+        ]
         for snapshot in expired_snapshots:
-            shared_version_snapshots = snapshots_by_version[(snapshot.name, snapshot.version)]
-            shared_version_snapshots.discard(snapshot.snapshot_id)
-
-            shared_dev_version_snapshots = snapshots_by_dev_version[
-                (snapshot.name, snapshot.dev_version)
-            ]
-            shared_dev_version_snapshots.discard(snapshot.snapshot_id)
-
-            if not shared_dev_version_snapshots:
-                dev_table_only = bool(shared_version_snapshots)
-                cleanup_targets.append((snapshot.snapshot_id, dev_table_only))
-
-        snapshot_ids_to_cleanup = [snapshot_id for snapshot_id, _ in cleanup_targets]
-        full_snapshots = self._get_snapshots(snapshot_ids_to_cleanup)
-        for snapshot_id, dev_table_only in cleanup_targets:
-            if snapshot_id in full_snapshots:
+            prod_owners = snapshots_by_version[(snapshot.name, snapshot.version)]
+            dev_owners = snapshots_by_dev_version[(snapshot.name, snapshot.dev_version)]
+            prod_owners.discard(snapshot.snapshot_id)
+            dev_owners.discard(snapshot.snapshot_id)
+            delete_prod = delete_dev = False
+            if snapshot.is_model and not snapshot.is_symbolic:
+                prod_table_owners = table_owners[table_key(snapshot, True)]
+                dev_table_owners = table_owners[table_key(snapshot, False)]
+                prod_table_owners.discard(snapshot.snapshot_id)
+                dev_table_owners.discard(snapshot.snapshot_id)
+                delete_prod = not prod_table_owners
+                delete_dev = not dev_table_owners
+            # An interval-only task is required when the last logical version
+            # expires but a physical object is retained by a different version.
+            if delete_prod or delete_dev or not prod_owners or not dev_owners:
                 cleanup_tasks.append(
                     SnapshotTableCleanupTask(
-                        snapshot=full_snapshots[snapshot_id].table_info,
-                        dev_table_only=dev_table_only,
+                        snapshot=snapshot.table_info,
+                        dev_table_only=not delete_prod,
+                        delete_dev_table=delete_dev,
+                        delete_prod_intervals=(
+                            None if (not prod_owners) == delete_prod else not prod_owners
+                        ),
+                        delete_dev_intervals=(
+                            None if (not dev_owners) == delete_dev else not dev_owners
+                        ),
                     )
                 )
-                expired_snapshot_ids.add(snapshot_id)
-                all_expired_snapshot_ids.discard(snapshot_id)
-
-        # Add any remaining expired snapshots that don't require cleanup
-        if all_expired_snapshot_ids:
-            expired_snapshot_ids.update(all_expired_snapshot_ids)
+            expired_snapshot_ids.add(snapshot.snapshot_id)
 
         if expired_snapshot_ids or cleanup_tasks:
             return ExpiredSnapshotBatch(
