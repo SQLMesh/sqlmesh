@@ -49,7 +49,7 @@ In general, you must be connected to a ClickHouse server to execute commands. By
 
 To associate an object with a cluster, DDL commands that create or modify it must include the text `ON CLUSTER [your cluster name]`.
 
-If you provide a cluster name in your SQLMesh connection configuration, SQLMesh will automatically inject the `ON CLUSTER` statement into the DDL commands for all objects created while executing the project. We provide more information about clusters in SQLMesh [below](#cluster-specification).
+If you provide a cluster name in your SQLMesh connection configuration, SQLMesh automatically adds `ON CLUSTER` to object DDL, except for metadata DDL targeting `Replicated` databases, which replicate those changes themselves. We provide more information about clusters in SQLMesh [below](#cluster-specification).
 
 #### ClickHouse Cloud mode
 
@@ -96,7 +96,9 @@ For example, we could create a table `my_schema.my_table` on cluster `TheCluster
 
 To create SQLMesh objects on a cluster, provide the cluster name to the `cluster` key in the SQLMesh connection definition (see all connection parameters [below](#localbuilt-in-scheduler)).
 
-SQLMesh will automatically inject the `ON CLUSTER` clause and cluster name you provide into all project DDL statements.
+SQLMesh automatically adds the `ON CLUSTER` clause and cluster name you provide to object DDL, except for metadata DDL targeting `Replicated` databases. SQLMesh retains `ON CLUSTER` for database creation and removal and for partition operations.
+
+Partition overwrites in multi-shard `Replicated` databases remain unvalidated. ClickHouse can replicate an ALTER containing both `REPLACE PARTITION` and `DROP PARTITION`, which can conflict with `ON CLUSTER`. This behavior predates the metadata DDL policy described above and depends on the ClickHouse version.
 
 ## Model definition
 
