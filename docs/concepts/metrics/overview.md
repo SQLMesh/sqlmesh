@@ -41,7 +41,7 @@ FROM __semantic.__table  -- special table for simple metric queries
 GROUP BY ds
 ```
 
-When that model query is run, SQLMesh uses its semantic understanding of the query and metrics definitions to generate the code that is actually executed by the SQL engine:
+SQLMesh expands the metric into SQL equivalent to the following query (generated aliases may differ):
 
 ``` sql linenums="1"
 SELECT
@@ -60,3 +60,15 @@ FROM (
 ```
 
 SQLMesh automatically generates the correct join to use values from both the `sushi.orders` and `sushi.customers` tables.
+
+## Filters and grouping across metrics
+
+Queries against `__semantic.__table` treat its columns as logical dimensions. A `WHERE` predicate is resolved independently for every contributing fact source and applied before aggregation, including when the filtered dimension is not in `GROUP BY`. Derived metrics are calculated from those filtered aggregates.
+
+Dimension resolution prefers a column on the fact itself. Otherwise, the column must resolve to one reachable model through the configured grains and references. An explicit dimension-table alias selects that model instead of a same-named fact column. Unknown, unreachable, or ambiguous dimensions are rejected rather than ignored.
+
+Fact aggregates are combined with a full join by default. Group keys present only in a later fact are retained, and matching `NULL` group keys are combined, including composite keys. Missing metric values remain `NULL`; they are not automatically converted to zero.
+
+On PostgreSQL, full joins use composite-key equality to retain `NULL` groups without the planner restriction on `IS NOT DISTINCT FROM` join conditions. Corresponding dimensions must have matching PostgreSQL types; use an explicit cast in the grouping expression when models expose different types. Metric arithmetic follows the definition's SQL dialect: use a numeric or floating-point cast for fractional ratios of integer counts, and `NULLIF(denominator, 0)` when a zero denominator should produce `NULL`.
+
+The prototype rejects subqueries in metric `WHERE` filters, grouping sets, and reference paths that cannot be compiled into safe matching-key joins. This includes multi-hop paths that change reference keys. These checks do not restrict ordinary SQL scopes without `METRIC` expressions. They are not a substitute for application authorization.
