@@ -90,6 +90,24 @@ def test_macro_registry_render_private_macros():
     assert rendered == "macro_a_a"
 
 
+def test_macro_registry_render_private_macro_calling_other_functions():
+    package_a = """
+{% macro macro_a_a(value) %}a{{ value }}{% endmacro %}
+
+{% macro _macro_a_b() %}{{ macro_a_a(1) }}-{{ range(3) | join(',') }}{% endmacro %}
+
+{% macro macro_a_c() %}{{ package_a._macro_a_b() }}{% endmacro %}
+"""
+
+    extractor = MacroExtractor()
+    registry = JinjaMacroRegistry()
+
+    registry.add_macros(extractor.extract(package_a), package="package_a")
+
+    rendered = registry.build_environment().from_string("{{ package_a.macro_a_c() }}").render()
+    assert rendered == "a1-0,1,2"
+
+
 def test_macro_registry_render_different_vars():
     package_a = "{% macro macro_a_a() %}{{ external() }}{% endmacro %}"
 
@@ -194,6 +212,37 @@ def test_macro_return():
         .render()
     )
     assert rendered == "[1, 2, 3]"
+
+
+def test_macro_return_recursive():
+    macros = """
+{% macro flatten(items) %}
+  {% set result = [] %}
+  {% for item in items %}
+    {% if item is iterable and item is not string %}
+      {% do result.extend(flatten(item)) %}
+    {% else %}
+      {% do result.append(item) %}
+    {% endif %}
+  {% endfor %}
+  {{ macro_return(result) }}
+{% endmacro %}
+"""
+
+    def macro_return(val):
+        raise MacroReturnVal(val)
+
+    extractor = MacroExtractor()
+    registry = JinjaMacroRegistry()
+
+    registry.add_macros(extractor.extract(macros))
+
+    rendered = (
+        registry.build_environment(macro_return=macro_return)
+        .from_string("{{ flatten([1, [2, 3], 4, [5, [6]]]) }}")
+        .render()
+    )
+    assert rendered == "[1, 2, 3, 4, 5, 6]"
 
 
 def test_global_objs():
