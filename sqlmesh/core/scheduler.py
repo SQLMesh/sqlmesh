@@ -1158,15 +1158,12 @@ def interval_diff(
             if uninterrupted:
                 return results
 
-            if interval_a[0] >= interval_b[0]:
-                index_a += 1
-            else:
-                index_b += 1
+            # interval_a overlaps interval_b, so it must be excluded. interval_b is kept because
+            # it may also overlap the next interval in intervals_a.
+            index_a += 1
 
-    if index_a < len_a:
-        interval_a = intervals_a[index_a]
-        if interval_a[0] >= interval_b[1] or interval_b[0] >= interval_a[1]:
-            results.extend(intervals_a[index_a:])
+    # Any remaining intervals in intervals_a start after the last interval in intervals_b
+    results.extend(intervals_a[index_a:])
 
     return results
 
