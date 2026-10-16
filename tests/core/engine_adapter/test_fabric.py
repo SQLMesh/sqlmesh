@@ -11,7 +11,7 @@ from sqlglot import exp, parse_one
 from sqlmesh.core.engine_adapter import FabricEngineAdapter
 from sqlmesh.core.engine_adapter.fabric import FabricHttpClient
 from tests.core.engine_adapter import to_sql_calls
-from sqlmesh.core.engine_adapter.shared import DataObject
+from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 
 pytestmark = [pytest.mark.engine, pytest.mark.fabric]
 
@@ -41,7 +41,19 @@ def _conflict_response(mocker: MockerFixture, error_code: str) -> t.Any:
     return resp
 
 
-def test_get_current_catalog_uses_only_explicit_target_catalog(
+def _record_catalogs_at_execute(adapter: FabricEngineAdapter) -> t.List[t.Optional[str]]:
+    catalogs: t.List[t.Optional[str]] = []
+    real_execute = adapter.execute
+
+    def execute(*args: t.Any, **kwargs: t.Any) -> None:
+        catalogs.append(adapter._resolved_catalog())
+        return real_execute(*args, **kwargs)
+
+    adapter.execute = execute  # type: ignore[method-assign]
+    return catalogs
+
+
+def test_get_current_catalog_returns_configured_database_when_target_is_default(
     make_mocked_engine_adapter: t.Callable,
 ):
     adapter = make_mocked_engine_adapter(
@@ -49,7 +61,10 @@ def test_get_current_catalog_uses_only_explicit_target_catalog(
         database="default_catalog",
     )
 
-    assert adapter.get_current_catalog() is None
+    current_catalog = adapter.get_current_catalog()
+    assert current_catalog is not None
+    assert current_catalog.lower() == "default_catalog"
+    assert adapter._target_catalog is None
 
     adapter._target_catalog = "switched_catalog"
 
@@ -58,8 +73,29 @@ def test_get_current_catalog_uses_only_explicit_target_catalog(
     adapter._connection_pool.close()
 
     assert adapter._connection_pool.get_attribute("target_catalog") is None
-    assert adapter.get_current_catalog() is None
+    assert adapter.get_current_catalog() == "default_catalog"
     adapter.cursor.execute.assert_not_called()
+
+
+def test_shared_catalog_operations_can_lowercase_the_default_warehouse(
+    make_mocked_engine_adapter: t.Callable,
+):
+    """test_catalog_operations lowercases the current catalog, then restores it."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        database="ci_abc",
+    )
+
+    current_catalog = adapter.get_current_catalog().lower()
+    assert current_catalog == "ci_abc"
+    assert adapter._target_catalog is None
+
+    adapter.set_current_catalog("testing")
+    assert adapter.get_current_catalog().lower() == "testing"
+
+    adapter.set_current_catalog(current_catalog)
+    assert adapter.get_current_catalog().lower() == current_catalog
+    assert adapter._target_catalog is None
 
 
 def test_get_current_catalog_returns_none_without_target_or_database(
@@ -97,7 +133,8 @@ def test_set_current_catalog_to_default_clears_explicit_target(
     adapter.set_current_catalog("planning")
     adapter.set_current_catalog("core")
 
-    assert adapter.get_current_catalog() is None
+    assert adapter._target_catalog is None
+    assert adapter.get_current_catalog() == "core"
     adapter.cursor.execute.assert_not_called()
 
 
@@ -119,8 +156,9 @@ def test_catalog_scoped_call_restores_to_neutral_without_close(
     # Decorator calls set_current_catalog("planning") then set_current_catalog(None).
     # Only the first call (None→planning) should trigger a connection close.
     assert close_spy.call_count == 1
+    assert adapter._target_catalog is None
     assert adapter._connected_catalog == "planning"
-    assert adapter.get_current_catalog() is None
+    assert adapter.get_current_catalog() == "core"
 
 
 def test_default_catalog_after_non_default_catalog_reconnects(
@@ -139,8 +177,9 @@ def test_default_catalog_after_non_default_catalog_reconnects(
     adapter.table_exists("core.db.table")
 
     assert close_spy.call_count == 2
+    assert adapter._target_catalog is None
     assert adapter._connected_catalog is None
-    assert adapter.get_current_catalog() is None
+    assert adapter.get_current_catalog() == "core"
 
 
 def test_repeated_same_catalog_reuses_connection(
@@ -494,3 +533,154 @@ def test_create_warehouse_unrelated_conflict_still_raises(
 
     with pytest.raises(requests.HTTPError):
         fabric_http_client.create_warehouse("my_warehouse")
+
+
+def test_get_data_objects_uses_configured_default_catalog(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+        patch_get_data_objects=False,
+    )
+    assert adapter._target_catalog is None
+    assert adapter.get_current_catalog() == "ci_abc"
+
+    mocker.patch.object(
+        adapter,
+        "fetchdf",
+        return_value=pd.DataFrame([{"name": "test_table", "schema_name": "dbo", "type": "TABLE"}]),
+    )
+
+    assert adapter.get_data_objects("ci_abc.dbo") == [
+        DataObject(
+            catalog="ci_abc",
+            schema="dbo",
+            name="test_table",
+            type=DataObjectType.TABLE,
+        )
+    ]
+
+
+def test_get_data_objects_cache_hits_for_default_catalog(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    """Listing fills catalog on the return value. Cache must still hit."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+        patch_get_data_objects=False,
+    )
+    fetchdf = mocker.patch.object(
+        adapter,
+        "fetchdf",
+        return_value=pd.DataFrame([{"name": "t", "schema_name": "dbo", "type": "TABLE"}]),
+    )
+
+    first = adapter.get_data_objects("ci_abc.dbo", {"t"}, safe_to_cache=True)
+    second = adapter.get_data_objects("ci_abc.dbo", {"t"}, safe_to_cache=True)
+
+    assert first[0].catalog == "ci_abc"
+    assert second[0].catalog == "ci_abc"
+    assert fetchdf.call_count == 1
+
+
+def test_get_data_objects_labels_connected_warehouse_after_lazy_restore(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    """Logical target is the default; the connection is still on planning.
+
+    The public catalog is the configured warehouse. The unqualified list must
+    still be planning, because that is the warehouse the query hits.
+    ci_abc.dbo must still switch.
+    """
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+        patch_get_data_objects=False,
+    )
+    adapter.set_current_catalog("planning")
+    adapter.set_current_catalog(None)
+    assert adapter._target_catalog is None
+    assert adapter._connected_catalog == "planning"
+    assert adapter.get_current_catalog() == "ci_abc"
+
+    fetchdf = mocker.patch.object(
+        adapter,
+        "fetchdf",
+        return_value=pd.DataFrame([{"name": "t", "schema_name": "dbo", "type": "TABLE"}]),
+    )
+
+    objects = adapter.get_data_objects("dbo")
+
+    assert objects == [
+        DataObject(
+            catalog="planning",
+            schema="dbo",
+            name="t",
+            type=DataObjectType.TABLE,
+        )
+    ]
+
+    assert adapter.get_data_objects("ci_abc.dbo") == [
+        DataObject(
+            catalog="ci_abc",
+            schema="dbo",
+            name="t",
+            type=DataObjectType.TABLE,
+        )
+    ]
+    assert fetchdf.call_count == 2
+
+
+def test_drop_data_object_default_catalog_drops_without_requalifying(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    """DROP SQL has no warehouse. Prove it ran on ci_abc, without reconnecting."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+    )
+    close = mocker.spy(adapter._connection_pool, "close")
+    catalogs_at_execute = _record_catalogs_at_execute(adapter)
+
+    adapter.drop_data_object(
+        DataObject(catalog="ci_abc", schema="dbo", name="v", type=DataObjectType.VIEW)
+    )
+
+    close.assert_not_called()
+    assert catalogs_at_execute == ["ci_abc"]
+    assert to_sql_calls(adapter) == ["DROP VIEW IF EXISTS [dbo].[v];"]
+
+
+def test_drop_data_object_default_catalog_reconnects_when_connected_elsewhere(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    """DROP SQL has no warehouse. Prove it ran on ci_abc, then restored planning."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+    )
+    adapter.set_current_catalog("planning")
+    assert adapter.get_current_catalog() == "planning"
+    close = mocker.spy(adapter._connection_pool, "close")
+    catalogs_at_execute = _record_catalogs_at_execute(adapter)
+
+    adapter.drop_data_object(
+        DataObject(catalog="ci_abc", schema="dbo", name="v", type=DataObjectType.VIEW)
+    )
+
+    assert catalogs_at_execute == ["ci_abc"]
+    assert adapter.get_current_catalog() == "planning"
+    assert close.call_count == 2
+    assert "DROP VIEW IF EXISTS [dbo].[v];" in to_sql_calls(adapter)
