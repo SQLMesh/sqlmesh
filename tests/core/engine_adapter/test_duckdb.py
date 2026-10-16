@@ -77,6 +77,32 @@ def test_set_current_catalog(make_mocked_engine_adapter: t.Callable, duck_conn):
     ]
 
 
+@pytest.mark.parametrize("as_keyword", [True, False])
+def test_metadata_error_restores_catalog(
+    adapter: EngineAdapter, duck_conn, mocker: MockerFixture, as_keyword: bool
+):
+    duck_conn.execute("ATTACH ':memory:' AS secondary")
+    original_catalog = adapter.get_current_catalog()
+    schema = exp.table_("", db="main", catalog="secondary")
+    original_schema = schema.copy()
+    error = RuntimeError("metadata query failed")
+
+    mocker.patch.object(adapter, "fetchdf", side_effect=error)
+    with pytest.raises(RuntimeError) as exc_info:
+        if as_keyword:
+            adapter._get_data_objects(schema_name=schema)
+        else:
+            adapter._get_data_objects(schema)
+
+    assert exc_info.value is error
+    assert schema == original_schema
+    assert adapter.get_current_catalog() == original_catalog
+    duck_conn.execute("CREATE TABLE subsequent_table (id INT)")
+    assert duck_conn.execute(
+        "SELECT database_name FROM duckdb_tables() WHERE table_name = 'subsequent_table'"
+    ).fetchall() == [(original_catalog,)]
+
+
 def test_temporary_table(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
 
