@@ -15,8 +15,8 @@
 | `type`             | Engine type name - must be `duckdb`                                                                                                                                                                                                             |  string   |    Y     |
 | `database`         | The optional database name. If not specified, the in-memory database is used. Cannot be defined if using `catalogs`.                                                                                                                            |  string   |    N     |
 | `catalogs`         | Mapping to define multiple catalogs. Can [attach DuckDB catalogs](#duckdb-catalogs-example) or [catalogs for other connections](#other-connection-catalogs-example). First entry is the default catalog. Cannot be defined if using `database`. |   dict    |    N     |
-| `extensions`       | Extension to load into duckdb. Only autoloadable extensions are supported.                                                                                                                                                                      |   list    |    N     |
-| `connector_config` | Configuration to pass into the duckdb connector.                                                                                                                                                                                                |   dict    |    N     |
+| `extensions`       | Extensions to install and load into DuckDB. Each entry is either an extension name or a dict with `name`, an optional `repository` (alias such as `community`, a local directory or a URL) and an optional `force_install` flag. See [Extensions](#extensions).                 |   list    |    N     |
+| `connector_config` | DuckDB settings applied with `SET` to every connection. Settings that control how extensions are installed (e.g. `custom_extension_repository`, `extension_directory`) are applied before any extension is installed. See [Extensions](#extensions).                       |   dict    |    N     |
 | `secrets`          | Configuration for authenticating external sources (e.g., S3) using DuckDB secrets. Can be a list of secret configurations or a dictionary with custom secret names.                                                                             | list/dict |    N     |
 | `filesystems`      | Configuration for registering `fsspec` filesystems to the DuckDB connection.                                                                                                                                                                    |   dict    |    N     |
 
@@ -200,6 +200,111 @@ Example: mounting a SQLite database with the name `sqlite` that has a table `exa
 
 If a connector, like Postgres, requires sensitive information in the path, it might support defining environment variables instead.
 [See DuckDB Documentation for more information](https://duckdb.org/docs/extensions/postgres#configuring-via-environment-variables).
+
+#### Extensions
+
+The `extensions` option lists the [DuckDB extensions](https://duckdb.org/docs/stable/extensions/overview) that SQLMesh installs and loads on every connection. Each entry is either the extension name or a dictionary with the following keys:
+
+| Key             | Description                                                                                                                                        | Required |
+|-----------------|----------------------------------------------------------------------------------------------------------------------------------------------------|:--------:|
+| `name`          | The extension name, e.g. `httpfs`.                                                                                                                 |    Y     |
+| `repository`    | Where to install the extension from. Either a repository alias (`core`, `core_nightly`, `community`), a local directory or a URL (`https://`, `s3://`). |    N     |
+| `force_install` | Reinstall the extension even if it is already installed (`FORCE INSTALL`).                                                                         |    N     |
+
+=== "YAML"
+
+    ```yaml linenums="1"
+    gateways:
+      my_gateway:
+        connection:
+          type: duckdb
+          extensions:
+            - httpfs
+            - name: h3
+              repository: community
+            - name: spatial
+              repository: /opt/duckdb/extensions
+              force_install: true
+    ```
+
+=== "Python"
+
+    ```python linenums="1"
+    from sqlmesh.core.config import (
+        Config,
+        ModelDefaultsConfig,
+        GatewayConfig,
+        DuckDBConnectionConfig
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect=<dialect>),
+        gateways={
+            "my_gateway": GatewayConfig(
+                connection=DuckDBConnectionConfig(
+                    extensions=[
+                        "httpfs",
+                        {"name": "h3", "repository": "community"},
+                        {"name": "spatial", "repository": "/opt/duckdb/extensions", "force_install": True},
+                    ]
+                )
+            ),
+        }
+    )
+    ```
+
+##### Installing extensions from a custom or offline repository
+
+In restricted networks the default DuckDB extension repository is often not reachable, so extensions must be installed from an internal mirror (e.g. Artifactory) or from a directory that was populated ahead of time.
+
+DuckDB exposes this through settings such as [`custom_extension_repository`](https://duckdb.org/docs/stable/extensions/installing_extensions#custom-repository), `extension_directory` and `autoinstall_known_extensions`. When these are supplied via `connector_config`, SQLMesh applies them **before** any `INSTALL` / `LOAD` statement runs, so DuckDB never contacts the default repository. All other `connector_config` settings are applied after the extensions have been loaded, since some of them (e.g. `s3_region`) are only defined once the corresponding extension is available.
+
+=== "YAML"
+
+    ```yaml linenums="1"
+    gateways:
+      my_gateway:
+        connection:
+          type: duckdb
+          connector_config:
+            custom_extension_repository: https://artifactory.example.com/duckdb-extensions
+            # or, for a directory of pre-downloaded extensions:
+            # extension_directory: /opt/duckdb/extensions
+            autoinstall_known_extensions: false
+          extensions:
+            - httpfs
+    ```
+
+=== "Python"
+
+    ```python linenums="1"
+    from sqlmesh.core.config import (
+        Config,
+        ModelDefaultsConfig,
+        GatewayConfig,
+        DuckDBConnectionConfig
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect=<dialect>),
+        gateways={
+            "my_gateway": GatewayConfig(
+                connection=DuckDBConnectionConfig(
+                    connector_config={
+                        "custom_extension_repository": "https://artifactory.example.com/duckdb-extensions",
+                        "autoinstall_known_extensions": False,
+                    },
+                    extensions=["httpfs"],
+                )
+            ),
+        }
+    )
+    ```
+
+Alternatively, the repository can be set per extension with the `repository` key, which maps directly to `INSTALL <name> FROM <repository>`.
+
+!!! note "Unsigned extensions"
+    `allow_unsigned_extensions` can only be set when the DuckDB database is opened and therefore cannot be configured through `connector_config`.
 
 #### Cloud service authentication
 
