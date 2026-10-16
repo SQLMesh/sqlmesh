@@ -1246,3 +1246,169 @@ def test_data_diff_nulls_in_some_grain_columns():
         "null value",
         "null value modified",
     ]
+
+
+def _create_uppercase_tables() -> t.Any:
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    columns_to_types = {
+        "KEY1": exp.DataType.build("int"),
+        "KEY2": exp.DataType.build("int"),
+        "VALUE": exp.DataType.build("varchar"),
+        "OTHER": exp.DataType.build("varchar"),
+    }
+    engine_adapter.create_table("src", columns_to_types)
+    engine_adapter.create_table("target", columns_to_types)
+
+    src_df = pd.DataFrame(
+        [(1, 1, "a", "x"), (2, 2, "b", "y"), (3, 3, "src only", "z")],
+        columns=list(columns_to_types),
+    )
+    target_df = pd.DataFrame(
+        [(1, 1, "a", "x"), (2, 2, "b modified", "y2"), (4, 4, "target only", "z")],
+        columns=list(columns_to_types),
+    )
+    engine_adapter.insert_append("src", src_df)
+    engine_adapter.insert_append("target", target_df)
+    return engine_adapter
+
+
+@pytest.mark.parametrize(
+    "on",
+    [
+        ["KEY1"],
+        ["key1"],
+        ["KEY1", "KEY2"],
+        ["key1", "KEY2"],
+        exp.condition("s.KEY1 = t.KEY1 AND s.KEY2 = t.KEY2"),
+    ],
+)
+def test_data_diff_non_lowercase_key_columns(on):
+    engine_adapter = _create_uppercase_tables()
+
+    diff = TableDiff(adapter=engine_adapter, source="src", target="target", on=on).row_diff()
+
+    assert diff.join_count == 2
+    assert diff.s_only_count == 1
+    assert diff.t_only_count == 1
+    assert diff.full_match_count == 1
+    assert diff.partial_match_count == 1
+    assert diff.s_sample["VALUE"].tolist() == ["src only"]
+    assert diff.t_sample["VALUE"].tolist() == ["target only"]
+
+
+def test_data_diff_non_lowercase_skip_columns():
+    engine_adapter = _create_uppercase_tables()
+
+    diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="target",
+        on=["KEY1", "KEY2"],
+        skip_columns=["OTHER"],
+    ).row_diff()
+
+    assert "OTHER" not in diff.s_sample.columns
+    assert "OTHER" not in diff.t_sample.columns
+    assert diff.join_count == 2
+    assert diff.partial_match_count == 1
+
+    # Skipping a non-existent column is still a no-op
+    diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="target",
+        on=["KEY1"],
+        skip_columns=["other", "does_not_exist"],
+    ).row_diff()
+    assert "OTHER" not in diff.s_sample.columns
+
+
+def test_data_diff_key_column_does_not_exist():
+    engine_adapter = _create_uppercase_tables()
+
+    with pytest.raises(SQLMeshError, match="missing_key"):
+        TableDiff(
+            adapter=engine_adapter, source="src", target="target", on=["missing_key"]
+        ).row_diff()
+
+
+def test_data_diff_key_column_exact_match_preferred():
+    engine_adapter = _create_uppercase_tables()
+    table_diff = TableDiff(adapter=engine_adapter, source="src", target="target", on=["KEY1"])
+
+    schema = {
+        "key1": exp.DataType.build("int"),
+        "KEY1": exp.DataType.build("int"),
+        "Key1": exp.DataType.build("int"),
+    }
+    assert table_diff._resolve_column_name("key1", schema) == "key1"
+    assert table_diff._resolve_column_name("KEY1", schema) == "KEY1"
+    with pytest.raises(SQLMeshError, match="ambiguous"):
+        table_diff._resolve_column_name("kEy1", schema)
+
+
+def test_data_diff_key_columns_different_casing_between_tables():
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    engine_adapter.create_table(
+        "src", {"KEY1": exp.DataType.build("int"), "VALUE": exp.DataType.build("varchar")}
+    )
+    engine_adapter.create_table(
+        "target", {"key1": exp.DataType.build("int"), "VALUE": exp.DataType.build("varchar")}
+    )
+    engine_adapter.insert_append(
+        "src", pd.DataFrame([(1, "a"), (2, "b")], columns=["KEY1", "VALUE"])
+    )
+    engine_adapter.insert_append(
+        "target", pd.DataFrame([(1, "a"), (3, "c")], columns=["key1", "VALUE"])
+    )
+
+    for on in (["KEY1"], exp.condition("s.KEY1 = t.key1")):
+        diff = TableDiff(adapter=engine_adapter, source="src", target="target", on=on).row_diff()
+        assert diff.join_count == 1
+        assert diff.s_only_count == 1
+        assert diff.t_only_count == 1
+
+
+def test_data_diff_on_expression_not_mutated():
+    engine_adapter = _create_uppercase_tables()
+    on = exp.condition("s.KEY1 = t.KEY1")
+    expected_sql = on.sql()
+
+    TableDiff(adapter=engine_adapter, source="src", target="target", on=on).row_diff()
+
+    assert on.sql() == expected_sql
+
+
+def test_data_diff_skip_columns_resolution():
+    engine_adapter = _create_uppercase_tables()
+    engine_adapter.create_table(
+        "extra", {"KEY1": exp.DataType.build("int"), "EXTRA": exp.DataType.build("int")}
+    )
+
+    # A column that only exists in one of the tables is skipped in that table
+    table_diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="extra",
+        on=["KEY1"],
+        skip_columns=["other", "extra"],
+    )
+    assert table_diff.skip_columns == {"OTHER", "EXTRA"}
+
+    # Ambiguous names are reported instead of being silently ignored
+    ambiguous = {"OTHER": exp.DataType.build("int"), "Other": exp.DataType.build("int")}
+    with pytest.raises(SQLMeshError, match="ambiguous"):
+        table_diff._find_column_name("other", ambiguous)
+
+
+def test_data_diff_generated_sql_uses_resolved_column_names(mocker: MockerFixture):
+    engine_adapter = _create_uppercase_tables()
+    spy_execute = mocker.spy(engine_adapter, "_execute")
+
+    TableDiff(adapter=engine_adapter, source="src", target="target", on=["key1", "key2"]).row_diff()
+
+    executed = [str(call.args[0]) for call in spy_execute.call_args_list]
+    assert any('"s"."KEY1"' in sql and '"t"."KEY2"' in sql for sql in executed)
+    assert not any('"s"."key1"' in sql for sql in executed)
