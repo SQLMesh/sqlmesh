@@ -11,6 +11,7 @@ from sqlmesh.utils.date import to_datetime, to_date
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.metaprogramming import Executable
 from sqlmesh.core.macros import RuntimeStage
+from sqlmesh.core.model import load_sql_based_model
 
 
 @pytest.fixture
@@ -1313,3 +1314,51 @@ def test_generate_surrogate_key_hash_semantics() -> None:
         render("snowflake", "SHA256")
         == "SELECT SHA256(CONCAT(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_'))) FROM foo"
     )
+
+
+@pytest.mark.parametrize(
+    "projection, expected",
+    [
+        # GitHub issue #5649: once the optimizer resolves `1 IS NULL`, the CASE collapses into its
+        # ELSE branch, and the arithmetic must stay grouped inside the surrounding multiplication.
+        (
+            "(@SAFE_SUB(price, amount_off)) * (@SAFE_SUB(1, percent_off / 100))",
+            'CASE WHEN "s"."amount_off" IS NULL AND "s"."price" IS NULL THEN NULL ELSE (COALESCE("s"."price", 0) - COALESCE("s"."amount_off", 0)) END * (COALESCE(1, 0) - COALESCE("s"."percent_off" / 100, 0))',
+        ),
+        ("x * @SAFE_SUB(1, y)", '"s"."x" * (COALESCE(1, 0) - COALESCE("s"."y", 0))'),
+        ("-@SAFE_SUB(1, y)", '-(COALESCE(1, 0) - COALESCE("s"."y", 0))'),
+        ("x - @SAFE_ADD(1, y)", '"s"."x" - (COALESCE(1, 0) + COALESCE("s"."y", 0))'),
+        ("x * @SAFE_ADD(1, y)", '"s"."x" * (COALESCE(1, 0) + COALESCE("s"."y", 0))'),
+        (
+            "@SAFE_DIV(@SAFE_SUB(1, y), x)",
+            '(COALESCE(1, 0) - COALESCE("s"."y", 0)) / NULLIF("s"."x", 0)',
+        ),
+        # The quotient is a single operand of the enclosing operator.
+        ("x / @SAFE_DIV(price, y)", '"s"."x" / ("s"."price" / NULLIF("s"."y", 0))'),
+        ("x * @SAFE_DIV(price, y)", '"s"."x" * ("s"."price" / NULLIF("s"."y", 0))'),
+        # Standalone usages: the optimizer drops the redundant parentheses around the quotient,
+        # while the ELSE branch keeps its grouping.
+        ("@SAFE_DIV(price, y)", '"s"."price" / NULLIF("s"."y", 0)'),
+        (
+            "@SAFE_SUB(price, amount_off) + 1",
+            'CASE WHEN "s"."amount_off" IS NULL AND "s"."price" IS NULL THEN NULL ELSE (COALESCE("s"."price", 0) - COALESCE("s"."amount_off", 0)) END + 1',
+        ),
+    ],
+)
+def test_safe_arithmetic_macros_keep_precedence_after_optimization(
+    projection: str, expected: str
+) -> None:
+    model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (name db.safe_arithmetic);
+
+            SELECT {projection} AS result
+            FROM (SELECT 1 AS x, 2 AS y, 100 AS price, 25 AS amount_off, 20 AS percent_off) AS s
+            """
+        )
+    )
+
+    rendered_projection = model.render_query_or_raise().selects[0]
+
+    assert rendered_projection.sql() == f'{expected} AS "result"'
