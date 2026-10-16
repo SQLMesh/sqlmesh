@@ -2614,6 +2614,10 @@ def _create_model(
         # external_models.yaml, so it must remain explicit rather than inheriting the
         # gateway used to execute managed models in the project.
         defaults.pop("gateway", None)
+        # External models are symbolic, so their statements are never executed. They are also
+        # built without the project's macros, so default statements could not be rendered.
+        for statement_field in ("pre_statements", "post_statements", "on_virtual_update"):
+            defaults.pop(statement_field, None)
     if not issubclass(klass, SqlModel):
         defaults.pop("optimize_query", None)
 

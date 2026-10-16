@@ -13552,6 +13552,33 @@ def test_external_model_does_not_inherit_model_defaults_gateway() -> None:
     assert explicit_external_model.gateway == "source_gateway"
 
 
+def test_external_model_does_not_inherit_model_defaults_statements() -> None:
+    defaults = ModelDefaultsConfig(
+        dialect="duckdb",
+        pre_statements=["SET a = 1"],
+        post_statements=["ANALYZE"],
+        on_virtual_update=["SELECT 1"],
+    ).dict()
+
+    external_model = create_external_model("source_schema.source", defaults=defaults)
+    assert not external_model.pre_statements
+    assert not external_model.post_statements
+    assert not external_model.on_virtual_update
+
+    # Statements passed explicitly are kept.
+    explicit_model = create_external_model(
+        "source_schema.explicit_source",
+        defaults=defaults,
+        pre_statements=[d.parse_one("SET b = 2")],
+    )
+    assert [s.sql() for s in explicit_model.pre_statements] == ["SET b = 2"]
+
+    sql_model = create_sql_model("a.b", d.parse_one("SELECT 1 AS x"), defaults=defaults)
+    assert [s.sql() for s in sql_model.pre_statements] == ["SET a = 1"]
+    assert [s.sql() for s in sql_model.post_statements] == ["ANALYZE"]
+    assert [s.sql() for s in sql_model.on_virtual_update] == ["SELECT 1"]
+
+
 def test_no_gateway_uses_global_default_catalog():
     """
     Control test: when a model does NOT specify a gateway, the global
