@@ -20,7 +20,6 @@ import contextlib
 import logging
 import typing as t
 from pathlib import Path
-from datetime import datetime
 
 
 from sqlmesh.core.console import Console, get_console
@@ -36,7 +35,7 @@ from sqlmesh.core.snapshot import (
     SnapshotIntervals,
     SnapshotNameVersion,
     SnapshotTableInfo,
-    start_date,
+    missing_intervals_for_no_gaps,
 )
 from sqlmesh.core.snapshot.definition import (
     Interval,
@@ -62,7 +61,7 @@ from sqlmesh.core.state_sync.db.environment import EnvironmentState
 from sqlmesh.core.state_sync.db.snapshot import SnapshotState
 from sqlmesh.core.state_sync.db.version import VersionState
 from sqlmesh.core.state_sync.db.migrator import StateMigrator, _backup_table_name
-from sqlmesh.utils.date import TimeLike, to_timestamp, time_like_to_str, now_timestamp
+from sqlmesh.utils.date import TimeLike, time_like_to_str, now_timestamp
 from sqlmesh.utils.errors import ConflictingPlanError, SQLMeshError
 
 logger = logging.getLogger(__name__)
@@ -586,43 +585,25 @@ class EngineAdapterStateSync(StateSync):
         target_environment: Environment,
         snapshot_names: t.Optional[t.Set[str]],
     ) -> None:
+        target_snapshots = list(target_snapshots)
         target_snapshots_by_name = {s.name: s for s in target_snapshots}
-
-        changed_version_prev_snapshots_by_name = {
-            s.name: s
+        changed_version_prev_snapshots = [
+            s
             for s in target_environment.snapshots
             if s.name in target_snapshots_by_name
             and target_snapshots_by_name[s.name].version != s.version
-        }
+        ]
+        previous_snapshots = self.get_snapshots(changed_version_prev_snapshots).values()
 
-        prev_snapshots = self.get_snapshots(
-            changed_version_prev_snapshots_by_name.values()
-        ).values()
-        cache: t.Dict[str, datetime] = {}
-
-        for prev_snapshot in prev_snapshots:
-            target_snapshot = target_snapshots_by_name[prev_snapshot.name]
-            if (
-                (snapshot_names is None or prev_snapshot.name in snapshot_names)
-                and target_snapshot.is_incremental
-                and prev_snapshot.is_incremental
-                and prev_snapshot.intervals
-            ):
-                start = to_timestamp(
-                    start_date(target_snapshot, target_snapshots_by_name.values(), cache)
-                )
-                end = prev_snapshot.intervals[-1][1]
-
-                if start < end:
-                    missing_intervals = target_snapshot.missing_intervals(
-                        start, end, end_bounded=True
-                    )
-
-                    if missing_intervals:
-                        raise SQLMeshError(
-                            f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
-                            "Please re-apply your plan to resolve this error."
-                        )
+        missing_intervals = missing_intervals_for_no_gaps(
+            target_snapshots, previous_snapshots, snapshot_names
+        )
+        if missing_intervals:
+            target_snapshot = next(iter(missing_intervals))
+            raise SQLMeshError(
+                f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
+                "Please re-apply your plan to resolve this error."
+            )
 
     @contextlib.contextmanager
     def _transaction(self) -> t.Iterator[None]:
