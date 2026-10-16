@@ -2832,13 +2832,10 @@ def _split_sql_model_statements(
 def _resolve_model_refs_to_physical_tables(
     value: exp.Expr, table_mapping: t.Dict[str, str], dialect: DialectType
 ) -> exp.Literal:
-    """Resolve managed-model references in a property value to their physical table names.
+    """Resolve managed-model references in a property value to physical table names.
 
-    The value is a single table reference, a comma-separated string, or a tuple/array of
-    table references. Each reference that matches a managed model (via ``table_mapping``) is
-    swapped for its physical ``db.table`` name;
-    anything else (e.g. a raw source) is kept as written. Returns a single string literal so the
-    property renders just like a hand-written value.
+    Unmatched references keep their table names. The function returns the names as one
+    comma-separated string literal.
     """
     if isinstance(value, exp.Literal) and value.is_string:
         refs = value.this.split(",")

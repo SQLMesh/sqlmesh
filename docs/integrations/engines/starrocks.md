@@ -517,9 +517,9 @@ SELECT user_id, COUNT(*) AS event_count FROM user_events GROUP BY user_id;
 * `excluded_trigger_tables`: base tables whose data changes should **not** automatically trigger a refresh of this MV.
 * `excluded_refresh_tables`: base tables that should **not** be scanned when the MV refreshes.
 
-Both properties accept a single table reference, a comma-separated string of table references, or a tuple or array of table references.
+Both properties accept a single reference, a comma-separated string, a tuple, or an array. References can be bare identifiers or quoted strings.
 
-StarRocks requires the **physical** base table name for these properties, not the logical view name that SQLMesh normally exposes. SQLMesh handles this automatically: when a reference matches a managed SQLMesh model, the logical name is resolved to its physical table name before the `CREATE MATERIALIZED VIEW` statement is issued. References that do not match any managed model are passed through unchanged.
+StarRocks requires physical base table names in these properties. SQLMesh replaces references to managed models with physical table names and passes other references through unchanged. It sends the resulting names to StarRocks as a comma-separated string.
 
 ```sql
 MODEL (
@@ -529,7 +529,6 @@ MODEL (
   ),
   physical_properties (
     refresh_scheme = 'ASYNC',
-    -- SQLMesh resolves mydb.orders and mydb.order_items to their physical table names
     excluded_trigger_tables = 'mydb.orders,mydb.order_items',
     excluded_refresh_tables = mydb.orders
   )
@@ -538,17 +537,15 @@ MODEL (
 SELECT order_id, SUM(amount) AS total FROM mydb.orders GROUP BY order_id;
 ```
 
-A single reference can be written as a bare identifier (`mydb.orders`) or as a quoted string. Multiple references can be provided as a quoted, comma-separated string (`'mydb.orders,mydb.order_items'`), a tuple, or an array. Tuple and array elements can be bare identifiers, quoted strings, or a mix of both:
+Tuple and array elements can mix bare identifiers and quoted strings:
 
 ```sql
 physical_properties (
-  refresh_scheme = 'ASYNC',
-  excluded_trigger_tables = (mydb.orders, 'mydb.order_items'),
-  excluded_refresh_tables = ['mydb.orders', mydb.order_items]
+	refresh_scheme = 'ASYNC',
+	excluded_trigger_tables = (mydb.orders, 'mydb.order_items'),
+	excluded_refresh_tables = ['mydb.orders', mydb.order_items]
 )
 ```
-
-SQLMesh resolves each reference individually and passes the result to StarRocks as a comma-separated string of table names, regardless of the input form.
 
 **Other properties:**
 
