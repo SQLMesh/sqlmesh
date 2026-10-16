@@ -84,6 +84,7 @@ from sqlmesh.utils.errors import (
 )
 from sqlmesh.utils.metaprogramming import Executable
 from sqlmesh.utils.pydantic import list_of_fields_validator
+from sqlmesh.utils.windows import IS_WINDOWS
 
 
 if t.TYPE_CHECKING:
@@ -5860,6 +5861,7 @@ def test_evaluate_runs_after_previous_run_was_stopped(
     adapter_mock.transaction.assert_called()
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
 def test_interrupted_create_stops_workers_and_waits_for_them(
     mocker: MockerFixture, adapter_mock, make_snapshot
 ):

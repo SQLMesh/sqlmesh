@@ -14,6 +14,7 @@ from sqlmesh.utils.concurrency import (
     concurrent_apply_to_values,
 )
 from sqlmesh.utils.dag import DAG
+from sqlmesh.utils.windows import IS_WINDOWS
 
 
 @pytest.mark.parametrize("tasks_num", [1, 2])
@@ -156,6 +157,7 @@ def test_concurrent_apply(tasks_num: int):
     assert results == [x * 2 for x in values]
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
 @pytest.mark.parametrize(
     "apply",
     [
@@ -200,6 +202,7 @@ def test_interrupt_without_on_interrupt_waits_for_running_tasks(apply: t.Callabl
     assert sorted(started) == [1, 2]
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
 @pytest.mark.parametrize(
     "apply",
     [
