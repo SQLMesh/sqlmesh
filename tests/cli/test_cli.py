@@ -1457,6 +1457,241 @@ WHERE
         remove(dataset_path)
 
 
+def _stub_ducklake_dlt(
+    monkeypatch,
+    drivername="sqlite",
+    ducklake_name="mre_ducklake",
+    metadata_schema=None,
+    override_data_path=False,
+    database="/tmp/x/mre_ducklake.sqlite",
+    storage_url="/tmp/x/mre_ducklake.files",
+):
+    """Install a fake `dlt` module exposing a ducklake pipeline. No dlt install needed."""
+    import sys
+    import types
+
+    catalog = types.SimpleNamespace(drivername=drivername, database=database)
+    credentials = types.SimpleNamespace(
+        ducklake_name=ducklake_name,
+        metadata_schema=metadata_schema,
+        catalog=catalog,
+        storage_url=storage_url,
+    )
+    client_config = types.SimpleNamespace(
+        credentials=credentials, override_data_path=override_data_path
+    )
+    pipeline = types.SimpleNamespace(
+        destination=types.SimpleNamespace(to_name=lambda dest: "ducklake"),
+        default_schema=types.SimpleNamespace(
+            tables={}, _dlt_tables_prefix="_dlt", loads_table_name="_dlt_loads"
+        ),
+        dataset_name="mre",
+    )
+    pipeline._get_load_storage = lambda: types.SimpleNamespace(list_loaded_packages=lambda: [])
+    pipeline.destination_client = lambda: types.SimpleNamespace(config=client_config)
+
+    dlt_fake = types.ModuleType("dlt")
+    dlt_fake.attach = lambda pipeline_name, pipelines_dir="": pipeline
+
+    schema_utils = types.ModuleType("dlt.common.schema.utils")
+    schema_utils.has_table_seen_data = lambda table: True
+    schema_utils.is_complete_column = lambda col: True
+
+    pipeline_exceptions = types.ModuleType("dlt.pipeline.exceptions")
+    pipeline_exceptions.CannotRestorePipelineException = type(
+        "CannotRestorePipelineException", (Exception,), {}
+    )
+
+    for name, module in {
+        "dlt": dlt_fake,
+        "dlt.common": types.ModuleType("dlt.common"),
+        "dlt.common.schema": types.ModuleType("dlt.common.schema"),
+        "dlt.common.schema.utils": schema_utils,
+        "dlt.pipeline": types.ModuleType("dlt.pipeline"),
+        "dlt.pipeline.exceptions": pipeline_exceptions,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+@pytest.mark.parametrize(
+    "drivername", ["sqlite", "duckdb"], ids=["sqlite-catalog", "duckdb-catalog"]
+)
+def test_dlt_ducklake_pipeline(monkeypatch, drivername):
+    import yaml
+
+    from sqlmesh.core.config.connection import DuckDBConnectionConfig, parse_connection_config
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, drivername=drivername)
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+
+    # Byte-identical for ordinary paths (no quoting, key order and indent unchanged)
+    assert connection_config == (
+        "      type: duckdb\n"
+        "      catalogs:\n"
+        "        mre_ducklake:\n"
+        "          type: ducklake\n"
+        "          path: /tmp/x/mre_ducklake.sqlite\n"
+        "          data_path: /tmp/x/mre_ducklake.files\n"
+        "          metadata_schema: mre_ducklake"
+    )
+
+    # Structural parse instead of substring checks: malformed YAML cannot pass
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    assert parsed["type"] == "duckdb"
+    assert set(parsed["catalogs"]) == {"mre_ducklake"}
+    lake = parsed["catalogs"]["mre_ducklake"]
+    assert lake == {
+        "type": "ducklake",
+        "path": "/tmp/x/mre_ducklake.sqlite",
+        "data_path": "/tmp/x/mre_ducklake.files",
+        "metadata_schema": "mre_ducklake",
+    }
+
+    # Round-trip: the exact ConfigError from #5914 no longer fires
+    config = parse_connection_config(parsed)
+    assert isinstance(config, DuckDBConnectionConfig)
+    attach_sql = next(iter(config.catalogs.values())).to_sql("mre_ducklake")
+    assert attach_sql == (
+        "ATTACH IF NOT EXISTS 'ducklake:/tmp/x/mre_ducklake.sqlite' AS mre_ducklake "
+        "(DATA_PATH '/tmp/x/mre_ducklake.files', METADATA_SCHEMA 'mre_ducklake')"
+    )
+
+
+def test_dlt_ducklake_explicit_metadata_schema(monkeypatch):
+    import yaml
+
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, metadata_schema="custom_meta")
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    lake = parsed["catalogs"]["mre_ducklake"]
+    assert lake["metadata_schema"] == "custom_meta"
+    assert lake["path"] == "/tmp/x/mre_ducklake.sqlite"
+
+
+def test_dlt_ducklake_override_data_path(monkeypatch):
+    import yaml
+
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, override_data_path=True)
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    lake = parsed["catalogs"]["mre_ducklake"]
+    assert lake["override_data_path"] is True
+
+
+def test_dlt_ducklake_custom_name(monkeypatch):
+    import yaml
+
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, ducklake_name="my_lake")
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    assert set(parsed["catalogs"]) == {"my_lake"}
+    lake = parsed["catalogs"]["my_lake"]
+    assert lake["metadata_schema"] == "my_lake"
+
+
+def test_dlt_ducklake_yaml_inline_helper():
+    from sqlmesh.integrations.dlt import _yaml_inline
+
+    # Ordinary values stay byte-identical (no quotes)
+    assert _yaml_inline("/tmp/x/mre_ducklake.sqlite") == "/tmp/x/mre_ducklake.sqlite"
+    assert _yaml_inline("mre_ducklake") == "mre_ducklake"
+    # Pathological values are quoted single-line and round-trip
+    import yaml
+
+    for pathological in (
+        "'/tmp/quote/mre_ducklake.sqlite",
+        "/tmp/new\nline/mre.sqlite",
+        "a: b # c",
+        "  leading-space",
+    ):
+        emitted = _yaml_inline(pathological)
+        assert "\n" not in emitted
+        doc = f"connection:\n      path: {emitted}\n"
+        assert yaml.safe_load(doc)["connection"]["path"] == pathological
+
+
+@pytest.mark.parametrize(
+    "pathological",
+    ["'/tmp/quote/mre_ducklake.sqlite", "/tmp/new\nline/mre.sqlite"],
+    ids=["leading-quote", "newline"],
+)
+def test_dlt_ducklake_pathological_paths_round_trip(monkeypatch, pathological):
+    import yaml
+
+    from sqlmesh.core.config.connection import DuckDBConnectionConfig, parse_connection_config
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, database=pathological)
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+    # Must not raise ScannerError; values must round-trip exactly
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    assert parsed["catalogs"]["mre_ducklake"]["path"] == pathological
+    config = parse_connection_config(parsed)
+    assert isinstance(config, DuckDBConnectionConfig)
+
+
+def test_dlt_ducklake_block_coexists_with_second_catalog(monkeypatch):
+    import yaml
+
+    from sqlmesh.core.config.connection import DuckDBConnectionConfig, parse_connection_config
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch)
+
+    _, connection_config, _ = dlt_module.generate_dlt_models_and_settings(
+        pipeline_name="mre_ducklake", dialect="duckdb"
+    )
+    parsed = yaml.safe_load("connection:\n" + connection_config)["connection"]
+    parsed["catalogs"]["other"] = {"type": "ducklake", "path": "/tmp/x/other.sqlite"}
+    config = parse_connection_config(parsed)
+    assert isinstance(config, DuckDBConnectionConfig)
+    assert set(config.catalogs) == {"mre_ducklake", "other"}
+
+
+def test_dlt_ducklake_unsupported_catalog(monkeypatch):
+    from sqlmesh.integrations import dlt as dlt_module
+
+    _stub_ducklake_dlt(monkeypatch, drivername="postgres")
+
+    called = {}
+
+    orig = dlt_module.format_ducklake_config
+
+    def _spy(client_config):
+        called["branch"] = True
+        return orig(client_config)
+
+    monkeypatch.setattr(dlt_module, "format_ducklake_config", _spy)
+
+    with pytest.raises(ClickException, match="Unsupported DuckLake catalog 'postgres'") as exc_info:
+        dlt_module.generate_dlt_models_and_settings(pipeline_name="mre_ducklake", dialect="duckdb")
+
+    assert called.get("branch") is True
+    assert "postgres" in str(exc_info.value)
+
+
 @time_machine.travel(FREEZE_TIME)
 def test_environments(runner, tmp_path):
     create_example_project(tmp_path)
