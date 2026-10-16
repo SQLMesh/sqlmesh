@@ -1520,6 +1520,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -1541,6 +1542,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -1563,10 +1565,26 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
-    COALESCE("joined"."t_test_UPDATED_at", "joined"."test_UPDATED_at") AS "test_UPDATED_at",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_test_UPDATED_at"
+      ELSE "joined"."test_UPDATED_at"
+    END AS "test_UPDATED_at",
     CASE
       WHEN "t_test_valid_from" IS NULL AND NOT "latest_deleted"."_exists" IS NULL
       THEN CASE
@@ -1725,6 +1743,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -1741,6 +1760,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -1758,10 +1778,26 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
-    COALESCE("joined"."t_test_UPDATED_at", "joined"."test_UPDATED_at") AS "test_UPDATED_at",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_test_UPDATED_at"
+      ELSE "joined"."test_UPDATED_at"
+    END AS "test_UPDATED_at",
     CASE
       WHEN "t_test_valid_from" IS NULL AND NOT "latest_deleted"."_exists" IS NULL
       THEN CASE
@@ -1926,6 +1962,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -1942,6 +1979,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -1959,10 +1997,26 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
-    COALESCE("joined"."t_test_updated_at", "joined"."test_updated_at") AS "test_updated_at",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_test_updated_at"
+      ELSE "joined"."test_updated_at"
+    END AS "test_updated_at",
     CASE
       WHEN "t_test_valid_from" IS NULL AND NOT "latest_deleted"."_exists" IS NULL
       THEN CASE
@@ -2124,6 +2178,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id1" AS "t_id1",
     "latest"."id2" AS "t_id2",
     "latest"."name" AS "t_name",
@@ -2142,6 +2197,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id1" AS "t_id1",
     "latest"."id2" AS "t_id2",
     "latest"."name" AS "t_name",
@@ -2161,11 +2217,31 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id1", "joined"."id1") AS "id1",
-    COALESCE("joined"."t_id2", "joined"."id2") AS "id2",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
-    COALESCE("joined"."t_test_updated_at", "joined"."test_updated_at") AS "test_updated_at",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id1"
+      ELSE "joined"."id1"
+    END AS "id1",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id2"
+      ELSE "joined"."id2"
+    END AS "id2",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_test_updated_at"
+      ELSE "joined"."test_updated_at"
+    END AS "test_updated_at",
     CASE
       WHEN "t_test_valid_from" IS NULL AND NOT "latest_deleted"."_exists" IS NULL
       THEN CASE
@@ -2291,6 +2367,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -2305,6 +2382,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -2320,9 +2398,21 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
     COALESCE("t_test_VALID_from", CAST('2020-01-01 00:00:00' AS TIMESTAMP)) AS "test_VALID_from",
     CASE
       WHEN "joined"."_exists" IS NULL
@@ -2477,6 +2567,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id_a" AS "t_id_a",
     "latest"."id_b" AS "t_id_b",
     "latest"."name" AS "t_name",
@@ -2493,6 +2584,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id_a" AS "t_id_a",
     "latest"."id_b" AS "t_id_b",
     "latest"."name" AS "t_name",
@@ -2510,10 +2602,26 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id_a", "joined"."id_a") AS "id_a",
-    COALESCE("joined"."t_id_b", "joined"."id_b") AS "id_b",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id_a"
+      ELSE "joined"."id_a"
+    END AS "id_a",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id_b"
+      ELSE "joined"."id_b"
+    END AS "id_b",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
     COALESCE("t_test_VALID_from", CAST('2020-01-01 00:00:00' AS TIMESTAMP)) AS "test_VALID_from",
     CASE
       WHEN "joined"."_exists" IS NULL
@@ -2666,6 +2774,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -2680,6 +2789,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -2695,9 +2805,21 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
     COALESCE("t_test_valid_from", CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AS "test_valid_from",
     CASE
       WHEN "joined"."_exists" IS NULL
@@ -2846,6 +2968,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -2860,6 +2983,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -2875,9 +2999,21 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
     COALESCE("t_test_valid_from", CAST('2020-01-01 00:00:00' AS TIMESTAMP)) AS "test_valid_from",
     CASE
       WHEN "joined"."_exists" IS NULL
@@ -3041,6 +3177,7 @@ WITH "source" AS (
 ), "joined" AS (
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -3055,6 +3192,7 @@ WITH "source" AS (
   UNION ALL
   SELECT
     "source"."_exists" AS "_exists",
+    "latest"."_exists" AS "t__exists",
     "latest"."id" AS "t_id",
     "latest"."name" AS "t_name",
     "latest"."price" AS "t_price",
@@ -3070,9 +3208,21 @@ WITH "source" AS (
     "latest"."_exists" IS NULL
 ), "updated_rows" AS (
   SELECT
-    COALESCE("joined"."t_id", "joined"."id") AS "id",
-    COALESCE("joined"."t_name", "joined"."name") AS "name",
-    COALESCE("joined"."t_price", "joined"."price") AS "price",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_id"
+      ELSE "joined"."id"
+    END AS "id",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_name"
+      ELSE "joined"."name"
+    END AS "name",
+    CASE
+      WHEN NOT "joined"."t__exists" IS NULL
+      THEN "joined"."t_price"
+      ELSE "joined"."price"
+    END AS "price",
     COALESCE("t_test_valid_from", CAST('2020-01-01 00:00:00' AS TIMESTAMP)) AS "test_valid_from",
     CASE
       WHEN (
