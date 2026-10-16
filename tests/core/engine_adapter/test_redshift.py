@@ -1,6 +1,7 @@
 # type: ignore
 import threading
 import typing as t
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd  # noqa: TID253
 import pytest
@@ -1053,6 +1054,34 @@ def test_recycle_terminates_sessions_from_new_connection_after_interrupted_trans
         "SELECT pg_backend_pid()",
         "SELECT PG_TERMINATE_BACKEND(100)",
     ]
+
+
+def test_recycle_fails_transaction_of_thread_between_statements(mocker: MockerFixture):
+    deleted = threading.Event()
+    recycled = threading.Event()
+    connect, connections = _mock_connections(mocker, lambda sql: None)
+    adapter = RedshiftEngineAdapter(connect, multithreaded=True)
+
+    def run_delete_then_insert() -> None:
+        with pytest.raises(SQLMeshError, match="closed while a transaction was in progress"):
+            with adapter.transaction():
+                adapter.execute("DELETE FROM t")
+                deleted.set()
+                assert recycled.wait(timeout=10)
+                adapter.execute("INSERT INTO t SELECT 1")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run_delete_then_insert)
+        assert deleted.wait(timeout=10)
+        adapter.recycle()
+        recycled.set()
+        future.result()
+
+    # Closing the connection rolled back the DELETE, so the INSERT must not run and commit on a new one.
+    assert len(connections) == 1
+    assert _executed_sql(connections[0]) == ["SELECT pg_backend_pid()", "DELETE FROM t"]
+    connections[0].close.assert_called_once()
+    connections[0].cursor.return_value.commit.assert_not_called()
 
 
 def test_close_without_running_queries(mocker: MockerFixture):

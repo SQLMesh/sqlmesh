@@ -3,8 +3,13 @@ import logging
 import typing as t
 from collections import defaultdict
 from threading import Lock, get_ident
+from threading import enumerate as enumerate_threads
+
+from sqlmesh.utils.errors import SQLMeshError
 
 logger = logging.getLogger(__name__)
+
+_BROKEN_TRANSACTION_MESSAGE = "The connection was closed while a transaction was in progress, so the transaction was rolled back."
 
 
 class ConnectionPool(abc.ABC):
@@ -131,6 +136,7 @@ class _ThreadLocalBase(_TransactionManagementMixin):
         self._connection_factory = connection_factory
         self._thread_cursors: t.Dict[t.Hashable, t.Any] = {}
         self._thread_transactions: t.Set[t.Hashable] = set()
+        self._thread_broken_transactions: t.Set[t.Hashable] = set()
         self._thread_attributes: t.Dict[t.Hashable, t.Dict[str, t.Any]] = defaultdict(dict)
         self._thread_cursors_lock = Lock()
         self._thread_transactions_lock = Lock()
@@ -138,6 +144,7 @@ class _ThreadLocalBase(_TransactionManagementMixin):
 
     def get_cursor(self) -> t.Any:
         thread_id = get_ident()
+        self._raise_if_transaction_broken(thread_id)
         with self._thread_cursors_lock:
             if thread_id not in self._thread_cursors:
                 self._thread_cursors[thread_id] = self.get().cursor()
@@ -167,12 +174,20 @@ class _ThreadLocalBase(_TransactionManagementMixin):
             self._thread_transactions.add(get_ident())
 
     def commit(self) -> None:
+        thread_id = get_ident()
+        if self._is_transaction_broken(thread_id):
+            self._discard_transaction(thread_id)
+            raise SQLMeshError(_BROKEN_TRANSACTION_MESSAGE)
         self._do_commit()
-        self._discard_transaction(get_ident())
+        self._discard_transaction(thread_id)
 
     def rollback(self) -> None:
-        self._do_rollback()
-        self._discard_transaction(get_ident())
+        thread_id = get_ident()
+        try:
+            if not self._is_transaction_broken(thread_id):
+                self._do_rollback()
+        finally:
+            self._discard_transaction(thread_id)
 
     @property
     def is_transaction_active(self) -> bool:
@@ -189,6 +204,31 @@ class _ThreadLocalBase(_TransactionManagementMixin):
     def _discard_transaction(self, thread_id: t.Hashable) -> None:
         with self._thread_transactions_lock:
             self._thread_transactions.discard(thread_id)
+            self._thread_broken_transactions.discard(thread_id)
+
+    def _close_transaction(self, thread_id: t.Hashable) -> None:
+        # The statements another thread has run in its transaction are rolled back when its
+        # connection is closed, so it must not continue the transaction on a new connection, where
+        # its remaining statements would be committed without them. The transaction is kept active
+        # but broken until the thread rolls it back. A finished thread can't continue it, and its
+        # ident may be reused by a new thread, so its transaction is discarded instead.
+        with self._thread_transactions_lock:
+            if (
+                thread_id != get_ident()
+                and thread_id in self._thread_transactions
+                and any(thread.ident == thread_id for thread in enumerate_threads())
+            ):
+                self._thread_broken_transactions.add(thread_id)
+                return
+        self._discard_transaction(thread_id)
+
+    def _is_transaction_broken(self, thread_id: t.Hashable) -> bool:
+        with self._thread_transactions_lock:
+            return thread_id in self._thread_broken_transactions
+
+    def _raise_if_transaction_broken(self, thread_id: t.Hashable) -> None:
+        if self._is_transaction_broken(thread_id):
+            raise SQLMeshError(_BROKEN_TRANSACTION_MESSAGE)
 
 
 class ThreadLocalConnectionPool(_ThreadLocalBase):
@@ -203,6 +243,7 @@ class ThreadLocalConnectionPool(_ThreadLocalBase):
 
     def get(self) -> t.Any:
         thread_id = get_ident()
+        self._raise_if_transaction_broken(thread_id)
         with self._thread_connections_lock:
             if thread_id not in self._thread_connections:
                 self._thread_connections[thread_id] = self._connection_factory()
@@ -226,7 +267,7 @@ class ThreadLocalConnectionPool(_ThreadLocalBase):
                     _try_close(connection, "connection")
                     self._thread_connections.pop(thread_id)
                     self._thread_cursors.pop(thread_id, None)
-                    self._discard_transaction(thread_id)
+                    self._close_transaction(thread_id)
 
             self._thread_attributes.clear()
 
@@ -242,6 +283,7 @@ class ThreadLocalSharedConnectionPool(_ThreadLocalBase):
         self._connection_lock = Lock()
 
     def get(self) -> t.Any:
+        self._raise_if_transaction_broken(get_ident())
         with self._connection_lock:
             if self._connection is None:
                 self._connection = self._connection_factory()
@@ -263,7 +305,7 @@ class ThreadLocalSharedConnectionPool(_ThreadLocalBase):
                 if not exclude_calling_thread or thread_id != calling_thread_id:
                     _try_close(cursor, "cursor")
                     self._thread_cursors.pop(thread_id)
-                    self._discard_transaction(thread_id)
+                    self._close_transaction(thread_id)
                 self._thread_attributes.pop(thread_id, None)
 
             if not exclude_calling_thread:
