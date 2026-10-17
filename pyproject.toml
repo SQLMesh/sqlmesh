@@ -257,6 +257,7 @@ markers = [
     "remote: test that involves interacting with a remote DB",
     "cicdonly: test that only runs on CI/CD",
     "isolated: tests that need to run sequentially usually because they use fork",
+    "fork_isolated: tests that need their own fresh pytest process because they use fork",
     "dialect_isolated: tests that need to run separately due to global dialect overrides",
 
     # Test Domain Markers

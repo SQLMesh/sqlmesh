@@ -50,9 +50,7 @@ function execAsyncCore(
             exitCode,
             stdout,
             stderr:
-              typeof error.code === 'number'
-                ? stderr
-                : stderr || error.message,
+              typeof error.code === 'number' ? stderr : stderr || error.message,
           })
         }
         return

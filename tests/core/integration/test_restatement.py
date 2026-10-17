@@ -1854,7 +1854,6 @@ def entrypoint(evaluator: MacroEvaluator) -> str:
         # ensure dev is present before the restatement plan starts
         assert restatement_ctx.state_sync.get_environment("dev") is not None
 
-        q.put("plan_started")
         expected_error = None
         try:
             restatement_ctx.plan(
@@ -1875,15 +1874,15 @@ def entrypoint(evaluator: MacroEvaluator) -> str:
 
     assert q.get() == "thread_started"
 
-    try:
-        if e := restatement_plan_future.exception(timeout=1):
-            # abort early if the plan thread threw an exception
-            raise e
-    except TimeoutError:
-        # that's ok, we dont actually expect the plan to have finished in 1 second
-        pass
-
-    assert q.get() == "plan_started"
+    # wait until the original model is blocked inside the restatement's evaluation
+    deadline = time.monotonic() + 30
+    while not evaluation_lock_file_path.exists():
+        if restatement_plan_future.done():
+            if e := restatement_plan_future.exception():
+                raise e
+            raise AssertionError("Restatement plan finished before it blocked on the model")
+        assert time.monotonic() < deadline, "Restatement plan never entered the evaluation lock"
+        time.sleep(0.1)
 
     # ok, now the prod restatement plan is running, let's deploy dev to prod
     ctx.plan(environment="prod", auto_apply=True)
