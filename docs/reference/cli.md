@@ -494,6 +494,8 @@ Options:
 
     The `rollback` command affects all SQLMesh users. Contact your SQLMesh administrator before running.
 
+Run `rollback` with the SQLMesh version that performed the migration, then reinstall the previous version. See [Rolling back a migration](../guides/migrations.md#rolling-back-a-migration) for details.
+
 ## run
 
 ```
