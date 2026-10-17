@@ -6,6 +6,7 @@ import typing as t
 import unittest
 import uuid
 import logging
+import re
 import textwrap
 from humanize import metric, naturalsize
 from itertools import zip_longest
@@ -3354,10 +3355,13 @@ class MarkdownConsole(CaptureTerminalConsole):
 
         if context_diff.has_environment_statements_changes and not no_diff:
             self._print("\nEnvironment statements:\n")
-            for _, diff in context_diff.environment_statements_diff(
+            for language, diff in context_diff.environment_statements_diff(
                 include_python_env=not context_diff.is_new_environment
             ):
-                self._print(diff)
+                if language == "sql":
+                    self._print_diff(diff)
+                else:
+                    self._print(diff)
 
     def show_model_difference_summary(
         self,
@@ -3474,12 +3478,8 @@ class MarkdownConsole(CaptureTerminalConsole):
                     diff_text = context_diff.text_diff(snapshot.name)
                     # sometimes there is no text_diff, like on a seed model where the data has been updated
                     if diff_text:
-                        diff_text = f"\n```diff\n{diff_text}\n```"
                         # these are part of a Markdown list, so indent them by 2 spaces to relate them to the current list item
-                        diff_text_indented = "\n".join(
-                            [f"  {line}" for line in diff_text.splitlines()]
-                        )
-                        self._print(diff_text_indented)
+                        self._print_diff(diff_text, indent="  ")
                     else:
                         if indirectly_modified_children:
                             self._print("\n")
@@ -3573,7 +3573,7 @@ class MarkdownConsole(CaptureTerminalConsole):
             else:
                 continue
 
-            self._print(f"```diff\n{context_diff.text_diff(snapshot.name)}\n```\n")
+            self._print_diff(context_diff.text_diff(snapshot.name))
             self._print("```\n")
             self._print(tree)
             self._print("\n```")
@@ -3696,6 +3696,15 @@ class MarkdownConsole(CaptureTerminalConsole):
         with self.console.capture() as capture:
             self.console.print(value, **kwargs)
         self._captured_outputs.append(capture.get())
+
+    def _print_diff(self, diff: str, indent: str = "") -> None:
+        longest_backticks = max((len(run) for run in re.findall(r"`+", diff)), default=0)
+        fence = "`" * max(3, longest_backticks + 1)
+        indented_diff = diff.replace("\n", f"\n{indent}")
+        block = f"{indent}\n{indent}{fence}diff\n{indent}{indented_diff}\n{indent}{fence}\n"
+        # Capture the Markdown source, since even literal Rich output expands tabs.
+        self._captured_outputs.append(block)
+        self.console.print(block, markup=False, emoji=False, soft_wrap=True, end="")
 
 
 class DatabricksMagicConsole(CaptureTerminalConsole):
