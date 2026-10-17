@@ -1,4 +1,156 @@
-from sqlmesh.core.console import MarkdownConsole
+from io import StringIO
+
+import pytest
+from rich.console import Console
+
+from sqlmesh.core.console import MarkdownConsole, TerminalConsole
+from sqlmesh.core.table_diff import RowDiff
+
+
+@pytest.fixture
+def row_diff():
+    import pandas as pd
+
+    return RowDiff(
+        source="source",
+        target="target",
+        stats={
+            "s_count": 2,
+            "t_count": 2,
+            "distinct_count_s": 2,
+            "distinct_count_t": 2,
+            "join_count": 2,
+            "full_match_count": 0,
+            "s_only_count": 0,
+            "t_only_count": 0,
+            "null_grain_count": 0,
+        },
+        column_stats=pd.DataFrame(
+            {"pct_match": [50.0, 50.0, 100.0]}, index=["early", "late", "unchanged"]
+        ),
+        sample=pd.DataFrame(),
+        joined_sample=pd.DataFrame(
+            {"id": [1], "s__early": [10], "t__early": [99], "s__late": [20], "t__late": [20]}
+        ),
+        s_sample=pd.DataFrame(),
+        t_sample=pd.DataFrame(),
+    )
+
+
+@pytest.mark.parametrize("console_type", [TerminalConsole, MarkdownConsole])
+def test_show_row_diff_omits_empty_column_samples(row_diff, console_type):
+    output = StringIO()
+    console = console_type()
+    console.console = Console(file=output, width=120)
+
+    console.show_row_diff(row_diff)
+
+    rendered = output.getvalue()
+    assert "Column: early" in rendered
+    assert "99" in rendered
+    assert "Column: late" not in rendered
+    assert "Column: unchanged" not in rendered
+    assert "early" in rendered and "late" in rendered and "unchanged" in rendered
+    assert "50.0" in rendered and "100.0" in rendered
+    assert "PARTIAL MATCH: 2 rows (100.0%)" in rendered
+
+
+@pytest.mark.parametrize("dtype", ["object", "Int64", "boolean", "float64"])
+def test_show_row_diff_omits_equal_null_samples(row_diff, dtype):
+    import pandas as pd
+
+    nulls = pd.Series([float("nan")] if dtype == "float64" else [None], dtype=dtype)
+    row_diff = row_diff.copy(
+        update={"joined_sample": row_diff.joined_sample.assign(s__late=nulls, t__late=nulls.copy())}
+    )
+    output = StringIO()
+
+    TerminalConsole(console=Console(file=output)).show_row_diff(row_diff)
+
+    assert "Column: early" in output.getvalue()
+    assert "Column: late" not in output.getvalue()
+
+
+def test_show_row_diff_preserves_null_differences_aliases_keys_and_inputs(row_diff):
+    import pandas as pd
+
+    row_diff = row_diff.copy(
+        update={
+            "source_alias": "dev",
+            "target_alias": "prod",
+            "stats": {
+                **row_diff.stats,
+                "s_count": 3,
+                "t_count": 3,
+                "distinct_count_s": 3,
+                "distinct_count_t": 3,
+                "s_only_count": 1,
+                "t_only_count": 1,
+            },
+            "joined_sample": pd.DataFrame(
+                {
+                    "id": [1, 2],
+                    "region": ["east", "west"],
+                    "DEV__early": pd.Series([10, None], dtype="Int64"),
+                    "PROD__early": pd.Series([None, 20], dtype="Int64"),
+                    "DEV__late": pd.Series([True, None], dtype="boolean"),
+                    "PROD__late": pd.Series([True, None], dtype="boolean"),
+                }
+            ),
+            "s_sample": pd.DataFrame({"id": [3], "region": ["source-only"]}),
+            "t_sample": pd.DataFrame({"id": [4], "region": ["target-only"]}),
+        }
+    )
+    original_stats = row_diff.stats.copy()
+    frames = {
+        name: getattr(row_diff, name).copy(deep=True)
+        for name in ("sample", "joined_sample", "s_sample", "t_sample", "column_stats")
+    }
+    output = StringIO()
+
+    TerminalConsole(console=Console(file=output, width=120)).show_row_diff(row_diff)
+
+    rendered = output.getvalue()
+    assert "Column: early" in rendered
+    assert "Column: late" not in rendered
+    assert all(label in rendered for label in ("id", "region", "DEV", "PROD"))
+    assert all(value in rendered for value in ("east", "west", "10", "20", "<NA>"))
+    assert "DEV ONLY: 1 rows" in rendered and "PROD ONLY: 1 rows" in rendered
+    assert "DEV ONLY sample rows:" in rendered and "source-only" in rendered
+    assert "PROD ONLY sample rows:" in rendered and "target-only" in rendered
+    assert row_diff.stats == original_stats
+    for name, frame in frames.items():
+        pd.testing.assert_frame_equal(getattr(row_diff, name), frame)
+
+
+def test_show_row_diff_without_samples(row_diff):
+    output = StringIO()
+
+    TerminalConsole(console=Console(file=output)).show_row_diff(row_diff, show_sample=False)
+
+    rendered = output.getvalue()
+    assert "PARTIAL MATCH: 2 rows (100.0%)" in rendered
+    assert "column comparison stats:" in rendered
+    assert "late" in rendered and "unchanged" in rendered
+    assert "sample" not in rendered
+    assert "Column:" not in rendered
+
+
+def test_show_row_diff_without_joined_sample(row_diff):
+    row_diff = row_diff.copy(
+        update={
+            "joined_sample": row_diff.joined_sample.iloc[:0],
+            "stats": {**row_diff.stats, "full_match_count": 2},
+        }
+    )
+    output = StringIO()
+
+    TerminalConsole(console=Console(file=output)).show_row_diff(row_diff)
+
+    rendered = output.getvalue()
+    assert "FULL MATCH: 2 rows (100.0%)" in rendered
+    assert "All joined rows match" in rendered
+    assert "Column:" not in rendered
 
 
 def test_markdown_console_warning_block():
