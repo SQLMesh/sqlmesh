@@ -526,7 +526,14 @@ class Scheduler:
             snapshot = self.snapshots_by_name[node.snapshot_name]
 
             if isinstance(node, EvaluateNode):
-                self.console.start_snapshot_evaluation_progress(snapshot)
+                if audit_only:
+                    self.console.start_snapshot_evaluation_progress(snapshot, audit_only=True)
+                else:
+                    self.console.start_snapshot_evaluation_progress(snapshot)
+                if not audit_only:
+                    self.console.start_snapshot_evaluation_batch(
+                        snapshot, node.interval, node.batch_index
+                    )
                 execution_start_ts = now_timestamp()
                 evaluation_duration_ms: t.Optional[int] = None
                 start, end = node.interval
@@ -574,18 +581,33 @@ class Scheduler:
                         SnapshotIdBatch(snapshot_id=snapshot.snapshot_id, batch_id=node.batch_index)
                     )
 
-                    self.console.update_snapshot_evaluation_progress(
-                        snapshot,
-                        batched_intervals[snapshot][node.batch_index],
-                        node.batch_index,
-                        evaluation_duration_ms,
-                        num_audits - num_audits_failed,
-                        num_audits_failed,
-                        execution_stats=execution_stats,
-                        auto_restatement_triggers=auto_restatement_triggers.get(
-                            snapshot.snapshot_id
-                        ),
-                    )
+                    if audit_only:
+                        self.console.update_snapshot_evaluation_progress(
+                            snapshot,
+                            batched_intervals[snapshot][node.batch_index],
+                            node.batch_index,
+                            evaluation_duration_ms,
+                            num_audits - num_audits_failed,
+                            num_audits_failed,
+                            audit_only=True,
+                            execution_stats=execution_stats,
+                            auto_restatement_triggers=auto_restatement_triggers.get(
+                                snapshot.snapshot_id
+                            ),
+                        )
+                    else:
+                        self.console.update_snapshot_evaluation_progress(
+                            snapshot,
+                            batched_intervals[snapshot][node.batch_index],
+                            node.batch_index,
+                            evaluation_duration_ms,
+                            num_audits - num_audits_failed,
+                            num_audits_failed,
+                            execution_stats=execution_stats,
+                            auto_restatement_triggers=auto_restatement_triggers.get(
+                                snapshot.snapshot_id
+                            ),
+                        )
             elif isinstance(node, CreateNode):
                 self.snapshot_evaluator.create_snapshot(
                     snapshot=snapshot,
