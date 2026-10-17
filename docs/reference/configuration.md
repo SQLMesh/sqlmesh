@@ -4,6 +4,14 @@ This page lists SQLMesh configuration options and their parameters. Learn more a
 
 Configuration options for model definitions are listed in the [model configuration reference page](./model_configuration.md).
 
+## Environment variables
+
+Project settings use environment variables beginning with `SQLMESH__`, with double underscores separating configuration fields. For example, `SQLMESH__MODEL_DEFAULTS__DIALECT=snowflake` sets the default model dialect, and `SQLMESH__DEFAULT_GATEWAY=production` sets the project's default gateway. These variables override values in configuration files. See the [configuration guide](../guides/configuration.md#environment-variables) for details.
+
+CLI option defaults use a single underscore after `SQLMESH`, such as `SQLMESH_PATHS`, `SQLMESH_CONFIG`, or `SQLMESH_PLAN_START`. An explicit CLI option takes precedence over its environment variable. For example, `SQLMESH_GATEWAY` selects the gateway for a command, while `SQLMESH__DEFAULT_GATEWAY` configures the project's default gateway.
+
+Export root CLI option variables before invoking SQLMesh. Root options are parsed before project `.env` files or a custom `--dotenv` file are loaded, so `SQLMESH_PATHS` inside a project `.env` cannot locate that project. Subcommand option variables can come from the loaded dotenv file, whose values replace existing process environment values. See the [CLI environment-variable reference](./cli.md#environment-variables) for naming, path lists, and precedence.
+
 ## Root configurations
 
 A SQLMesh project configuration consists of root level parameters within which other parameters are defined.

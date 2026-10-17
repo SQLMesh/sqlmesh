@@ -59,6 +59,21 @@ jobs:
 
 Next checkout the [Core Bot Behavior Configuration Guide](#core-bot-behavior-configuration-guide) to see how to configure the bot's core behavior. Then checkout [Bot Configuration](#bot-configuration) to see how to configure the bot's behavior in general. Finally, checkout [Custom Workflow Configuration](#custom-workflow-configuration) to see the full set of customizations available to the bot.
 
+### Project paths
+
+The bot shares the `SQLMESH_PATHS` environment variable with the `sqlmesh` CLI. You can use it instead of `-p` in a workflow step:
+
+```yaml
+- name: Run CI/CD Bot
+  env:
+    SQLMESH_PATHS: ${{ github.workspace }}
+  run: sqlmesh_cicd github --token ${{ secrets.GITHUB_TOKEN }} run-all
+```
+
+An explicit `-p` or `--paths` option replaces the entire environment path list. An unset or empty `SQLMESH_PATHS` uses the existing default project path. Export the variable in the workflow environment before invoking the bot; a project's `.env` file cannot locate the project that contains it.
+
+Spaces and Unicode characters remain part of each path. For multiple projects, separate paths with `:` on POSIX runners or `;` on Windows runners. Empty path-list segments refer to the current directory. Use repeated `-p` options for directory names that contain the platform's path separator. See the [CLI reference](../reference/cli.md#project-paths) for examples. Automatic command-option variables such as `SQLMESH_PLAN_START` apply to the main `sqlmesh` CLI; the bot shares the explicit `SQLMESH_PATHS` binding.
+
 ## Core Bot Behavior Configuration Guide
 
 There are two fundamental ways the bot can be configured: synchronized or desynchronized production code and data.

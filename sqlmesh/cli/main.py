@@ -66,7 +66,11 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
-@click.group(cls=_SQLMeshGroup, no_args_is_help=True)
+@click.group(
+    cls=_SQLMeshGroup,
+    no_args_is_help=True,
+    context_settings={"auto_envvar_prefix": "SQLMESH"},
+)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
 @opt.config
@@ -131,13 +135,6 @@ def cli(
     load = True
     # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
-    # The parent callback constructs Context before Click invokes the subcommand, so inspect its
-    # parsed args here.
-    if (
-        ctx.invoked_subcommand in OPTIONAL_LOCAL_COMMANDS
-        and "--local" in ctx.meta["subcommand_args"]
-    ):
-        load_state = False
 
     if len(paths) == 1:
         path = os.path.abspath(paths[0])
@@ -152,6 +149,19 @@ def cli(
         load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
+    # The subcommand is parsed after this callback. Resolve its local flag after dotenv loading
+    # so Context avoids state access for the same effective value the subcommand will receive.
+    if ctx.invoked_subcommand and ctx.invoked_subcommand in OPTIONAL_LOCAL_COMMANDS:
+        if "--local" in ctx.meta["subcommand_args"]:
+            load_state = False
+        else:
+            command = t.cast(click.Group, ctx.command).get_command(ctx, ctx.invoked_subcommand)
+            assert command is not None
+            with click.Context(command, info_name=ctx.invoked_subcommand, parent=ctx) as child:
+                local = next(param for param in command.params if param.name == "local")
+                value = local.value_from_envvar(child)
+                if value is not None:
+                    load_state = not local.type_cast_value(child, value)
     log_limit = list(configs.values())[0].log_limit
 
     remove_excess_logs(log_file_dir, log_limit)

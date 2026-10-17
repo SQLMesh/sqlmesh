@@ -7,7 +7,7 @@ Usage: sqlmesh [OPTIONS] COMMAND [ARGS]...
 
 Options:
   --version            Show the version and exit.
-  -p, --paths TEXT     Path(s) to the SQLMesh config/project.
+  -p, --paths PATH     Path(s) to the SQLMesh config/project.
   --config TEXT        Name of the config object. Only applicable to
                        configuration defined using Python script.
   --gateway TEXT       The name of the gateway.
@@ -51,6 +51,65 @@ Commands:
   ui                      Start a browser-based SQLMesh UI.
   lint                    Run the linter for the target model(s).
 ```
+
+## Environment variables
+
+CLI options accept defaults from environment variables. Use `SQLMESH_` followed by the uppercase command and option names, replacing hyphens with underscores. Include every command name for nested commands.
+
+| Environment variable | CLI option |
+| --- | --- |
+| `SQLMESH_PATHS` | `sqlmesh --paths` |
+| `SQLMESH_CONFIG` | `sqlmesh --config` |
+| `SQLMESH_PLAN_START` | `sqlmesh plan --start` |
+| `SQLMESH_TABLE_DIFF_LIMIT` | `sqlmesh table_diff --limit` |
+| `SQLMESH_STATE_EXPORT_OUTPUT_FILE` | `sqlmesh state export --output-file` |
+| `SQLMESH_TEST_LOCAL` | `sqlmesh test --local` |
+| `SQLMESH_LINT_LOCAL` | `sqlmesh lint --local` |
+
+Options with an explicit environment variable retain their names: `SQLMESH_GATEWAY`, `SQLMESH_IGNORE_WARNINGS`, and `SQLMESH_DOTENV_PATH`. Environment variables do not supply positional arguments, such as the environment in `sqlmesh plan dev`.
+
+An explicit CLI option takes precedence over its environment variable. For example, `sqlmesh plan --start 2025-02-01` uses that date even if `SQLMESH_PLAN_START` specifies another date. Values use the same type validation as the corresponding CLI option.
+
+### Project paths
+
+Set `SQLMESH_PATHS` to select a project when running SQLMesh from another directory:
+
+```bash
+export SQLMESH_PATHS="/work/analytics project"
+sqlmesh info
+```
+
+Spaces and Unicode characters remain part of each path. For multiple projects, separate paths with `:` on POSIX or `;` on Windows. For example, on POSIX:
+
+```bash
+export SQLMESH_PATHS="/work/analytics project:/work/finance α"
+sqlmesh info
+```
+
+In PowerShell, a single project path can be set with:
+
+```powershell
+$env:SQLMESH_PATHS = 'C:\work\analytics project'
+sqlmesh info
+```
+
+Windows path lists use semicolons, preserving drive-letter colons. Shell quotes delimit the assignment and are not part of the value.
+
+Explicit `-p` or `--paths` options replace the entire environment path list. Repeat the option to select multiple projects:
+
+```bash
+sqlmesh -p "/work/another project" -p "/work/finance α" info
+```
+
+An unset or empty `SQLMESH_PATHS` uses the existing default project path. Relative paths resolve from the invocation directory. Avoid leading, trailing, or repeated path separators: empty segments are retained and refer to the current directory. If a directory name contains the platform's path separator, pass it with an explicit `-p` option.
+
+### Dotenv timing and precedence
+
+Root options, including project paths, are parsed before SQLMesh loads project `.env` files or the file selected by `--dotenv`. Export `SQLMESH_PATHS` before invoking SQLMesh. A project `.env` file cannot select the project that SQLMesh must find to load that file. Other root options, such as `SQLMESH_CONFIG` and `SQLMESH_DOTENV_PATH`, also need to be present before invocation.
+
+For commands that load project configuration, subcommand options are parsed after dotenv loading. Variables such as `SQLMESH_PLAN_START`, `SQLMESH_TEST_LOCAL`, and `SQLMESH_LINT_LOCAL` can therefore come from the selected project's `.env` file. SQLMesh loads dotenv values with replacement enabled, so they can override values already in the process environment. Explicit CLI options still take precedence.
+
+CLI option variables are separate from the `SQLMESH__...` variables that configure project settings. See the [configuration reference](./configuration.md#environment-variables).
 
 ## audit
 
