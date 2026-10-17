@@ -24,7 +24,10 @@ import {
   traceError,
 } from './utilities/common/log'
 import { onDidChangePythonInterpreter } from './utilities/common/python'
-import { requiresLspRestart } from './utilities/common/configurationChange'
+import {
+  requiresLspRestart,
+  restartLspOnTelemetryChange,
+} from './utilities/common/configurationChange'
 import { coalesceAsync } from './utilities/coalesceAsync'
 import { sleep } from './utilities/sleep'
 import { ErrorType, handleError } from './utilities/errors'
@@ -128,6 +131,15 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   }
 
+  // Subscribe before starting the first server so a consent change during a
+  // slow startup is not lost. The subscription defers that restart until the
+  // first client and its test controller are fully initialized.
+  const telemetryRestartSubscription = restartLspOnTelemetryChange(
+    vscode.env.onDidChangeTelemetryEnabled,
+    restartLsp,
+  )
+  context.subscriptions.push(telemetryRestartSubscription)
+
   // commands needing the restart helper
   context.subscriptions.push(
     vscode.commands.registerCommand(
@@ -141,24 +153,34 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sqlmesh.signout', signOut(authProvider)),
   )
 
-  //  Instantiate the LSP client (once)
-  lspClient = new LSPClient()
-  const startResult = await lspClient.start()
-  if (isErr(startResult)) {
-    await handleError(
-      authProvider,
-      restartLsp,
-      startResult.error,
-      'Failed to start LSP',
-    )
+  // Instantiate the LSP client once. The telemetry subscription is completed
+  // in a finally block so even a failed initial start cannot leave every later
+  // telemetry change deferred forever.
+  const initialLspClient = new LSPClient()
+  lspClient = initialLspClient
+  let initialStartSucceeded = false
+  await telemetryRestartSubscription.runDuringInitialStart(async () => {
+    const startResult = await initialLspClient.start()
+    if (isErr(startResult)) {
+      await handleError(
+        authProvider,
+        restartLsp,
+        startResult.error,
+        'Failed to start LSP',
+      )
+      return
+    }
+
+    context.subscriptions.push(initialLspClient)
+
+    // Initialize the test controller
+    testControllerDisposable = setupTestController(initialLspClient)
+    context.subscriptions.push(testControllerDisposable, testController)
+    initialStartSucceeded = true
+  })
+  if (!initialStartSucceeded) {
     return // abort activation – nothing else to do
   }
-
-  context.subscriptions.push(lspClient)
-
-  // Initialize the test controller
-  testControllerDisposable = setupTestController(lspClient)
-  context.subscriptions.push(testControllerDisposable, testController)
 
   // Register the rendered model provider
   const renderedModelProvider = new RenderedModelProvider()
