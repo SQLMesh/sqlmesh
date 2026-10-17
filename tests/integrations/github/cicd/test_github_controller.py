@@ -12,7 +12,9 @@ from pytest_mock.plugin import MockerFixture
 from sqlmesh.core import constants as c
 from sqlmesh.core.config import CategorizerConfig
 from sqlmesh.core.dialect import parse_one
+from sqlmesh.core.environment import EnvironmentNamingInfo, EnvironmentStatements
 from sqlmesh.core.model import SqlModel
+from sqlmesh.core.snapshot import SnapshotChangeCategory
 from sqlmesh.core.user import User, UserRole
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.linter.rule import RuleViolation
@@ -798,6 +800,60 @@ def test_get_plan_summary_includes_warnings_and_errors(
     assert (
         "> Linter **errors** for `tests/linter_test.sql`:\n>  - mock_linter_rule: Linter error\n>"
     ) in summary
+
+
+def test_get_plan_summary_preserves_literal_sql(
+    github_client, make_controller, make_snapshot, mocker
+):
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json", github_client
+    )
+    context_diff = controller.prod_plan.context_diff
+    old, new = [
+        make_snapshot(
+            SqlModel(
+                name="test.model",
+                dialect="tsql",
+                query=parse_one(f"SELECT [{column}] FROM [schema].[table]", dialect="tsql"),
+            )
+        )
+        for column in ("old_col", "new_col")
+    ]
+    new.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+    context_diff.is_new_environment = False
+    context_diff.added = set()
+    context_diff.snapshots = {new.snapshot_id: new}
+    context_diff.modified_snapshots = {new.name: (new, old)}
+    context_diff.environment_statements = [
+        EnvironmentStatements(
+            before_all=["SELECT [before] FROM [schema].[table]"],
+            after_all=["SELECT ':smile: [/invalid] ```' AS [after]"],
+            python_env={},
+        )
+    ]
+    plan = mocker.Mock(
+        spec=Plan,
+        context_diff=context_diff,
+        restatements={},
+        missing_intervals=[],
+        user_provided_flags={},
+        environment_naming_info=EnvironmentNamingInfo(),
+    )
+    controller._console.log_success("stale output")
+    github_client.reset_mock()
+
+    summary = controller.get_plan_summary(plan)
+
+    diff = context_diff.text_diff(new.name)
+    assert (
+        "  ```diff\n" + "\n".join(f"  {line}" for line in diff.split("\n")) + "\n  ```\n" in summary
+    )
+    for _, diff in context_diff.environment_statements_diff():
+        fence = "````" if "```" in diff else "```"
+        assert f"{fence}diff\n{diff}\n{fence}\n" in summary
+    assert "stale output" not in summary
+    assert controller._console.consume_captured_output() == ""
+    assert not github_client.mock_calls
 
 
 def test_get_pr_environment_summary_includes_warnings_and_errors(
