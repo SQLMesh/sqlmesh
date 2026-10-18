@@ -83,6 +83,8 @@ export async function activate(context: vscode.ExtensionContext) {
    * the run that is still waiting on the handler.
    */
   let restartError: ErrorType | undefined
+  // A retry during activation can succeed even when the first start failed.
+  let lspStartSucceeded = false
 
   const runRestart = async (): Promise<void> => {
     const invokedByUser = restartInvokedByUser
@@ -110,6 +112,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     testControllerDisposable = setupTestController(lspClient)
     context.subscriptions.push(testControllerDisposable)
+    lspStartSucceeded = true
   }
 
   /**
@@ -158,7 +161,6 @@ export async function activate(context: vscode.ExtensionContext) {
   // telemetry change deferred forever.
   const initialLspClient = new LSPClient()
   lspClient = initialLspClient
-  let initialStartSucceeded = false
   await telemetryRestartSubscription.runDuringInitialStart(async () => {
     const startResult = await initialLspClient.start()
     if (isErr(startResult)) {
@@ -175,12 +177,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize the test controller
     testControllerDisposable = setupTestController(initialLspClient)
-    context.subscriptions.push(testControllerDisposable, testController)
-    initialStartSucceeded = true
+    context.subscriptions.push(testControllerDisposable)
+    lspStartSucceeded = true
   })
-  if (!initialStartSucceeded) {
+  if (!lspStartSucceeded) {
     return // abort activation – nothing else to do
   }
+  context.subscriptions.push(testController)
 
   // Register the rendered model provider
   const renderedModelProvider = new RenderedModelProvider()
