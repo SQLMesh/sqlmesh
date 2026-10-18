@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * The shell families we know how to print environment variables in.
  */
@@ -6,10 +8,16 @@ export type ShellFamily = 'fish' | 'powershell' | 'cmd' | 'posix'
 /**
  * Commands that list the environment variables of the current shell, one per
  * shell family.
+ *
+ * `set -x` is fish's exported-only listing, which matches what the other
+ * families print; a bare `set` would also include shell-local variables.
+ * PowerShell formats each variable itself because the default table view
+ * truncates values at the console width.
  */
 const PRINT_ENVIRONMENT_COMMANDS: Record<ShellFamily, string> = {
-  fish: 'set',
-  powershell: 'Get-ChildItem Env: | Sort-Object Name',
+  fish: 'set -x',
+  powershell:
+    "Get-ChildItem Env: | Sort-Object Name | ForEach-Object { '{0}={1}' -f $_.Name, $_.Value }",
   cmd: 'set',
   posix: 'env | sort',
 }

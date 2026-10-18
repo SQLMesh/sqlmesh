@@ -1,5 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, it, expect } from 'vitest'
 import { detectShellFamily, printEnvironmentCommand } from './shellCommand'
+
+const POWERSHELL_COMMAND =
+  "Get-ChildItem Env: | Sort-Object Name | ForEach-Object { '{0}={1}' -f $_.Name, $_.Value }"
 
 describe('detectShellFamily', () => {
   it('should detect fish', () => {
@@ -62,8 +67,8 @@ describe('detectShellFamily', () => {
 })
 
 describe('printEnvironmentCommand', () => {
-  it('should use set in fish', () => {
-    expect(printEnvironmentCommand('/usr/bin/fish', false)).toBe('set')
+  it('should use the exported-only set in fish', () => {
+    expect(printEnvironmentCommand('/usr/bin/fish', false)).toBe('set -x')
   })
 
   it('should use env | sort in POSIX shells', () => {
@@ -84,7 +89,14 @@ describe('printEnvironmentCommand', () => {
         'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
         true,
       ),
-    ).toBe('Get-ChildItem Env: | Sort-Object Name')
+    ).toBe(POWERSHELL_COMMAND)
+  })
+
+  it('should use the PowerShell command for pwsh off Windows', () => {
+    expect(printEnvironmentCommand('/usr/local/bin/pwsh', false)).toBe(
+      POWERSHELL_COMMAND,
+    )
+    expect(printEnvironmentCommand('pwsh', false)).toBe(POWERSHELL_COMMAND)
   })
 
   it('should keep the previous behaviour when the shell is unknown', () => {
