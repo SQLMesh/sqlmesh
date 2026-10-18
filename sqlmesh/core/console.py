@@ -1102,6 +1102,7 @@ class TerminalConsole(Console):
         num_audits_passed: int = 0,
         num_audits_failed: int = 0,
         execution_stats: t.Optional[QueryExecutionStats] = None,
+        soft_wrap: t.Optional[bool] = None,
     ) -> None:
         """Print one evaluation row (Running or completion) to the live console.
 
@@ -1147,7 +1148,7 @@ class TerminalConsole(Console):
             f"{f'{batch} ' if not audit_only else ''}{display_name}   {annotation}   {status_col}"
         ).replace(self.AUDIT_PASS_MARK, self.GREEN_AUDIT_PASS_MARK)
 
-        self.evaluation_progress_live.console.print(msg, soft_wrap=True)
+        self.evaluation_progress_live.console.print(msg, soft_wrap=soft_wrap)
 
     def start_snapshot_evaluation_progress(
         self, snapshot: Snapshot, audit_only: bool = False
@@ -1168,7 +1169,7 @@ class TerminalConsole(Console):
         self, snapshot: Snapshot, interval: Interval, batch_idx: int
     ) -> None:
         """Print a durable running row so the active batch appears in captured output."""
-        self._print_evaluation_row(snapshot, interval, batch_idx, "Running")
+        self._print_evaluation_row(snapshot, interval, batch_idx, "Running", soft_wrap=True)
 
     def update_snapshot_evaluation_progress(
         self,
@@ -1203,7 +1204,7 @@ class TerminalConsole(Console):
                     execution_stats=execution_stats,
                 )
             elif not audit_only:
-                self._print_evaluation_row(snapshot, interval, batch_idx, "Failed")
+                self._print_evaluation_row(snapshot, interval, batch_idx, "Failed", soft_wrap=True)
 
             self.evaluation_total_progress.update(
                 self.evaluation_total_task or TaskID(0), refresh=True, advance=1

@@ -147,7 +147,10 @@ def test_markdown_console_error_block():
 def _make_evaluation_console(width: int = 200, force_terminal: bool = True) -> tuple:
     """Return (buf, TerminalConsole) backed by a no-color in-memory console."""
     buf = io.StringIO()
-    rich = RichConsole(file=buf, force_terminal=force_terminal, no_color=True, width=width)
+    # Rich otherwise ignores width for TERM=dumb when height is unspecified.
+    rich = RichConsole(
+        file=buf, force_terminal=force_terminal, no_color=True, width=width, height=25
+    )
     return buf, TerminalConsole(console=rich)
 
 
@@ -212,6 +215,42 @@ def test_snapshot_evaluation_running_row(make_snapshot, force_terminal: bool):
         f"  Running : {running_stripped!r}\n"
         f"  Duration: {duration_stripped!r}"
     )
+
+
+def test_snapshot_evaluation_long_name_wrapping(make_snapshot):
+    model_name = f"silver.{'a' * 80}"
+    snapshot = make_snapshot(
+        SqlModel(
+            name=model_name,
+            kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ts")),
+            cron="@hourly",
+            query=parse_one("SELECT ts FROM tbl"),
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    interval = (to_timestamp("2026-07-17 13:00:00"), to_timestamp("2026-07-17 14:00:00"))
+    buf, console = _make_evaluation_console(width=80, force_terminal=False)
+    console.start_evaluation_progress(
+        {snapshot: [interval]}, EnvironmentNamingInfo(), default_catalog=None
+    )
+    console.start_snapshot_evaluation_progress(snapshot)
+    console.start_snapshot_evaluation_batch(snapshot, interval, 0)
+
+    running_lines = _readable_lines(buf)
+    assert len(running_lines) == 1
+    assert model_name in running_lines[0]
+    assert "13:00:00-13:59:59" in running_lines[0]
+    assert running_lines[0].rstrip().endswith("Running")
+
+    completion_offset = buf.tell()
+    console.update_snapshot_evaluation_progress(snapshot, interval, 0, 1234, 0, 0)
+    completion_lines = buf.getvalue()[completion_offset:].splitlines()
+    console.stop_evaluation_progress(success=False)
+
+    assert len(completion_lines) > 1
+    assert all(len(line) <= 80 for line in completion_lines)
+    assert model_name in "".join(line.rstrip() for line in completion_lines)
+    assert "1.23s" in "".join(completion_lines)
 
 
 def test_snapshot_evaluation_zero_duration(make_snapshot):
