@@ -54,13 +54,17 @@ Commands:
 
 ## Environment variables
 
-CLI options accept defaults from environment variables. Use `SQLMESH_` followed by the uppercase command and option names, replacing hyphens with underscores. Include every command name for nested commands.
+CLI options accept defaults from environment variables. Use `SQLMESH_` followed by the command names and the option's Click parameter name, all uppercase with hyphens replaced by underscores. Include every command name for nested commands. The parameter name usually matches the long option, but some differ, as shown below. Aliases share the same environment variable.
 
 | Environment variable | CLI option |
 | --- | --- |
 | `SQLMESH_PATHS` | `sqlmesh --paths` |
 | `SQLMESH_CONFIG` | `sqlmesh --config` |
 | `SQLMESH_PLAN_START` | `sqlmesh plan --start` |
+| `SQLMESH_PLAN_SKIP_BACKFILL` | `sqlmesh plan --skip-backfill` or `sqlmesh plan --dry-run` |
+| `SQLMESH_AUDIT_MODELS` | `sqlmesh audit --model` |
+| `SQLMESH_CREATE_TEST_QUERIES` | `sqlmesh create_test --query` |
+| `SQLMESH_CREATE_TEST_VARIABLES` | `sqlmesh create_test --var` |
 | `SQLMESH_TABLE_DIFF_LIMIT` | `sqlmesh table_diff --limit` |
 | `SQLMESH_STATE_EXPORT_OUTPUT_FILE` | `sqlmesh state export --output-file` |
 | `SQLMESH_TEST_LOCAL` | `sqlmesh test --local` |
