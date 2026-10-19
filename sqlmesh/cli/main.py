@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
+import threading
 import typing as t
 from pathlib import Path
 
@@ -66,6 +68,10 @@ def _sqlmesh_version() -> str:
         return "0.0.0"
 
 
+def _exit_on_sigterm(signum: int, frame: t.Any) -> None:
+    raise SystemExit(128 + signum)
+
+
 @click.group(cls=_SQLMeshGroup, no_args_is_help=True)
 @click.version_option(version=_sqlmesh_version(), message="%(version)s")
 @opt.paths
@@ -119,6 +125,14 @@ def cli(
     """SQLMesh command line tool."""
     if "--help" in sys.argv:
         return
+
+    if threading.current_thread() is threading.main_thread():
+        # Handle SIGTERM (e.g. from CI cancellation) like Ctrl-C, so that running work is stopped
+        # and the context is closed before exiting.
+        previous_sigterm_handler = signal.signal(signal.SIGTERM, _exit_on_sigterm)
+        # The CLI can also run inside another process (e.g. tests using CliRunner), where the
+        # handler shouldn't outlive the command.
+        ctx.call_on_close(lambda: signal.signal(signal.SIGTERM, previous_sigterm_handler))
 
     configure_logging(
         debug,

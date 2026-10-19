@@ -1,6 +1,7 @@
 import json
 import os
 import pytest
+import signal
 import string
 import time_machine
 from os import getcwd, path, remove
@@ -2976,3 +2977,18 @@ test_py_model:
     assert result.exit_code != 0
     assert "is not a known model or test file" in result.output
     mock.assert_not_called()
+
+
+def test_sigterm_closes_context_and_exits(runner, tmp_path, mocker):
+    create_example_project(tmp_path)
+    mocker.patch.object(
+        Context, "plan", side_effect=lambda *args, **kwargs: signal.raise_signal(signal.SIGTERM)
+    )
+    close = mocker.patch.object(Context, "close")
+    previous_handler = signal.getsignal(signal.SIGTERM)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan"])
+
+    assert result.exit_code == 128 + signal.SIGTERM, result.output
+    close.assert_called_once()
+    assert signal.getsignal(signal.SIGTERM) is previous_handler
