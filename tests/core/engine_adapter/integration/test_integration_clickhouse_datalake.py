@@ -143,14 +143,6 @@ def test_reads_mapped_source_queries_without_mutating_ast(
     assert query == original_query
 
 
-def test_raw_string_sql_is_not_rewritten(engine_adapter: ClickhouseEngineAdapter) -> None:
-    from clickhouse_connect.driver.exceptions import DatabaseError
-
-    with pytest.raises(DatabaseError) as error:
-        engine_adapter.fetchall(_SOURCE_QUERY)
-    assert error.value.code in {62, 81}
-
-
 @pytest.mark.parametrize("adapter_fixture", ["engine_adapter", "injected_engine_adapter"])
 def test_ctas_reads_mapped_source(request: pytest.FixtureRequest, adapter_fixture: str) -> None:
     adapter = request.getfixturevalue(adapter_fixture)

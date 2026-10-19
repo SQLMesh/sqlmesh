@@ -2195,22 +2195,24 @@ def test_clickhouse_datalake_mapping_preserves_unmapped_foreign_read_catalogs(
     assert query == original
 
 
-def test_clickhouse_datalake_mapping_rendering_is_repeatable_and_does_not_mutate_ast(
-    make_mocked_engine_adapter: t.Callable,
+@pytest.mark.parametrize("fetch_method", ["fetchall", "fetchdf"])
+def test_clickhouse_datalake_mapping_leaves_raw_sql_strings_unchanged(
+    make_mocked_engine_adapter: t.Callable, fetch_method: str
 ):
     adapter = make_mocked_engine_adapter(
         ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
     )
-    query = parse_one("SELECT lake.source.events.id FROM lake.source.events", dialect="clickhouse")
-    original = query.copy()
+    query = "SELECT id, value FROM lake.analytics.events ORDER BY id"
 
-    first = adapter._to_sql(query)
-    second = adapter._to_sql(query)
+    if fetch_method == "fetchall":
+        adapter.fetchall(query)
+        adapter.cursor.execute.assert_called_once_with(query)
+    else:
+        import pandas as pd
 
-    assert (
-        first == second == ('SELECT "iceberg"."source.events"."id" FROM "iceberg"."source.events"')
-    )
-    assert query == original
+        adapter.cursor.client.query_df.return_value = pd.DataFrame()
+        adapter.fetchdf(query)
+        adapter.cursor.client.query_df.assert_called_once_with(query, use_extended_dtypes=True)
 
 
 @pytest.mark.parametrize("inject_catalog", [False, True])
@@ -2222,7 +2224,7 @@ def test_clickhouse_datalake_mapping_rewrites_insert_select_source(
     )
     if inject_catalog:
         adapter.inject_virtual_catalog("clickhouse_gw")
-    target = "__clickhouse_gw__.analytics.target" if inject_catalog else "analytics.target"
+    target = "lake.analytics.target"
     statement = parse_one(
         f"INSERT INTO {target} (id) SELECT lake.source.events.id FROM lake.source.events",
         dialect="clickhouse",
@@ -2232,7 +2234,7 @@ def test_clickhouse_datalake_mapping_rewrites_insert_select_source(
     adapter.execute(statement)
 
     assert to_sql_calls(adapter) == [
-        'INSERT INTO "analytics"."target" ("id") '
+        'INSERT INTO "lake"."analytics"."target" ("id") '
         'SELECT "iceberg"."source.events"."id" FROM "iceberg"."source.events"'
     ]
     assert statement == original

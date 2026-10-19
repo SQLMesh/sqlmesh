@@ -12,6 +12,9 @@ Run the complete fixture and test module:
 make clickhouse-datalake-test
 ```
 
+The PR CI Docker matrix runs this target as `clickhouse-datalake`. It uploads the JUnit
+report at `test-results/junit-clickhouse-datalake.xml` and stops the services after the run.
+
 If Docker runs under a named context, set `DOCKER_CONTEXT` for each Make command. For example, with a context named `colima`:
 
 ```bash
@@ -59,7 +62,6 @@ The tests check the ClickHouse version and read the seeded table. They also cove
 
 - Mapped reads with qualified tables, aliases, qualified columns, and CTEs, with and without virtual catalog injection.
 - Preserving the original query AST.
-- Passing raw SQL strings through unchanged.
 - CTAS, append, and replace materializations.
 - Rejection of an unknown source before CTAS creates its target.
 - Stripping the injected virtual catalog from local reads.

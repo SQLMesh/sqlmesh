@@ -203,7 +203,7 @@ clickhouse-datalake-test:
 	docker info >/dev/null
 	$(MAKE) engine-clickhouse-install
 	$(MAKE) clickhouse-datalake-up
-	SQLMESH_RUN_CLICKHOUSE_DATALAKE=1 pytest -n 0 -m "docker and clickhouse_datalake" tests/core/engine_adapter/integration/test_integration_clickhouse_datalake.py
+	SQLMESH_RUN_CLICKHOUSE_DATALAKE=1 pytest -n 0 -m "docker and clickhouse_datalake" tests/core/engine_adapter/integration/test_integration_clickhouse_datalake.py --junitxml=test-results/junit-clickhouse-datalake.xml
 
 clickhouse-datalake-down:
 	$(CLICKHOUSE_DATALAKE_COMPOSE) down -v --remove-orphans
