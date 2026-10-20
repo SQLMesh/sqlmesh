@@ -11,8 +11,23 @@ from datetime import datetime
 from pytest_mock.plugin import MockerFixture
 from sqlmesh.core import dialect as d
 from sqlglot.optimizer.qualify_columns import quote_identifiers
+from sqlmesh.utils.errors import SQLMeshError
 
 pytestmark = [pytest.mark.clickhouse, pytest.mark.engine]
+
+_HAS_REPLICATED_DATABASE_PROPERTY = ClickhouseEngineAdapter.__dict__["_has_replicated_database"]
+
+
+@pytest.fixture(autouse=True)
+def no_replicated_database_by_default(mocker) -> None:
+    """Default every adapter in this module to a server with no `Replicated` database.
+
+    That is the world these tests describe, and in it `ON CLUSTER` behaviour is exactly
+    what it was before the Replicated-aware policy existed. Seeding the probe keeps the
+    introspection query out of the asserted SQL and makes the assumption explicit.
+    `test_on_cluster_*` re-patches this to cover the other side.
+    """
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", False)
 
 
 @pytest.fixture
@@ -1066,7 +1081,7 @@ def test_insert_overwrite_by_condition_replace_partitioned(
     )
 
     assert to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
@@ -1104,7 +1119,7 @@ def test_insert_overwrite_by_condition_replace(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
@@ -1153,7 +1168,7 @@ def test_insert_overwrite_by_condition_where_partitioned(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         """INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30'""",
         """CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30' UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions\"""",
         """INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("ds" BETWEEN '2024-02-15' AND '2024-04-30') AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")""",
@@ -1204,12 +1219,12 @@ def test_insert_overwrite_by_condition_by_key(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd"))',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd"))',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
@@ -1267,13 +1282,13 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
         'CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")',
         """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")',
@@ -1316,7 +1331,7 @@ def test_insert_overwrite_by_condition_inc_by_partition(
     )
 
     to_sql_calls(adapter) == [
-        "CREATE TABLE __temp_target_abcd AS __temp_existing_records_abcd",
+        'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd\"""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
@@ -1596,6 +1611,124 @@ def test_virtual_catalog_stripped_in_alter_table(make_mocked_engine_adapter: t.C
     assert "ALTER TABLE" in sql_calls[0]
 
 
+@pytest.mark.parametrize(
+    "query_sql, expected_sql",
+    [
+        (
+            'INSERT INTO __ch_gw__.mydb.target ("id") '
+            "SELECT __ch_gw__.mydb.source.id FROM __ch_gw__.mydb.source",
+            'INSERT INTO "mydb"."target" ("id") SELECT "mydb"."source"."id" FROM "mydb"."source"',
+        ),
+        (
+            "SELECT __ch_gw__.mydb.source.id, '__ch_gw__.literal' FROM __ch_gw__.mydb.source "
+            "JOIN other_catalog.otherdb.source ON __ch_gw__.mydb.source.id = "
+            "other_catalog.otherdb.source.id",
+            'SELECT "mydb"."source"."id", \'__ch_gw__.literal\' FROM "mydb"."source" JOIN '
+            '"other_catalog"."otherdb"."source" ON "mydb"."source"."id" = '
+            '"other_catalog"."otherdb"."source"."id"',
+        ),
+    ],
+)
+def test_virtual_catalog_stripped_from_execute_queries(
+    make_mocked_engine_adapter: t.Callable, query_sql: str, expected_sql: str
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    query = parse_one(query_sql, dialect="clickhouse")
+    original_sql = query.sql(dialect="clickhouse")
+
+    adapter.execute(query)
+
+    assert query.sql(dialect="clickhouse") == original_sql
+    assert to_sql_calls(adapter) == [expected_sql]
+
+
+def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+
+    adapter.ctas(
+        "__ch_gw__.mydb.target",
+        parse_one("SELECT __ch_gw__.mydb.source.id FROM __ch_gw__.mydb.source"),
+        {"id": exp.DataType.build("Int32")},
+    )
+    adapter.delete_from(
+        "__ch_gw__.mydb.target",
+        "__ch_gw__.mydb.target.id IN (SELECT id FROM __ch_gw__.mydb.source)",
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "mydb"."target" ENGINE=MergeTree ORDER BY () AS '
+        'SELECT CAST("id" AS Nullable(Int32)) AS "id" FROM '
+        '(SELECT "mydb"."source"."id" FROM "mydb"."source") AS "_subquery"',
+        'DELETE FROM "mydb"."target" WHERE "mydb"."target"."id" IN '
+        '(SELECT "id" FROM "mydb"."source")',
+    ]
+
+
+def test_virtual_catalog_stripped_from_insert_overwrite(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table",
+        return_value=exp.to_table("__ch_gw__.mydb.__temp_target_abcd"),
+    )
+    mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone", return_value=None)
+
+    source_queries, columns_to_types = adapter._get_source_queries_and_columns_to_types(
+        parse_one("SELECT * FROM __ch_gw__.mydb.source"),
+        {"id": exp.DataType.build("Int8", dialect="clickhouse")},
+        "__ch_gw__.mydb.target",
+    )
+    adapter._insert_overwrite_by_condition(
+        "__ch_gw__.mydb.target", source_queries, columns_to_types
+    )
+
+    assert [call.args[0] for call in adapter.cursor.execute.call_args_list] == [
+        'CREATE TABLE "mydb"."__temp_target_abcd" AS "mydb"."target"',
+        'INSERT INTO "mydb"."__temp_target_abcd" ("id") SELECT "id" FROM '
+        '(SELECT * FROM "mydb"."source") AS "_subquery"',
+        'EXCHANGE TABLES "mydb"."target" AND "mydb"."__temp_target_abcd"',
+        'DROP TABLE IF EXISTS "mydb"."__temp_target_abcd"',
+    ]
+
+
+def test_virtual_catalog_stripped_from_rename_table(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+
+    adapter.rename_table("__ch_gw__.mydb.old_table", "__ch_gw__.mydb.new_table")
+
+    assert [call.args[0] for call in adapter.cursor.execute.call_args_list] == [
+        'RENAME TABLE "mydb"."old_table" TO "mydb"."new_table"',
+    ]
+
+
+def test_virtual_catalog_stripped_from_comments(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("ch_gw")
+
+    adapter._create_table_comment("__ch_gw__.mydb.target", "table comment")
+    adapter._create_column_comments("__ch_gw__.mydb.target", {"id": "column comment"})
+
+    assert [call.args[0] for call in adapter.cursor.execute.call_args_list] == [
+        'ALTER TABLE "mydb"."target" MODIFY COMMENT \'table comment\'',
+        'ALTER TABLE "mydb"."target" COMMENT COLUMN "id" \'column comment\'',
+    ]
+
+
+def test_three_part_names_unchanged_without_virtual_catalog(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+
+    adapter.execute(parse_one("SELECT * FROM __ch_gw__.mydb.source", dialect="clickhouse"))
+
+    assert to_sql_calls(adapter) == ['SELECT * FROM "__ch_gw__"."mydb"."source"']
+
+
 def test_virtual_catalog_stripped_from_create_view_source(
     make_mocked_engine_adapter: t.Callable,
 ):
@@ -1637,3 +1770,325 @@ def test_create_view_source_rejects_unexpected_virtual_catalog(
             "__clickhouse_gw__.my_db.connection_test__dev",
             parse_one("SELECT * FROM unexpected_catalog.my_db.physical_view"),
         )
+
+
+# Replicated-aware ON CLUSTER policy.
+#
+# Inside a `Replicated` database Keeper already propagates object DDL, so emitting
+# `ON CLUSTER` fans the statement out a second time and double-applies it. The policy is
+# per target database, because one connection can hold both an Atomic and a `Replicated`
+# database and objects in the Atomic one still need `ON CLUSTER`.
+
+
+def _on_cluster_adapter(
+    make_mocked_engine_adapter: t.Callable,
+    mocker,
+    engines: t.Dict[str, t.Optional[str]],
+    connection_database: t.Optional[str] = "default",
+) -> ClickhouseEngineAdapter:
+    """An adapter on a cluster whose databases have the given engines."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
+    mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", connection_database)
+    mocker.patch.object(
+        ClickhouseEngineAdapter,
+        "_database_engine",
+        lambda self, database: engines.get(database),
+    )
+    return adapter
+
+
+def test_on_cluster_predicate(make_mocked_engine_adapter: t.Callable, mocker):
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        {"atomic_db": "Atomic", "replicated_db": "Replicated", "memory_db": "Memory"},
+    )
+
+    # A Replicated target is the only case that suppresses.
+    assert adapter._should_use_on_cluster(exp.to_table("atomic_db.t")) is True
+    assert adapter._should_use_on_cluster(exp.to_table("replicated_db.t")) is False
+    assert adapter._should_use_on_cluster(exp.to_table("memory_db.t")) is True
+
+    # Fails open: an unknown target or an unresolvable database keeps today's behaviour.
+    assert adapter._should_use_on_cluster(None) is True
+    assert adapter._should_use_on_cluster(exp.to_table("absent_db.t")) is True
+
+    # A bare name resolves to the connection's database rather than counting as unknown.
+    mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", "replicated_db")
+    assert adapter._should_use_on_cluster(exp.to_table("t")) is False
+
+
+def test_on_cluster_predicate_off_cluster_never_emits(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    assert adapter._should_use_on_cluster(exp.to_table("any_db.t")) is False
+
+
+def test_on_cluster_predicate_short_circuits_without_a_replicated_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    """The no-op guarantee: no Replicated database means no lookup and no behaviour change."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+
+    assert adapter._should_use_on_cluster(exp.to_table("any_db.t")) is True
+    assert to_sql_calls(adapter) == []
+
+
+def test_on_cluster_predicate_strips_the_virtual_catalog(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = _on_cluster_adapter(make_mocked_engine_adapter, mocker, {"my_db": "Replicated"})
+    adapter.inject_virtual_catalog("clickhouse_gw")
+
+    assert adapter._should_use_on_cluster(exp.to_table("__clickhouse_gw__.my_db.t")) is False
+
+
+def test_database_engine_lookup_is_cached_and_fails_open(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+
+    fetchone = mocker.patch.object(ClickhouseEngineAdapter, "fetchone", return_value=("Atomic",))
+    assert adapter._database_engine("some_db") == "Atomic"
+    assert adapter._database_engine("some_db") == "Atomic"
+    assert fetchone.call_count == 1, "engine lookup should be cached per database"
+
+    # An introspection failure resolves to None, which the predicate treats as "emit".
+    mocker.patch.object(ClickhouseEngineAdapter, "fetchone", side_effect=Exception("boom"))
+    assert adapter._database_engine("other_db") is None
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
+    mocker.patch.object(ClickhouseEngineAdapter, "_connection_database", "default")
+    assert adapter._should_use_on_cluster(exp.to_table("other_db.t")) is True
+
+
+@pytest.mark.parametrize(
+    ("target", "metadata_results", "expected_diagnostic"),
+    [
+        pytest.param(
+            "replicated_db.t",
+            [RuntimeError("probe unavailable"), (1,), ("Replicated",)],
+            "Failed to check for Replicated ClickHouse databases; keeping ON CLUSTER: probe unavailable",
+            id="replicated-database-probe",
+        ),
+        pytest.param(
+            "replicated_db.t",
+            [(1,), RuntimeError("engine unavailable"), ("Replicated",)],
+            "Failed to determine engine for ClickHouse database 'replicated_db'; keeping ON CLUSTER: engine unavailable",
+            id="database-engine",
+        ),
+        pytest.param(
+            "t",
+            [
+                (1,),
+                RuntimeError("current database unavailable"),
+                ("replicated_db",),
+                ("Replicated",),
+            ],
+            "Failed to determine current ClickHouse database; keeping ON CLUSTER: current database unavailable",
+            id="current-database",
+        ),
+    ],
+)
+def test_object_ddl_retries_failed_metadata_lookups(
+    make_mocked_engine_adapter: t.Callable,
+    mocker,
+    caplog,
+    target: str,
+    metadata_results: t.List[t.Any],
+    expected_diagnostic: str,
+):
+    """A transient metadata failure warns once, then a successful result is cached."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+    # Restore the real probe because the module fixture stubs it for other tests.
+    mocker.patch.object(
+        ClickhouseEngineAdapter,
+        "_has_replicated_database",
+        _HAS_REPLICATED_DATABASE_PROPERTY,
+    )
+
+    fetchone = mocker.patch.object(adapter, "fetchone", side_effect=metadata_results)
+    caplog.set_level("WARNING", logger="sqlmesh.core.engine_adapter.clickhouse")
+    caplog.clear()
+
+    adapter.drop_table(target)
+    assert [record.getMessage() for record in caplog.records] == [expected_diagnostic]
+
+    adapter.drop_table(target)
+    adapter.drop_table(target)
+    assert [record.getMessage() for record in caplog.records] == [expected_diagnostic]
+
+    target_sql = '"replicated_db"."t"' if "." in target else '"t"'
+    assert to_sql_calls(adapter) == [
+        f'DROP TABLE IF EXISTS {target_sql} ON CLUSTER "my_cluster"',
+        f"DROP TABLE IF EXISTS {target_sql}",
+        f"DROP TABLE IF EXISTS {target_sql}",
+    ]
+    assert fetchone.call_count == len(metadata_results)
+
+
+def test_on_cluster_suppressed_for_replicated_object_ddl(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """Per-site rendering: the same statement against Atomic and Replicated targets."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    adapter.delete_from(exp.to_table("a_db.t"), "x = 1")
+    adapter.delete_from(exp.to_table("r_db.t"), "x = 1")
+    adapter.drop_table("a_db.t")
+    adapter.drop_table("r_db.t")
+    adapter._create_table_like("a_db.copy", "a_db.t", exists=False)
+    adapter._create_table_like("r_db.copy", "r_db.t", exists=False)
+
+    assert to_sql_calls(adapter) == [
+        'DELETE FROM "a_db"."t" ON CLUSTER "my_cluster" WHERE "x" = 1',
+        'DELETE FROM "r_db"."t" WHERE "x" = 1',
+        'DROP TABLE IF EXISTS "a_db"."t" ON CLUSTER "my_cluster"',
+        'DROP TABLE IF EXISTS "r_db"."t"',
+        # The doubled space is pre-existing: _on_cluster_sql renders a padded clause.
+        'CREATE TABLE "a_db"."copy" ON CLUSTER "my_cluster"  AS "a_db"."t"',
+        'CREATE TABLE "r_db"."copy" AS "r_db"."t"',
+    ]
+
+
+def test_on_cluster_suppressed_for_replicated_create_table_and_view(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """Covers the two shared-code property builders, which get their target from base."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+    columns_to_types = {"id": exp.DataType.build("UInt64", dialect="clickhouse")}
+
+    adapter.create_table("a_db.t", columns_to_types)
+    adapter.create_table("r_db.t", columns_to_types)
+    adapter.create_view("a_db.v", parse_one("SELECT 1 AS id"))
+    adapter.create_view("r_db.v", parse_one("SELECT 1 AS id"))
+
+    calls = to_sql_calls(adapter)
+    assert 'ON CLUSTER "my_cluster"' in calls[0]
+    assert "ON CLUSTER" not in calls[1]
+    assert 'ON CLUSTER "my_cluster"' in calls[2]
+    assert "ON CLUSTER" not in calls[3]
+
+
+def test_on_cluster_suppressed_for_replicated_comments(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    assert 'ON CLUSTER "my_cluster"' in adapter._build_create_comment_table_exp(
+        exp.to_table("a_db.t"), "hi", "TABLE"
+    )
+    assert "ON CLUSTER" not in adapter._build_create_comment_table_exp(
+        exp.to_table("r_db.t"), "hi", "TABLE"
+    )
+    assert 'ON CLUSTER "my_cluster"' in adapter._build_create_comment_column_exp(
+        exp.to_table("a_db.t"), "id", "hi"
+    )
+    assert "ON CLUSTER" not in adapter._build_create_comment_column_exp(
+        exp.to_table("r_db.t"), "id", "hi"
+    )
+
+
+def test_database_ddl_is_always_on_cluster(make_mocked_engine_adapter: t.Callable, mocker):
+    """Carve-out. Creating or dropping the database itself is never Keeper-propagated.
+
+    `CREATE DATABASE` is how a `Replicated` database comes into existence, so there is no
+    engine to consult, and a database's own DDL log cannot propagate its own removal.
+    """
+    adapter = _on_cluster_adapter(make_mocked_engine_adapter, mocker, {"r_db": "Replicated"})
+
+    adapter.create_schema("r_db")
+    adapter.drop_schema("r_db")
+
+    for call in to_sql_calls(adapter):
+        assert 'ON CLUSTER "my_cluster"' in call, call
+
+
+def test_alter_table_decides_on_cluster_per_expression(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """One call can carry alters against both kinds of database; it cannot be hoisted."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    adapter.alter_table(
+        [
+            parse_one("ALTER TABLE a_db.t ADD COLUMN x UInt64", dialect="clickhouse").assert_is(
+                exp.Alter
+            ),
+            parse_one("ALTER TABLE r_db.t ADD COLUMN x UInt64", dialect="clickhouse").assert_is(
+                exp.Alter
+            ),
+        ]
+    )
+
+    calls = to_sql_calls(adapter)
+    assert 'ON CLUSTER "my_cluster"' in calls[0]
+    assert "ON CLUSTER" not in calls[1]
+
+
+@pytest.mark.parametrize("cluster", [None, "my_cluster"])
+@pytest.mark.parametrize("database_engine", ["Atomic", "Replicated"])
+@pytest.mark.parametrize("operation", ["drop", "replace", "both"])
+def test_alter_partition_keeps_on_cluster(
+    make_mocked_engine_adapter: t.Callable, mocker, cluster, database_engine, operation
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster=cluster)
+    mocker.patch.object(ClickhouseEngineAdapter, "_has_replicated_database", True)
+    mocker.patch.object(ClickhouseEngineAdapter, "_database_engine", return_value=database_engine)
+
+    # Use the same AST builder as incremental partition overwrites.
+    alter = adapter._build_alter_partition_exp(
+        exp.to_table("my_db.target"),
+        exp.to_table("my_db.source"),
+        {"1"} if operation in ("replace", "both") else set(),
+        {"2"} if operation in ("drop", "both") else set(),
+    )
+    adapter.alter_table([alter])
+
+    actions = []
+    if operation in ("replace", "both"):
+        actions.append('REPLACE PARTITION ID \'1\' FROM "my_db"."source"')
+    if operation in ("drop", "both"):
+        actions.append("DROP PARTITION ID '2'")
+    cluster_sql = ' ON CLUSTER "my_cluster"' if cluster else ""
+    assert to_sql_calls(adapter) == [
+        f'ALTER TABLE "my_db"."target"{cluster_sql} {", ".join(actions)}'
+    ]
+
+
+def test_cross_engine_rename_and_exchange_are_refused(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """A single statement cannot be both cluster-wide and Keeper-propagated."""
+    adapter = _on_cluster_adapter(
+        make_mocked_engine_adapter, mocker, {"a_db": "Atomic", "r_db": "Replicated"}
+    )
+
+    with pytest.raises(SQLMeshError, match="RENAME TABLE between a Replicated database"):
+        adapter._rename_table("a_db.t", "r_db.t")
+
+    with pytest.raises(SQLMeshError, match="EXCHANGE TABLES between a Replicated database"):
+        adapter._exchange_tables("a_db.t", "r_db.t")
+
+
+def test_creating_a_database_invalidates_the_engine_cache(
+    make_mocked_engine_adapter: t.Callable, mocker
+):
+    """A database that resolved as absent may exist, with an engine, after CREATE."""
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, cluster="my_cluster")
+    adapter.__dict__["_has_replicated_database"] = True
+    adapter._database_engine_cache["new_db"] = None
+
+    adapter.create_schema("new_db")
+
+    assert "new_db" not in adapter._database_engine_cache
+    assert "_has_replicated_database" not in adapter.__dict__
