@@ -10,11 +10,15 @@ from unittest.mock import MagicMock
 
 from click import ClickException
 from click.testing import CliRunner
+from sqlglot import __version__ as SQLGLOT_VERSION
 from sqlmesh import RuntimeEnv
+from sqlmesh._version import __version__ as SQLMESH_VERSION
 from sqlmesh.cli.project_init import ProjectTemplate, init_example_project
 from sqlmesh.cli.main import cli
 from sqlmesh.core.context import Context
+from sqlmesh.core.state_sync.base import SCHEMA_VERSION
 from sqlmesh.integrations.dlt import generate_dlt_models
+from sqlmesh.utils import major_minor
 from sqlmesh.utils.date import now_ds, time_like_to_str, timedelta, to_datetime, yesterday_ds
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
 
@@ -1022,6 +1026,107 @@ def test_info_on_new_project_does_not_create_state_sync(runner, tmp_path):
     assert not context.engine_adapter.table_exists("sqlmesh._environments")
     assert not context.engine_adapter.table_exists("sqlmesh._intervals")
     assert not context.engine_adapter.table_exists("sqlmesh._versions")
+
+
+def test_info_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "info"])
+    assert result.exit_code == 0
+    assert "State backend versions" not in result.output
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "info", "-v"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"Schema version: {SCHEMA_VERSION}" in result.output
+    assert f"SQLGlot version: {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: {SQLMESH_VERSION}" in result.output
+
+
+def test_rollback_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    context = Context(paths=tmp_path)
+    state_sync = context._new_state_sync()
+    # Back up the current state, then pretend the state was migrated by a newer SQLMesh.
+    state_sync.migrator._backup_state()
+    state_sync.version_state.update_versions(
+        schema_version=SCHEMA_VERSION + 1,
+        sqlglot_version="9999.0.0",
+        sqlmesh_version="9999.0.0",
+    )
+    context.close()
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "rollback"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"Schema version: {SCHEMA_VERSION + 1} -> {SCHEMA_VERSION}" in result.output
+    assert f"SQLGlot version: 9999.0.0 -> {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: 9999.0.0 -> {SQLMESH_VERSION}" in result.output
+
+
+def test_migrate_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    context = Context(paths=tmp_path)
+    # Pretend the state was written by an older patch release of the same minor version, which
+    # is the case `migrate` used to leave untouched.
+    major, minor = major_minor(SQLMESH_VERSION)
+    older_sqlmesh = f"{major}.{minor}.dev0"
+    context._new_state_sync().version_state.update_versions(
+        sqlglot_version="0.0.1",
+        sqlmesh_version=older_sqlmesh,
+    )
+    context.close()
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "migrate"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"SQLGlot version: 0.0.1 -> {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: {older_sqlmesh} -> {SQLMESH_VERSION}" in result.output
+
+
+def test_migrate_updates_versions_after_a_patch_bump(runner, tmp_path):
+    """A patch bump leaves the minor version equal, but the recorded versions must still move.
+
+    Both minor versions have to match the installed ones, otherwise `_apply_migrations` reports
+    rows to migrate and the early return this covers is never reached.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    sqlmesh_major, sqlmesh_minor = major_minor(SQLMESH_VERSION)
+    sqlglot_major, sqlglot_minor = major_minor(SQLGLOT_VERSION)
+    context = Context(paths=tmp_path)
+    context._new_state_sync().version_state.update_versions(
+        sqlglot_version=f"{sqlglot_major}.{sqlglot_minor}.dev0",
+        sqlmesh_version=f"{sqlmesh_major}.{sqlmesh_minor}.dev0",
+    )
+    context.close()
+
+    assert (
+        runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "migrate"]).exit_code
+        == 0
+    )
+
+    context = Context(paths=tmp_path)
+    versions = context._new_state_sync().get_versions(validate=False)
+    context.close()
+    assert versions.sqlmesh_version == SQLMESH_VERSION
+    assert versions.sqlglot_version == SQLGLOT_VERSION
+
+
+def test_rollback_without_backup_does_not_print_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "rollback"])
+    assert result.exit_code == 1
+    assert "There are no prior migrations to roll back to." in result.output
+    assert "State backend versions" not in result.output
 
 
 def test_dlt_pipeline_errors(runner, tmp_path):
