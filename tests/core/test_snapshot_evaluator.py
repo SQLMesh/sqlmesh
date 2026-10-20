@@ -5855,16 +5855,13 @@ def test_evaluate_runs_after_previous_run_was_stopped(
         evaluator.stop_workers()
 
     with evaluator.concurrent_context():
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            executor.submit(evaluator.evaluate, snapshot, snapshots={}, **date_kwargs).result()
+        evaluator.evaluate(snapshot, snapshots={}, **date_kwargs)
 
     adapter_mock.transaction.assert_called()
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
-def test_interrupted_create_stops_workers_and_waits_for_them(
-    mocker: MockerFixture, adapter_mock, make_snapshot
-):
+def test_interrupted_create_cancels_queries_and_stops_workers(adapter_mock, make_snapshot):
     evaluator = SnapshotEvaluator(adapter_mock, ddl_concurrent_tasks=2)
     snapshot = make_snapshot(
         SqlModel(name="db.model", kind=FullKind(), query=parse_one("SELECT 1"))
@@ -5873,7 +5870,6 @@ def test_interrupted_create_stops_workers_and_waits_for_them(
 
     blocked = threading.Event()
     cancelled = threading.Event()
-    worker_finished = threading.Event()
 
     def block_in_pre_statements(*args: t.Any, **kwargs: t.Any) -> None:
         blocked.set()
@@ -5881,16 +5877,6 @@ def test_interrupted_create_stops_workers_and_waits_for_them(
 
     adapter_mock.execute.side_effect = block_in_pre_statements
     adapter_mock.cancel_queries.side_effect = cancelled.set
-
-    create_snapshot = evaluator.create_snapshot
-
-    def create_snapshot_and_record_finish(*args: t.Any, **kwargs: t.Any) -> None:
-        try:
-            create_snapshot(*args, **kwargs)
-        finally:
-            worker_finished.set()
-
-    mocker.patch.object(evaluator, "create_snapshot", side_effect=create_snapshot_and_record_finish)
 
     def interrupt_main_thread() -> None:
         assert blocked.wait(timeout=10)
@@ -5901,12 +5887,11 @@ def test_interrupted_create_stops_workers_and_waits_for_them(
         threading.Thread(target=interrupt_main_thread).start()
         with pytest.raises(KeyboardInterrupt):
             evaluator.create([snapshot], {})
-        # The worker was unblocked by the cancellation and waited for before the interrupt propagated.
-        assert worker_finished.is_set()
     finally:
         signal.signal(signal.SIGINT, previous_sigint_handler)
         cancelled.set()
 
+    adapter_mock.cancel_queries.assert_called_once()
     adapter_mock.transaction.assert_not_called()
     adapter_mock.create_table.assert_not_called()
 

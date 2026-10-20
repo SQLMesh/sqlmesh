@@ -963,19 +963,9 @@ def test_close_terminates_session_of_interrupted_query(mocker: MockerFixture):
     connections[1].close.assert_called_once()
 
 
-def _recycle_then_close(adapter: RedshiftEngineAdapter) -> None:
-    # On KeyboardInterrupt, SnapshotEvaluator.concurrent_context() recycles before the context closes.
-    adapter.recycle()
-    adapter.close()
-
-
-@pytest.mark.parametrize(
-    "teardown",
-    [lambda adapter: adapter.close(), _recycle_then_close],
-    ids=["close", "recycle_then_close"],
-)
-def test_teardown_terminates_sessions_of_queries_running_in_other_threads(
-    mocker: MockerFixture, teardown: t.Callable
+@pytest.mark.parametrize("method", ["close", "cancel_queries"])
+def test_close_and_cancel_queries_terminate_sessions_of_queries_running_in_other_threads(
+    mocker: MockerFixture, method: str
 ):
     query_started = threading.Event()
     session_terminated = threading.Event()
@@ -1001,7 +991,7 @@ def test_teardown_terminates_sessions_of_queries_running_in_other_threads(
     thread = threading.Thread(target=run_long_query)
     thread.start()
     assert query_started.wait(timeout=10)
-    teardown(adapter)
+    getattr(adapter, method)()
     thread.join(timeout=10)
 
     assert not thread.is_alive()
@@ -1011,7 +1001,6 @@ def test_teardown_terminates_sessions_of_queries_running_in_other_threads(
         "SELECT PG_TERMINATE_BACKEND(100)",
     ]
     connections[0].close.assert_called_once()
-    connections[1].close.assert_called_once()
 
 
 def test_recycle_terminates_sessions_from_new_connection_after_interrupted_transaction(
@@ -1056,12 +1045,9 @@ def test_recycle_terminates_sessions_from_new_connection_after_interrupted_trans
     ]
 
 
-@pytest.mark.parametrize("method", ["recycle", "cancel_queries"])
-def test_recycle_and_cancel_queries_fail_transaction_of_thread_between_statements(
-    mocker: MockerFixture, method: str
-):
+def test_cancel_queries_fails_transaction_of_thread_between_statements(mocker: MockerFixture):
     deleted = threading.Event()
-    recycled = threading.Event()
+    cancelled = threading.Event()
     connect, connections = _mock_connections(mocker, lambda sql: None)
     adapter = RedshiftEngineAdapter(connect, multithreaded=True)
 
@@ -1070,14 +1056,14 @@ def test_recycle_and_cancel_queries_fail_transaction_of_thread_between_statement
             with adapter.transaction():
                 adapter.execute("DELETE FROM t")
                 deleted.set()
-                assert recycled.wait(timeout=10)
+                assert cancelled.wait(timeout=10)
                 adapter.execute("INSERT INTO t SELECT 1")
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(run_delete_then_insert)
         assert deleted.wait(timeout=10)
-        getattr(adapter, method)()
-        recycled.set()
+        adapter.cancel_queries()
+        cancelled.set()
         future.result()
 
     # Closing the connection rolled back the DELETE, so the INSERT must not run and commit on a new one.

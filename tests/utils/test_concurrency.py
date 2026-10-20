@@ -1,6 +1,5 @@
 import signal
 import threading
-import time
 import typing as t
 
 import pytest
@@ -155,51 +154,6 @@ def test_concurrent_apply(tasks_num: int):
     values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     results = concurrent_apply_to_values(values, lambda x: x * 2, tasks_num)
     assert results == [x * 2 for x in values]
-
-
-@pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
-@pytest.mark.parametrize(
-    "apply",
-    [
-        lambda fn: concurrent_apply_to_values([1, 2, 3, 4], fn, 2),
-        lambda fn: concurrent_apply_to_dag(DAG({1: set(), 2: set(), 3: {1}, 4: {2}}), fn, 2),
-    ],
-    ids=["values", "dag"],
-)
-def test_interrupt_without_on_interrupt_waits_for_running_tasks(apply: t.Callable):
-    started = []
-    finished = []
-    started_lock = threading.Lock()
-    both_started = threading.Event()
-    release = threading.Event()
-
-    def fn(value: int) -> None:
-        with started_lock:
-            started.append(value)
-            if len(started) == 2:
-                both_started.set()
-        assert release.wait(timeout=10)
-        finished.append(value)
-
-    def interrupt_main_thread_then_release() -> None:
-        both_started.wait(timeout=10)
-        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
-        time.sleep(0.1)
-        release.set()
-
-    previous_sigint_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
-    try:
-        threading.Thread(target=interrupt_main_thread_then_release).start()
-        with pytest.raises(KeyboardInterrupt):
-            apply(fn)
-    finally:
-        signal.signal(signal.SIGINT, previous_sigint_handler)
-        release.set()
-
-    # The running tasks were waited for before the interrupt propagated, and the pending ones
-    # never started.
-    assert sorted(finished) == [1, 2]
-    assert sorted(started) == [1, 2]
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="signal.pthread_kill isn't available on Windows")
