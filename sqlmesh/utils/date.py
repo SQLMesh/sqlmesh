@@ -194,7 +194,13 @@ def to_datetime(
             try:
                 dt = datetime.strptime(str(value), DATE_INT_FMT)
             except ValueError:
-                dt = datetime.fromtimestamp(epoch / 1000.0, tz=UTC)
+                try:
+                    dt = datetime.fromtimestamp(epoch / 1000.0, tz=UTC)
+                except (OverflowError, OSError, ValueError):
+                    # A non-finite or out-of-range epoch (e.g. "inf", 1e30, or a
+                    # huge millis value) overflows fromtimestamp. Fall through to
+                    # the ValueError below rather than leaking OverflowError/OSError.
+                    dt = None
 
     if dt is None:
         raise ValueError(f"Could not convert `{value}` to datetime.")

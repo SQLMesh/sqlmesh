@@ -312,6 +312,8 @@ class SnapshotEvaluator:
         self._get_virtual_data_objects(target_snapshots, environment_naming_info)
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
+        # Renderers look snapshots up by model name, not by SnapshotId.
+        snapshots_by_name = {s.name: s for s in (snapshots or {}).values()}
         with self.concurrent_context():
             concurrent_apply_to_snapshots(
                 target_snapshots,
@@ -320,7 +322,7 @@ class SnapshotEvaluator:
                     start=start,
                     end=end,
                     execution_time=execution_time,
-                    snapshots=snapshots,
+                    snapshots=snapshots_by_name,
                     table_mapping=table_mapping,
                     environment_naming_info=environment_naming_info,
                     deployability_index=deployability_index,  # type: ignore
@@ -1104,6 +1106,7 @@ class SnapshotEvaluator:
                 target_table_name,
                 snapshot.table_name(),
                 rendered_physical_properties=rendered_physical_properties,
+                table_format=snapshot.model.table_format,
             )
             self._migrate_target_table(
                 target_table_name=target_table_name,
@@ -1259,7 +1262,7 @@ class SnapshotEvaluator:
         start: t.Optional[TimeLike] = None,
         end: t.Optional[TimeLike] = None,
         execution_time: t.Optional[TimeLike] = None,
-        snapshots: t.Optional[t.Dict[SnapshotId, Snapshot]] = None,
+        snapshots: t.Optional[t.Dict[str, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
     ) -> None:
         if not snapshot.is_model:
@@ -1298,9 +1301,9 @@ class SnapshotEvaluator:
                 **render_kwargs,
             )
 
-            snapshot_by_name = {s.name: s for s in (snapshots or {}).values()}
-            render_kwargs["snapshots"] = snapshot_by_name
-            adapter.execute(snapshot.model.render_on_virtual_update(**render_kwargs))
+            adapter.execute(
+                snapshot.model.render_on_virtual_update(snapshots=snapshots, **render_kwargs)
+            )
 
         if on_complete is not None:
             on_complete(snapshot)
@@ -2161,7 +2164,7 @@ class MaterializableStrategy(PromotableStrategy, abc.ABC):
         _check_additive_schema_change(
             snapshot, alter_operations, kwargs["allow_additive_snapshots"]
         )
-        self.adapter.alter_table(alter_operations)
+        self.adapter.alter_table(alter_operations, table_format=snapshot.model.table_format)
 
         # Apply grants after schema migration
         deployability_index = kwargs.get("deployability_index")

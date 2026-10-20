@@ -198,7 +198,11 @@ export default function ModelNode({
       style={{
         width: '100%',
         ...(tagColor != null
-          ? { borderColor: tagColor, backgroundColor: tagColor, color: tagColor }
+          ? {
+              borderColor: tagColor,
+              backgroundColor: tagColor,
+              color: tagColor,
+            }
           : {}),
       }}
     >
@@ -246,7 +250,10 @@ export default function ModelNode({
         />
       </div>
       {showColumns && (
-        <div ref={columnsWrapperRef} style={{ height: '10rem', overflow: 'hidden' }}>
+        <div
+          ref={columnsWrapperRef}
+          style={{ height: '10rem', overflow: 'hidden' }}
+        >
           <ModelColumns
             className="nowheel rounded-b-lg bg-theme-lighter text-xs h-full"
             nodeId={id}

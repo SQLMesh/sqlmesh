@@ -135,6 +135,21 @@ $ sqlmesh lint --local
 
 This can make linting faster in repositories where all referenced models are loaded from local files. In multi-repository setups, or when linting only a subset of projects, `--local` may cause additional linting errors because SQLMesh will not resolve references or schemas from models that exist only in remote state.
 
+For faster targeted linting, enable the persistent project index with `--use-project-index`. When
+models are selected with `--model`, SQLMesh loads, resolves, and validates only those models and
+their transitive upstream dependencies. The same behavior can be enabled by default for the
+Python API and CLI with the `linter.use_project_index` configuration option:
+
+```yaml
+linter:
+  enabled: true
+  use_project_index: true
+```
+
+`Context.lint_models` uses this configuration value when `use_project_index` is omitted. Passing
+`use_project_index=False` explicitly disables it for that call. If a context was already loaded,
+an indexed lint of selected models reloads the context so the requested scope is applied.
+
 
 ## Applying linting rules
 

@@ -120,6 +120,71 @@ def test_multi(mocker):
     ]
 
 
+def test_multi_repo_model_default_gateways(tmp_path: Path) -> None:
+    """Each project routes its models using its own default gateway."""
+    repo_one = tmp_path / "repo_one"
+    repo_two = tmp_path / "repo_two"
+    (repo_one / "models").mkdir(parents=True)
+    (repo_two / "models").mkdir(parents=True)
+
+    (repo_one / "models" / "default.sql").write_text(
+        "MODEL (name analytics.repo_one_default, kind FULL); SELECT @owner AS owner"
+    )
+    (repo_one / "models" / "override.sql").write_text(
+        "MODEL (name analytics.explicit_override, kind FULL, gateway 'repo-two'); "
+        "SELECT @owner AS owner"
+    )
+    (repo_two / "models" / "default.sql").write_text(
+        "MODEL (name analytics.repo_two_default, kind FULL); SELECT @owner AS owner"
+    )
+
+    def make_config(project: str, default_gateway: str) -> Config:
+        return Config(
+            project=project,
+            gateways={
+                "repo-one": GatewayConfig(
+                    connection=DuckDBConnectionConfig(database=str(tmp_path / "repo_one.duckdb")),
+                    variables={"owner": "repo-one-variable"},
+                ),
+                "repo-two": GatewayConfig(
+                    connection=DuckDBConnectionConfig(database=str(tmp_path / "repo_two.duckdb")),
+                    variables={"owner": "repo-two-variable"},
+                ),
+            },
+            default_gateway=default_gateway,
+            model_defaults=ModelDefaultsConfig(dialect="duckdb", gateway=default_gateway),
+            variables={"owner": "global-variable"},
+        )
+
+    context = Context(
+        paths=[repo_one, repo_two],
+        config={
+            repo_one: make_config("repo_one", "repo-one"),
+            repo_two: make_config("repo_two", "repo-two"),
+        },
+        gateway="repo-one",
+    )
+
+    repo_one_model = context.get_model("repo_one.analytics.repo_one_default")
+    repo_two_model = context.get_model("repo_two.analytics.repo_two_default")
+    override_model = context.get_model("repo_two.analytics.explicit_override")
+
+    assert repo_one_model.gateway == "repo-one"
+    assert repo_one_model.catalog == "repo_one"
+    assert repo_one_model.project == "repo_one"
+    assert context.render(repo_one_model.fqn).sql() == ("SELECT 'repo-one-variable' AS \"owner\"")
+
+    assert repo_two_model.gateway == "repo-two"
+    assert repo_two_model.catalog == "repo_two"
+    assert repo_two_model.project == "repo_two"
+    assert context.render(repo_two_model.fqn).sql() == ("SELECT 'repo-two-variable' AS \"owner\"")
+
+    assert override_model.gateway == "repo-two"
+    assert override_model.catalog == "repo_two"
+    assert override_model.project == "repo_one"
+    assert context.render(override_model.fqn).sql() == ("SELECT 'repo-two-variable' AS \"owner\"")
+
+
 @use_terminal_console
 def test_multi_repo_single_project_environment_statements_update(copy_to_temp_path):
     paths = copy_to_temp_path("examples/multi")
