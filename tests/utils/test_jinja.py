@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from base64 import b64encode
 
+import pytest
+from jinja2 import UndefinedError
+
 from sqlmesh.utils import AttributeDict, yaml
 from sqlmesh.utils.jinja import (
     ENVIRONMENT,
@@ -10,6 +13,7 @@ from sqlmesh.utils.jinja import (
     MacroReference,
     MacroReturnVal,
     call_name,
+    extract_error_details,
     nodes,
 )
 
@@ -243,6 +247,31 @@ def test_macro_return_recursive():
         .render()
     )
     assert rendered == "[1, 2, 3, 4, 5, 6]"
+
+
+def test_macro_error_uses_macro_name():
+    registry = JinjaMacroRegistry()
+    registry.add_macros(MacroExtractor().extract("{% macro foo(a) %}{{ a }}{% endmacro %}"))
+
+    with pytest.raises(TypeError, match="macro 'foo' takes not more than 1 argument"):
+        registry.build_environment().from_string("{{ foo(1, 2) }}").render()
+
+
+def test_extract_error_details_private_macro():
+    package_a = "{% macro _macro_a() %}{{ undefined_macro() }}{% endmacro %}"
+
+    registry = JinjaMacroRegistry()
+    registry.add_macros(MacroExtractor().extract(package_a), package="package_a")
+
+    # extract_error_details reads the traceback of the exception being handled
+    try:
+        registry.build_environment().from_string("{{ package_a._macro_a() }}").render()
+    except UndefinedError as ex:
+        details = extract_error_details(ex)
+    else:
+        pytest.fail("Expected UndefinedError")
+
+    assert "in macro: '_macro_a'" in details
 
 
 def test_global_objs():

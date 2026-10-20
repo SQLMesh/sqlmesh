@@ -643,6 +643,8 @@ class JinjaMacroRegistry(PydanticModel):
             macro_callable = getattr(
                 template.make_module(vars=context), _internal_macro_name(self.name)
             )
+            # Jinja uses this name in its own error messages
+            macro_callable.name = self.name
             try:
                 return macro_callable(*args, **kwargs)
             except MacroReturnVal as ret:
@@ -734,8 +736,7 @@ def extract_error_details(ex: Exception) -> str:
                 if frame.f_code.co_name == "_invoke":
                     macro = frame.f_locals.get("self")
                     if isinstance(macro, Macro):
-                        macro_name = macro.name.removeprefix(_INTERNAL_MACRO_NAME_PREFIX)
-                        error_details += f" in macro: '{macro_name}'\n"
+                        error_details += f" in macro: '{macro.name}'\n"
                         break
         except:
             # to fall back to the generic error message if frame analysis fails
