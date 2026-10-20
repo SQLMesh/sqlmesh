@@ -5872,15 +5872,15 @@ def test_interrupted_create_stops_workers_and_waits_for_them(
     snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
 
     blocked = threading.Event()
-    recycled = threading.Event()
+    cancelled = threading.Event()
     worker_finished = threading.Event()
 
     def block_in_pre_statements(*args: t.Any, **kwargs: t.Any) -> None:
         blocked.set()
-        assert recycled.wait(timeout=10)
+        assert cancelled.wait(timeout=10)
 
     adapter_mock.execute.side_effect = block_in_pre_statements
-    adapter_mock.recycle.side_effect = lambda: blocked.is_set() and recycled.set()
+    adapter_mock.cancel_queries.side_effect = cancelled.set
 
     create_snapshot = evaluator.create_snapshot
 
@@ -5905,7 +5905,18 @@ def test_interrupted_create_stops_workers_and_waits_for_them(
         assert worker_finished.is_set()
     finally:
         signal.signal(signal.SIGINT, previous_sigint_handler)
-        recycled.set()
+        cancelled.set()
 
     adapter_mock.transaction.assert_not_called()
     adapter_mock.create_table.assert_not_called()
+
+
+def test_stop_workers_cancels_queries_without_recycling(adapter_mock):
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    with evaluator.concurrent_context():
+        evaluator.stop_workers()
+        # Recycling closes the workers' connections while they may still be using them, which some
+        # engines (e.g. DuckDB) don't support.
+        adapter_mock.cancel_queries.assert_called_once()
+        adapter_mock.recycle.assert_not_called()

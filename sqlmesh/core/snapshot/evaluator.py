@@ -680,10 +680,14 @@ class SnapshotEvaluator:
     def stop_workers(self) -> None:
         """Stops the worker threads of the current concurrent context. Meant to be passed as the
         `on_interrupt` of the concurrent operations run in it."""
-        # Workers stop before they start a snapshot's main transaction, and recycling the adapters
-        # stops the queries and transactions the workers are running.
+        # Workers stop before they start a snapshot's main transaction. Their connections aren't
+        # closed here, since some engines (e.g. DuckDB) hang if a connection is closed mid-query.
         self._interrupted.set()
-        self.recycle()
+        for gateway, adapter in self.adapters.items():
+            try:
+                adapter.cancel_queries()
+            except Exception:
+                logger.exception("Failed to cancel the queries of gateway '%s'", gateway)
 
     def recycle(self) -> None:
         """Closes all open connections and releases all allocated resources associated with any thread

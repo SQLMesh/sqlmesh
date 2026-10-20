@@ -157,6 +157,11 @@ class RedshiftEngineAdapter(
         self._terminate_running_queries()
         super().recycle()
 
+    def cancel_queries(self) -> None:
+        # Closing the other threads' connections also fails the transactions of threads that are
+        # between statements, which terminating the running queries alone wouldn't stop.
+        self.recycle()
+
     def close(self) -> t.Any:
         self._terminate_running_queries()
         return super().close()

@@ -1056,7 +1056,10 @@ def test_recycle_terminates_sessions_from_new_connection_after_interrupted_trans
     ]
 
 
-def test_recycle_fails_transaction_of_thread_between_statements(mocker: MockerFixture):
+@pytest.mark.parametrize("method", ["recycle", "cancel_queries"])
+def test_recycle_and_cancel_queries_fail_transaction_of_thread_between_statements(
+    mocker: MockerFixture, method: str
+):
     deleted = threading.Event()
     recycled = threading.Event()
     connect, connections = _mock_connections(mocker, lambda sql: None)
@@ -1073,7 +1076,7 @@ def test_recycle_fails_transaction_of_thread_between_statements(mocker: MockerFi
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(run_delete_then_insert)
         assert deleted.wait(timeout=10)
-        adapter.recycle()
+        getattr(adapter, method)()
         recycled.set()
         future.result()
 

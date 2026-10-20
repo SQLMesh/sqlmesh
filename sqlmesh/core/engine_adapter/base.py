@@ -449,6 +449,10 @@ class EngineAdapter:
         except the calling one."""
         self._connection_pool.close_all(exclude_calling_thread=True)
 
+    def cancel_queries(self) -> None:
+        """Stops the queries that other threads are running, if the engine supports it. Otherwise they
+        run until they finish."""
+
     def close(self) -> t.Any:
         """Closes all open connections and releases all allocated resources."""
         self._connection_pool.close_all()
