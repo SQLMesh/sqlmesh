@@ -394,8 +394,8 @@ importers:
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.1.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(jiti@2.4.2)(jsdom@26.1.0(supports-color@9.4.0))(lightningcss@1.30.1)(supports-color@9.4.0)(terser@5.44.0)(tsx@4.20.3)(yaml@2.9.0)
     optionalDependencies:
       '@swc/core-linux-x64-gnu':
-        specifier: ^1.13.2
-        version: 1.13.2
+        specifier: ^1.16.2
+        version: 1.16.2
 
   web/common:
     devDependencies:
@@ -2203,6 +2203,13 @@ packages:
 
   '@swc/core-linux-x64-gnu@1.13.2':
     resolution: {integrity: sha512-dRPsyPyqpLD0HMRCRpYALIh4kdOir8pPg4AhNQZLehKowigRd30RcLXGNVZcc31Ua8CiPI4QSgjOIxK+EQe4LQ==}
+    engines: {node: '>=10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@swc/core-linux-x64-gnu@1.16.2':
+    resolution: {integrity: sha512-LyHJgxCA4Tje0ysBMbEb0tt/ie8kgUKoFE3JAKFhpevmTmhYEoC0H9s47WuDsqiFckF1ITUguZIXJG6K5e0dvg==}
     engines: {node: '>=10'}
     cpu: [x64]
     os: [linux]
@@ -8972,6 +8979,9 @@ snapshots:
     optional: true
 
   '@swc/core-linux-x64-gnu@1.13.2':
+    optional: true
+
+  '@swc/core-linux-x64-gnu@1.16.2':
     optional: true
 
   '@swc/core-linux-x64-musl@1.13.2':
