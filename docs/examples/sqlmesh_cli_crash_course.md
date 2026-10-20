@@ -738,6 +738,11 @@ You'll use these commands as needed to validate that your changes are behaving a
 
 This is a great way to verify that your model's SQL is looking as expected before applying the changes. It is especially important if you're migrating from one query engine to another (ex: postgres to databricks).
 
+In large projects, add `--use-project-index` to load only the model being rendered and its upstream
+dependencies. To enable this behavior by default, set
+[`render.use_project_index`](../reference/configuration.md#render) to `true` in the project
+configuration.
+
 === "SQLMesh"
 
     ```bash
