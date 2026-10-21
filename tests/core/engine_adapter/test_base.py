@@ -1346,6 +1346,54 @@ MERGE INTO "target" AS "__MERGE_TARGET__" USING (
     )
 
 
+def test_merge_when_not_matched_by_source(make_mocked_engine_adapter: t.Callable, assert_exp_eq):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+
+    adapter.merge(
+        target_table="target",
+        source_table=t.cast(exp.Select, parse_one('SELECT "ID", val FROM source')),
+        target_columns_to_types={
+            "ID": exp.DataType.build("int"),
+            "val": exp.DataType.build("int"),
+        },
+        unique_key=[exp.to_identifier("ID", quoted=True)],
+        when_matched=exp.Whens(
+            expressions=[
+                exp.When(
+                    matched=True,
+                    source=False,
+                    then=exp.Update(
+                        expressions=[
+                            exp.column("val", "__MERGE_TARGET__").eq(
+                                exp.column("val", "__MERGE_SOURCE__")
+                            ),
+                        ],
+                    ),
+                ),
+                exp.When(matched=False, source=True, then=exp.Delete()),
+            ]
+        ),
+    )
+
+    # the generated WHEN NOT MATCHED clause has to come before WHEN NOT MATCHED BY SOURCE
+    assert_exp_eq(
+        adapter.cursor.execute.call_args[0][0],
+        """
+MERGE INTO "target" AS "__MERGE_TARGET__" USING (
+  SELECT
+    "ID",
+    "val"
+  FROM "source"
+) AS "__MERGE_SOURCE__"
+  ON "__MERGE_TARGET__"."ID" = "__MERGE_SOURCE__"."ID"
+  WHEN MATCHED THEN UPDATE SET "__MERGE_TARGET__"."val" = "__MERGE_SOURCE__"."val"
+  WHEN NOT MATCHED THEN INSERT ("ID", "val")
+    VALUES ("__MERGE_SOURCE__"."ID", "__MERGE_SOURCE__"."val")
+  WHEN NOT MATCHED BY SOURCE THEN DELETE
+""",
+    )
+
+
 def test_merge_filter(make_mocked_engine_adapter: t.Callable, assert_exp_eq):
     adapter = make_mocked_engine_adapter(EngineAdapter)
 
