@@ -65,6 +65,10 @@ dev = [
     # it depends on the 'InvalidCatalogIntegrationConfigError' class that only exists as of dbt-adapters==1.16.6
     # so we exclude it to prevent failures and hope that upstream releases a new version with the correct constraint
     "dbt-snowflake!=1.10.1",
+    # fastjsonschema 2.22+ uses PEP 604 type hints and now requires Python >=3.10
+    # (upstream #211 / #213). Keep 3.9 on the 2.21 line; pulled in via
+    # dbt-bigquery → nbformat.
+    "fastjsonschema<2.22; python_version<'3.10'",
     "dbt-athena-community",
     "dbt-clickhouse",
     "dbt-databricks",
@@ -74,7 +78,7 @@ dev = [
     "google-auth",
     "google-cloud-bigquery",
     "google-cloud-bigquery-storage",
-    "httpx",
+    "httpx2",
     "mypy~=1.13.0",
     "numpy",
     "pandas-stubs",
@@ -108,6 +112,10 @@ dev = [
 ]
 dbt = ["dbt-core<2"]
 dlt = ["dlt"]
+db2 = [
+    "ibm_db",
+    "db2-sqlglot-dialect;python_version>=\"3.10\""
+]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
 fabric-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
@@ -130,7 +138,9 @@ snowflake = [
 starrocks = ["pymysql"]
 trino = ["trino"]
 web = [
-    "fastapi==0.120.1",
+    "fastapi>=0.136.3; python_version >= '3.10'",
+    "starlette>=1.0.1; python_version >= '3.10'",
+    "fastapi==0.120.1; python_version < '3.10'",
     "watchfiles>=0.19.0",
     "uvicorn[standard]==0.22.0",
     "sse-starlette>=0.2.2",
@@ -138,7 +148,9 @@ web = [
 ]
 lsp = [
     # Duplicate of web
-    "fastapi==0.120.1",
+    "fastapi>=0.136.3; python_version >= '3.10'",
+    "starlette>=1.0.1; python_version >= '3.10'",
+    "fastapi==0.120.1; python_version < '3.10'",
     "watchfiles>=0.19.0",
     # "uvicorn[standard]==0.22.0",
     "sse-starlette>=0.2.2",
@@ -245,6 +257,7 @@ markers = [
     "remote: test that involves interacting with a remote DB",
     "cicdonly: test that only runs on CI/CD",
     "isolated: tests that need to run sequentially usually because they use fork",
+    "fork_isolated: tests that need their own fresh pytest process because they use fork",
     "dialect_isolated: tests that need to run separately due to global dialect overrides",
 
     # Test Domain Markers
@@ -262,6 +275,7 @@ markers = [
     "clickhouse: test for Clickhouse (standalone mode / cluster mode)",
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
+    "db2: test for Db2",
     "duckdb: test for DuckDB",
     "fabric: test for Fabric",
     "motherduck: test for MotherDuck",

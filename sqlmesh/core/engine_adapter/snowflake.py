@@ -24,6 +24,7 @@ from sqlmesh.core.engine_adapter.shared import (
     SourceQuery,
     set_catalog,
 )
+from sqlmesh.core.schema_diff import TableAlterOperation
 from sqlmesh.utils import optional_import, get_source_columns_to_types
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.pandas import columns_to_types_from_dtypes
@@ -667,6 +668,8 @@ class SnowflakeEngineAdapter(
         replace: bool = False,
         exists: bool = True,
         clone_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
+        table_format: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> None:
         # The Snowflake adapter should use the transient property to clone transient tables
@@ -675,13 +678,42 @@ class SnowflakeEngineAdapter(
             if isinstance(table_type, exp.TransientProperty):
                 kwargs["properties"] = exp.Properties(expressions=[table_type])
 
+        # Snowflake rejects `CREATE TABLE ... CLONE` for Iceberg tables, it requires
+        # `CREATE ICEBERG TABLE ... CLONE` instead
+        if table_format and not table_kind:
+            table_kind = f"{table_format.upper()} TABLE"
+
         super().clone_table(
             target_table_name,
             source_table_name,
             replace=replace,
             clone_kwargs=clone_kwargs,
+            table_kind=table_kind,
             **kwargs,
         )
+
+    def alter_table(
+        self,
+        alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
+    ) -> None:
+        # Snowflake rejects `ALTER TABLE` for Iceberg tables, it requires
+        # `ALTER ICEBERG TABLE` instead
+        if table_format:
+            table_kind = f"{table_format.upper()} TABLE"
+            resolved_expressions = []
+            for alter_expression in alter_expressions:
+                resolved_expression = (
+                    alter_expression.expression
+                    if isinstance(alter_expression, TableAlterOperation)
+                    else alter_expression.copy()
+                )
+                resolved_expression.set("kind", table_kind)
+                resolved_expressions.append(resolved_expression)
+
+            super().alter_table(resolved_expressions)
+        else:
+            super().alter_table(alter_expressions)
 
     @t.overload
     def _columns_to_types(
@@ -725,14 +757,32 @@ class SnowflakeEngineAdapter(
     def get_table_last_modified_ts(self, table_names: t.List[TableName]) -> t.List[int]:
         from sqlmesh.utils.date import to_timestamp
 
-        num_tables = len(table_names)
-
-        query = "SELECT LAST_ALTERED FROM INFORMATION_SCHEMA.TABLES WHERE"
-        for i, table_name in enumerate(table_names):
+        # INFORMATION_SCHEMA only contains the objects of the database it belongs to, so the tables
+        # are grouped by database and each group is looked up in its own database's INFORMATION_SCHEMA.
+        # The groups are keyed on the catalog identifier rather than its name, because quoting matters
+        # in Snowflake: unquoted raw is the database RAW, while quoted "raw" is a different database
+        catalogs_to_tables: t.Dict[t.Optional[exp.Identifier], t.List[exp.Table]] = {}
+        for table_name in table_names:
             table = exp.to_table(table_name)
-            query += f"""(TABLE_NAME = '{table.name}' AND TABLE_SCHEMA = '{table.db}' AND TABLE_CATALOG = '{table.catalog}')"""
-            if i < num_tables - 1:
-                query += " OR "
+            catalogs_to_tables.setdefault(table.args.get("catalog"), []).append(table)
 
-        result = self.fetchall(query)
-        return [to_timestamp(row[0]) for row in result]
+        results = []
+        for catalog, tables in catalogs_to_tables.items():
+            query = (
+                exp.select("LAST_ALTERED")
+                .from_(exp.table_("TABLES", db="INFORMATION_SCHEMA", catalog=catalog))
+                .where(
+                    exp.or_(
+                        *(
+                            exp.and_(
+                                exp.column("TABLE_NAME").eq(exp.Literal.string(table.name)),
+                                exp.column("TABLE_SCHEMA").eq(exp.Literal.string(table.db)),
+                            )
+                            for table in tables
+                        )
+                    )
+                )
+            )
+            results.extend(self.fetchall(query))
+
+        return [to_timestamp(row[0]) for row in results]

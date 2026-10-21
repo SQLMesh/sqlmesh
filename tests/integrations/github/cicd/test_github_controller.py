@@ -3,7 +3,7 @@ import typing as t
 import os
 import pathlib
 from unittest import mock
-from unittest.mock import PropertyMock, call
+from unittest.mock import ANY, PropertyMock, call
 
 import pytest
 import time_machine
@@ -256,7 +256,9 @@ def test_pr_plan(github_client, make_controller):
     assert controller.pr_plan.skip_backfill
     assert not controller.pr_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert (
         controller._pr_plan_builder._categorizer_config
         == controller._context.auto_categorize_changes
@@ -278,7 +280,9 @@ def test_pr_plan_auto_categorization(github_client, make_controller):
     assert controller.pr_plan.skip_backfill
     assert not controller.pr_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert controller._pr_plan_builder._categorizer_config == custom_categorizer_config
     assert controller.pr_plan.start == default_start_absolute
     assert not controller.pr_plan.start_override_per_model
@@ -365,7 +369,9 @@ def test_prod_plan(github_client, make_controller):
     assert not controller.prod_plan.skip_backfill
     assert controller.prod_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert (
         controller._prod_plan_builder._categorizer_config
         == controller._context.auto_categorize_changes
@@ -387,7 +393,9 @@ def test_prod_plan_auto_categorization(github_client, make_controller):
     assert not controller.prod_plan.skip_backfill
     assert controller.prod_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert controller._prod_plan_builder._categorizer_config == custom_categorizer_config
     # default PR start should be ignored for prod plans
     assert controller.prod_plan.start != default_pr_start
@@ -404,7 +412,9 @@ def test_prod_plan_with_gaps(github_client, make_controller):
     assert controller._prod_plan_with_gaps_builder._auto_categorization_enabled
     assert not controller.prod_plan_with_gaps.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
 
 
 def test_run_tests(github_client, make_controller):
@@ -915,3 +925,39 @@ def test_forward_only_config_falls_back_to_plan_config(
 
     controller._context.config.plan.forward_only = False
     assert controller.forward_only_plan is False
+
+
+def test_chunk_up_api_message_preserves_ascii_behavior(
+    github_client, make_event_issue_comment, make_controller
+):
+    controller = make_controller(make_event_issue_comment("created", "test"), github_client)
+
+    max_bytes = controller.MAX_BYTE_LENGTH
+    message = ("a" * max_bytes) + ("b" * max_bytes) + "c"
+
+    assert controller._chunk_up_api_message("") == []
+    assert controller._chunk_up_api_message(message) == [
+        "a" * max_bytes,
+        "b" * max_bytes,
+        "c",
+    ]
+
+
+@pytest.mark.parametrize("multibyte_char", ["🙂", "界"])
+def test_chunk_up_api_message_preserves_multibyte_chars(
+    github_client, make_event_issue_comment, make_controller, multibyte_char
+):
+    controller = make_controller(make_event_issue_comment("created", "test"), github_client)
+
+    max_bytes = controller.MAX_BYTE_LENGTH
+    # Place a multibyte character exactly on the byte boundary between two chunks so
+    # that byte-oriented slicing would bisect its UTF-8 encoding and drop it.
+    message = ("a" * (max_bytes - 1)) + multibyte_char + "b"
+    assert len(message.encode("utf-8")) > max_bytes
+
+    chunks = controller._chunk_up_api_message(message)
+
+    # No character is lost, so the chunks reassemble into the original message.
+    assert "".join(chunks) == message
+    # Each chunk still respects the GitHub API byte limit.
+    assert all(len(chunk.encode("utf-8")) <= max_bytes for chunk in chunks)

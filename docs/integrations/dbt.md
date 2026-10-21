@@ -287,9 +287,12 @@ If set to `False`, then the snapshot will be skipped and a warning will be logge
 Support for this will be added soon.
 
 ## Tests
-SQLMesh uses dbt tests to perform SQLMesh [audits](../concepts/audits.md) (coming soon).
 
-Add SQLMesh [unit tests](../concepts/tests.md) to a dbt project by placing them in the "tests" directory.
+dbt and SQLMesh use the word "test" differently. See [Workflow differences](#workflow-differences-between-sqlmesh-and-dbt) above for an overview.
+
+SQLMesh converts dbt tests (singular and generic `.sql` files in the `tests/` directory) into SQLMesh [audits](../concepts/audits.md). These run against data that already exists in your tables, just like dbt tests.
+
+Add SQLMesh [unit tests](../concepts/tests.md) to a dbt project by placing YAML files named `test*.yaml` or `test*.yml` in the `tests/` directory. Unit tests validate model query logic with predefined inputs and expected outputs; they are separate from dbt's SQL test files.
 
 ## Seed column types
 

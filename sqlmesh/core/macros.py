@@ -965,15 +965,82 @@ def generate_surrogate_key(
             )
         )
 
+    concat = exp.func("CONCAT", *string_fields)
+    # The argument is always a string; annotating it here lets generators that
+    # split string/binary hash semantics (Presto, Trino) wrap the encode.
+    concat.type = exp.DataType.build("text")
+
     func = exp.func(
         hash_function.name,
-        exp.func("CONCAT", *string_fields),
+        concat,
         dialect=evaluator.dialect,
     )
     if isinstance(func, exp.MD5Digest):
         func = exp.MD5(this=func.this)
+    elif isinstance(func, exp.SHA2Digest):
+        # Same split as MD5/MD5Digest: the surrogate key must be a hex string,
+        # not a binary digest, on every dialect.
+        func = exp.SHA2(this=func.this, length=func.args.get("length"))
+    elif isinstance(func, exp.Anonymous) and _is_presto_family(evaluator.dialect):
+        # Athena runs the Trino engine, so sha256() takes varbinary there too,
+        # but its parser has no SHA256/SHA512 entry: exp.func returns an
+        # Anonymous node, so neither branch above fires and the surrogate key
+        # keeps the bare SHA256(varchar) form reported in #5871. Unlike the
+        # probe below, this is not a pin-era workaround — Athena still parses
+        # to Anonymous on sqlglot versions that carry tobymao/sqlglot#7824.
+        #
+        # Anonymous is the catch-all for every unrecognised function name, and
+        # hash_function is caller-supplied, so the name is checked rather than
+        # assumed: an unknown hash must pass through untouched.
+        length = _SHA2_DIGEST_LENGTHS.get(func.name.upper())
+        if length is not None:
+            func = exp.SHA2(this=concat, length=exp.Literal.number(length))
+
+    if isinstance(func, exp.SHA2) and _sha2_renders_binary(evaluator.dialect):
+        # Presto/Trino render a bare SHA256(varchar) for exp.SHA2 on sqlglot
+        # versions without tobymao/sqlglot#7824: a type error on Trino, and
+        # binary rather than string semantics where it runs. Build the
+        # hex-string form explicitly, mirroring what those generators do for
+        # MD5: LOWER(TO_HEX(SHA256(TO_UTF8(...)))). The probe keeps this
+        # branch inert once sqlglot renders the hex form natively, so the
+        # expression is never wrapped twice.
+        return exp.Lower(
+            this=exp.Hex(
+                this=exp.SHA2(
+                    this=exp.Encode(this=func.this, charset=exp.Literal.string("utf-8")),
+                    length=func.args.get("length"),
+                )
+            )
+        )
 
     return func
+
+
+# Dialects that model string and binary hashes separately, so a bare
+# SHA256(varchar) is a type error rather than a hex-string surrogate key.
+# Athena is on the list because it runs the Trino engine.
+_PRESTO_FAMILY = frozenset({"presto", "trino", "athena"})
+
+# The SHA-2 digest widths a surrogate key may ask for, by function name.
+_SHA2_DIGEST_LENGTHS = {"SHA256": 256, "SHA512": 512}
+
+
+def _is_presto_family(dialect: DialectType) -> bool:
+    """Whether this dialect is Presto, Trino or Athena."""
+    return (str(dialect) if dialect else "").split(",")[0].strip().lower() in _PRESTO_FAMILY
+
+
+@lru_cache(maxsize=None)
+def _sha2_renders_binary(dialect: DialectType) -> bool:
+    """Whether this dialect renders exp.SHA2 as a bare binary-semantics call.
+
+    Only the Presto family models string and binary hashes separately; other
+    dialects' SHA256(varchar) already returns a hex string.
+    """
+    if not _is_presto_family(dialect):
+        return False
+    probe = exp.SHA2(this=exp.column("_sqlmesh_probe"), length=exp.Literal.number(256))
+    return "TO_HEX" not in probe.sql(dialect=dialect)
 
 
 @macro()
@@ -1379,15 +1446,17 @@ def resolve_template(
     """
     Generates either a String literal or an exp.Table representing a physical table location, based on rendering the provided template String literal.
 
-    Note: It relies on the @this_model variable being available in the evaluation context (@this_model resolves to an exp.Table object
-    representing the current physical table).
+    Note: It relies on the @this_model variable being available in the evaluation context. @this_model usually resolves to an
+    exp.Table object representing the current physical table, but in an audit on a model with a time column it resolves to a
+    subquery that selects from that table and filters it down to the audited time range. In that case the placeholders below
+    are resolved against the physical table the subquery selects from.
     Therefore, the @resolve_template macro must be used at creation or evaluation time and not at load time.
 
     Args:
         template: Template string literal. Can contain the following placeholders:
-            @{catalog_name} -> replaced with the catalog of the exp.Table returned from @this_model
-            @{schema_name} -> replaced with the schema of the exp.Table returned from @this_model
-            @{table_name} -> replaced with the name of the exp.Table returned from @this_model
+            @{catalog_name} -> replaced with the catalog of the physical table @this_model refers to
+            @{schema_name} -> replaced with the schema of the physical table @this_model refers to
+            @{table_name} -> replaced with the name of the physical table @this_model refers to
         mode: What to return.
             'literal' -> return an exp.Literal string
             'table' -> return an exp.Table
@@ -1400,9 +1469,26 @@ def resolve_template(
         >>> evaluator.locals.update({"this_model": exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505")})
         >>> evaluator.transform(parse_one(sql)).sql()
         "'s3://data-bucket/prod/test_catalog/sqlmesh__test/test__test_model__2517971505'"
+
+        The same template resolves to the same location when @this_model is the time-filtered
+        subquery that audits on models with a time column receive:
+
+        >>> table = exp.to_table("test_catalog.sqlmesh__test.test__test_model__2517971505")
+        >>> subquery = exp.select("*").from_(table).where(exp.column("ds").eq("2020-01-01")).subquery()
+        >>> evaluator.locals.update({"this_model": subquery})
+        >>> evaluator.transform(parse_one(sql)).sql()
+        "'s3://data-bucket/prod/test_catalog/sqlmesh__test/test__test_model__2517971505'"
     """
     if "this_model" in evaluator.locals:
-        this_model = exp.to_table(evaluator.locals["this_model"], dialect=evaluator.dialect)
+        this_model_expr = evaluator.locals["this_model"]
+        if isinstance(this_model_expr, exp.Subquery):
+            # Audits on models with a time column render @this_model as a subquery that filters the
+            # physical table on the audited time range, so resolve against the table it selects from
+            from_ = this_model_expr.unnest().args.get("from_")
+            if from_ is not None and isinstance(from_.this, exp.Table):
+                this_model_expr = from_.this
+
+        this_model = exp.to_table(this_model_expr, dialect=evaluator.dialect)
         template_str: str = template.this
         result = (
             template_str.replace("@{catalog_name}", this_model.catalog)

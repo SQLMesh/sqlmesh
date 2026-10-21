@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pyarrow as pa  # type: ignore
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx2 import ASGITransport, AsyncClient
 from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.core.context import Context
@@ -73,6 +73,32 @@ def test_get_file(client: TestClient, project_tmp_path: Path) -> None:
         "extension": ".txt",
         "content": "bar",
     }
+
+
+def test_get_file_nested_path_matches_directory_listing(
+    client: TestClient, project_tmp_path: Path
+) -> None:
+    models_dir = project_tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "mymodel.sql").write_text("SELECT 1")
+
+    response = client.get("/api/files/models/mymodel.sql")
+    assert response.status_code == 200
+    assert response.json()["path"] == "models/mymodel.sql"
+
+
+def test_get_file_relative_path_uses_posix_separators(tmp_path: Path) -> None:
+    file_path = tmp_path / "models" / "mymodel.sql"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("SELECT 1")
+
+    windows_relative = PureWindowsPath("models/mymodel.sql")
+    assert windows_relative.as_posix() == "models/mymodel.sql"
+    assert str(windows_relative) == "models\\mymodel.sql"
+
+    file = _get_file_with_content(file_path, windows_relative.as_posix())
+    assert file.path == "models/mymodel.sql"
+    assert file.path != str(windows_relative)
 
 
 def test_get_file_not_found(client: TestClient) -> None:

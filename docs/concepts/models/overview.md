@@ -190,6 +190,7 @@ This table lists each engine's support for `TABLE` and `VIEW` object comments:
 | Redshift      | Y                | N               |
 | Snowflake     | Y                | Y               |
 | Spark         | Y                | Y               |
+| StarRocks     | Y                | Y               |
 | Trino         | Y                | Y               |
 
 
