@@ -837,3 +837,41 @@ def test_databricks_connect_cluster_id_not_overridden_by_falsy_serverless(
         token="mytoken",
         cluster_id="0123-456789-mycluster",
     )
+
+
+def test_df_source_query_drops_temp_view(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+):
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.set_current_catalog"
+    )
+    adapter = make_mocked_engine_adapter(DatabricksEngineAdapter, default_catalog="test_catalog")
+    mocker.patch.object(
+        DatabricksEngineAdapter,
+        "_use_spark_session",
+        new_callable=mocker.PropertyMock,
+        return_value=True,
+    )
+    spark = mocker.Mock()
+    mocker.patch.object(
+        DatabricksEngineAdapter, "spark", new_callable=mocker.PropertyMock, return_value=spark
+    )
+    pyspark_df = mocker.Mock()
+    mocker.patch.object(adapter, "_ensure_pyspark_df", return_value=pyspark_df)
+    mocker.patch.object(
+        adapter,
+        "_get_temp_table",
+        return_value=exp.to_table("`temp_test_abcdefgh`", dialect="databricks"),
+    )
+
+    source_queries = adapter._df_to_source_queries(
+        pyspark_df, {"a": exp.DataType.build("int")}, batch_size=0, target_table="db.test"
+    )
+    assert len(source_queries) == 1
+
+    with source_queries[0] as query:
+        pyspark_df.createOrReplaceTempView.assert_called_once_with("`temp_test_abcdefgh`")
+        assert query.sql(dialect="databricks") == "SELECT `a` FROM `temp_test_abcdefgh`"
+        spark.catalog.dropTempView.assert_not_called()
+
+    spark.catalog.dropTempView.assert_called_once_with("temp_test_abcdefgh")
