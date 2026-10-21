@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import typing as t
-from unittest.mock import call, patch
+from unittest.mock import PropertyMock, call, patch
 
 import duckdb  # noqa: TID253
 import pandas as pd  # noqa: TID253
@@ -24,7 +24,7 @@ from sqlmesh.core.model import (
     SeedModel,
     SqlModel,
 )
-from sqlmesh.core.promotion import PromotionFrontier
+from sqlmesh.core.promotion import PromotionFrontier, TrailingGap
 from sqlmesh.core.snapshot import (
     Snapshot,
     SnapshotChangeCategory,
@@ -1251,6 +1251,49 @@ def test_promote_snapshots_accepts_bounded_trailing_gap(
     assert payload["planned_frontier"] == to_timestamp("2023-01-01 11:00")
     assert payload["observed_frontier"] == to_timestamp("2023-01-01 12:00")
     assert payload["gap_count"] == 1
+
+
+@pytest.mark.parametrize("failure", ["warning", "payload"])
+def test_promote_snapshots_acceptance_logging_failures_do_not_block_promotion(
+    state_sync: EngineAdapterStateSync,
+    make_snapshot: t.Callable,
+    failure: str,
+):
+    _, target, frontier = _prepare_trailing_gap_promotion(state_sync, make_snapshot)
+    logging_patch: t.ContextManager[t.Any]
+    if failure == "warning":
+        logging_patch = patch(
+            "sqlmesh.core.state_sync.db.facade.logger.warning",
+            side_effect=RuntimeError("logging failed"),
+        )
+    else:
+        logging_patch = patch.object(
+            TrailingGap,
+            "interval",
+            new_callable=PropertyMock,
+            side_effect=RuntimeError("payload construction failed"),
+        )
+
+    with logging_patch:
+        result = promote_snapshots(
+            state_sync,
+            [target],
+            "prod",
+            no_gaps=True,
+            max_trailing_gap_intervals=1,
+            planned_frontiers={target.name: frontier},
+            plan_id="new_plan_id",
+            previous_plan_id="test_plan_id",
+        )
+
+    assert result.added == [target.table_info]
+    environment = state_sync.get_environment("prod")
+    assert environment is not None
+    assert environment.plan_id == "new_plan_id"
+    assert environment.snapshots[0].snapshot_id == target.snapshot_id
+    assert state_sync.get_snapshots([target])[target.snapshot_id].intervals == [
+        (to_timestamp("2023-01-01 00:00"), to_timestamp("2023-01-01 11:00"))
+    ]
 
 
 def test_promote_snapshots_rolls_back_multiple_models_before_warning(

@@ -266,26 +266,12 @@ class EngineAdapterStateSync(StateSync):
         )
 
         for target_snapshot, incumbent_snapshot, frontier, gap in accepted_trailing_gaps:
-            payload = {
-                "environment": environment.name,
-                "plan_id": environment.plan_id,
-                "previous_plan_id": environment.previous_plan_id,
-                "model": target_snapshot.name,
-                "incumbent_snapshot_id": str(incumbent_snapshot.snapshot_id),
-                "candidate_snapshot_id": str(target_snapshot.snapshot_id),
-                "planned_frontier": frontier.end,
-                "observed_frontier": gap.end,
-                "gap_count": gap.interval_count,
-                "gap_range": gap.interval,
-                "next_scheduler_boundary": gap.next_scheduler_boundary,
-            }
-            logger.warning(
-                "Accepted bounded trailing gap during promotion: %s",
-                payload,
-                extra={
-                    "sqlmesh_event": "bounded_trailing_gap_accepted",
-                    "sqlmesh_promotion": payload,
-                },
+            _log_trailing_gap_acceptance(
+                environment,
+                target_snapshot,
+                incumbent_snapshot,
+                frontier,
+                gap,
             )
 
         return result
@@ -682,9 +668,14 @@ class EngineAdapterStateSync(StateSync):
                             max_trailing_gap_intervals,
                             start=start,
                         )
-                        if evaluation.gap and frontier:
+                        if evaluation.gap is not None:
                             accepted_trailing_gaps.append(
-                                (target_snapshot, prev_snapshot, frontier, evaluation.gap)
+                                (
+                                    target_snapshot,
+                                    prev_snapshot,
+                                    t.cast(PromotionFrontier, frontier),
+                                    evaluation.gap,
+                                )
                             )
                             continue
 
@@ -700,11 +691,15 @@ class EngineAdapterStateSync(StateSync):
                             "Please re-apply your plan to resolve this error."
                         )
 
+        children_by_parent = (
+            _build_children_by_parent(target_snapshots_by_name) if accepted_trailing_gaps else {}
+        )
         for target_snapshot, _, _, trailing_gap in accepted_trailing_gaps:
             if _has_downstream_coverage(
                 target_snapshots_by_name,
                 target_snapshot.name,
                 trailing_gap,
+                children_by_parent,
             ):
                 _log_trailing_gap_rejection(
                     target_environment,
@@ -778,8 +773,57 @@ def _log_trailing_gap_rejection(
         pass
 
 
+def _log_trailing_gap_acceptance(
+    environment: Environment,
+    target_snapshot: Snapshot,
+    incumbent_snapshot: Snapshot,
+    frontier: PromotionFrontier,
+    gap: TrailingGap,
+) -> None:
+    """Report an accepted policy decision without affecting promotion."""
+    try:
+        payload = {
+            "environment": environment.name,
+            "plan_id": environment.plan_id,
+            "previous_plan_id": environment.previous_plan_id,
+            "model": target_snapshot.name,
+            "incumbent_snapshot_id": str(incumbent_snapshot.snapshot_id),
+            "candidate_snapshot_id": str(target_snapshot.snapshot_id),
+            "planned_frontier": frontier.end,
+            "observed_frontier": gap.end,
+            "gap_count": gap.interval_count,
+            "gap_range": gap.interval,
+            "next_scheduler_boundary": gap.next_scheduler_boundary,
+        }
+        logger.warning(
+            "Accepted bounded trailing gap during promotion: %s",
+            payload,
+            extra={
+                "sqlmesh_event": "bounded_trailing_gap_accepted",
+                "sqlmesh_promotion": payload,
+            },
+        )
+    except Exception:
+        # Observability must not roll back a successful promotion.
+        pass
+
+
+def _build_children_by_parent(
+    snapshots_by_name: t.Mapping[str, Snapshot],
+) -> t.Dict[str, t.Set[str]]:
+    """Build target snapshot adjacency for a single no-gaps evaluation."""
+    children_by_parent: t.Dict[str, t.Set[str]] = {}
+    for snapshot in snapshots_by_name.values():
+        for parent in snapshot.parents:
+            children_by_parent.setdefault(parent.name, set()).add(snapshot.name)
+    return children_by_parent
+
+
 def _has_downstream_coverage(
-    snapshots_by_name: t.Mapping[str, Snapshot], model_name: str, gap: TrailingGap
+    snapshots_by_name: t.Mapping[str, Snapshot],
+    model_name: str,
+    gap: TrailingGap,
+    children_by_parent: t.Mapping[str, t.Set[str]],
 ) -> bool:
     """Return whether a target descendant already covers an accepted parent tail.
 
@@ -788,11 +832,6 @@ def _has_downstream_coverage(
     conservative avoids accepting that state when auto-upstream selection or
     a later scheduler run cannot invalidate the descendant interval.
     """
-    children_by_parent: t.Dict[str, t.Set[str]] = {}
-    for snapshot in snapshots_by_name.values():
-        for parent in snapshot.parents:
-            children_by_parent.setdefault(parent.name, set()).add(snapshot.name)
-
     descendants: t.Set[str] = set()
     pending = [model_name]
     while pending:

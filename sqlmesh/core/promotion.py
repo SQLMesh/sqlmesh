@@ -59,26 +59,24 @@ class TrailingGapEvaluation:
     reason: t.Optional[TrailingGapRejectionReason] = None
 
 
-def classify_trailing_gap(
+def evaluate_trailing_gap(
     target_snapshot: Snapshot,
     incumbent_snapshot: Snapshot,
     planned_frontier: t.Optional[PromotionFrontier],
     max_trailing_gap_intervals: int,
     *,
     start: int,
-) -> t.Optional[TrailingGap]:
-    """Classify an absent suffix using stored snapshot coverage.
+) -> TrailingGapEvaluation:
+    """Evaluate whether an absent suffix is a bounded trailing gap.
 
-    The existing promotion check deliberately asks ``Snapshot.missing_intervals``
-    for the model's required work.  That method expands missing work for
-    lookback, so its result cannot be used as a safety-policy count.  This
-    helper instead subtracts the candidate's *stored* intervals from the
-    incumbent's stored intervals and then counts the resulting suffix against
-    the model's scheduler cron boundaries.
+    This subtracts the candidate's *stored* intervals from the incumbent's
+    stored intervals. ``Snapshot.missing_intervals`` cannot provide a safe
+    policy count because it expands work for lookback. The resulting suffix is
+    counted against the model's scheduler cron boundaries.
 
-    ``None`` means that the change cannot be proven to be a bounded trailing
-    suffix.  Callers should retain the normal strict no-gap failure in that
-    case.
+    ``gap`` is populated only when the suffix is accepted. Otherwise ``reason``
+    gives a stable category for the policy rejection. Callers should retain the
+    normal strict no-gap failure when ``gap`` is absent.
 
     Args:
         target_snapshot: The candidate snapshot being promoted.
@@ -88,33 +86,9 @@ def classify_trailing_gap(
             plan's original backfill bounds were selected.
         max_trailing_gap_intervals: Maximum number of scheduler boundaries the
             accepted suffix may span.
-        start: Inclusive start of the original no-gap obligation.  The
+        start: Inclusive start of the original no-gap obligation. The
             promotion facade passes this value so historical coverage is
             checked independently of lookback.
-    """
-    return evaluate_trailing_gap(
-        target_snapshot,
-        incumbent_snapshot,
-        planned_frontier,
-        max_trailing_gap_intervals,
-        start=start,
-    ).gap
-
-
-def evaluate_trailing_gap(
-    target_snapshot: Snapshot,
-    incumbent_snapshot: Snapshot,
-    planned_frontier: t.Optional[PromotionFrontier],
-    max_trailing_gap_intervals: int,
-    *,
-    start: int,
-) -> TrailingGapEvaluation:
-    """Evaluate an absent suffix and return its bounded-policy reason.
-
-    :func:`classify_trailing_gap` is a convenience wrapper that returns only
-    the optional accepted gap. Callers that report policy decisions should use
-    this function so the policy is evaluated exactly once and a rejected gap
-    is assigned a bounded, stable category.
     """
     if max_trailing_gap_intervals < 1:
         return _rejected(TrailingGapRejectionReason.DISABLED)
@@ -187,8 +161,6 @@ def evaluate_trailing_gap(
     boundaries = boundary_evaluation.boundaries
     if boundaries is None or not boundaries:
         return _rejected(TrailingGapRejectionReason.SCHEDULE_INELIGIBLE)
-    if len(boundaries) > max_trailing_gap_intervals:
-        return _rejected(TrailingGapRejectionReason.BOUND_EXCEEDED)
 
     try:
         # The warning describes the next scheduler run from the current wall
