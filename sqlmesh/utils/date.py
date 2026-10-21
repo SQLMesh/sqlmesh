@@ -4,6 +4,7 @@ import re
 import time
 import typing as t
 import warnings
+import zoneinfo
 
 from datetime import date, datetime, timedelta, timezone, tzinfo
 
@@ -13,6 +14,7 @@ from dateparser.freshness_date_parser import freshness_date_parser
 from sqlglot import exp
 
 from sqlmesh.utils import ttl_cache
+from sqlmesh.utils.errors import ConfigError
 
 if t.TYPE_CHECKING:
     import pandas as pd
@@ -44,6 +46,36 @@ TEMPORAL_TZ_TYPES = {
     exp.DataType.Type.TIMESTAMPTZ,
     exp.DataType.Type.TIMESTAMPLTZ,
 }
+
+
+def parse_time_zone(tz: t.Optional[str]) -> t.Optional[zoneinfo.ZoneInfo]:
+    """Parse an IANA timezone name. None means UTC/default behavior."""
+    if not tz or tz == "UTC":
+        return None
+
+    try:
+        return zoneinfo.ZoneInfo(tz)
+    except Exception as e:
+        available_timezones = zoneinfo.available_timezones()
+
+        if available_timezones:
+            raise ConfigError(f"'{tz}' is not a valid IANA timezone name.")
+        raise ConfigError(
+            f"{e}. IANA time zone data is not available on your system. "
+            "`pip install tzdata` to leverage time zones."
+        )
+
+
+def _floor_to_local_midnight(dt: datetime, local_tz: tzinfo) -> datetime:
+    local_dt = dt.astimezone(local_tz)
+    return local_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _timezone_name(tzinfo_: tzinfo) -> str:
+    key = getattr(tzinfo_, "key", None)
+    if not isinstance(key, str) or not key:
+        raise ConfigError(f"Timezone {tzinfo_!r} has no IANA name.")
+    return key
 
 
 def now(minute_floor: bool = True) -> datetime:
@@ -149,6 +181,7 @@ def to_datetime(
     relative_base: t.Optional[datetime] = None,
     check_categorical_relative_expression: bool = True,
     tz: t.Optional[tzinfo] = None,
+    relative_tz: t.Optional[tzinfo] = None,
 ) -> datetime:
     """Converts a value into a UTC datetime object.
 
@@ -157,6 +190,10 @@ def to_datetime(
         relative_base: The datetime to reference for time expressions that are using relative terms.
         check_categorical_relative_expression: If True, takes into account the relative expressions that are categorical.
         tz: Timezone to convert datetime to, defaults to utc
+        relative_tz: Timezone used when `value` is a day-sized relative phrase such as
+            "1 week ago", "today", or "yesterday". The phrase is anchored to midnight in
+            this timezone, then converted to UTC. Sub-day phrases and absolute timestamps
+            ignore this argument.
 
     Raises:
         ValueError if value cannot be converted to a datetime.
@@ -169,7 +206,13 @@ def to_datetime(
     elif isinstance(value, date):
         dt = datetime(value.year, value.month, value.day)
     elif isinstance(value, exp.Expr):
-        return to_datetime(value.name)
+        return to_datetime(
+            value.name,
+            relative_base=relative_base,
+            check_categorical_relative_expression=check_categorical_relative_expression,
+            tz=tz,
+            relative_tz=relative_tz,
+        )
     else:
         try:
             epoch = float(value)
@@ -179,17 +222,38 @@ def to_datetime(
         if epoch is None:
             relative_base = relative_base or now()
             expression = str(value)
-            if check_categorical_relative_expression and is_categorical_relative_expression(
+            parse_timezone = "UTC"
+            parse_relative_base: datetime = relative_base
+            use_relative_tz = bool(
+                relative_tz
+                and check_categorical_relative_expression
+                and is_categorical_relative_expression(expression)
+            )
+
+            if use_relative_tz:
+                assert relative_tz is not None
+                parse_timezone = _timezone_name(relative_tz)
+                parse_relative_base = _floor_to_local_midnight(relative_base, relative_tz)
+            elif check_categorical_relative_expression and is_categorical_relative_expression(
                 expression
             ):
-                relative_base = relative_base.replace(hour=0, minute=0, second=0, microsecond=0)
+                parse_relative_base = relative_base.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
 
             # note: we hardcode TIMEZONE: UTC to work around this bug: https://github.com/scrapinghub/dateparser/issues/896
-            # where dateparser just silently fails if it cant interpret the contents of /etc/localtime
-            # this works because SQLMesh only deals with UTC, there is no concept of user local time
+            # where dateparser just silently fails if it cant interpret the contents of /etc/localtime.
+            # Day-sized phrases may instead use relative_tz; the result is still converted to UTC.
             dt = dateparser.parse(
-                expression, settings={"RELATIVE_BASE": relative_base, "TIMEZONE": "UTC"}
+                expression,
+                settings={"RELATIVE_BASE": parse_relative_base, "TIMEZONE": parse_timezone},
             )
+
+            if use_relative_tz and dt is not None:
+                assert relative_tz is not None
+                if not dt.tzinfo:
+                    dt = dt.replace(tzinfo=relative_tz)
+                dt = dt.astimezone(UTC)
         else:
             try:
                 dt = datetime.strptime(str(value), DATE_INT_FMT)
