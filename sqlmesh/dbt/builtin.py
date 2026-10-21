@@ -369,7 +369,7 @@ def to_yaml(value: t.Any, default: t.Optional[t.Any] = None) -> t.Optional[t.Any
 
 def from_yaml(value: t.Any, default: t.Optional[t.Any] = None) -> t.Optional[t.Any]:
     try:
-        return dict(yaml.load(value, raise_if_empty=False, render_jinja=False))
+        return yaml.load(value, raise_if_empty=False, render_jinja=False)
     except (TypeError, YAMLError):
         return default
 
