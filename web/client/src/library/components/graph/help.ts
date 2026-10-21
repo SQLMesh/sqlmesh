@@ -175,7 +175,10 @@ function getNodeMap({
     const model = models.get(modelName)
     const tagsStr = model?.details?.tags
     const tags = tagsStr
-      ? tagsStr.split(',').map(t => t.trim()).filter(Boolean)
+      ? tagsStr
+          .split(',')
+          .map(t => t.trim())
+          .filter(Boolean)
       : undefined
     const node = createGraphNode(modelName, {
       label: model?.displayName ?? modelName,

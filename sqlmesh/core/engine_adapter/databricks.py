@@ -154,7 +154,7 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             host=self._extra_config["databricks_connect_server_hostname"],
             token=self._extra_config.get("databricks_connect_access_token"),
         )
-        if "databricks_connect_use_serverless" in self._extra_config:
+        if self._extra_config.get("databricks_connect_use_serverless"):
             connect_kwargs["serverless"] = True
         else:
             connect_kwargs["cluster_id"] = self._extra_config["databricks_connect_cluster_id"]
@@ -386,6 +386,8 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
         replace: bool = False,
         exists: bool = True,
         clone_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
+        table_format: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> None:
         clone_kwargs = clone_kwargs or {}
@@ -395,6 +397,8 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             source_table_name,
             replace=replace,
             clone_kwargs=clone_kwargs,
+            table_format=table_format,
+            table_kind=table_kind,
             **kwargs,
         )
 

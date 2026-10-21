@@ -14,11 +14,13 @@ from sqlmesh.utils.date import (
     is_categorical_relative_expression,
     is_relative,
     make_inclusive,
+    make_ts_exclusive,
     to_datetime,
     to_time_column,
     to_timestamp,
     to_ts,
     to_tstz,
+    to_utc_timestamp,
 )
 
 
@@ -37,6 +39,17 @@ def test_to_datetime() -> None:
     target = datetime(1971, 1, 1).replace(tzinfo=UTC)
     assert to_datetime("1971-01-01") == target
     assert to_datetime("31536000000") == target
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["inf", "-inf", "1e30", "99999999999999999999", float("inf")],
+)
+def test_to_datetime_out_of_range_raises(value: t.Any) -> None:
+    # A non-finite or out-of-range epoch overflows fromtimestamp; it must raise
+    # the documented ValueError rather than leaking OverflowError/OSError.
+    with pytest.raises(ValueError):
+        to_datetime(value)
 
 
 @pytest.mark.parametrize(
@@ -138,6 +151,17 @@ def test_make_inclusive_tsql(start_in, end_in, start_out, end_out, dialect) -> N
     assert make_inclusive(start_in, end_in, "tsql") == (
         to_datetime(start_out),
         pd.Timestamp(end_out),
+    )
+
+
+def test_make_ts_exclusive() -> None:
+    # tsql subtracts 1ns from the UTC timestamp; must not raise NameError (pd not imported)
+    assert make_ts_exclusive("2020-01-01 12:00:00", dialect="tsql") == to_utc_timestamp(
+        to_datetime("2020-01-01 12:00:00")
+    ) - pd.Timedelta(1, unit="ns")
+    # non-tsql dialects add 1 microsecond
+    assert make_ts_exclusive("2020-01-01 12:00:00", dialect="duckdb") == to_datetime(
+        "2020-01-01 12:00:00.000001"
     )
 
 

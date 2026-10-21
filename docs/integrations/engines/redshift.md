@@ -29,6 +29,7 @@ pip install "sqlmesh[redshift]"
 | `region`                | The AWS region of the Amazon Redshift cluster                                                               | string |    N     |
 | `cluster_identifier`    | The cluster identifier of the Amazon Redshift cluster                                                       | string |    N     |
 | `iam`                   | If IAM authentication is enabled. IAM must be True when authenticating using an IdP                         |  dict  |    N     |
+| `db_user`               | The database user to authenticate as. Required when using IAM authentication                                | string |    N     |
 | `is_serverless`         | If the Amazon Redshift cluster is serverless (Default: `False`)                                             |  bool  |    N     |
 | `serverless_acct_id`    | The account ID of the serverless cluster                                                                    | string |    N     |
 | `serverless_work_group` | The name of work group for serverless end point                                                             | string |    N     |

@@ -242,7 +242,7 @@ def _formatted_validation_errors(error: pydantic.ValidationError) -> t.List[str]
     for e in error.errors():
         msg = e["msg"]
         loc: t.Optional[t.Tuple] = e.get("loc")
-        loc_str = ".".join(loc) if loc else None
+        loc_str = ".".join(str(p) for p in loc) if loc else None
         result.append(f"Invalid field '{loc_str}':\n    {msg}" if loc_str else msg)
     return result
 

@@ -1,3 +1,4 @@
+import ast
 import typing as t
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ def test_print_exception(mocker: MockerFixture):
     except Exception as ex:
         print_exception(ex, test_env, out_mock)
 
-    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 49, in test_print_exception
+    expected_message = r"""  File ".*?.tests.utils.test_metaprogramming\.py", line 50, in test_print_exception
     eval\("test_fun\(\)", env\).*
 
   File '/test/path.py' \(or imported file\), line 2, in test_fun
@@ -220,8 +221,7 @@ def test_func_globals() -> None:
 def test_normalize_source() -> None:
     assert (
         normalize_source(main_func)
-        == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
-    ):
+        == """def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2):
     sqlglot.parse_one('1')
     MyClass(47)
     DataClass(x=y)
@@ -271,8 +271,7 @@ def test_serialize_env() -> None:
             name="main_func",
             alias="MAIN",
             path="test_metaprogramming.py",
-            payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2
-    ):
+            payload="""def main_func(y: int, foo=exp.true(), *, bar=expressions.Literal.number(1) + 2):
     sqlglot.parse_one('1')
     MyClass(47)
     DataClass(x=y)
@@ -370,7 +369,8 @@ def sample_context_manager():
         "my_lambda": Executable(
             name="my_lambda",
             path="test_metaprogramming.py",
-            payload="my_lambda = lambda : print('z')",
+            # Match normalize_source output across Python versions
+            payload=ast.unparse(ast.parse("my_lambda = lambda: print('z')")).strip(),
         ),
         "normalize_model_name": Executable(
             payload="from sqlmesh.core.dialect import normalize_model_name",

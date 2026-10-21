@@ -13,8 +13,8 @@ from functools import partial
 from sys import version_info
 
 import pydantic
+from pydantic import Field, computed_field
 from packaging import version
-from pydantic import Field
 from pydantic_core import from_json
 from sqlglot import exp
 from sqlglot.errors import ParseError
@@ -60,6 +60,9 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Nullable types are problematic
     "clickhouse",
     "starrocks",
+    # Db2 rejects table names starting with underscore (_versions, _snapshots,
+    # _environments, _intervals). Use a separate state_connection (e.g., DuckDB).
+    "db2",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
@@ -110,7 +113,14 @@ class ConnectionConfig(abc.ABC, BaseConfig):
     catalog_type_overrides: t.Optional[t.Dict[str, str]] = None
 
     # Whether to share a  single connection across threads or create a new connection per thread.
-    shared_connection: t.ClassVar[bool] = False
+    #
+    # MyPy throws a "Decorators on top of @property are not supported" error despite this being a
+    # valid decoration, and Pydantic recommend disabling the MyPy hint for this reason - see:
+    # https://pydantic.dev/docs/validation/2.0/usage/computed_fields/
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def shared_connection(self) -> bool:
+        return False
 
     @property
     @abc.abstractmethod
@@ -311,7 +321,10 @@ class BaseDuckDBConnectionConfig(ConnectionConfig):
 
     token: t.Optional[str] = None
 
-    shared_connection: t.ClassVar[bool] = True
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def shared_connection(self) -> bool:
+        return True
 
     _data_file_to_adapter: t.ClassVar[t.Dict[str, EngineAdapter]] = {}
 
@@ -820,10 +833,14 @@ class DatabricksConnectionConfig(ConnectionConfig):
     DISPLAY_NAME: t.ClassVar[t.Literal["Databricks"]] = "Databricks"
     DISPLAY_ORDER: t.ClassVar[t.Literal[3]] = 3
 
-    shared_connection: t.ClassVar[bool] = True
-
     _concurrent_tasks_validator = concurrent_tasks_validator
     _http_headers_validator = http_headers_validator
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def shared_connection(self) -> bool:
+        """The connection should only be shared if U2M OAuth is being used"""
+        return self.auth_type is not None and self.oauth_client_secret is None
 
     @model_validator(mode="before")
     def _databricks_connect_validator(cls, data: t.Any) -> t.Any:
@@ -1321,6 +1338,7 @@ class RedshiftConnectionConfig(ConnectionConfig):
         region: The AWS region where the Amazon Redshift cluster is located.
         cluster_identifier: The cluster identifier of the Amazon Redshift cluster.
         iam: If IAM authentication is enabled. Default value is False. IAM must be True when authenticating using an IdP.
+        db_user: The database user to authenticate as. Required when using IAM authentication.
         is_serverless: Redshift end-point is serverless or provisional. Default value false.
         serverless_acct_id: The account ID of the serverless. Default value None
         serverless_work_group: The name of work group for serverless end point. Default value None.
@@ -1346,6 +1364,7 @@ class RedshiftConnectionConfig(ConnectionConfig):
     region: t.Optional[str] = None
     cluster_identifier: t.Optional[str] = None
     iam: t.Optional[bool] = None
+    db_user: t.Optional[str] = None
     is_serverless: t.Optional[bool] = None
     serverless_acct_id: t.Optional[str] = None
     serverless_work_group: t.Optional[str] = None
@@ -1383,6 +1402,7 @@ class RedshiftConnectionConfig(ConnectionConfig):
             "region",
             "cluster_identifier",
             "iam",
+            "db_user",
             "is_serverless",
             "serverless_acct_id",
             "serverless_work_group",
@@ -2585,6 +2605,93 @@ _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {
     BaseDuckDBConnectionConfig,  # type: ignore[type-abstract]
 }
 
+
+class Db2ConnectionConfig(ConnectionConfig):
+    host: str
+    port: int = 50000
+    database: str
+    db2_schema: str
+    username: str
+    password: str
+    ssl: bool = False
+    ssl_cert: t.Optional[str] = None
+    ssl_key: t.Optional[str] = None
+    ssl_ca: t.Optional[str] = None
+    connect_timeout: int = 30
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    pre_ping: bool = True
+
+    type_: t.Literal["db2"] = Field(alias="type", default="db2")
+    DIALECT: t.ClassVar[t.Literal["db2"]] = "db2"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Db2"]] = "Db2"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[19]] = 19
+
+    _engine_import_validator = _get_engine_import_validator("ibm_db", "db2")
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        return {
+            "host",
+            "port",
+            "database",
+            "db2_schema",
+            "username",
+            "password",
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        adapter = getattr(engine_adapter, "Db2EngineAdapter", None)
+        if adapter is None:
+            raise ConfigError(
+                "The Db2 engine adapter requires Python 3.10+ and the 'db2' extra. "
+                "Please install it with: pip install 'sqlmesh[db2]'"
+            )
+        return t.cast(t.Type[EngineAdapter], adapter)
+
+    def get_catalog(self) -> t.Optional[str]:
+        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
+        passed to the adapter matches what get_current_catalog() returns at runtime."""
+        catalog = super().get_catalog()
+        return catalog.upper() if catalog else None
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        import ibm_db_dbi  # type: ignore
+
+        ssl = self.ssl
+        ssl_cert = self.ssl_cert
+        ssl_key = self.ssl_key
+        ssl_ca = self.ssl_ca
+        connect_timeout = self.connect_timeout
+
+        def connect_db2(**kwargs: t.Any) -> t.Any:
+            conn_str_parts = [
+                f"DATABASE={kwargs['database']}",
+                f"HOSTNAME={kwargs['host']}",
+                f"PORT={kwargs['port']}",
+                "PROTOCOL=TCPIP",
+                f"UID={kwargs['username']}",
+                f"PWD={kwargs['password']}",
+                f"CURRENTSCHEMA={kwargs['db2_schema']}",
+                f"CONNECTTIMEOUT={connect_timeout}",
+            ]
+            if ssl:
+                conn_str_parts.append("SECURITY=SSL")
+                if ssl_cert:
+                    conn_str_parts.append(f"SSLClientCertificate={ssl_cert}")
+                if ssl_key:
+                    conn_str_parts.append(f"SSLClientKey={ssl_key}")
+                if ssl_ca:
+                    conn_str_parts.append(f"SSLServerCertificate={ssl_ca}")
+            conn_str = ";".join(conn_str_parts) + ";"
+            return ibm_db_dbi.connect(conn_str, "", "")
+
+        return connect_db2
+
+
 CONNECTION_CONFIG_TO_TYPE = {
     # Map all subclasses of ConnectionConfig to the value of their `type_` field.
     tpe.all_field_infos()["type_"].default: tpe
@@ -2640,7 +2747,8 @@ connection_config_validator: t.Callable = field_validator(
     "state_connection",
     "test_connection",
     "default_connection",
-    "default_test_connection",
+    # field_validator matches field names, not aliases
+    "default_test_connection_",
     mode="before",
     check_fields=False,
 )(_connection_config_validator)

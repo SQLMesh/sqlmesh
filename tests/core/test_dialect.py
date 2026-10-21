@@ -1,3 +1,5 @@
+import importlib.util
+import sys
 import pytest
 from sqlglot import Dialect, ParseError, exp, parse_one
 from sqlglot.dialects.dialect import NormalizationStrategy
@@ -15,6 +17,7 @@ from sqlmesh.core.dialect import (
 import sqlmesh.core.dialect as d
 from sqlmesh.core.model import SqlModel, load_sql_based_model
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
+from sqlmesh.core.config.format import FormatConfig
 
 pytestmark = pytest.mark.dialect_isolated
 
@@ -98,7 +101,7 @@ def test_format_model_expressions():
   references (a, (b, c) AS d), /* c */
   @macro_prop_with_comment(proper := 'foo'), /* k */
   audits ARRAY(
-    NOT_NULL(
+    not_null(
       columns = ARRAY(
         foo_id,
         foo_normalised,
@@ -112,14 +115,14 @@ def test_format_model_expressions():
         tier
       )
     ),
-    UNIQUE_VALUES(columns = ARRAY(foo_id)),
-    ACCEPTED_RANGE(column = foo_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = bar_normalised, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = total_weight, min_v = 0, max_v = 100),
-    ACCEPTED_RANGE(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_RANGE(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
-    ACCEPTED_VALUES(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
-    ACCEPTED_VALUES(
+    unique_values(columns = ARRAY(foo_id)),
+    accepted_range(column = foo_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = bar_normalised, min_v = 0, max_v = 100),
+    accepted_range(column = total_weight, min_v = 0, max_v = 100),
+    accepted_range(column = cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_range(column = market_cumulative_total_weight_share, min_v = 0, max_v = 1),
+    accepted_values(column = tier, is_in = ARRAY('Tier 1', 'Tier 2', 'Tier 3', 'Long Tail')),
+    accepted_values(
       column = total_weight_decile,
       is_in = ARRAY(
         'Decile_01',
@@ -339,6 +342,588 @@ GRANT REFERENCES, SELECT ON FUTURE VIEWS IN DATABASE demo_db TO ROLE owner_name;
 GRANT SELECT ON VIEW demo_db.table /* sqlglot.meta replace=false */ TO ROLE admin;
 ON_VIRTUAL_UPDATE_END;"""
     )
+
+
+@pytest.mark.parametrize(
+    "dialect,audit_type,int_type",
+    # These dialects spell the same types differently -- fabric renders a bare DATETIME2
+    # with its default precision and keeps INT, tsql does the reverse. The point of the
+    # test is that each keeps *its own* spelling rather than being flattened.
+    [("tsql", "DATETIME2", "INTEGER"), ("fabric", "DATETIME2(6)", "INT")],
+)
+def test_format_model_expressions_meta_render_policy(dialect: str, audit_type: str, int_type: str):
+    """Header properties whose values are warehouse SQL render with the model dialect,
+    while SQLMesh's own properties stay dialect-agnostic.
+
+    Rendering the whole header with the dialect corrupts SQLMesh DDL (tsql turns
+    `allow_partials TRUE` into the unparseable `(1 = 1)`), but rendering all of it
+    generically discards dialect-specific values the user authored, such as the
+    `DATETIME2` types below. The split is derived from the field declarations, so it
+    covers `columns`, `audits`, `physical_properties` and the expression properties
+    nested inside `kind` alike.
+    """
+    formatted = format_model_expressions(
+        parse(
+            f"""
+            MODEL (
+              name a.b,
+              dialect {dialect},
+              kind SCD_TYPE_2_BY_TIME (
+                unique_key id,
+                time_data_type DATETIME2(6)
+              ),
+              allow_partials true,
+              description 'my description',
+              columns (
+                ts DATETIME2(6)
+              ),
+              audits (
+                my_audit(threshold := CAST('2024-01-01' AS DATETIME2))
+              ),
+              physical_properties (
+                labels = (('env', 'prod'))
+              )
+            );
+
+            SELECT CAST(x AS INT) AS y FROM t
+            """
+        ),
+        dialect=dialect,
+    )
+
+    assert (
+        formatted
+        == f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  kind SCD_TYPE_2_BY_TIME (
+    unique_key id,
+    time_data_type DATETIME2(6)
+  ),
+  allow_partials TRUE,
+  description 'my description',
+  columns (
+    ts DATETIME2(6)
+  ),
+  audits (
+    my_audit(threshold := '2024-01-01'::{audit_type})
+  ),
+  physical_properties (
+    labels = (
+      ('env', 'prod')
+    )
+  )
+);
+
+SELECT
+  x::{int_type} AS y
+FROM t"""
+    )
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "audits (my_audit(t := CAST('2024-01-01' AS DATETIME2)))",
+        "audits (my_audit(flag := true))",
+        "kind SCD_TYPE_2_BY_COLUMN(unique_key id, columns (a, b), time_data_type DATETIME2(6))",
+        "physical_properties (labels = (('env', 'prod')))",
+        "allow_partials true, description 'my description'",
+        "@my_prop(cutoff := CAST('2024-01-01' AS DATETIME2))",
+    ],
+)
+def test_format_model_expressions_is_idempotent(header: str):
+    """Formatting an already-formatted model must be a no-op.
+
+    Rendering a dialect-specific type with the generic generator does not merely lose
+    formatting, it compounds: tsql `DATETIME2` renders as `TIMESTAMP`, and tsql parses
+    `TIMESTAMP` as ROWVERSION (a binary type), so a second pass writes `VARBINARY`. Two
+    runs of `sqlmesh format` silently turned a datetime into a binary type -- and for
+    `time_data_type` that is the physical type of the SCD valid_from/valid_to columns.
+    """
+    source = f"MODEL (name a.b, dialect tsql, {header});\nSELECT 1 AS x"
+
+    once = format_model_expressions(parse(source, default_dialect="tsql"), dialect="tsql")
+    twice = format_model_expressions(parse(once, default_dialect="tsql"), dialect="tsql")
+
+    assert once == twice
+
+
+@pytest.mark.parametrize(
+    "dialect,column_type",
+    [("bigquery", "DATETIME"), ("tsql", "DATETIME2(6)")],
+)
+def test_format_model_expressions_preserves_column_types(dialect: str, column_type: str):
+    """Repeated `sqlmesh format` runs must not change a model's declared column types.
+
+    Rendering `columns` with the generic generator rewrote them: BigQuery `DATETIME`
+    became `TIMESTAMP` and then `TIMESTAMPTZ`, tsql `DATETIME2` became `TIMESTAMP` and
+    then `VARBINARY`.
+    """
+    expected = exp.DataType.build(column_type, dialect=dialect)
+    formatted = f"MODEL (name a.b, dialect {dialect}, columns (ts {column_type}));\nSELECT 1 AS ts"
+
+    for _ in range(2):
+        formatted = format_model_expressions(
+            parse(formatted, default_dialect=dialect), dialect=dialect
+        )
+        model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+        assert model.columns_to_types == {"ts": expected}
+
+
+def test_format_audit_expressions_meta_render_policy():
+    """AUDIT headers have their own meta model, and get the same split: `blocking` is
+    SQLMesh's own boolean and must not become tsql's `(1 = 0)`, while `defaults` holds
+    user expressions and keeps its dialect-specific type."""
+    formatted = format_model_expressions(
+        parse(
+            """
+            AUDIT (
+              name my_audit,
+              dialect tsql,
+              blocking false,
+              defaults (
+                cutoff := CAST('2024-01-01' AS DATETIME2)
+              )
+            );
+
+            SELECT * FROM t WHERE x > 0
+            """
+        ),
+        dialect="tsql",
+    )
+
+    assert "blocking FALSE" in formatted
+    assert "cutoff := '2024-01-01'::DATETIME2" in formatted
+
+
+def test_format_model_expressions_kind_time_column_dialect():
+    """Expression-bearing properties nested inside `kind` render with the model dialect,
+    while their scalar siblings stay dialect-agnostic.
+
+    `time_column` is a nested Pydantic model (`TimeColumn`) wrapping an expression, not
+    an `exp.Expr` annotation itself, so the render-policy reflection must recurse into
+    nested Pydantic models to classify it as warehouse SQL. Otherwise it falls back to
+    generic rendering and loses dialect-specific identifier quoting: tsql's `[end]`
+    becomes ANSI `"end"`, even though the same identifier in the query body is correctly
+    kept as `[end]`.
+
+    Regression: recursing into nested Pydantic models to fix `time_column` made
+    `_holds_expression` also match on `kind` itself, since *some* member of the
+    `ModelKind` union (`IncrementalByTimeRangeKind.time_column`) holds an expression.
+    That routed the entire `kind (...)` subtree through a dialect-specific generator, so tsql's
+    boolean-literal preprocessing rewrote `forward_only TRUE` into `forward_only (1 = 1)`.
+    That reparses without error, but `str_to_bool` on `Paren(EQ(1, 1)).name` (`""`)
+    evaluates to `False`, so the value silently flips on reload.
+    """
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              kind INCREMENTAL_BY_TIME_RANGE (
+                time_column [end],
+                forward_only true
+              )
+            );
+
+            SELECT 1 AS x, [end] FROM t
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert (
+        formatted
+        == """MODEL (
+  name a.b,
+  dialect tsql,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column [end],
+    forward_only TRUE
+  )
+);
+
+SELECT
+  1 AS x,
+  [end]
+FROM t"""
+    )
+
+    model = load_sql_based_model(parse(formatted, default_dialect="tsql"), dialect="tsql")
+    assert model.kind.forward_only is True
+
+
+def test_format_model_expressions_macro_property_comments_preserved_with_dialect():
+    """Comments inside a macro header-property must survive formatting when the model
+    has a `dialect` set.
+
+    The dialect-render path goes through `Expression.sql(dialect=...)`, which builds a
+    fresh `Generator` with `comments` as a constructor flag: passing `comments=False`
+    there disables comment rendering for the *entire* subtree, rather than just
+    suppressing the redundant outer-level `maybe_comment` call the way `comment=False`
+    does for `Generator.sql()`. That previously caused comments like `/* inline note */`
+    to be silently dropped whenever the model declared a `dialect`.
+    """
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              @my_prop(cutoff := CAST('2024-01-01' AS DATETIME2) /* inline note */)
+            );
+
+            SELECT 1 AS x
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert "/* inline note */" in formatted
+    assert (
+        formatted
+        == """MODEL (
+  name a.b,
+  dialect tsql,
+  @my_prop(cutoff := '2024-01-01'::DATETIME2 /* inline note */)
+);
+
+SELECT
+  1 AS x"""
+    )
+
+    # Idempotency: formatting an already-formatted macro property must not duplicate or
+    # drop the comment on a second pass.
+    twice = format_model_expressions(parse(formatted, default_dialect="tsql"), dialect="tsql")
+    assert formatted == twice
+
+
+@pytest.mark.parametrize("dialect", ["bigquery", "duckdb", "snowflake"])
+@pytest.mark.parametrize("prop_name", ["tags", "ignored_rules"])
+def test_format_model_expressions_list_property_array_literal(dialect: str, prop_name: str):
+    """List-valued header properties render as `[a, b]`, not `ARRAY(a, b)`, which
+    BigQuery parses as a subquery and fails to load."""
+    source = f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  {prop_name} ['C1', 'c2']
+);
+SELECT 1 AS x"""
+
+    formatted = format_model_expressions(parse(source, default_dialect=dialect), dialect=dialect)
+    assert f"{prop_name} ['C1', 'c2']" in formatted
+
+    twice = format_model_expressions(parse(formatted, default_dialect=dialect), dialect=dialect)
+    assert formatted == twice
+
+    model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+    if prop_name == "tags":
+        assert model.tags == ["C1", "c2"]
+    else:
+        assert model.ignored_rules == {"c1", "c2"}
+
+
+def test_format_model_expressions_array_property_no_dialect_unchanged():
+    formatted = format_model_expressions(
+        parse("MODEL (name a.b, tags ['C1', 'c2']); SELECT 1 AS x")
+    )
+
+    assert "tags ARRAY('C1', 'c2')" in formatted
+
+
+@pytest.mark.parametrize("dialect", ["tsql", "sqlite"])
+@pytest.mark.parametrize("prop_name", ["tags", "ignored_rules"])
+def test_format_model_expressions_list_property_bracket_identifier_dialects(
+    dialect: str, prop_name: str
+):
+    """These dialects quote identifiers with `[...]`, so a bracketed list would reload
+    as a single identifier. List properties must keep the `ARRAY(...)` form."""
+    source = f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  {prop_name} ARRAY('C1', 'c2')
+);
+SELECT 1 AS x"""
+
+    formatted = format_model_expressions(parse(source, default_dialect=dialect), dialect=dialect)
+    assert f"{prop_name} ARRAY('C1', 'c2')" in formatted
+
+    twice = format_model_expressions(parse(formatted, default_dialect=dialect), dialect=dialect)
+    assert formatted == twice
+
+    model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+    if prop_name == "tags":
+        assert model.tags == ["C1", "c2"]
+    else:
+        assert model.ignored_rules == {"c1", "c2"}
+
+
+@pytest.mark.parametrize("dialect", ["bigquery", "duckdb", "snowflake", "postgres"])
+def test_format_model_expressions_grain_alias_render_policy(dialect: str):
+    """`grain` is renamed to `grains` before validation, so it must share the
+    `grains` render policy instead of falling back to `ARRAY(...)`."""
+    source = f"""MODEL (
+  name a.b,
+  dialect {dialect},
+  grain [id, id2]
+);
+SELECT 1 AS x, 2 AS id, 3 AS id2"""
+
+    formatted = format_model_expressions(parse(source, default_dialect=dialect), dialect=dialect)
+    assert "ARRAY(id, id2)" not in formatted
+
+    twice = format_model_expressions(parse(formatted, default_dialect=dialect), dialect=dialect)
+    assert formatted == twice
+
+    model = load_sql_based_model(parse(formatted, default_dialect=dialect), dialect=dialect)
+    assert {c.name for c in model.grains[0].find_all(exp.Column)} == {"id", "id2"}
+
+
+def test_format_model_expressions_table_properties_alias_render_policy():
+    """`table_properties` is renamed to `physical_properties` before validation, so it
+    must keep dialect-specific types such as tsql's `DATETIME2`."""
+    formatted = format_model_expressions(
+        parse(
+            """
+            MODEL (
+              name a.b,
+              dialect tsql,
+              table_properties (
+                x = CAST('2024-01-01' AS DATETIME2)
+              )
+            );
+
+            SELECT 1 AS x
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+    )
+
+    assert "x = '2024-01-01'::DATETIME2" in formatted
+
+    twice = format_model_expressions(parse(formatted, default_dialect="tsql"), dialect="tsql")
+    assert formatted == twice
+
+
+def test_format_model_expressions_normalize_functions():
+    """Regression: formatter function-name casing behavior.
+
+    Approved behavior:
+    - Default (``normalize_functions=False``): custom/audit function names
+      (stored as strings in the AST) are preserved with their original casing.
+      SQLGlot built-in functions like COUNT/SUM are always output in their
+      canonical uppercase form because the parser discards the original spelling.
+    - ``normalize_functions="upper"``: both audit references and query functions
+      are uppercased.
+    - ``normalize_functions="lower"``: both audit references and query functions
+      are lowercased.
+
+    The fix also covers the single-meta-expression early-return path in
+    ``format_model_expressions``; assertions at the end of this test exercise
+    that path to prevent regression.
+    """
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+
+        SELECT SUM(id), count(id) FROM foo;
+        """
+    )
+
+    # Default: audit references preserved lowercase; COUNT/SUM canonicalized uppercase.
+    assert (
+        format_model_expressions(expressions)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # "upper": audit references uppercased; query functions uppercased.
+    assert (
+        format_model_expressions(expressions, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # "lower": audit references preserved lowercase (already lower); query functions lowercased.
+    assert (
+        format_model_expressions(expressions, normalize_functions="lower")
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  sum(id),
+  count(id)
+FROM foo"""
+    )
+
+    # None: explicit deferral to SQLGlot default → custom/audit names uppercased,
+    # just like "upper".  This is distinct from False (preserve) and must be tested
+    # explicitly because None used to be indistinguishable from the missing kwarg.
+    assert (
+        format_model_expressions(expressions, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+);
+
+SELECT
+  SUM(id),
+  COUNT(id)
+FROM foo"""
+    )
+
+    # Single-meta-expression path: normalize_functions must be forwarded.
+    # Without the fix, this path ignored normalize_functions entirely.
+    single_model = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        """
+    )
+
+    assert (
+        format_model_expressions(single_model, normalize_functions="upper")
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    assert (
+        format_model_expressions(single_model)
+        == """MODEL (
+  name x,
+  audits (
+    unique_combination_of_columns(columns := (
+      id
+    )),
+    not_null(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+    # Single-meta path, None: custom audit names are uppercased (explicit SQLGlot default deferral).
+    assert (
+        format_model_expressions(single_model, normalize_functions=None)
+        == """MODEL (
+  name x,
+  audits (
+    UNIQUE_COMBINATION_OF_COLUMNS(columns := (
+      id
+    )),
+    NOT_NULL(columns := (
+      id
+    ))
+  )
+)"""
+    )
+
+
+def test_format_config_normalize_functions_false():
+    config = FormatConfig(normalize_functions=False)
+
+    assert config.normalize_functions is False
+    assert config.generator_options["normalize_functions"] is False
+
+
+def test_format_config_normalize_functions_none():
+    """FormatConfig(normalize_functions=None) must be accepted but excluded from
+    generator_options by Pydantic's exclude_none serialization.  The config-layer
+    null therefore takes the False-default path in format_model_expressions rather
+    than deferring to SQLGlot's generator default the way True does.
+    """
+    config = FormatConfig(normalize_functions=None)
+
+    assert config.normalize_functions is None
+    # None is excluded by PydanticModel.dict(exclude_none=True), so the key must
+    # be absent from generator_options — format_model_expressions will use False.
+    assert "normalize_functions" not in config.generator_options
+
+    # Confirm the False-default behaviour: custom audit names must be preserved.
+    expressions = parse(
+        """
+        MODEL (
+          name x,
+          audits (
+            unique_combination_of_columns(columns := (id)),
+            not_null(columns := (id))
+          )
+        );
+        SELECT id FROM foo
+        """
+    )
+    result = format_model_expressions(expressions, **config.generator_options)
+    assert "unique_combination_of_columns" in result
+    assert "not_null" in result
 
 
 def test_macro_format():
@@ -778,6 +1363,38 @@ def test_conditional_statement():
     assert q.sql(dialect="tsql") == "@IF(@runtime_stage = 'evaluating', SELECT 1)"
 
 
+def test_tsql_alter_column_nullability():
+    # Issue #5932: T-SQL spells nullability right after the type in ALTER COLUMN. Without support
+    # for it the statement falls back to a Command, so any macros it contains go unresolved.
+    for sql, expected in [
+        (
+            "ALTER TABLE x ALTER COLUMN y INT NOT NULL",
+            "ALTER TABLE x ALTER COLUMN y INTEGER NOT NULL",
+        ),
+        ("ALTER TABLE x ALTER COLUMN y INT NULL", "ALTER TABLE x ALTER COLUMN y INTEGER NULL"),
+        ("ALTER TABLE x ALTER COLUMN y INT", "ALTER TABLE x ALTER COLUMN y INTEGER"),
+    ]:
+        e = parse_one(sql, read="tsql")
+        assert isinstance(e, exp.Alter)
+        assert e.sql(dialect="tsql") == expected
+
+    # The macro must survive parsing so that it can be resolved later
+    e = parse_one(
+        "@IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INT NOT NULL);",
+        read="tsql",
+    )
+    assert (
+        e.sql(dialect="tsql")
+        == "@IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INTEGER NOT NULL)"
+    )
+
+    # Statements that don't carry a type are unaffected
+    assert (
+        parse_one("ALTER TABLE x ALTER COLUMN y DROP NOT NULL", read="tsql").sql(dialect="tsql")
+        == "ALTER TABLE x ALTER COLUMN y DROP NOT NULL"
+    )
+
+
 def test_model_name_cannot_be_string():
     with pytest.raises(ParseError) as parse_error:
         parse(
@@ -801,6 +1418,12 @@ def test_parse_snowflake_create_schema_ddl():
 
 @pytest.mark.parametrize("dialect", sorted(set(DIALECT_TO_TYPE.values())))
 def test_sqlglot_extended_correctly(dialect: str) -> None:
+    # Skip Db2 if db2-sqlglot-dialect is not installed
+    if dialect == "db2" and (
+        sys.version_info < (3, 10) or importlib.util.find_spec("db2_sqlglot") is None
+    ):
+        pytest.skip("db2-sqlglot-dialect is not installed")
+
     # MODEL is a SQLMesh extension and not part of SQLGlot
     # If we can roundtrip an expression containing MODEL across every dialect, then the SQLMesh extensions have been registered correctly
     ast = d.parse_one("MODEL (name foo)", dialect=dialect)
@@ -968,3 +1591,17 @@ def test_pipe_syntax():
         ast.sql("bigquery")
         == "SELECT * FROM (WITH __tmp1 AS (SELECT id FROM t2) SELECT * FROM __tmp1)"
     )
+
+
+def test_extend_sqlglot_is_idempotent():
+    # extend_sqlglot() runs at import time; calling it again must not re-wrap the
+    # already-installed overrides, otherwise they call themselves (RecursionError).
+    from sqlglot.generator import Generator
+
+    before = Generator.UNWRAPPED_INTERVAL_VALUES
+
+    d.extend_sqlglot()
+
+    assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
+    # The class-level registries must not grow on repeated calls.
+    assert Generator.UNWRAPPED_INTERVAL_VALUES == before

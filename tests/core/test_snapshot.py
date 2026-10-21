@@ -1633,6 +1633,276 @@ def test_categorize_change_sql(make_snapshot):
     )
 
 
+def test_categorize_change_sql_additive_projection_edge_cases(make_snapshot):
+    config = CategorizerConfig(sql=AutoCategorizationMode.SEMI)
+
+    old_snapshot = make_snapshot(
+        SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t"))
+    )
+
+    # A same-type cast column has been inserted mid-list, above the existing one.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # An added projection identical to an existing projection remains non-breaking.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT s::TEXT, a::DATE, s::TEXT FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # Multiple same-type cast columns have been inserted mid-list.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a", query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT, y::INT FROM t")
+                )
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # The type of an existing projection has changed (in addition to a new column): undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::INT, x::TEXT, s::TEXT FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        is None
+    )
+
+    # Existing projections have been reordered: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT s::TEXT, a::DATE FROM t"))
+            ),
+            old=old_snapshot,
+            config=config,
+        )
+        is None
+    )
+
+    # An existing projection has been removed: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(SqlModel(name="a", query=parse_one("SELECT s::TEXT FROM t"))),
+            old=old_snapshot,
+            config=config,
+        )
+        is None
+    )
+
+    # A WHERE clause changed alongside the added cast column: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t WHERE a = 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t WHERE a = 1"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Mid-list insert with ORDER BY ordinal shifts the referenced projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t ORDER BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t ORDER BY 2"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Append at end with ORDER BY ordinal leaves existing ordinal bindings unchanged.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, s::TEXT, x::TEXT FROM t ORDER BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t ORDER BY 2"))
+            ),
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+    # Mid-list insert with GROUP BY ordinal shifts the referenced projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one("SELECT a::DATE, x::TEXT, s::TEXT FROM t GROUP BY 2"),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE, s::TEXT FROM t GROUP BY 2"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # Aliased UDTF projection: undetermined.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one(
+                        "SELECT a::DATE AS a, x::TEXT AS x, EXPLODE(y) AS y, s::TEXT AS s FROM t"
+                    ),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE AS a, s::TEXT AS s FROM t"))
+            ),
+            config=config,
+        )
+        is None
+    )
+
+    # UDTF inside aliased scalar subquery remains non-breaking.
+    assert (
+        categorize_change(
+            new=make_snapshot(
+                SqlModel(
+                    name="a",
+                    query=parse_one(
+                        "SELECT a::DATE AS a, (SELECT x FROM unnest(b) x) AS sub, s::TEXT AS s FROM t"
+                    ),
+                )
+            ),
+            old=make_snapshot(
+                SqlModel(name="a", query=parse_one("SELECT a::DATE AS a, s::TEXT AS s FROM t"))
+            ),
+            config=config,
+        )
+        == SnapshotChangeCategory.NON_BREAKING
+    )
+
+
+@pytest.mark.parametrize(
+    ("previous_query", "this_query", "expected"),
+    [
+        pytest.param(
+            "WITH x AS (SELECT a FROM t) SELECT a FROM x",
+            "WITH x AS (SELECT a, b FROM t) SELECT a FROM x",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="cte",
+        ),
+        pytest.param(
+            "SELECT a FROM t WHERE EXISTS (SELECT x FROM u)",
+            "SELECT a FROM t WHERE EXISTS (SELECT x, y FROM u)",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="exists",
+        ),
+        pytest.param(
+            "SELECT (SELECT a FROM t) AS x",
+            "SELECT (SELECT a, b FROM t) AS x",
+            None,
+            id="scalar-subquery-projection",
+        ),
+        pytest.param(
+            "SELECT a FROM x UNION ALL SELECT a FROM y",
+            "SELECT a, b FROM x UNION ALL SELECT a, b FROM y",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="union",
+        ),
+        pytest.param(
+            "WITH x AS (SELECT a::DATE, s::TEXT FROM t ORDER BY 2) SELECT * FROM x",
+            "WITH x AS (SELECT a::DATE, x::TEXT, s::TEXT FROM t ORDER BY 2) SELECT * FROM x",
+            None,
+            id="nested-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a FROM (SELECT x FROM t) AS nested",
+            "SELECT a FROM (SELECT x, EXPLODE(y) FROM t) AS nested",
+            None,
+            id="derived-table-udtf",
+        ),
+        pytest.param(
+            "SELECT a, c FROM t ORDER BY 2",
+            "SELECT a, b, c FROM t ORDER BY 2",
+            None,
+            id="order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y ORDER BY 2",
+            "SELECT a, b, c FROM x UNION ALL SELECT a, b, c FROM y ORDER BY 2",
+            None,
+            id="union-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y UNION ALL SELECT a, c FROM z ORDER BY 2",
+            "SELECT a, b, c FROM x UNION ALL SELECT a, b, c FROM y UNION ALL SELECT a, b, c FROM z ORDER BY 2",
+            None,
+            id="nested-union-order-by-ordinal",
+        ),
+        pytest.param(
+            "SELECT a, c FROM x UNION ALL SELECT a, c FROM y ORDER BY 2",
+            "SELECT a, c, b FROM x UNION ALL SELECT a, c, b FROM y ORDER BY 2",
+            SnapshotChangeCategory.NON_BREAKING,
+            id="union-order-by-ordinal-append",
+        ),
+    ],
+)
+def test_categorize_change_sql_nested_projection_additions(
+    make_snapshot,
+    previous_query,
+    this_query,
+    expected,
+):
+    config = CategorizerConfig(sql=AutoCategorizationMode.SEMI)
+    old_snapshot = make_snapshot(SqlModel(name="a", query=parse_one(previous_query)))
+
+    assert (
+        categorize_change(
+            new=make_snapshot(SqlModel(name="a", query=parse_one(this_query))),
+            old=old_snapshot,
+            config=config,
+        )
+        is expected
+    )
+
+
 def test_categorize_change_seed(make_snapshot, tmp_path):
     config = CategorizerConfig(seed=AutoCategorizationMode.SEMI)
     model_name = "test_db.test_seed_model"

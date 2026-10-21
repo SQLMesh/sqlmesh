@@ -1426,18 +1426,19 @@ def test_databricks(make_config):
         )
 
 
-def test_databricks_shared_connection(make_config):
-    """Databricks should use a shared connection pool to prevent OAuth CSRF races.
+def test_databricks__u2m_oauth__shared_connection_pool(make_config):
+    """Databricks should use a shared connection pool when using OAuth to prevent CSRF races.
 
     When concurrent_tasks > 1, ThreadLocalConnectionPool creates one connection per
     thread. For U2M OAuth, each thread triggers its own browser-based OAuth flow;
     these race on the CSRF state parameter and cause MismatchingStateError.
 
-    Setting shared_connection = True causes ThreadLocalSharedConnectionPool to be
-    used instead: a single connection is created (behind a lock) and each thread
-    gets its own cursor, so only one OAuth flow is ever initiated.
+    For non-U2M OAuth authentication types (e.g. access_token and M2M OAuth) then
+    ThreadLocalConnectionPool should still be used.
 
-    See: https://github.com/tobymao/sqlmesh/issues/5646
+    See:
+        https://github.com/tobymao/sqlmesh/issues/5646
+        https://github.com/SQLMesh/sqlmesh/issues/5858
     """
     from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
 
@@ -1445,7 +1446,7 @@ def test_databricks_shared_connection(make_config):
         type="databricks",
         server_hostname="dbc-test.cloud.databricks.com",
         http_path="sql/test/foo",
-        access_token="test-token",
+        auth_type="databricks-oauth",
         concurrent_tasks=4,
     )
     assert isinstance(config, DatabricksConnectionConfig)
@@ -1453,6 +1454,43 @@ def test_databricks_shared_connection(make_config):
 
     adapter = config.create_engine_adapter()
     assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+
+
+@patch.object(DatabricksConnectionConfig, "_connection_factory_with_kwargs")
+def test_databricks__m2m_oauth__connection_pool(mock_connection_factory_with_kwargs, make_config):
+    from sqlmesh.utils.connection_pool import ThreadLocalConnectionPool
+
+    config = make_config(
+        type="databricks",
+        server_hostname="dbc-test.cloud.databricks.com",
+        http_path="sql/test/foo",
+        auth_type="databricks-oauth",
+        oauth_client_id="oauth_client_id",
+        oauth_client_secret="oauth_client_secret",
+        concurrent_tasks=4,
+    )
+    assert isinstance(config, DatabricksConnectionConfig)
+    assert config.shared_connection is False
+
+    adapter = config.create_engine_adapter()
+    assert isinstance(adapter._connection_pool, ThreadLocalConnectionPool)
+
+
+def test_databricks__access_token__connection_pool(make_config):
+    from sqlmesh.utils.connection_pool import ThreadLocalConnectionPool
+
+    config = make_config(
+        type="databricks",
+        server_hostname="dbc-test.cloud.databricks.com",
+        http_path="sql/test/foo",
+        access_token="any-token",
+        concurrent_tasks=4,
+    )
+    assert isinstance(config, DatabricksConnectionConfig)
+    assert config.shared_connection is False
+
+    adapter = config.create_engine_adapter()
+    assert isinstance(adapter._connection_pool, ThreadLocalConnectionPool)
 
 
 def test_engine_import_validator():

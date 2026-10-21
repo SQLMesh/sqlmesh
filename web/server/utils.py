@@ -9,7 +9,7 @@ from pathlib import Path, PurePath
 import pyarrow as pa  # type: ignore
 from fastapi import Depends, HTTPException
 from starlette.responses import StreamingResponse
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_ENTITY
+from starlette.status import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_CONTENT
 
 from sqlmesh.core import constants as c
 from web.server.console import api_console
@@ -45,7 +45,7 @@ async def run_in_executor(func: t.Callable[..., R], *args: t.Any) -> R:
                     message="An unexpected error occurred",
                     origin="API -> utils -> run_in_executor",
                     trigger="An unexpected error occurred",
-                    status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=HTTP_422_UNPROCESSABLE_CONTENT,
                 )
             )
             raise e

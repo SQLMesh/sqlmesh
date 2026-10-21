@@ -9,8 +9,7 @@ from functools import cached_property, partial
 from pathlib import Path
 
 from pydantic import Field
-from sqlglot import diff, exp
-from sqlglot.diff import Insert
+from sqlglot import exp
 from sqlglot.helper import seq_get
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 from sqlglot.optimizer.simplify import gen
@@ -1580,37 +1579,12 @@ class SqlModel(_Model):
             # Can't determine if there's a breaking change if we can't render the query.
             return None
 
-        if previous_query is this_query:
-            edits = []
-        else:
-            edits = diff(
-                previous_query,
-                this_query,
-                matchings=[(previous_query, this_query)],
-                delta_only=True,
-                dialect=self.dialect if self.dialect == previous.dialect else None,
-            )
-        inserted_expressions = {e.expression for e in edits if isinstance(e, Insert)}
+        if previous_query is this_query or _is_only_projection_additions(
+            previous_query, this_query
+        ):
+            return False
 
-        for edit in edits:
-            if not isinstance(edit, Insert):
-                return None
-
-            expr = edit.expression
-            if isinstance(expr, exp.UDTF):
-                # projection subqueries do not change cardinality, engines don't allow these to return
-                # more than one row of data
-                parent = expr.find_ancestor(exp.Subquery)
-
-                if not parent:
-                    return None
-
-                expr = parent
-
-            if not _is_projection(expr) and expr.parent not in inserted_expressions:
-                return None
-
-        return False
+        return None
 
     def is_metadata_only_change(self, previous: _Node) -> bool:
         if self._is_metadata_only_change_cache.get(id(previous), None) is not None:
@@ -1712,6 +1686,7 @@ class SeedModel(_Model):
 
     def render_seed(self) -> t.Iterator[QueryOrDF]:
         import numpy as np
+        import pandas as pd
 
         self._ensure_hydrated()
 
@@ -1752,8 +1727,6 @@ class SeedModel(_Model):
 
             # convert all date/time types to native pandas timestamp
             for column in [*date_columns, *datetime_columns]:
-                import pandas as pd
-
                 df[column] = pd.to_datetime(df[column], infer_datetime_format=True, errors="ignore")  # type: ignore
 
             # extract datetime.date from pandas timestamp for DATE columns
@@ -1769,7 +1742,7 @@ class SeedModel(_Model):
                     )
 
             for column in bool_columns:
-                df[column] = df[column].apply(lambda i: str_to_bool(str(i)))
+                df[column] = df[column].apply(lambda i: None if pd.isna(i) else str_to_bool(str(i)))
 
             df.loc[:, string_columns] = df[string_columns].mask(
                 cond=lambda x: x.notna(),  # type: ignore
@@ -2098,9 +2071,14 @@ def create_models_from_blueprints(
         loader_kwargs["default_catalog"] = original_default_catalog
         blueprint_variables = _extract_blueprint_variables(blueprint, path)
 
-        if gateway:
+        gateway_name: t.Optional[str]
+        if isinstance(gateway, str):
+            # Python decorator gateway names are literals, not SQL expressions. In particular,
+            # parsing a gateway such as "secondary-gw" as SQL would interpret it as subtraction.
+            gateway_name = gateway.lower()
+        elif gateway:
             rendered_gateway = render_expression(
-                expression=exp.maybe_parse(gateway, dialect=dialect),
+                expression=gateway,
                 module_path=module_path,
                 macros=loader_kwargs.get("macros"),
                 jinja_macros=loader_kwargs.get("jinja_macros"),
@@ -2109,7 +2087,11 @@ def create_models_from_blueprints(
                 default_catalog=loader_kwargs.get("default_catalog"),
                 blueprint_variables=blueprint_variables,
             )
-            gateway_name = rendered_gateway[0].name if rendered_gateway else None
+            gateway_name = rendered_gateway[0].name.lower() if rendered_gateway else None
+        elif configured_gateway := (loader_kwargs.get("defaults") or {}).get("gateway"):
+            # Config gateway names are literals, not SQL expressions. In particular, parsing a
+            # gateway such as "secondary-gw" as SQL would interpret it as subtraction.
+            gateway_name = configured_gateway.lower()
         else:
             gateway_name = None
 
@@ -2627,6 +2609,11 @@ def _create_model(
         kwargs["kind"] = create_model_kind(raw_kind, dialect, defaults or {})
 
     defaults = {k: v for k, v in (defaults or {}).items() if k in klass.all_fields()}
+    if issubclass(klass, ExternalModel):
+        # An external model's gateway selects a gateway-specific source definition in
+        # external_models.yaml, so it must remain explicit rather than inheriting the
+        # gateway used to execute managed models in the project.
+        defaults.pop("gateway", None)
     if not issubclass(klass, SqlModel):
         defaults.pop("optimize_query", None)
 
@@ -2908,9 +2895,158 @@ def _list_of_calls_to_exp(value: t.List[t.Tuple[str, t.Dict[str, t.Any]]]) -> ex
     )
 
 
-def _is_projection(expr: exp.Expr) -> bool:
-    parent = expr.parent
-    return isinstance(parent, exp.Select) and expr.arg_key == "expressions"
+def _has_ordinal_references(query: exp.Query) -> bool:
+    order = query.args.get("order")
+    if order and any(
+        isinstance(ob.this, exp.Literal) and ob.this.is_number for ob in order.expressions
+    ):
+        return True
+    group = query.args.get("group")
+    return bool(
+        group and any(isinstance(gb, exp.Literal) and gb.is_number for gb in group.expressions)
+    )
+
+
+def _has_ordinal_references_in_scope(query: exp.Select) -> bool:
+    """Return whether the SELECT or any set operation it is a branch of uses ordinal references.
+
+    An ORDER BY on a UNION is attached to the set operation rather than to its branches, but its
+    ordinals address the branch projections positionally, so a mid-list addition shifts them too.
+    Ascending only while the direct parent is a set operation keeps the walk within the projection
+    list's own output scope: it covers chained set operations but stops at a subquery or CTE
+    boundary, whose ordinals refer to that enclosing scope's projections instead.
+    """
+    if _has_ordinal_references(query):
+        return True
+
+    parent = query.parent
+    while isinstance(parent, exp.SetOperation):
+        if _has_ordinal_references(parent):
+            return True
+        parent = parent.parent
+
+    return False
+
+
+def _added_projection_preserves_cardinality(projection: exp.Expr) -> bool:
+    """Return whether an added projection preserves the query's row cardinality.
+
+    A directly projected UDTF can emit multiple rows. SQLMesh treats it as safe when its nearest
+    subquery ancestor is contained by the added projection because engines require that projection
+    subquery to return at most one row.
+    """
+    udtfs = list(projection.find_all(exp.UDTF))
+    if not udtfs:
+        return True
+
+    projection_node_ids = {id(node) for node in projection.walk()}
+    return all(
+        (subquery := udtf.find_ancestor(exp.Subquery)) is not None
+        and id(subquery) in projection_node_ids
+        for udtf in udtfs
+    )
+
+
+def _projections_only_safely_added(previous_query: exp.Select, this_query: exp.Select) -> bool:
+    """Return whether a SELECT's projections differ only through safe additions.
+
+    Every previous projection must occur unchanged and in the same order in the current list.
+    Unmatched current projections are additions, subject to the UDTF cardinality check. Additions
+    before an existing projection are unsafe when the query uses ordinal GROUP BY or ORDER BY
+    references because they can change which output those ordinals address.
+    """
+    previous_projections = previous_query.expressions
+    this_projections = this_query.expressions
+    this_index = 0
+    added_before_existing = False
+
+    # Match each previous projection to the earliest identical current projection. Any current
+    # projections skipped along the way are additions placed before an existing projection.
+    for previous_projection in previous_projections:
+        while (
+            this_index < len(this_projections)
+            and previous_projection != this_projections[this_index]
+        ):
+            if not _added_projection_preserves_cardinality(this_projections[this_index]):
+                return False
+
+            added_before_existing = True
+            this_index += 1
+
+        if this_index == len(this_projections):
+            return False
+
+        this_index += 1
+
+    # Once all previous projections are matched, every remaining projection was appended, which
+    # leaves the positions of the existing projections untouched.
+    for index in range(this_index, len(this_projections)):
+        if not _added_projection_preserves_cardinality(this_projections[index]):
+            return False
+
+    # Be conservative about every addition placed before an existing projection when ordinals are
+    # present. Determining whether a particular ordinal was shifted would couple this comparison
+    # to dialect-specific semantics.
+    return not (added_before_existing and _has_ordinal_references_in_scope(this_query))
+
+
+def _is_only_projection_additions(
+    previous_query: exp.Query,
+    this_query: exp.Query,
+) -> bool:
+    """Return whether a query changed exclusively through safe projection additions.
+
+    The two ASTs are walked in lockstep. Node types, scalar arguments, and non-projection child
+    lists must match exactly. SELECT projection lists may contain additional expressions as long
+    as all previous projections remain unchanged and ordered and the additions pass the
+    cardinality and ordinal-reference safeguards.
+
+    This specialized comparison avoids the candidate matching performed by SQLGlot's general tree
+    diff while remaining conservative for every change other than an added projection.
+    """
+    expression_pairs: t.List[t.Tuple[exp.Expr, exp.Expr]] = [(previous_query, this_query)]
+
+    while expression_pairs:
+        previous_expression, this_expression = expression_pairs.pop()
+
+        if type(previous_expression) is not type(this_expression):
+            return False
+
+        for arg_key in previous_expression.args.keys() | this_expression.args.keys():
+            previous_value = previous_expression.args.get(arg_key)
+            this_value = this_expression.args.get(arg_key)
+
+            if isinstance(previous_value, exp.Expr):
+                if not isinstance(this_value, exp.Expr):
+                    return False
+
+                expression_pairs.append((previous_value, this_value))
+            elif isinstance(previous_value, list):
+                if not isinstance(this_value, list):
+                    return False
+
+                if (
+                    isinstance(previous_expression, exp.Select)
+                    and isinstance(this_expression, exp.Select)
+                    and arg_key == "expressions"
+                ):
+                    if not _projections_only_safely_added(previous_expression, this_expression):
+                        return False
+                elif len(previous_value) != len(this_value):
+                    return False
+                else:
+                    for previous_item, this_item in zip(previous_value, this_value):
+                        if isinstance(previous_item, exp.Expr):
+                            if not isinstance(this_item, exp.Expr):
+                                return False
+
+                            expression_pairs.append((previous_item, this_item))
+                        elif previous_item != this_item:
+                            return False
+            elif previous_value != this_value:
+                return False
+
+    return True
 
 
 def _single_expr_or_tuple(values: t.Sequence[exp.Expr]) -> exp.Expr | exp.Tuple:

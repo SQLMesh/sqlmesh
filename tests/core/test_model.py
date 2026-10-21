@@ -15,6 +15,7 @@ from sqlglot.errors import ParseError
 from sqlglot.schema import MappingSchema
 from sqlmesh.cli.project_init import init_example_project, ProjectTemplate
 from sqlmesh.core.environment import EnvironmentNamingInfo
+from sqlmesh.core.renderer import TableMapping
 from sqlmesh.core.model.kind import TimeColumn, ModelKindName, SeedKind
 
 from sqlmesh import CustomMaterialization, CustomKind
@@ -1000,6 +1001,75 @@ def test_column_descriptions(sushi_context, assert_exp_eq):
     assert model.column_descriptions == {"id": "primary key", "foo": "bar"}
 
 
+def test_column_descriptions_quoted_identifier():
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect snowflake,
+            column_descriptions (
+                "myColumn" = 'a case-sensitive column',
+                other_column = 'an unquoted column'
+            )
+        );
+
+        SELECT 1 AS "myColumn", 2 AS other_column
+    """
+    )
+    model = load_sql_based_model(expressions, dialect="snowflake")
+
+    # A quoted key keeps its case, an unquoted one is still normalized.
+    assert model.column_descriptions == {
+        "myColumn": "a case-sensitive column",
+        "OTHER_COLUMN": "an unquoted column",
+    }
+    assert set(model.column_descriptions) <= set(model.columns_to_types)
+
+
+def test_column_descriptions_dotted_identifier():
+    # A nested field is looked up by its dotted path, so every part normalizes on its own.
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect bigquery,
+            column_descriptions (
+                record.`myField` = 'a nested field'
+            )
+        );
+
+        SELECT STRUCT(1 AS `myField`) AS record
+    """
+    )
+    model = load_sql_based_model(expressions, dialect="bigquery")
+
+    assert model.column_descriptions == {"record.myfield": "a nested field"}
+
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect snowflake,
+            column_descriptions (
+                nested.field = 'an unquoted path',
+                "MyStruct"."myField" = 'a quoted path'
+            )
+        );
+
+        SELECT 1 AS c
+    """
+    )
+    model = load_sql_based_model(expressions, dialect="snowflake")
+
+    assert model.column_descriptions == {
+        "NESTED.FIELD": "an unquoted path",
+        "MyStruct.myField": "a quoted path",
+    }
+
+
 def test_model_jinja_macro_reference_extraction():
     @macro()
     def test_macro(**kwargs) -> None:
@@ -1541,6 +1611,44 @@ def test_seed_model_custom_types(tmp_path):
     assert df["empty_date"].iloc[0] is None
 
 
+def test_seed_model_boolean_nulls_are_preserved(tmp_path):
+    model_csv_path = (tmp_path / "model.csv").absolute()
+
+    with open(model_csv_path, "w", encoding="utf-8") as fd:
+        fd.write("id,test_ind\n")
+        fd.write("1,null\n")
+        fd.write("2,false\n")
+        fd.write("3,true\n")
+        fd.write("4,null\n")
+
+    model = create_seed_model(
+        "test_db.test_model",
+        SeedKind(path=str(model_csv_path)),
+        columns={
+            "id": "int",
+            "test_ind": "boolean",
+        },
+        dialect="databricks",
+    )
+
+    df = next(model.render_seed())
+
+    assert df["test_ind"].to_list() == [None, False, True, None]
+
+    context = Context(
+        config=Config(
+            default_connection=DuckDBConnectionConfig(),
+            model_defaults=ModelDefaultsConfig(dialect="databricks"),
+        )
+    )
+    context.upsert_model(model)
+
+    rendered_sql = context.render(model).sql("databricks")
+
+    assert "CAST(NULL AS BOOLEAN)" in rendered_sql
+    assert "(4, NULL)" in rendered_sql
+
+
 def test_seed_with_special_characters_in_column(tmp_path, assert_exp_eq):
     config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
     context = Context(config=config)
@@ -1918,6 +2026,45 @@ def test_render_definition():
 
     # Should include the macro implementation.
     assert "def test_macro(evaluator, v):" in d.format_model_expressions(model.render_definition())
+
+
+def test_tsql_alter_column_post_statement(make_snapshot: t.Callable) -> None:
+    # Issue #5932: the trailing NOT NULL made this parse as a Command, which left @this_model
+    # unresolved and sent the macro to the engine verbatim.
+    expressions = d.parse(
+        """
+        MODEL (
+            name test.test_model,
+            dialect tsql,
+        );
+
+        SELECT 1 AS id;
+
+        @IF(@runtime_stage = 'creating', ALTER TABLE @SQL('@this_model') ALTER COLUMN id INT NOT NULL);
+        """
+    )
+
+    model = load_sql_based_model(expressions, default_catalog="catalog")
+
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    post_statements = model.render_post_statements(
+        snapshots={model.fqn: snapshot},
+        runtime_stage=RuntimeStage.CREATING,
+    )
+
+    assert len(post_statements) == 1
+    assert (
+        post_statements[0].sql(dialect="tsql")
+        == f"ALTER TABLE [catalog].[sqlmesh__test].[test__test_model__{snapshot.version}] /* catalog.test.test_model */ ALTER COLUMN [id] INTEGER NOT NULL"
+    )
+
+    # The statement is skipped outside of the creating stage
+    assert not model.render_post_statements(
+        snapshots={model.fqn: snapshot},
+        runtime_stage=RuntimeStage.EVALUATING,
+    )
 
 
 def test_render_definition_with_defaults():
@@ -2679,6 +2826,21 @@ def test_time_column():
     assert model.time_column.column == exp.to_column("ds", quoted=True)
     assert model.time_column.format == "%Y-%m"
     assert model.time_column.expression == d.parse_one("(\"ds\", '%Y-%m')")
+
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind INCREMENTAL_BY_TIME_RANGE(
+                time_column ()
+            )
+        );
+
+        SELECT col::text, ds::text
+    """
+    )
+    with pytest.raises(ConfigError, match="Time Column cannot be empty."):
+        load_sql_based_model(expressions)
 
 
 def test_default_time_column():
@@ -4945,6 +5107,62 @@ def test_project_level_properties_python_model():
     assert not m.enabled
     assert m.allow_partials
     assert m.interval_unit == IntervalUnit.QUARTER_HOUR
+
+
+def test_explicit_hyphenated_gateway_python_model() -> None:
+    @model(
+        name="model_schema.python_explicit_gateway",
+        kind="full",
+        gateway="secondary-gw",
+        columns={"some_col": "int"},
+    )
+    def python_explicit_gateway(context, **kwargs):
+        yield {"some_col": 1}
+
+    requested_variable_gateways: t.List[t.Optional[str]] = []
+
+    def get_variables(gateway: t.Optional[str]) -> t.Dict[str, str]:
+        requested_variable_gateways.append(gateway)
+        return {}
+
+    loaded_models = model.get_registry()["model_schema.python_explicit_gateway"].models(
+        get_variables=get_variables,
+        module_path=Path("."),
+        path=Path("."),
+        dialect="duckdb",
+        defaults=ModelDefaultsConfig().dict(),
+        default_catalog="default_db",
+        default_catalog_per_gateway={"secondary-gw": "secondary_db"},
+    )
+
+    assert len(loaded_models) == 1
+    assert loaded_models[0].gateway == "secondary-gw"
+    assert loaded_models[0].catalog == "secondary_db"
+    assert requested_variable_gateways == ["secondary-gw"]
+
+
+def test_model_defaults_gateway_python_model() -> None:
+    @model(
+        name="model_schema.python_gateway_default",
+        kind="full",
+        columns={"some_col": "int"},
+    )
+    def python_gateway_default(context, **kwargs):
+        yield {"some_col": 1}
+
+    loaded_models = model.get_registry()["model_schema.python_gateway_default"].models(
+        get_variables=lambda gateway: {},
+        module_path=Path("."),
+        path=Path("."),
+        dialect="duckdb",
+        defaults=ModelDefaultsConfig(gateway="python_gateway").dict(),
+        default_catalog="default_db",
+        default_catalog_per_gateway={"python_gateway": "python_db"},
+    )
+
+    assert len(loaded_models) == 1
+    assert loaded_models[0].gateway == "python_gateway"
+    assert loaded_models[0].catalog == "python_db"
 
 
 def test_model_defaults_macros(make_snapshot):
@@ -9531,6 +9749,357 @@ def test_resolve_table(make_snapshot: t.Callable):
         assert post_statements[0].sql() == f'"main"."sqlmesh__schema"."schema__parent__{version}"'
 
 
+def test_resolve_table_large_environment(make_snapshot: t.Callable, mocker: MockerFixture):
+    """`_resolve_table` should only build a mapping for the one table being resolved, not the
+    entire environment (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    target = load_sql_based_model(d.parse("MODEL (name target); SELECT 1 AS c"))
+    target_snapshot = make_snapshot(target)
+    target_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    snapshots = {'"target"': target_snapshot}
+    for i in range(50):
+        other = load_sql_based_model(d.parse(f"MODEL (name other_{i}); SELECT 1 AS c"))
+        other_snapshot = make_snapshot(other)
+        other_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[f'"other_{i}"'] = other_snapshot
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT c FROM target;
+            @resolve_named('target')
+            """
+        )
+    )
+
+    spy = mocker.spy(exp, "replace_tables")
+
+    post_statements = child.render_post_statements(snapshots=snapshots)
+    assert len(post_statements) == 1
+    assert post_statements[0].sql() == f'"sqlmesh__default"."target__{target_snapshot.version}"'
+
+    # every replace_tables call made while resolving the single `target` reference should only
+    # ever see that one mapping entry, not all 51 snapshots in the environment
+    for call in spy.call_args_list:
+        assert len(call.args[1]) <= 1
+
+    # a name absent from both snapshots and table_mapping resolves unchanged
+    unmapped = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name unmapped_child);
+            SELECT 1 AS c;
+            @resolve_named('does_not_exist')
+            """
+        )
+    )
+    unmapped_result = unmapped.render_post_statements(snapshots=snapshots)
+    assert unmapped_result[0].sql() == '"does_not_exist"'
+
+
+@pytest.mark.parametrize("mapping_type", [dict, TableMapping])
+@pytest.mark.parametrize("include_exact_mapping", [False, True])
+def test_resolve_table_preserves_dialect_equivalent_table_mapping_override(
+    make_snapshot: t.Callable, include_exact_mapping: bool, mapping_type: t.Callable
+):
+    """An explicit mapping should override a snapshot mapping when its key is dialect-equivalent
+    to the resolved table name, even when the snapshot lookup is an exact match."""
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    parent = load_sql_based_model(d.parse("MODEL (name parent); SELECT 1 AS c"))
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT 1 AS c;
+            @resolve_named('parent')
+            """
+        )
+    )
+
+    table_mapping = {"parent": "override_table"}
+    if include_exact_mapping:
+        table_mapping = {parent.fqn: "earlier_table", **table_mapping}
+
+    post_statements = child.render_post_statements(
+        snapshots={parent.fqn: parent_snapshot}, table_mapping=mapping_type(table_mapping)
+    )
+
+    assert post_statements[0].sql() == '"override_table"'
+
+
+def test_resolve_table_cross_dialect_fqn_mismatch(make_snapshot: t.Callable):
+    """`_resolve_table`'s narrowed lookup keys `snapshots` by the caller's already-normalized
+    `table_name` string. That string is built with the *referencing* model's own dialect
+    (`self._dialect` in the `resolve_table` macro closure), while the entry in `snapshots` is
+    keyed by the *referenced* model's fqn, which is normalized using that model's own dialect.
+
+    When the two models use dialects with different identifier-casing rules (e.g. a
+    case-insensitive dialect like duckdb referencing a model whose fqn was computed under a
+    case-uppercasing dialect like snowflake), the raw string lookup can miss even though
+    `exp.replace_tables`'s own (dialect-aware) matching -- which is what ran before this
+    optimization, and which the narrowed lookup's own final `exp.replace_tables` call still
+    performs when the key IS found -- would have matched them.
+    """
+
+    # Use explicit per-model normalization settings so this regression is independent of
+    # mutable process-global SQLGlot dialect settings.
+    parent_dialect = "snowflake,normalization_strategy=uppercase"
+    child_dialect = "duckdb,normalization_strategy=case_insensitive"
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    # parent is declared/rendered under snowflake, which uppercases unquoted identifiers, so its
+    # fqn (the key that will appear in `snapshots`) is uppercase-quoted.
+    parent = load_sql_based_model(
+        d.parse("MODEL (name parent); SELECT 1 AS c"), dialect=parent_dialect
+    )
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    assert parent.fqn == '"PARENT"'
+
+    # child is declared/rendered under duckdb (case-insensitive), referencing `parent` in lowercase
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT c FROM parent;
+            @resolve_named('parent')
+            """
+        ),
+        dialect=child_dialect,
+    )
+
+    snapshots = {parent.fqn: parent_snapshot}
+    post_statements = child.render_post_statements(snapshots=snapshots)
+
+    assert len(post_statements) == 1
+    resolved_sql = post_statements[0].sql()
+    # BUG: if this assertion fails with the resolved name still literally "parent" (unmapped)
+    # instead of the physical table name, the narrowed single-snapshot lookup in `_resolve_table`
+    # failed to find `parent` in `snapshots` due to the cross-dialect casing mismatch between the
+    # lookup key and the dict key, even though the table legitimately exists in `snapshots`.
+    assert resolved_sql == f'"sqlmesh__default"."parent__{parent_snapshot.version}"', (
+        f"expected parent to resolve to its physical table name, but got {resolved_sql!r} -- "
+        "this indicates the narrowed snapshots.get(table_name) lookup in _resolve_table missed "
+        "a snapshot that the old full-mapping + exp.replace_tables path would have matched"
+    )
+
+
+def test_resolve_tables_expand_reveals_table_after_find_check(make_snapshot: t.Callable):
+    """Embedded-model expansion (`expand=`) runs as an `expression.transform` *before* the new
+    `expression.find(exp.Table)` short-circuit in `_resolve_tables`, so a table reference that
+    only exists *after* inlining an embedded model's query must still be seen by `find()` and
+    mapped. This locks in that ordering: `grandparent` is not a literal `exp.Table` node in
+    `child`'s original query -- it only appears once the embedded `mid` model is expanded -- and
+    must still resolve to its physical table name, not be silently skipped because it wasn't
+    present at the time `_resolve_tables` was first called."""
+
+    grandparent = load_sql_based_model(d.parse("MODEL (name grandparent); SELECT 1 AS c"))
+    grandparent_snapshot = make_snapshot(grandparent)
+    grandparent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    mid = load_sql_based_model(
+        d.parse("MODEL (name mid, kind EMBEDDED); SELECT c FROM grandparent;")
+    )
+    mid_snapshot = make_snapshot(mid)
+    mid_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    child = load_sql_based_model(d.parse("MODEL (name child); SELECT c FROM mid;"))
+
+    snapshots = {'"grandparent"': grandparent_snapshot, '"mid"': mid_snapshot}
+    query = child.render_query(snapshots=snapshots)
+    assert query is not None
+    rendered_sql = query.sql()
+
+    # the physical table name for `grandparent` must appear -- if the find(exp.Table) check had
+    # run before expansion (or expansion didn't feed into it), `grandparent` would remain
+    # unmapped in the rendered output.
+    assert f"grandparent__{grandparent_snapshot.version}" in rendered_sql
+    assert "FROM grandparent" not in rendered_sql
+
+
+def test_resolve_table_deployability_index_consistency(make_snapshot: t.Callable):
+    """The narrowed `_resolve_table` single-snapshot mapping must respect `deployability_index`
+    identically to the full-mapping path: a non-deployable (dev-preview) snapshot should map to
+    its dev table, not its deployable/prod table.
+
+    A snapshot's dev table only differs from its prod table when `dev_version_` differs from
+    `version` (see `Snapshot._table_name`); that normally arises from a forward-only change
+    against a previous version. `SnapshotChangeCategory.FORWARD_ONLY` is deprecated/blocked by
+    `categorize_as`, so this sets `dev_version_` directly to force that condition deterministically
+    without relying on a deprecated code path.
+    """
+    from sqlmesh.core.snapshot import DeployabilityIndex
+
+    parent = load_sql_based_model(
+        d.parse("MODEL (name parent); SELECT 1 AS c"),
+        dialect="duckdb",
+    )
+    parent_snapshot = make_snapshot(parent)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    parent_snapshot.dev_version_ = "customdevversion123"
+    assert parent_snapshot.table_name(is_deployable=True) != parent_snapshot.table_name(
+        is_deployable=False
+    )
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    child_sql = """
+        MODEL (name child);
+        SELECT 1 AS c;
+        @resolve_named('parent')
+        """
+
+    snapshots = {parent.fqn: parent_snapshot}
+
+    # separate model instances per render call so the statement-render cache (keyed independent
+    # of `deployability_index`) doesn't just return the first call's cached result.
+    deployable_result = (
+        load_sql_based_model(d.parse(child_sql))
+        .render_post_statements(
+            snapshots=snapshots, deployability_index=DeployabilityIndex.all_deployable()
+        )[0]
+        .sql()
+    )
+    non_deployable_result = (
+        load_sql_based_model(d.parse(child_sql))
+        .render_post_statements(
+            snapshots=snapshots,
+            deployability_index=DeployabilityIndex.all_deployable().with_non_deployable(
+                parent_snapshot
+            ),
+        )[0]
+        .sql()
+    )
+
+    # the narrowed single-snapshot mapping must still pick the right table for each index.
+    assert deployable_result != non_deployable_result
+    assert parent_snapshot.table_name(is_deployable=True) in deployable_result.replace('"', "")
+    assert parent_snapshot.table_name(is_deployable=False) in non_deployable_result.replace('"', "")
+
+
+def test_resolve_table_table_mapping_only_dialect_mismatch(make_snapshot: t.Callable):
+    """When `snapshots` is empty/None, `_resolve_table`'s narrowed lookup must still fall back to
+    the full, dialect-reconciling mapping on a miss - not just when `snapshots` is non-empty.
+
+    `table_name` and a `table_mapping` key can be normalized under different dialects (e.g. a
+    unit-test `table_mapping` built from the project's dialect vs. a model's own dialect for the
+    macro-resolved name), so they can disagree in casing/quoting even though an entry for this
+    table exists. The old exp.replace_tables-based path reconciled this via its own
+    normalization; a raw `table_name in table_mapping` string-equality check does not.
+    """
+
+    @macro()
+    def resolve_named(evaluator, name):
+        return evaluator.resolve_table(name.name)
+
+    child = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (name child);
+            SELECT 1 AS c;
+            @resolve_named('a.b')
+            """
+        )
+    )
+
+    # `table_mapping` key differs from the resolved name only in quoting - a raw dict lookup on
+    # `'"a"."b"'` would miss `'a.b'`, but exp.replace_tables' normalization matches them.
+    post_statements = child.render_post_statements(snapshots=None, table_mapping={"a.b": "c"})
+    assert post_statements[0].sql(comments=False) == '"c"'
+
+
+def test_resolve_tables_skips_expand_computation_without_table_refs(
+    make_snapshot: t.Callable,
+):
+    """Rendering a table-less expression (e.g. `virtual_properties`) must skip building the
+    `expand` set and `model_mapping` entirely, not just the final mapping/replace_tables call -
+    both of those are themselves O(N) in the number of snapshots when any snapshot is embedded,
+    so doing them for an expression with no `exp.Table` node at all defeats the point of skipping
+    the mapping build."""
+
+    embedded = load_sql_based_model(d.parse("MODEL (name embedded, kind EMBEDDED); SELECT 1 AS c"))
+    embedded_snapshot = make_snapshot(embedded)
+    embedded_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    class ItemsCountingDict(dict):
+        items_call_count = 0
+
+        def items(self):
+            ItemsCountingDict.items_call_count += 1
+            return super().items()
+
+    snapshots = ItemsCountingDict({embedded.fqn: embedded_snapshot})
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.test_model,
+                virtual_properties (
+                    labels = [('team', 'data')]
+                ),
+            );
+            SELECT a FROM tbl;
+            """
+        )
+    )
+
+    assert model.render_virtual_properties(snapshots=snapshots) == {
+        "labels": exp.maybe_parse("[('team', 'data')]")
+    }
+    # `_resolve_tables` computing `expand` (which scans `snapshots.items()` for embedded
+    # snapshots) and `model_mapping` must not happen for a table-less expression, even though
+    # this environment has an embedded snapshot that would otherwise trigger both.
+    assert ItemsCountingDict.items_call_count == 0
+
+
+def test_table_mapping_normalized_keys():
+    table_mapping = TableMapping({'"db"."a"': "view_a", "db.A": "view_a_upper"})
+
+    # Keys that normalize to the same name resolve to the last one, like exp.replace_tables.
+    duckdb_keys = table_mapping.normalized_keys("duckdb")
+    assert duckdb_keys == {"db.a": "db.A"}
+    # Normalization happens once per dialect, and each dialect gets its own normalization.
+    assert table_mapping.normalized_keys("duckdb") is duckdb_keys
+    assert table_mapping.normalized_keys("snowflake") == {"db.a": '"db"."a"', "DB.A": "db.A"}
+
+    # Every mutation invalidates the cache.
+    table_mapping["db.b"] = "view_b"
+    assert "db.b" in table_mapping.normalized_keys("duckdb")
+    table_mapping.update({"db.c": "view_c"})
+    assert "db.c" in table_mapping.normalized_keys("duckdb")
+    table_mapping.setdefault("db.d", "view_d")
+    assert "db.d" in table_mapping.normalized_keys("duckdb")
+    table_mapping |= {"db.e": "view_e"}
+    assert "db.e" in table_mapping.normalized_keys("duckdb")
+    del table_mapping["db.b"]
+    assert "db.b" not in table_mapping.normalized_keys("duckdb")
+    table_mapping.pop("db.c")
+    assert "db.c" not in table_mapping.normalized_keys("duckdb")
+    table_mapping.popitem()
+    assert "db.e" not in table_mapping.normalized_keys("duckdb")
+    table_mapping.clear()
+    assert table_mapping.normalized_keys("duckdb") == {}
+
+
 def test_cluster_with_complex_expression():
     expressions = d.parse(
         """
@@ -12888,6 +13457,99 @@ def test_default_catalog_still_applied_to_supported_gateway():
     model = models[0]
 
     assert model.catalog == "other_db", f"Expected catalog 'other_db', got: {model.catalog}"
+
+
+@pytest.mark.parametrize(
+    ("model_gateway", "expected_gateway", "expected_catalog"),
+    [
+        (None, "secondary-gw", "secondary_db"),
+        ("default_gw", "default_gw", "example_catalog"),
+    ],
+)
+def test_model_defaults_gateway(
+    model_gateway: t.Optional[str], expected_gateway: str, expected_catalog: str
+) -> None:
+    """A project-level gateway default controls loading unless the model overrides it."""
+    gateway_property = f"gateway {model_gateway}," if model_gateway else ""
+    expressions = d.parse(
+        f"""
+        MODEL (
+            name my_schema.my_model,
+            kind FULL,
+            {gateway_property}
+        );
+
+        SELECT 1 AS id
+        """,
+        default_dialect="duckdb",
+    )
+    requested_variable_gateways: t.List[t.Optional[str]] = []
+
+    def get_variables(gateway: t.Optional[str]) -> t.Dict[str, str]:
+        requested_variable_gateways.append(gateway)
+        return {}
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=get_variables,
+        defaults=ModelDefaultsConfig(gateway="secondary-gw").dict(),
+        dialect="duckdb",
+        default_catalog_per_gateway={
+            "default_gw": "example_catalog",
+            "secondary-gw": "secondary_db",
+        },
+        default_catalog="example_catalog",
+    )
+
+    assert len(models) == 1
+    assert models[0].gateway == expected_gateway
+    assert models[0].catalog == expected_catalog
+    assert requested_variable_gateways == [expected_gateway]
+
+
+def test_model_defaults_gateway_with_blueprints() -> None:
+    expressions = d.parse(
+        """
+        MODEL (
+            name model_@suffix.my_model,
+            kind FULL,
+            blueprints (
+                (suffix := one),
+                (suffix := two),
+            ),
+        );
+
+        SELECT 1 AS id
+        """,
+        default_dialect="duckdb",
+    )
+
+    models = load_sql_based_models(
+        expressions,
+        get_variables=lambda gateway: {},
+        defaults=ModelDefaultsConfig(gateway="other_duckdb").dict(),
+        dialect="duckdb",
+        default_catalog_per_gateway={"other_duckdb": "other_db"},
+        default_catalog="example_catalog",
+    )
+
+    assert {model.gateway for model in models} == {"other_duckdb"}
+    assert {model.catalog for model in models} == {"other_db"}
+
+
+def test_external_model_does_not_inherit_model_defaults_gateway() -> None:
+    default_external_model = create_external_model(
+        "source_schema.default_source",
+        defaults=ModelDefaultsConfig(gateway="managed_gateway").dict(),
+    )
+    explicit_external_model = create_external_model(
+        "source_schema.explicit_source",
+        defaults=ModelDefaultsConfig(gateway="managed_gateway").dict(),
+        gateway="source_gateway",
+    )
+
+    assert default_external_model.gateway is None
+    assert explicit_external_model.gateway == "source_gateway"
 
 
 def test_no_gateway_uses_global_default_catalog():

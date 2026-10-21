@@ -4,7 +4,6 @@ import ast
 import typing as t
 from pathlib import Path
 
-from astor import to_source
 from difflib import get_close_matches
 from sqlglot import exp
 from sqlglot.helper import ensure_list
@@ -387,7 +386,7 @@ def parse_dependencies(
                         )
 
                     try:
-                        expression = to_source(first_arg)
+                        expression = ast.unparse(t.cast(ast.expr, first_arg))
                         return eval(expression, env, local_env)
                     except Exception:
                         if strict_resolution:

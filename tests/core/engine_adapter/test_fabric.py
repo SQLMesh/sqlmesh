@@ -4,10 +4,12 @@ import typing as t
 
 import pandas as pd  # noqa: TID253
 import pytest
+import requests
 from pytest_mock import MockerFixture
 from sqlglot import exp, parse_one
 
 from sqlmesh.core.engine_adapter import FabricEngineAdapter
+from sqlmesh.core.engine_adapter.fabric import FabricHttpClient
 from tests.core.engine_adapter import to_sql_calls
 from sqlmesh.core.engine_adapter.shared import DataObject
 
@@ -17,6 +19,171 @@ pytestmark = [pytest.mark.engine, pytest.mark.fabric]
 @pytest.fixture
 def adapter(make_mocked_engine_adapter: t.Callable) -> FabricEngineAdapter:
     return make_mocked_engine_adapter(FabricEngineAdapter)
+
+
+@pytest.fixture
+def fabric_http_client(mocker: MockerFixture) -> FabricHttpClient:
+    client = FabricHttpClient(
+        tenant_id="tenant-id",
+        workspace_id="workspace-id",
+        client_id="client-id",
+        client_secret="client-secret",
+    )
+    client.session = mocker.MagicMock()
+    return client
+
+
+def _conflict_response(mocker: MockerFixture, error_code: str) -> t.Any:
+    resp = mocker.MagicMock()
+    resp.status_code = 409
+    resp.json.return_value = {"errorCode": error_code}
+    resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+    return resp
+
+
+def test_get_current_catalog_uses_only_explicit_target_catalog(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        database="default_catalog",
+    )
+
+    assert adapter.get_current_catalog() is None
+
+    adapter._target_catalog = "switched_catalog"
+
+    assert adapter.get_current_catalog() == "switched_catalog"
+
+    adapter._connection_pool.close()
+
+    assert adapter._connection_pool.get_attribute("target_catalog") is None
+    assert adapter.get_current_catalog() is None
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_get_current_catalog_returns_none_without_target_or_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(FabricEngineAdapter)
+
+    assert adapter.get_current_catalog() is None
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_set_current_catalog_does_not_query_database(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        database="default_catalog",
+    )
+
+    adapter.set_current_catalog("new_catalog")
+
+    assert adapter.get_current_catalog() == "new_catalog"
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_set_current_catalog_to_default_clears_explicit_target(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+
+    adapter.set_current_catalog("planning")
+    adapter.set_current_catalog("core")
+
+    assert adapter.get_current_catalog() is None
+    adapter.cursor.execute.assert_not_called()
+
+
+def test_catalog_scoped_call_restores_to_neutral_without_close(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    """Decorator's restore-to-neutral must not close the existing connection."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("planning.db.table")
+
+    # Decorator calls set_current_catalog("planning") then set_current_catalog(None).
+    # Only the first call (None→planning) should trigger a connection close.
+    assert close_spy.call_count == 1
+    assert adapter._connected_catalog == "planning"
+    assert adapter.get_current_catalog() is None
+
+
+def test_default_catalog_after_non_default_catalog_reconnects(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("planning.db.table")
+    adapter.table_exists("core.db.table")
+
+    assert close_spy.call_count == 2
+    assert adapter._connected_catalog is None
+    assert adapter.get_current_catalog() is None
+
+
+def test_repeated_same_catalog_reuses_connection(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    """Two consecutive operations on the same catalog share one connection."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("planning.db.table")
+    adapter.table_exists("planning.db.table")
+
+    # Only the very first switch (None→planning) should close.
+    # The restore to neutral keeps the connection alive and the second
+    # planning operation reuses it without another close.
+    assert close_spy.call_count == 1
+    assert adapter._connected_catalog == "planning"
+
+
+def test_switching_between_catalogs_closes_each_time(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+):
+    """Switching to a different catalog always triggers a connection close."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="core",
+        database="core",
+    )
+    close_spy = mocker.spy(adapter._connection_pool, "close")
+    adapter.cursor.fetchone.return_value = (1,)
+
+    adapter.table_exists("safran.db.table")  # None→safran: 1 close
+    adapter.table_exists("planning.db.table")  # safran→planning: 2nd close
+
+    assert close_spy.call_count == 2
+    assert adapter._connected_catalog == "planning"
 
 
 def test_columns(adapter: FabricEngineAdapter):
@@ -306,3 +473,24 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
     create_table_comment_mock.assert_not_called()
     create_column_comments_mock.assert_not_called()
     assert to_sql_calls(adapter) == []
+
+
+def test_create_warehouse_already_exists_is_noop(
+    fabric_http_client: FabricHttpClient, mocker: MockerFixture
+) -> None:
+    fabric_http_client.session.post.return_value = _conflict_response(
+        mocker, "ItemDisplayNameAlreadyInUse"
+    )
+
+    fabric_http_client.create_warehouse("my_warehouse")
+
+    fabric_http_client.session.post.assert_called_once()
+
+
+def test_create_warehouse_unrelated_conflict_still_raises(
+    fabric_http_client: FabricHttpClient, mocker: MockerFixture
+) -> None:
+    fabric_http_client.session.post.return_value = _conflict_response(mocker, "SomeOtherError")
+
+    with pytest.raises(requests.HTTPError):
+        fabric_http_client.create_warehouse("my_warehouse")

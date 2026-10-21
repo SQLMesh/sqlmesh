@@ -732,3 +732,108 @@ def test_columns(mocker: MockFixture, make_mocked_engine_adapter: t.Callable):
     adapter.cursor.execute.assert_called_once_with(
         """SELECT columns.column_name, columns.full_data_type FROM system.information_schema.columns WHERE table_name = 'test_table' AND table_schema = 'test_db' AND table_catalog = 'test_catalog' ORDER BY ordinal_position ASC"""
     )
+
+
+def _make_databricks_connect_adapter(
+    mocker: MockFixture,
+    make_mocked_engine_adapter: t.Callable,
+    extra_config: t.Dict[str, t.Any],
+) -> t.Tuple[DatabricksEngineAdapter, t.Any]:
+    """Helper that creates a DatabricksEngineAdapter with Databricks Connect mocked out."""
+    import sys
+    import types
+
+    mock_session = mocker.MagicMock()
+    mock_builder = mocker.MagicMock()
+    mock_builder.remote.return_value = mock_builder
+    mock_builder.userAgent.return_value = mock_builder
+    mock_builder.getOrCreate.return_value = mock_session
+    mock_databricks_session_cls = mocker.MagicMock()
+    mock_databricks_session_cls.builder = mock_builder
+
+    # databricks.connect is a local import inside the method, so inject via sys.modules
+    mock_connect_module = types.ModuleType("databricks.connect")
+    mock_connect_module.DatabricksSession = mock_databricks_session_cls  # type: ignore
+    mock_databricks_module = types.ModuleType("databricks")
+    mocker.patch.dict(
+        sys.modules,
+        {"databricks": mock_databricks_module, "databricks.connect": mock_connect_module},
+    )
+
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.can_access_spark_session",
+        return_value=False,
+    )
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.databricks.DatabricksEngineAdapter.can_access_databricks_connect",
+        return_value=True,
+    )
+
+    adapter = make_mocked_engine_adapter(
+        DatabricksEngineAdapter,
+        default_catalog="test_catalog",
+        **extra_config,
+    )
+    return adapter, mock_builder
+
+
+def test_databricks_connect_routes_to_cluster_id(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+) -> None:
+    """cluster_id is used when databricks_connect_use_serverless is absent."""
+    extra_config = {
+        "databricks_connect_server_hostname": "myhost.azuredatabricks.net",
+        "databricks_connect_access_token": "mytoken",
+        "databricks_connect_cluster_id": "0123-456789-mycluster",
+    }
+    _, mock_builder = _make_databricks_connect_adapter(
+        mocker, make_mocked_engine_adapter, extra_config
+    )
+
+    mock_builder.remote.assert_called_once_with(
+        host="myhost.azuredatabricks.net",
+        token="mytoken",
+        cluster_id="0123-456789-mycluster",
+    )
+
+
+def test_databricks_connect_routes_to_serverless(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+) -> None:
+    """serverless=True is used when databricks_connect_use_serverless is truthy."""
+    extra_config = {
+        "databricks_connect_server_hostname": "myhost.azuredatabricks.net",
+        "databricks_connect_access_token": "mytoken",
+        "databricks_connect_cluster_id": "0123-456789-mycluster",
+        "databricks_connect_use_serverless": True,
+    }
+    _, mock_builder = _make_databricks_connect_adapter(
+        mocker, make_mocked_engine_adapter, extra_config
+    )
+
+    mock_builder.remote.assert_called_once_with(
+        host="myhost.azuredatabricks.net",
+        token="mytoken",
+        serverless=True,
+    )
+
+
+def test_databricks_connect_cluster_id_not_overridden_by_falsy_serverless(
+    mocker: MockFixture, make_mocked_engine_adapter: t.Callable
+) -> None:
+    """cluster_id is used when databricks_connect_use_serverless is present but False."""
+    extra_config = {
+        "databricks_connect_server_hostname": "myhost.azuredatabricks.net",
+        "databricks_connect_access_token": "mytoken",
+        "databricks_connect_cluster_id": "0123-456789-mycluster",
+        "databricks_connect_use_serverless": False,
+    }
+    _, mock_builder = _make_databricks_connect_adapter(
+        mocker, make_mocked_engine_adapter, extra_config
+    )
+
+    mock_builder.remote.assert_called_once_with(
+        host="myhost.azuredatabricks.net",
+        token="mytoken",
+        cluster_id="0123-456789-mycluster",
+    )

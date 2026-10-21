@@ -11,9 +11,13 @@ SQLMesh enables this decoupling by supporting multiple engine adapters within a 
 Configuring your project to use multiple engines follows a simple process:
 
 - Include all required [gateway connections](../reference/configuration.md#connection) in your configuration.
-- Specify the `gateway` to be used for execution in the `MODEL` DDL.
+- Set `model_defaults.gateway` to the gateway most models should use, and override individual models
+  with `gateway` in the `MODEL` DDL when needed.
 
-If no gateway is explicitly defined for a model, the [default_gateway](../reference/configuration.md#default-gateway) of the project is used.
+If no gateway is explicitly defined for a model, SQLMesh uses the project's
+[`model_defaults.gateway`](../reference/model_configuration.md#model-defaults), when configured,
+and otherwise uses its [default_gateway](../reference/configuration.md#default-gateway). This lets
+all managed models in a project use a gateway without repeating it in every model definition.
 
 By default, virtual layer views are created in the `default_gateway`. This approach requires that all engines can read from and write to the same shared catalog, so a view in the `default_gateway` can access a table in another gateway.
 

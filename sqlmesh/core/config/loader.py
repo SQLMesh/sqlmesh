@@ -272,4 +272,4 @@ def convert_config_type(
     config_obj: Config,
     config_type: t.Type[C],
 ) -> C:
-    return config_type.parse_obj(config_obj.dict())
+    return config_type.parse_obj(config_obj.dict(exclude_computed_fields=True))
