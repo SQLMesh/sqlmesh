@@ -117,22 +117,37 @@ class StateMigrator:
                 migration_time_sec=time.perf_counter() - migration_start_ts,
             )
         except Exception as e:
+            rollback_error: t.Optional[Exception] = None
             if skip_backup:
                 logger.error("Backup was skipped so no rollback was attempted.")
             else:
-                self.rollback()
+                try:
+                    self.rollback()
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
+                    logger.exception("Migration rollback failed.")
+                    self.console.log_warning(
+                        "Migration rollback failed, state may be partially migrated. Check the logs."
+                    )
 
-            analytics.collector.on_migration_end(
-                from_sqlmesh_version=versions.sqlmesh_version,
-                state_sync_type=self.engine_adapter.dialect,
-                migration_time_sec=time.perf_counter() - migration_start_ts,
-                error=e,
-            )
+            try:
+                analytics.collector.on_migration_end(
+                    from_sqlmesh_version=versions.sqlmesh_version,
+                    state_sync_type=self.engine_adapter.dialect,
+                    migration_time_sec=time.perf_counter() - migration_start_ts,
+                    error=e,
+                )
+            except Exception:
+                logger.exception("Failed to record the migration end analytics event.")
 
             self.console.log_migration_status(success=False)
             if isinstance(e, StateMigrationError):
                 raise
-            raise SQLMeshError("SQLMesh migration failed.") from e
+            if rollback_error is not None:
+                raise SQLMeshError(
+                    f"SQLMesh migration failed: {e}. Rolling back to the previous state also failed: {rollback_error}"
+                ) from e
+            raise SQLMeshError(f"SQLMesh migration failed: {e}") from e
 
         self.console.log_migration_status()
 

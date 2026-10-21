@@ -11,6 +11,7 @@ import time_machine
 from pytest_mock.plugin import MockerFixture
 from sqlglot import exp
 
+from sqlmesh.core import analytics
 from sqlmesh.core import constants as c
 from sqlmesh.core.config import EnvironmentSuffixTarget
 from sqlmesh.core.dialect import parse_one
@@ -2843,7 +2844,7 @@ def test_first_migration_failure(duck_conn, mocker: MockerFixture, tmp_path) -> 
     mocker.patch.object(state_sync.migrator, "_migrate_rows", side_effect=Exception("mocked error"))
     with pytest.raises(
         SQLMeshError,
-        match="SQLMesh migration failed.",
+        match=r"SQLMesh migration failed: mocked error",
     ):
         state_sync.migrate()
     assert not state_sync.engine_adapter.table_exists(state_sync.snapshot_state.snapshots_table)
@@ -2852,6 +2853,64 @@ def test_first_migration_failure(duck_conn, mocker: MockerFixture, tmp_path) -> 
     )
     assert not state_sync.engine_adapter.table_exists(state_sync.version_state.versions_table)
     assert not state_sync.engine_adapter.table_exists(state_sync.interval_state.intervals_table)
+
+
+def test_migration_failure_with_rollback_failure(
+    duck_conn, mocker: MockerFixture, tmp_path, caplog
+) -> None:
+    """On an existing state whose backups are unusable, a failed migration must
+    surface the rollback failure too: console warning, log record, and the
+    rollback error folded into the raised message."""
+    state_sync = EngineAdapterStateSync(
+        create_engine_adapter(lambda: duck_conn, "duckdb"),
+        schema=c.SQLMESH,
+        cache_dir=tmp_path / c.CACHE,
+    )
+    mocker.patch.object(state_sync.migrator, "_migrate_rows", side_effect=Exception("mocked error"))
+    # Simulate an existing state: schema_version != 0, so rollback() takes the
+    # restore-from-backups branch, while the backup tables don't exist and it
+    # raises instead of cleaning up.
+    mocker.patch.object(
+        state_sync.migrator.version_state,
+        "get_versions",
+        return_value=Versions(schema_version=1),
+    )
+    mocker.patch.object(
+        state_sync.migrator, "_apply_migrations", return_value=["pending_migration"]
+    )
+    with pytest.raises(
+        SQLMeshError,
+        match=r"SQLMesh migration failed: mocked error\. Rolling back to the previous state also failed: There are no prior migrations to roll back to\.",
+    ):
+        state_sync.migrate()
+    assert "Migration rollback failed." in caplog.text
+    assert not state_sync.engine_adapter.table_exists(state_sync.snapshot_state.snapshots_table)
+    assert not state_sync.engine_adapter.table_exists(
+        state_sync.environment_state.environments_table
+    )
+    assert not state_sync.engine_adapter.table_exists(state_sync.version_state.versions_table)
+    assert not state_sync.engine_adapter.table_exists(state_sync.interval_state.intervals_table)
+
+
+def test_migration_failure_after_update_versions(
+    duck_conn, mocker: MockerFixture, tmp_path
+) -> None:
+    state_sync = EngineAdapterStateSync(
+        create_engine_adapter(lambda: duck_conn, "duckdb"),
+        schema=c.SQLMESH,
+        cache_dir=tmp_path / c.CACHE,
+    )
+    # The first call happens inside the try block right after update_versions() and
+    # raises; the second call happens in the exception handler and succeeds.
+    mocker.patch.object(
+        analytics.collector,
+        "on_migration_end",
+        side_effect=[Exception("mocked error"), None],
+    )
+    with pytest.raises(SQLMeshError, match=r"SQLMesh migration failed: mocked error") as exc_info:
+        state_sync.migrate()
+    assert isinstance(exc_info.value.__cause__, Exception)
+    assert "mocked error" in str(exc_info.value.__cause__)
 
 
 def test_migrate_rows(state_sync: EngineAdapterStateSync, mocker: MockerFixture) -> None:
