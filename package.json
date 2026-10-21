@@ -5,8 +5,8 @@
   },
   "scripts": {
     "ci": "pnpm run lint && pnpm run -r ci",
-    "fmt": "prettier --write .",
-    "fmt:check": "prettier --check .",
+    "fmt": "prettier --write vscode web/client web/common",
+    "fmt:check": "prettier --check vscode web/client web/common",
     "lint": "pnpm run fmt:check && pnpm run -r lint",
     "lint:fix": "pnpm run fmt && pnpm run -r lint:fix"
   },

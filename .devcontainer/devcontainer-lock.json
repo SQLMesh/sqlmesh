@@ -10,11 +10,6 @@
       "resolved": "ghcr.io/devcontainers/features/docker-in-docker@sha256:4fa87399214366e320d489991769c4f3f461e1ffe461f54eea78a41b34945bb5",
       "integrity": "sha256:4fa87399214366e320d489991769c4f3f461e1ffe461f54eea78a41b34945bb5"
     },
-    "ghcr.io/devcontainers/features/java:1": {
-      "version": "1.8.1",
-      "resolved": "ghcr.io/devcontainers/features/java@sha256:8157bab2d8d71e40b2f3128c162fab763e2b11038fdd33784549290a5d386b48",
-      "integrity": "sha256:8157bab2d8d71e40b2f3128c162fab763e2b11038fdd33784549290a5d386b48"
-    },
     "ghcr.io/devcontainers/features/python:1": {
       "version": "1.8.0",
       "resolved": "ghcr.io/devcontainers/features/python@sha256:fbcad6955caeecc5ad3f7886baf652e25cba5225a6c4c2287c536de2e5607511",

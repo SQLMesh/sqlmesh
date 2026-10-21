@@ -1043,12 +1043,15 @@ class EngineAdapter:
     ) -> exp.Create:
         exists = False if replace else exists
         catalog_name = None
+        target_table: t.Optional[exp.Table] = None
         if not isinstance(table_name_or_schema, exp.Schema):
             table_name_or_schema = exp.to_table(table_name_or_schema)
             catalog_name = table_name_or_schema.catalog
+            target_table = table_name_or_schema
         else:
             if isinstance(table_name_or_schema.this, exp.Table):
                 catalog_name = table_name_or_schema.this.catalog
+                target_table = table_name_or_schema.this
 
         properties = (
             self._build_table_properties_exp(
@@ -1057,6 +1060,9 @@ class EngineAdapter:
                 target_columns_to_types=target_columns_to_types,
                 table_description=table_description,
                 table_kind=table_kind,
+                # Passed so an adapter can vary properties by target object, not just by
+                # connection. Additive: every override accepts **kwargs.
+                table=target_table,
             )
             if kwargs or table_description
             else None
@@ -1094,6 +1100,8 @@ class EngineAdapter:
         replace: bool = False,
         exists: bool = True,
         clone_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
+        table_format: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> None:
         """Creates a table with the target name by cloning the source table.
@@ -1103,6 +1111,10 @@ class EngineAdapter:
             source_table_name: The name of the source table that should be cloned.
             replace: Whether or not to replace an existing table.
             exists: Indicates whether to include the IF NOT EXISTS check.
+            clone_kwargs: Additional arguments for the CLONE clause.
+            table_format: The table format of the source table, if any. Engines that require
+                format-specific DDL to clone a table use it to derive `table_kind`.
+            table_kind: The kind of table to create. Defaults to `TABLE`.
         """
         if not self.SUPPORTS_CLONING:
             raise NotImplementedError(f"Engine does not support cloning: {type(self)}")
@@ -1111,7 +1123,7 @@ class EngineAdapter:
         self.execute(
             exp.Create(
                 this=exp.to_table(target_table_name),
-                kind="TABLE",
+                kind=table_kind or "TABLE",
                 replace=replace,
                 exists=exists,
                 clone=exp.Clone(
@@ -1214,9 +1226,15 @@ class EngineAdapter:
     def alter_table(
         self,
         alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
     ) -> None:
         """
         Performs the alter statements to change the current table into the structure of the target table.
+
+        Args:
+            alter_expressions: The alter operations to apply.
+            table_format: The table format of the target table, if any. Engines that require
+                format-specific DDL to alter a table use it to adjust the generated statements.
         """
         with self.transaction():
             for alter_expression in [
@@ -1352,6 +1370,8 @@ class EngineAdapter:
                 else None
             ),
             physical_cluster=create_kwargs.pop("physical_cluster", None),
+            # See the note on the table-properties call site above.
+            table=exp.to_table(view_name),
         )
         if create_view_properties:
             for view_property in create_view_properties.expressions:

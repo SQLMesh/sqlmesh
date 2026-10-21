@@ -30,6 +30,7 @@ docs
 examples
 posts
 .circleci
+.github/
 README.md
 mkdocs.yml
 .readthedocs.yaml

@@ -6,18 +6,12 @@
     "ghcr.io/devcontainers/features/python:1": {
       "version": "3.12"
     },
-    "ghcr.io/devcontainers/features/java:1": {
-      "version": "21"
-    },
     "ghcr.io/devcontainers/features/docker-in-docker:4": {}
   },
   "postCreateCommand": "bash .devcontainer/post-create-command.sh",
   "customizations": {
     "vscode": {
-      "extensions": [
-        "ms-python.python",
-        "ms-python.vscode-pylance"
-      ]
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance"]
     }
   },
   "remoteUser": "vscode"

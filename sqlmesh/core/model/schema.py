@@ -87,13 +87,16 @@ def _update_model_schemas(
             for future in as_completed(futures):
                 try:
                     futures.remove(future)
-                    fqn, entry_name, data_hash, metadata_hash, mapping_schema = future.result()
+                    fqn, cache_entry, data_hash, metadata_hash, mapping_schema = future.result()
                     model = models[fqn]
                     model._data_hash = data_hash
                     model._metadata_hash = metadata_hash
                     if model.mapping_schema != mapping_schema:
                         model.set_mapping_schema(mapping_schema)
-                    optimized_query_cache.with_optimized_query(model, entry_name)
+                    if cache_entry is not None:
+                        # The worker has already decompressed and decoded this entry. Passing
+                        # it back avoids a second gzip/pickle read in the parent process.
+                        optimized_query_cache.with_optimized_query_entry(model, cache_entry)
                     _update_schema_with_model(schema, model)
                     process_models(completed_model=model)
                 except Exception as ex:

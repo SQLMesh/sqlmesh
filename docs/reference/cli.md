@@ -494,6 +494,8 @@ Options:
 
     The `rollback` command affects all SQLMesh users. Contact your SQLMesh administrator before running.
 
+Run `rollback` with the SQLMesh version that performed the migration, then reinstall the previous version. See [Rolling back a migration](../guides/migrations.md#rolling-back-a-migration) for details.
+
 ## run
 
 ```
@@ -623,6 +625,10 @@ Usage: sqlmesh test [OPTIONS] [TESTS]...
 
   Run model unit tests.
 
+  TESTS are test files, `file.yaml::test_name` selectors, or model files, in
+  which case the tests for those models are run. They are unioned, and a test
+  selected more than once still only runs once.
+
 Options:
   -k TEXT              Only run tests that match the pattern of substring.
   -v, --verbose        Verbose output.
@@ -630,6 +636,9 @@ Options:
                        useful for debugging.
   --select-model TEXT  Select specific models to run unit tests for. Can be
                        specified multiple times.
+  --local              Run tests using only locally loaded project files
+                       without loading state. Tests whose model is not loaded
+                       are skipped with a warning rather than failing.
   --help               Show this message and exit.
 ```
 

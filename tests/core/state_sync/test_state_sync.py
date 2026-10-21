@@ -400,6 +400,40 @@ def test_remove_interval_missing_snapshot(
     ]
 
 
+def test_remove_interval_no_matching_intervals(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+) -> None:
+    snapshot = make_snapshot(
+        SqlModel(
+            name="a",
+            cron="@daily",
+            query=parse_one("select 1, ds"),
+        ),
+        version="a",
+    )
+    state_sync.push_snapshots([snapshot])
+
+    # The snapshot has never been backfilled, so there are no rows to expand the shared versions from
+    state_sync.remove_intervals(
+        [(snapshot, snapshot.inclusive_exclusive("2020-01-15", "2020-01-17"))],
+        remove_shared_versions=True,
+    )
+
+    remove_records_count = state_sync.engine_adapter.fetchone(
+        "SELECT COUNT(*) FROM sqlmesh._intervals WHERE name = '\"a\"' AND version = 'a' AND is_removed"
+    )[0]  # type: ignore
+    assert remove_records_count == 0
+
+    assert not state_sync.get_snapshots([snapshot])[snapshot.snapshot_id].intervals
+
+
+def test_remove_interval_empty_input(state_sync: EngineAdapterStateSync) -> None:
+    state_sync.remove_intervals([])
+    state_sync.remove_intervals([], remove_shared_versions=True)
+
+    assert state_sync.engine_adapter.fetchone("SELECT COUNT(*) FROM sqlmesh._intervals")[0] == 0  # type: ignore
+
+
 def test_refresh_snapshot_intervals(
     state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
 ) -> None:
@@ -2937,6 +2971,141 @@ def test_migrate_rows(state_sync: EngineAdapterStateSync, mocker: MockerFixture)
     )
 
 
+def test_migrate_v0071_keeps_still_live_dev_intervals() -> None:
+    from sqlmesh.migrations import v0071_add_dev_version_to_intervals as migration
+
+    engine_adapter = create_engine_adapter(duckdb.connect, "duckdb")
+    engine_adapter.create_schema(c.SQLMESH)
+
+    engine_adapter.create_table(
+        "sqlmesh._snapshots",
+        {
+            "name": exp.DataType.build("text"),
+            "identifier": exp.DataType.build("text"),
+            "version": exp.DataType.build("text"),
+            "snapshot": exp.DataType.build("text"),
+            "kind_name": exp.DataType.build("text"),
+            "updated_ts": exp.DataType.build("bigint"),
+            "unpaused_ts": exp.DataType.build("bigint"),
+            "ttl_ms": exp.DataType.build("bigint"),
+            "unrestorable": exp.DataType.build("boolean"),
+        },
+    )
+    # The intervals table at schema version 70, before v0071 adds the dev_version column.
+    engine_adapter.create_table(
+        "sqlmesh._intervals",
+        {
+            "id": exp.DataType.build("text"),
+            "created_ts": exp.DataType.build("bigint"),
+            "name": exp.DataType.build("text"),
+            "identifier": exp.DataType.build("text"),
+            "version": exp.DataType.build("text"),
+            "start_ts": exp.DataType.build("bigint"),
+            "end_ts": exp.DataType.build("bigint"),
+            "is_dev": exp.DataType.build("boolean"),
+            "is_removed": exp.DataType.build("boolean"),
+            "is_compacted": exp.DataType.build("boolean"),
+            "is_pending_restatement": exp.DataType.build("boolean"),
+        },
+    )
+
+    def snapshot_blob(name: str, identifier: str, version: str, dev_version: str) -> str:
+        return json.dumps(
+            {
+                "name": name,
+                "identifier": identifier,
+                "version": version,
+                "dev_version": dev_version,
+                "fingerprint": {
+                    "data_hash": "data",
+                    "metadata_hash": "metadata",
+                    "parent_data_hash": "parent_data",
+                    "parent_metadata_hash": "parent_metadata",
+                },
+                "previous_versions": [],
+            }
+        )
+
+    engine_adapter.insert_append(
+        "sqlmesh._snapshots",
+        pd.DataFrame(
+            [
+                {
+                    "name": '"db"."prod_model"',
+                    "identifier": "prod_ident",
+                    "version": "prod_ver",
+                    "snapshot": snapshot_blob(
+                        '"db"."prod_model"', "prod_ident", "prod_ver", "prod_dev"
+                    ),
+                    "kind_name": "FULL",
+                    "updated_ts": 1,
+                    "unpaused_ts": None,
+                    "ttl_ms": None,
+                    "unrestorable": False,
+                },
+                {
+                    "name": '"db"."dev_model"',
+                    "identifier": "dev_ident",
+                    "version": "dev_ver",
+                    "snapshot": snapshot_blob(
+                        '"db"."dev_model"', "dev_ident", "dev_ver", "dev_dev"
+                    ),
+                    "kind_name": "FULL",
+                    "updated_ts": 1,
+                    "unpaused_ts": None,
+                    "ttl_ms": None,
+                    "unrestorable": False,
+                },
+            ]
+        ),
+    )
+
+    engine_adapter.insert_append(
+        "sqlmesh._intervals",
+        pd.DataFrame(
+            [
+                # A non-dev interval that is always kept; it forces the migration to
+                # rewrite the intervals table so a wrongly-dropped dev interval is
+                # actually deleted rather than left behind by the empty-result guard.
+                {
+                    "id": "prod_int",
+                    "created_ts": 1,
+                    "name": '"db"."prod_model"',
+                    "identifier": "prod_ident",
+                    "version": "prod_ver",
+                    "start_ts": 100,
+                    "end_ts": 200,
+                    "is_dev": False,
+                    "is_removed": False,
+                    "is_compacted": False,
+                    "is_pending_restatement": False,
+                },
+                # A dev interval whose version and dev version are both still live.
+                # It must be preserved by the migration.
+                {
+                    "id": "dev_int",
+                    "created_ts": 1,
+                    "name": '"db"."dev_model"',
+                    "identifier": "dev_ident",
+                    "version": "dev_ver",
+                    "start_ts": 100,
+                    "end_ts": 200,
+                    "is_dev": True,
+                    "is_removed": False,
+                    "is_compacted": False,
+                    "is_pending_restatement": False,
+                },
+            ]
+        ),
+    )
+
+    migration.migrate_schemas(engine_adapter, c.SQLMESH)
+    migration.migrate_rows(engine_adapter, c.SQLMESH)
+
+    surviving_ids = {row[0] for row in engine_adapter.fetchall("SELECT id FROM sqlmesh._intervals")}
+    assert surviving_ids == {"prod_int", "dev_int"}
+
+
 def test_backup_state(state_sync: EngineAdapterStateSync, mocker: MockerFixture) -> None:
     state_sync.engine_adapter.replace_query(
         "sqlmesh._snapshots",
@@ -4220,3 +4389,35 @@ def test_state_version_is_too_old(
         match="The current state belongs to an old version of SQLMesh that is no longer supported. Please upgrade to 0.134.0 first before upgrading to.*",
     ):
         state_sync.migrate(skip_backup=True)
+
+
+def test_migrate_patch_bump_preserves_schema_version(
+    state_sync: EngineAdapterStateSync, mocker: MockerFixture
+) -> None:
+    """A run with nothing to migrate must not move the recorded schema version.
+
+    `_apply_migrations` is forced to report no rows so the patch-bump branch is reached with a
+    schema version that differs from the current one. A real state can't get into that shape,
+    which is the point: the schema version is carried over rather than defaulted so that a
+    migration which is genuinely still needed can't be masked.
+    """
+    from sqlmesh import __version__ as SQLMESH_VERSION
+    from sqlmesh.core.state_sync.base import SCHEMA_VERSION
+
+    stale_schema_version = SCHEMA_VERSION - 1
+    state_sync.version_state.update_versions(
+        schema_version=stale_schema_version,
+        sqlglot_version="0.0.1",
+        sqlmesh_version=SQLMESH_VERSION,
+    )
+
+    mocker.patch(
+        "sqlmesh.core.state_sync.db.migrator.StateMigrator._apply_migrations",
+        return_value=False,
+    )
+
+    state_sync.migrate()
+
+    versions = state_sync.get_versions(validate=False)
+    assert versions.schema_version == stale_schema_version
+    assert versions.sqlglot_version == SQLGLOT_VERSION
