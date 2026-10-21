@@ -23,6 +23,7 @@ from sqlmesh.core.plan.definition import (
     UserProvidedFlags,
     earliest_interval_start,
 )
+from sqlmesh.core.promotion import PromotionFrontier
 from sqlmesh.core.schema_diff import (
     get_schema_differ,
     has_drop_alteration,
@@ -72,6 +73,9 @@ class PlanBuilder:
         no_gaps:  Whether to ensure that new snapshots for nodes that are already a
             part of the target environment have no data gaps when compared against previous
             snapshots for same nodes.
+        max_trailing_gap_intervals: The maximum number of trailing scheduler intervals that
+            production promotion may accept as debt when no_gaps is enabled.
+        planned_frontiers: The production snapshot frontiers captured when the plan was built.
         skip_backfill: Whether to skip the backfill step.
         empty_backfill: Like skip_backfill, but also records processed intervals.
         is_dev: Whether this plan is for development purposes.
@@ -138,6 +142,8 @@ class PlanBuilder:
         console: t.Optional[PlanBuilderConsole] = None,
         user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None,
         selected_models: t.Optional[t.Set[str]] = None,
+        max_trailing_gap_intervals: int = 0,
+        planned_frontiers: t.Optional[t.Dict[str, PromotionFrontier]] = None,
     ):
         self._context_diff = context_diff
         self._no_gaps = no_gaps
@@ -184,6 +190,8 @@ class PlanBuilder:
         self._user_provided_flags = user_provided_flags
         self._selected_models = selected_models
         self._explain = explain
+        self._max_trailing_gap_intervals = max_trailing_gap_intervals
+        self._planned_frontiers = dict(planned_frontiers or {})
 
         self._start = start
         if not self._start and self._forward_only_preview_needed:
@@ -375,6 +383,8 @@ class PlanBuilder:
             ignore_cron=self._ignore_cron,
             user_provided_flags=self._user_provided_flags,
             selected_models=self._selected_models,
+            max_trailing_gap_intervals=self._max_trailing_gap_intervals,
+            planned_frontiers=self._planned_frontiers,
         )
         self._latest_plan = plan
         return plan
