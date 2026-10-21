@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import re
 import sys
@@ -1649,7 +1650,11 @@ def transform_values(
             return exp.Struct(expressions=expressions)
 
         if dtype.is_type(exp.DataType.Type.JSON):
-            return exp.func("PARSE_JSON", f"'{value}'")
+            if value is None or isinstance(value, exp.Null):
+                return exp.null()
+            if isinstance(value, (dict, list, tuple, bool, int, float)):
+                value = json.dumps(value)
+            return exp.func("PARSE_JSON", exp.Literal.string(str(value)))
 
         return exp.convert(value)
 
