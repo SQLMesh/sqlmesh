@@ -363,11 +363,16 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def visit_environment_record_update_stage(
         self, stage: stages.EnvironmentRecordUpdateStage, plan: EvaluatablePlan
     ) -> None:
-        self.state_sync.promote(
-            plan.environment,
-            no_gaps_snapshot_names=stage.no_gaps_snapshot_names if plan.no_gaps else set(),
-            environment_statements=plan.environment_statements,
-        )
+        promote_kwargs: t.Dict[str, t.Any] = {
+            "no_gaps_snapshot_names": (stage.no_gaps_snapshot_names if plan.no_gaps else set()),
+            "environment_statements": plan.environment_statements,
+        }
+        if stage.max_trailing_gap_intervals:
+            promote_kwargs.update(
+                max_trailing_gap_intervals=stage.max_trailing_gap_intervals,
+                planned_frontiers=stage.planned_frontiers,
+            )
+        self.state_sync.promote(plan.environment, **promote_kwargs)
 
     def visit_migrate_schemas_stage(
         self, stage: stages.MigrateSchemasStage, plan: EvaluatablePlan

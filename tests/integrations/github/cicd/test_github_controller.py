@@ -378,6 +378,45 @@ def test_prod_plan(github_client, make_controller):
     )
 
 
+def test_prod_plan_forwards_max_trailing_gap_intervals(
+    github_client, make_controller, mocker: MockerFixture
+):
+    context = mocker.MagicMock()
+    plan_builder = mocker.MagicMock()
+    plan = mocker.MagicMock(spec=Plan)
+    plan_builder.build.return_value = plan
+    context.config.plan.forward_only = False
+    context.plan_builder.return_value = plan_builder
+    mocker.patch("sqlmesh.integrations.github.cicd.controller.Context", return_value=context)
+
+    bot_config = GithubCICDBotConfig(max_trailing_gap_intervals_on_deploy_to_prod=2)
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json",
+        github_client,
+        bot_config=bot_config,
+    )
+
+    assert controller.prod_plan is plan
+    context.plan_builder.assert_called_once_with(
+        c.PROD,
+        no_gaps=True,
+        skip_tests=True,
+        skip_linter=True,
+        categorizer_config=bot_config.auto_categorize_changes,
+        run=bot_config.run_on_deploy_to_prod,
+        forward_only=controller.forward_only_plan,
+        max_trailing_gap_intervals=2,
+    )
+
+    context.plan_builder.reset_mock()
+    plan_builder.build.reset_mock()
+    assert controller.prod_plan_with_gaps is plan
+    prod_plan_with_gaps_call = context.plan_builder.call_args
+    assert prod_plan_with_gaps_call.args == (c.PROD,)
+    assert prod_plan_with_gaps_call.kwargs["no_gaps"] is False
+    assert "max_trailing_gap_intervals" not in prod_plan_with_gaps_call.kwargs
+
+
 def test_prod_plan_auto_categorization(github_client, make_controller):
     custom_categorizer_config = CategorizerConfig.all_off()
     default_pr_start = "1 week ago"
