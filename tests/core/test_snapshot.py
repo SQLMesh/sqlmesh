@@ -3371,6 +3371,50 @@ def test_get_next_auto_restatement_interval(
     )
 
 
+@pytest.mark.parametrize(
+    "auto_restatement_intervals,expected_auto_restatement_start",
+    [
+        (1, "2024-06-01"),
+        (12, "2023-07-01"),
+        (13, "2023-06-01"),
+        (24, "2022-07-01"),
+    ],
+)
+def test_apply_auto_restatements_monthly(
+    make_snapshot,
+    auto_restatement_intervals: int,
+    expected_auto_restatement_start: str,
+):
+    snapshot = make_snapshot(
+        SqlModel(
+            name="test_model",
+            kind=IncrementalByTimeRangeKind(
+                time_column=TimeColumn(column="ds"),
+                auto_restatement_cron="0 10 * * *",
+                auto_restatement_intervals=auto_restatement_intervals,
+            ),
+            cron="@monthly",
+            start="2020-01-01",
+            query=parse_one("SELECT 1, ds FROM name"),
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot.add_interval("2020-01-01", "2024-06-30")
+    snapshot.next_auto_restatement_ts = to_timestamp("2024-07-02 10:00:00")
+
+    restated_intervals, _ = apply_auto_restatements(
+        {snapshot.snapshot_id: snapshot}, to_timestamp("2024-07-02 10:01:00")
+    )
+
+    # Months have different lengths, so the last N monthly intervals must be restated exactly
+    expected_interval = (
+        to_timestamp(expected_auto_restatement_start),
+        to_timestamp("2024-07-01"),
+    )
+    assert restated_intervals[0].pending_restatement_intervals == [expected_interval]
+    assert snapshot.intervals == [(to_timestamp("2020-01-01"), expected_interval[0])]
+
+
 def test_apply_auto_restatements(make_snapshot):
     # Hourly upstream model with auto restatement intervals set to 24
     model_a = SqlModel(
