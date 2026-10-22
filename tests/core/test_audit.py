@@ -651,7 +651,20 @@ def test_chi_square_audit(model: Model):
     )
     assert (
         rendered_query.sql()
-        == """WITH "samples" AS (SELECT "a" AS "x_a", "b" AS "x_b" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE (NOT "a" IS NULL AND NOT "b" IS NULL) AND TRUE), "contingency_table" AS (SELECT "x_a", "x_b", COUNT(*) AS "observed", (SELECT COUNT(*) FROM "samples" AS "t" WHERE "r"."x_a" = "t"."x_a") AS "tot_a", (SELECT COUNT(*) FROM "samples" AS "t" WHERE "r"."x_b" = "t"."x_b") AS "tot_b", (SELECT COUNT(*) FROM "samples" AS "samples") AS "g_t" /* g_t is the grand total */ FROM "samples" AS "r" GROUP BY "x_a", "x_b") SELECT ((SELECT COUNT(DISTINCT "x_a") FROM "contingency_table" AS "contingency_table") - 1) * ((SELECT COUNT(DISTINCT "x_b") FROM "contingency_table" AS "contingency_table") - 1) AS "degrees_of_freedom", SUM(("observed" - ("tot_a" * "tot_b" / "g_t")) * ("observed" - ("tot_a" * "tot_b" / "g_t")) / ("tot_a" * "tot_b" / "g_t")) AS "chi_square" FROM "contingency_table" AS "contingency_table" /* H0: the two variables are independent */ /* H1: the two variables are dependent */ /* if chi_square > critical_value, reject H0 */ /* if chi_square <= critical_value, fail to reject H0 */ HAVING NOT "chi_square" > 9.48773"""
+        == """WITH "samples" AS (SELECT "a" AS "x_a", "b" AS "x_b" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE (NOT "a" IS NULL AND NOT "b" IS NULL) AND TRUE), "contingency_table" AS (SELECT "x_a", "x_b", COUNT(*) AS "observed", (SELECT COUNT(*) FROM "samples" AS "t" WHERE "r"."x_a" = "t"."x_a") AS "tot_a", (SELECT COUNT(*) FROM "samples" AS "t" WHERE "r"."x_b" = "t"."x_b") AS "tot_b", (SELECT COUNT(*) FROM "samples" AS "samples") AS "g_t" /* g_t is the grand total */ FROM "samples" AS "r" GROUP BY "x_a", "x_b"), "statistic" AS (SELECT ((SELECT COUNT(DISTINCT "x_a") FROM "contingency_table" AS "contingency_table") - 1) * ((SELECT COUNT(DISTINCT "x_b") FROM "contingency_table" AS "contingency_table") - 1) AS "degrees_of_freedom", SUM(("observed" - ("tot_a" * "tot_b" / "g_t")) * ("observed" - ("tot_a" * "tot_b" / "g_t")) / ("tot_a" * "tot_b" / "g_t")) AS "chi_square" FROM "contingency_table" AS "contingency_table") SELECT "degrees_of_freedom" AS "degrees_of_freedom", "chi_square" AS "chi_square" FROM "statistic" AS "statistic" /* H0: the two variables are independent */ /* H1: the two variables are dependent */ /* if chi_square > critical_value, reject H0 */ /* if chi_square <= critical_value, fail to reject H0 */ WHERE NOT "chi_square" > 9.48773"""
+    )
+
+
+def test_kl_divergence_audit(model: Model):
+    rendered_query = model.render_audit_query(
+        builtin.kl_divergence_audit,
+        source_column=exp.to_column("a"),
+        target_column=exp.to_column("b"),
+        threshold=exp.convert(0.1),
+    )
+    assert (
+        rendered_query.sql()
+        == """WITH "table_a" AS (SELECT "a" AS "x", COUNT(*) AS "num_rows" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE TRUE GROUP BY "a"), "table_b" AS (SELECT "b" AS "x", COUNT(*) AS "num_rows" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_1" WHERE TRUE GROUP BY "b"), "table_a_with_p" AS (SELECT "x", "num_rows" / SUM("num_rows") OVER () AS "p" FROM "table_a" AS "table_a"), "table_b_with_q" AS (SELECT "x", "num_rows" / SUM("num_rows") OVER () AS "q" FROM "table_b" AS "table_b"), "divergence" /* Values that appear in only one column are skipped, as their terms are undefined */ AS (SELECT SUM(("p" - "q") * LN("p" / "q")) AS "kl_divergence" FROM "table_a_with_p" AS "table_a_with_p" INNER JOIN "table_b_with_q" AS "table_b_with_q" ON "table_a_with_p"."x" = "table_b_with_q"."x") SELECT "kl_divergence" AS "kl_divergence" FROM "divergence" AS "divergence" WHERE "kl_divergence" > 0.1"""
     )
 
 

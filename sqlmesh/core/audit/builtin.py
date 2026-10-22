@@ -532,7 +532,7 @@ kl_divergence_audit = ModelAudit(
 WITH
   table_a AS (
     SELECT
-      @source_column,
+      @source_column AS x,
       COUNT(*) AS num_rows
     FROM @this_model
     WHERE @condition
@@ -540,7 +540,7 @@ WITH
   ),
   table_b AS (
     SELECT
-      @target_column,
+      @target_column AS x,
       COUNT(*) AS num_rows
     FROM @this_model
     WHERE @condition
@@ -548,68 +548,28 @@ WITH
   ),
   table_a_with_p AS (
     SELECT
-      @source_column,
-      num_rows,
+      x,
       num_rows / SUM(num_rows) OVER () AS p
     FROM table_a
   ),
   table_b_with_q AS (
     SELECT
-      @target_column,
-      num_rows,
+      x,
       num_rows / SUM(num_rows) OVER () AS q
     FROM table_b
   ),
-  table_a_with_q AS (
+  -- Values that appear in only one column are skipped, as their terms are undefined
+  divergence AS (
     SELECT
-      @source_column,
-      num_rows,
-      p,
-      COALESCE(q, 0) AS q
+      SUM((p - q) * LN(p / q)) AS kl_divergence
     FROM table_a_with_p
-    LEFT JOIN table_b_with_q USING (@source_column)
-  ),
-  table_b_with_p AS (
-    SELECT
-      @target_column,
-      num_rows,
-      q,
-      COALESCE(p, 0) AS p
-    FROM table_b_with_q
-    LEFT JOIN table_a_with_p USING (@target_column)
-  ),
-  table_a_with_kl AS (
-    SELECT
-      @source_column,
-      num_rows,
-      p,
-      q,
-      p * LOG(p / NULLIF(q, 0)) AS kl
-    FROM table_a_with_q
-  ),
-  table_b_with_kl AS (
-    SELECT
-      @target_column,
-      num_rows,
-      p,
-      q,
-      q * LOG(q / NULLIF(p, 0)) AS kl
-    FROM table_b_with_p
-  ),
-  unioned AS (
-    SELECT *
-    FROM table_a_with_kl
-    UNION ALL
-    SELECT *
-    FROM table_b_with_kl
+    INNER JOIN table_b_with_q
+      ON table_a_with_p.x = table_b_with_q.x
   )
 SELECT
-  @source_column,
-  @target_column,
-  SUM(kl) AS kl_divergence
-FROM unioned
-GROUP BY @source_column, @target_column
-HAVING kl_divergence > @threshold
+  kl_divergence
+FROM divergence
+WHERE kl_divergence > @threshold
     """,
 )
 
@@ -646,17 +606,23 @@ WITH
       (SELECT COUNT(*) FROM samples) as g_t -- g_t is the grand total
     FROM samples AS r
     GROUP BY x_a, x_b
+  ),
+  statistic AS (
+    SELECT
+      (@c - 1) * (@r - 1) as degrees_of_freedom,
+      SUM((observed - @E) * (observed - @E) / @E) as chi_square
+    FROM contingency_table
   )
 
 SELECT
-  (@c - 1) * (@r - 1) as degrees_of_freedom,
-  SUM((observed - @E) * (observed - @E) / @E) as chi_square
-FROM contingency_table
+  degrees_of_freedom,
+  chi_square
+FROM statistic
 -- H0: the two variables are independent
 -- H1: the two variables are dependent
 -- if chi_square > critical_value, reject H0
 -- if chi_square <= critical_value, fail to reject H0
-HAVING NOT @IF(@dependent, chi_square > @critical_value, chi_square <= @critical_value)
+WHERE NOT @IF(@dependent, chi_square > @critical_value, chi_square <= @critical_value)
     """,
 )
 
