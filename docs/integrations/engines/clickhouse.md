@@ -470,6 +470,43 @@ gateways:
 
 With this configuration, ClickHouse models will appear as `ch_virtual.mydb.mytable` in plan output instead of `__clickhouse__.mydb.mytable`.
 
+### Reading catalog-backed physical tables
+
+When ClickHouse exposes a source catalog through a [`DataLakeCatalog`](https://clickhouse.com/docs/engines/database-engines/datalake), map that source catalog to its ClickHouse database in the connection configuration:
+
+```yaml
+gateways:
+  clickhouse:
+    connection:
+      type: clickhouse
+      host: my-clickhouse-host
+      username: default
+      datalake_catalog_mapping:
+        lake: iceberg
+```
+
+SQLMesh renders `lake.analytics.orders` as `iceberg."analytics.orders"`. It combines the source
+schema and table into one quoted table name because ClickHouse uses a two-level namespace. The
+`iceberg` database must already exist and use the `DataLakeCatalog` engine. SQLMesh does not create
+the database or manage its metastore or storage permissions.
+
+For parsed queries that read data without writing the result to a ClickHouse table, SQLMesh rewrites
+mapped source catalogs and passes other foreign catalog-qualified references through unchanged.
+During rendering, SQLMesh strips the configured virtual catalog prefix, even before injection. For
+`INSERT ... SELECT` and other query materializations, SQLMesh rewrites mapped sources and validates
+the remaining catalog-qualified sources. With a non-empty mapping, each source catalog must appear
+in the mapping. When SQLMesh has injected a virtual catalog, a source can also use that catalog.
+SQLMesh raises an error for other catalogs. Without a non-empty mapping or an injected virtual
+catalog, SQLMesh does not apply DataLake mapping or catalog validation during materialization.
+
+An injected virtual catalog takes precedence over a mapping key with the same name. SQLMesh treats
+that name as its virtual catalog. Use different names for the virtual catalog and DataLakeCatalog
+source catalogs. The mapping applies to query source references. It does not rewrite SQL strings
+passed directly to the ClickHouse adapter or map `INSERT` targets.
+
+View creation rejects a source that uses another catalog when a virtual catalog is injected, even
+if the mapping includes that source. Mapped-source views work when no virtual catalog is injected.
+
 ## Local/Built-in Scheduler
 
 **Engine Adapter Type**: `clickhouse`
@@ -498,3 +535,4 @@ With this configuration, ClickHouse models will appear as `ch_virtual.mydb.mytab
 | `connection_settings`     | Additional [connection settings](https://clickhouse.com/docs/integrations/python#settings-argument)                                                                                                                                                                             |  dict  |    N     |
 | `connection_pool_options` | Additional [options](https://clickhouse.com/docs/integrations/python#customizing-the-http-connection-pool)                                                                                                                                         for the HTTP connection pool |  dict  |    N     |
 | `virtual_catalog`         | Override the virtual catalog name used when ClickHouse runs alongside a catalog-aware gateway (e.g. Trino). Defaults to `__{gateway_name}__`. See [Multi-gateway setup](#multi-gateway-setup) for details.                                                                      | string |    N     |
+| `datalake_catalog_mapping` | Map source catalogs to ClickHouse DataLakeCatalog databases. See [Reading catalog-backed physical tables](#reading-catalog-backed-physical-tables).                                                                                                                  | dict  |    N     |

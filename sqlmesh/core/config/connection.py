@@ -2244,6 +2244,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     port: t.Optional[int] = None
     cluster: t.Optional[str] = None
     virtual_catalog: t.Optional[str] = None
+    datalake_catalog_mapping: t.Dict[str, str] = Field(default_factory=dict)
     connect_timeout: int = 10
     send_receive_timeout: int = 300
     query_limit: int = 0
@@ -2289,6 +2290,21 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             raise ConfigError(
                 f"virtual_catalog must be a single identifier with no dots (got: {v!r})"
             )
+        return v
+
+    @field_validator("datalake_catalog_mapping")
+    def validate_datalake_catalog_mapping(cls, v: t.Dict[str, str]) -> t.Dict[str, str]:
+        for source_catalog, target_database in v.items():
+            if not source_catalog.strip() or "." in source_catalog:
+                raise ConfigError(
+                    "datalake_catalog_mapping keys must be non-empty single identifiers "
+                    f"(got: {source_catalog!r})"
+                )
+            if not target_database.strip() or "." in target_database:
+                raise ConfigError(
+                    "datalake_catalog_mapping values must be non-empty ClickHouse database "
+                    f"identifiers (got: {target_database!r})"
+                )
         return v
 
     @property
@@ -2357,6 +2373,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             "cluster": self.cluster,
             "cloud_mode": self.cloud_mode,
             "virtual_catalog": self.virtual_catalog,
+            "datalake_catalog_mapping": self.datalake_catalog_mapping,
         }
 
     @property

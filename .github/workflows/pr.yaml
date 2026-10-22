@@ -267,6 +267,7 @@ jobs:
             trino,
             spark,
             clickhouse,
+            clickhouse-datalake,
             risingwave,
             starrocks,
           ]
@@ -293,6 +294,9 @@ jobs:
         run: |
           source .venv/bin/activate
           make ${{ matrix.engine }}-test
+      - name: Stop DataLake services
+        if: ${{ always() && matrix.engine == 'clickhouse-datalake' }}
+        run: make clickhouse-datalake-down
       - name: Upload test results
         uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}

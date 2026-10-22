@@ -273,6 +273,7 @@ markers = [
     "athena: test for Athena",
     "bigquery: test for BigQuery",
     "clickhouse: test for Clickhouse (standalone mode / cluster mode)",
+    "clickhouse_datalake: test for ClickHouse DataLakeCatalog mapping",
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
     "db2: test for Db2",
