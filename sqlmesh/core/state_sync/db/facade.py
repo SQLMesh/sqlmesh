@@ -686,10 +686,7 @@ class EngineAdapterStateSync(StateSync):
                             candidate_plan_id=candidate_plan_id,
                         )
 
-                        raise SQLMeshError(
-                            f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
-                            "Please re-apply your plan to resolve this error."
-                        )
+                        raise _missing_intervals_error(target_snapshot, evaluation.reason)
 
         children_by_parent = (
             _build_children_by_parent(target_snapshots_by_name) if accepted_trailing_gaps else {}
@@ -707,9 +704,8 @@ class EngineAdapterStateSync(StateSync):
                     TrailingGapRejectionReason.DOWNSTREAM_COVERAGE,
                     candidate_plan_id=candidate_plan_id,
                 )
-                raise SQLMeshError(
-                    f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
-                    "Please re-apply your plan to resolve this error."
+                raise _missing_intervals_error(
+                    target_snapshot, TrailingGapRejectionReason.DOWNSTREAM_COVERAGE
                 )
 
         return accepted_trailing_gaps
@@ -742,6 +738,46 @@ def _remove_partial_intervals(
                 snapshot_id,
             )
     return results
+
+
+def _missing_intervals_error(
+    target_snapshot: Snapshot,
+    reason: t.Optional[TrailingGapRejectionReason],
+) -> SQLMeshError:
+    prefix = f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
+    if reason is None or reason == TrailingGapRejectionReason.DISABLED:
+        return SQLMeshError(prefix + "Please re-apply your plan to resolve this error.")
+
+    guidance = {
+        TrailingGapRejectionReason.BOUND_EXCEEDED: (
+            "Backfill the candidate's missing coverage through the incumbent frontier before retrying promotion. "
+            "Alternatively, review whether a larger allowance is appropriate and create a fresh plan; "
+            "changing the allowance does not change an existing serialized plan."
+        ),
+        TrailingGapRejectionReason.DOWNSTREAM_COVERAGE: (
+            "Backfill the candidate's upstream gap, invalidate overlapping downstream coverage, and then recompute it "
+            "before retrying promotion."
+        ),
+        TrailingGapRejectionReason.SCHEDULE_INELIGIBLE: (
+            "Resolve the incompatible schedule or interval semantics and backfill the candidate's missing "
+            "coverage before retrying promotion; increasing the allowance cannot make this gap eligible."
+        ),
+        TrailingGapRejectionReason.FRONTIER_UNAVAILABLE: (
+            "Create a fresh plan that captures the current incumbent frontier and backfills the candidate's "
+            "required coverage; re-applying this serialized plan will not refresh its frontier or bounds."
+        ),
+        TrailingGapRejectionReason.PLANNED_COVERAGE_INCOMPLETE: (
+            "Backfill the candidate's missing required coverage before retrying promotion. The allowance only "
+            "applies to a new trailing suffix."
+        ),
+        TrailingGapRejectionReason.NON_TRAILING_GAP: (
+            "Backfill the candidate's missing historical or internal coverage before retrying promotion. "
+            "The allowance only applies to a new trailing suffix."
+        ),
+    }.get(reason, "Inspect and repair the candidate's missing coverage before retrying promotion.")
+    return SQLMeshError(
+        f"{prefix}Bounded trailing-gap policy rejected ({reason.value}). {guidance}"
+    )
 
 
 def _log_trailing_gap_rejection(

@@ -1156,11 +1156,12 @@ def test_promote_snapshots_no_gaps(state_sync: EngineAdapterStateSync, make_snap
     )
     state_sync.push_snapshots([new_snapshot_missing_interval])
     state_sync.add_interval(new_snapshot_missing_interval, "2022-01-01", "2022-01-02")
-    with pytest.raises(
-        SQLMeshError,
-        match=r".*Detected missing intervals for model .*, interrupting your current plan. Please re-apply your plan to resolve this error.*",
-    ):
+    with pytest.raises(SQLMeshError) as error:
         promote_snapshots(state_sync, [new_snapshot_missing_interval], "prod", no_gaps=True)
+    assert str(error.value) == (
+        f"Detected missing intervals for model {new_snapshot_missing_interval.name}, "
+        "interrupting your current plan. Please re-apply your plan to resolve this error."
+    )
 
     new_snapshot_same_interval = make_snapshot(model, version="c")
     new_snapshot_same_interval.change_category = SnapshotChangeCategory.BREAKING
@@ -1307,7 +1308,7 @@ def test_promote_snapshots_rolls_back_multiple_models_before_warning(
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger="sqlmesh.core.state_sync.db.facade"):
-        with pytest.raises(SQLMeshError, match="Detected missing intervals"):
+        with pytest.raises(SQLMeshError, match="Detected missing intervals") as error:
             promote_snapshots(
                 state_sync,
                 targets,
@@ -1318,6 +1319,15 @@ def test_promote_snapshots_rolls_back_multiple_models_before_warning(
                 plan_id="new_plan_id",
                 previous_plan_id="test_plan_id",
             )
+    assert "(bound_exceeded)" in str(error.value)
+    assert "Backfill the candidate's missing coverage through the incumbent frontier" in str(
+        error.value
+    )
+    assert "review whether a larger allowance is appropriate and create a fresh plan" in str(
+        error.value
+    )
+    assert "changing the allowance does not change an existing serialized plan" in str(error.value)
+    assert "Please re-apply" not in str(error.value)
 
     assert not any(
         getattr(record, "sqlmesh_event", None) == "bounded_trailing_gap_accepted"
@@ -1437,7 +1447,7 @@ def test_promote_snapshots_reports_downstream_policy_rejection(
     )
 
     with caplog.at_level(logging.WARNING, logger="sqlmesh.core.state_sync.db.facade"):
-        with pytest.raises(SQLMeshError, match="Detected missing intervals"):
+        with pytest.raises(SQLMeshError, match="Detected missing intervals") as error:
             promote_snapshots(
                 state_sync,
                 target_snapshots,
@@ -1448,6 +1458,9 @@ def test_promote_snapshots_reports_downstream_policy_rejection(
                 plan_id="candidate_plan_id",
                 previous_plan_id="test_plan_id",
             )
+    assert "(downstream_coverage)" in str(error.value)
+    assert "invalidate overlapping downstream coverage, and then recompute it" in str(error.value)
+    assert "Please re-apply" not in str(error.value)
 
     rejected_warnings = [
         record
@@ -1460,6 +1473,41 @@ def test_promote_snapshots_reports_downstream_policy_rejection(
     assert payload["plan_id"] == "candidate_plan_id"
 
 
+def test_promote_snapshots_gives_actionable_schedule_rejection(
+    state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
+):
+    incumbent, _, frontier = _prepare_trailing_gap_promotion(state_sync, make_snapshot)
+    daily_model = SqlModel(
+        name=incumbent.name,
+        query=parse_one("select 1, ds"),
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        cron="@daily",
+        start="2023-01-01",
+    )
+    target = make_snapshot(daily_model, version="daily_target")
+    target.change_category = SnapshotChangeCategory.BREAKING
+    target.fingerprint = incumbent.fingerprint.copy(update={"data_hash": "daily_target"})
+    state_sync.push_snapshots([target])
+    state_sync.add_interval(incumbent, "2023-01-01 12:00", "2023-01-02 00:00")
+
+    with pytest.raises(SQLMeshError, match="Detected missing intervals") as error:
+        promote_snapshots(
+            state_sync,
+            [target],
+            "prod",
+            no_gaps=True,
+            max_trailing_gap_intervals=1,
+            planned_frontiers={target.name: frontier},
+            plan_id="new_plan_id",
+            previous_plan_id="test_plan_id",
+        )
+
+    assert "(schedule_ineligible)" in str(error.value)
+    assert "Resolve the incompatible schedule or interval semantics" in str(error.value)
+    assert "increasing the allowance cannot make this gap eligible" in str(error.value)
+    assert "Please re-apply" not in str(error.value)
+
+
 def test_promote_snapshots_rejects_frontier_identity_mismatch(
     state_sync: EngineAdapterStateSync, make_snapshot: t.Callable
 ):
@@ -1469,7 +1517,7 @@ def test_promote_snapshots_rejects_frontier_identity_mismatch(
         end=frontier.end,
     )
 
-    with pytest.raises(SQLMeshError, match="Detected missing intervals"):
+    with pytest.raises(SQLMeshError, match="Detected missing intervals") as error:
         promote_snapshots(
             state_sync,
             [target],
@@ -1480,6 +1528,10 @@ def test_promote_snapshots_rejects_frontier_identity_mismatch(
             plan_id="new_plan_id",
             previous_plan_id="test_plan_id",
         )
+    assert "(frontier_unavailable)" in str(error.value)
+    assert "Create a fresh plan that captures the current incumbent frontier" in str(error.value)
+    assert "backfills the candidate's required coverage" in str(error.value)
+    assert "Please re-apply" not in str(error.value)
 
 
 def test_promote_snapshots_conflict_precedes_relaxed_gap_check(
