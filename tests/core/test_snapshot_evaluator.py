@@ -18,7 +18,13 @@ from sqlglot import parse, parse_one, select
 from sqlmesh.core.audit import ModelAudit, StandaloneAudit
 from sqlmesh.core import dialect as d
 from sqlmesh.core.dialect import schema_, to_schema
-from sqlmesh.core.engine_adapter import EngineAdapter, create_engine_adapter, BigQueryEngineAdapter
+from sqlmesh.core.engine_adapter import (
+    EngineAdapter,
+    create_engine_adapter,
+    BigQueryEngineAdapter,
+    RedshiftEngineAdapter,
+    SnowflakeEngineAdapter,
+)
 from sqlmesh.core.engine_adapter.base import MERGE_SOURCE_ALIAS, MERGE_TARGET_ALIAS
 from sqlmesh.core.engine_adapter.shared import (
     DataObject,
@@ -81,6 +87,7 @@ from sqlmesh.utils.errors import (
 )
 from sqlmesh.utils.metaprogramming import Executable
 from sqlmesh.utils.pydantic import list_of_fields_validator
+from tests.core.engine_adapter import to_sql_calls
 
 
 if t.TYPE_CHECKING:
@@ -762,6 +769,59 @@ def test_evaluate_materialized_view_not_recreated_on_evaluation(
     )
 
     assert adapter_mock.create_view.call_count == expected_create_view_calls
+
+
+@pytest.mark.parametrize(
+    "adapter_cls, materialized, has_intervals, expect_recreate",
+    [
+        # Existing view with intervals -> routine evaluation: do NOT recreate on Redshift
+        (RedshiftEngineAdapter, False, True, False),
+        # Existing view without intervals -> first insert (e.g. `should_force_rebuild`): recreate it
+        (RedshiftEngineAdapter, False, False, True),
+        # Materialized views are still recreated on every evaluation
+        (RedshiftEngineAdapter, True, True, True),
+        # Other engines without view binding still recreate existing views on every evaluation
+        (SnowflakeEngineAdapter, False, True, True),
+        (SnowflakeEngineAdapter, False, False, True),
+        (SnowflakeEngineAdapter, True, True, True),
+    ],
+)
+def test_evaluate_existing_view_recreation(
+    mocker: MockerFixture,
+    make_mocked_engine_adapter,
+    make_snapshot,
+    adapter_cls: t.Type[EngineAdapter],
+    materialized: bool,
+    has_intervals: bool,
+    expect_recreate: bool,
+):
+    adapter = make_mocked_engine_adapter(adapter_cls)
+    adapter.with_settings = lambda **kwargs: adapter  # type: ignore
+    mocker.patch.object(adapter, "table_exists", return_value=True)
+    evaluator = SnapshotEvaluator(adapter)
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=ViewKind(materialized=materialized),
+        query=parse_one("SELECT a FROM tbl"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    if has_intervals:
+        snapshot.add_interval("2023-01-01", "2023-01-01")
+
+    evaluator.evaluate(
+        snapshot,
+        start="2020-01-01",
+        end="2020-01-02",
+        execution_time="2020-01-02",
+        snapshots={},
+    )
+
+    view_ddl = [
+        sql for sql in to_sql_calls(adapter) if sql.startswith(("CREATE", "DROP")) and "VIEW" in sql
+    ]
+    assert bool(view_ddl) == expect_recreate
 
 
 def test_evaluate_materialized_view_with_partitioned_by_cluster_by(
