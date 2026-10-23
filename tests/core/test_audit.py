@@ -310,6 +310,37 @@ def test_load_multiple(assert_exp_eq):
     )
 
 
+def test_load_multiple_standalone_with_macros():
+    expressions = parse(
+        """
+        AUDIT (
+            name my_audit,
+            standalone true,
+        );
+
+        JINJA_STATEMENT_BEGIN;
+        {{ test_jinja_macro() }}
+        JINJA_END;
+
+        SELECT @test_macro() FROM db.table
+    """
+    )
+
+    jinja_macros = JinjaMacroRegistry()
+    jinja_macros.add_macros(
+        MacroExtractor().extract("{% macro test_jinja_macro() %}{% endmacro %}")
+    )
+
+    (audit,) = load_multiple_audits(
+        expressions,
+        macros={"test_macro": Executable(payload="def test_macro(evaluator):\n    return 1")},
+        jinja_macros=jinja_macros,
+    )
+
+    assert "test_macro" in audit.python_env
+    assert "test_jinja_macro" in audit.jinja_macros.root_macros
+
+
 def test_load_with_dictionary_defaults():
     expressions = parse(
         """
