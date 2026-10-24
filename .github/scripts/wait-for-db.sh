@@ -104,6 +104,46 @@ db2_ready() {
     done
 }
 
+doris_ready() {
+    probe_port 9030
+
+    echo "Waiting for Doris FE to accept SQL connections..."
+    while true; do
+        if docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "SHOW FRONTENDS\G" 2>/dev/null | grep -q "Alive: true"; then
+            echo "Doris FE is alive"
+            break
+        fi
+        sleep 2
+    done
+
+    docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "ALTER SYSTEM ADD BACKEND '172.30.80.3:9050';" 2>/dev/null || true
+
+    echo "Checking for 1 alive Doris backends..."
+    while true; do
+        echo "Checking Doris backends..."
+        ALIVE_BACKENDS=$(docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "show backends \G" 2>/dev/null | grep -c "^ *Alive: true *$" || true)
+
+        # fallback value if failed to get number
+        if ! [[ "$ALIVE_BACKENDS" =~ ^[0-9]+$ ]]; then
+            echo "WARN: Unable to parse number of alive backends, got: '$ALIVE_BACKENDS'"
+            ALIVE_BACKENDS=0
+        fi
+
+        echo "Found $ALIVE_BACKENDS alive backends"
+
+        if [ "$ALIVE_BACKENDS" -ge 1 ]; then
+            echo "Doris has 1 or more alive backends"
+            break
+        fi
+
+        echo "Waiting for more backends to become alive..."
+        sleep 3
+    done
+
+    # set default replication num to 1 (there is only one be in the docker compose file)
+    docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "ADMIN SET FRONTEND CONFIG ('force_olap_table_replication_num' = '1');"
+}
+
 echo "Waiting for $ENGINE to be ready..."
 
 READINESS_FUNC="${ENGINE}_ready"

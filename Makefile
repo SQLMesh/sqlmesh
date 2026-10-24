@@ -226,6 +226,9 @@ starrocks-test: engine-starrocks-up
 db2-test: engine-db2-up
 	pytest -n auto -m "db2" --reruns 3 --junitxml=test-results/junit-db2.xml
 
+doris-test: engine-doris-up
+	pytest -n auto -m "doris" --reruns 3 --junitxml=test-results/junit-doris.xml
+
 #################
 # Cloud Engines #
 #################

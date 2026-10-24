@@ -1,0 +1,57 @@
+services:
+  doris-fe:
+    image: apache/doris:fe-4.0.8
+    container_name: doris-fe
+    hostname: doris-fe
+    entrypoint:
+      - /bin/bash
+      - -c
+    command:
+      - |
+        sed -i 's/-Xmx8192m -Xms8192m/-Xmx2048m -Xms512m/g' /opt/apache-doris/fe/conf/fe.conf
+        echo "priority_networks = 172.30.80.0/24" >> /opt/apache-doris/fe/conf/fe.conf
+        exec bash /opt/apache-doris/fe/bin/start_fe.sh --console
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    volumes:
+      - iceberg-warehouse:/tmp/doris_iceberg_warehouse
+    networks:
+      doris_net:
+        ipv4_address: 172.30.80.2
+
+  doris-be:
+    image: apache/doris:be-4.0.8
+    container_name: doris-be
+    hostname: doris-be
+    depends_on:
+      - doris-fe
+    entrypoint:
+      - /bin/bash
+      - -c
+    command:
+      - |
+        export SKIP_CHECK_ULIMIT=true
+        sed -i 's/-Xmx2048m/-Xmx1024m/g' /opt/apache-doris/be/conf/be.conf
+        echo "priority_networks = 172.30.80.0/24" >> /opt/apache-doris/be/conf/be.conf
+        echo "mem_limit = 2G" >> /opt/apache-doris/be/conf/be.conf
+        echo "storage_flood_stage_usage_percent = 99" >> /opt/apache-doris/be/conf/be.conf
+        echo "storage_flood_stage_left_capacity_bytes = 104857600" >> /opt/apache-doris/be/conf/be.conf
+        exec bash /opt/apache-doris/be/bin/start_be.sh --console
+    ports:
+      - "8040:8040"
+      - "9050:9050"
+    volumes:
+      - iceberg-warehouse:/tmp/doris_iceberg_warehouse
+    networks:
+      doris_net:
+        ipv4_address: 172.30.80.3
+
+volumes:
+  iceberg-warehouse:
+
+networks:
+  doris_net:
+    ipam:
+      config:
+        - subnet: 172.30.80.0/24

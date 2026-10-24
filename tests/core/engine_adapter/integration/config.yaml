@@ -128,6 +128,16 @@ gateways:
       check_import: false
     state_connection:
       type: duckdb
+  inttest_doris:
+    connection:
+      type: doris
+      host: {{ env_var('DOCKER_HOSTNAME', 'localhost') }}
+      port: 9030
+      user: root
+      password: ""
+      check_import: false
+    state_connection:
+      type: duckdb
 
 
   # Cloud databases

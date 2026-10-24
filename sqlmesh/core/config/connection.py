@@ -63,6 +63,8 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Db2 rejects table names starting with underscore (_versions, _snapshots,
     # _environments, _intervals). Use a separate state_connection (e.g., DuckDB).
     "db2",
+    # OLAP primary keys and lack of transactional DDL make Doris unsuitable for state sync
+    "doris",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
@@ -2690,6 +2692,167 @@ class Db2ConnectionConfig(ConnectionConfig):
             return ibm_db_dbi.connect(conn_str, "", "")
 
         return connect_db2
+
+
+class DorisConnectionConfig(ConnectionConfig):
+    """Configuration for the Apache Doris connection.
+
+    Apache Doris uses the MySQL network protocol and supports both internal OLAP tables
+    and external Multi-Catalog lakehouse catalogs (e.g., Apache Iceberg).
+
+    Args:
+        host: The hostname of the Doris FE (Frontend) node.
+        user: The Doris username.
+        password: The optional Doris password.
+        port: The query port number of the Doris FE node. Default is 9030.
+        database: The optional database name.
+        catalog: The optional default catalog name (e.g., 'internal' or an external Iceberg catalog).
+        charset: The optional character set (defaults to 'utf8mb4').
+        collation: The optional collation.
+        connect_timeout: Timeout in seconds for establishing a connection. Default is 10.
+        read_timeout: Timeout in seconds for reading from the connection.
+        write_timeout: Timeout in seconds for writing to the connection.
+        ssl: Optional dictionary of SSL arguments passed to PyMySQL.
+        ssl_ca: Path to the file that contains a PEM-formatted CA certificate.
+        ssl_cert: Path to the file that contains a PEM-formatted client certificate.
+        ssl_key: Path to the file that contains a PEM-formatted private key for the client certificate.
+        ssl_verify_cert: Whether to verify the server certificate against the CA certificate.
+        ssl_verify_identity: Whether to verify the server hostname against the certificate.
+        ssl_disabled: Whether to disable SSL connection.
+        session_variables: Optional dictionary of Doris session variables to set on each connection.
+        concurrent_tasks: The maximum number of tasks that can use this connection concurrently.
+        register_comments: Whether or not to register model comments with the SQL engine.
+        pre_ping: Whether or not to pre-ping the connection before starting a new statement.
+    """
+
+    host: str
+    user: str
+    password: t.Optional[str] = None
+    port: t.Optional[int] = 9030
+    database: t.Optional[str] = None
+    catalog: t.Optional[str] = None
+    charset: t.Optional[str] = None
+    collation: t.Optional[str] = None
+    connect_timeout: t.Optional[int] = 10
+    read_timeout: t.Optional[int] = None
+    write_timeout: t.Optional[int] = None
+    ssl: t.Optional[t.Union[bool, t.Dict[str, t.Any]]] = None
+    ssl_ca: t.Optional[str] = None
+    ssl_cert: t.Optional[str] = None
+    ssl_key: t.Optional[str] = None
+    ssl_verify_cert: t.Optional[bool] = None
+    ssl_verify_identity: t.Optional[bool] = None
+    ssl_disabled: t.Optional[bool] = None
+    session_variables: t.Optional[t.Dict[str, t.Any]] = None
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    pre_ping: bool = False
+
+    type_: t.Literal["doris"] = Field(alias="type", default="doris")
+    DIALECT: t.ClassVar[t.Literal["doris"]] = "doris"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Apache Doris"]] = "Apache Doris"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[20]] = 20
+
+    _engine_import_validator = _get_engine_import_validator("pymysql", "doris")
+
+    @field_validator("session_variables", mode="after")
+    @classmethod
+    def _validate_session_variables(
+        cls, v: t.Optional[t.Dict[str, t.Any]]
+    ) -> t.Optional[t.Dict[str, t.Any]]:
+        if v:
+            import math
+
+            for k, val in v.items():
+                if not isinstance(k, str) or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*\Z", k):
+                    raise ConfigError(f"Invalid Doris session variable name: '{k}'")
+                if not isinstance(val, (str, int, float, bool)) or (
+                    isinstance(val, float) and (math.isnan(val) or math.isinf(val))
+                ):
+                    raise ConfigError(f"Invalid Doris session variable value for '{k}': {val!r}")
+        return v
+
+    @property
+    def _static_connection_kwargs(self) -> t.Dict[str, t.Any]:
+        kwargs: t.Dict[str, t.Any] = {
+            "autocommit": True,
+            "charset": self.charset or "utf8mb4",
+            "local_infile": False,
+        }
+        if not self.ssl_disabled:
+            ssl_config: t.Dict[str, t.Any] = dict(self.ssl) if isinstance(self.ssl, dict) else {}
+            for key in ("ca", "cert", "key"):
+                val = getattr(self, f"ssl_{key}", None)
+                if val is not None:
+                    ssl_config[key] = val
+            if ssl_config or (self.ssl is not None and self.ssl is not False):
+                kwargs["ssl"] = ssl_config
+            for key in (
+                "ssl_ca",
+                "ssl_cert",
+                "ssl_key",
+                "ssl_verify_cert",
+                "ssl_verify_identity",
+            ):
+                val = getattr(self, key, None)
+                if val is not None:
+                    kwargs[key] = val
+        return kwargs
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        is_external_catalog = bool(self.catalog and self.catalog.lower() != "internal")
+        return {
+            k
+            for k in (
+                "host",
+                "user",
+                "password",
+                "port",
+                "database",
+                "charset",
+                "collation",
+                "connect_timeout",
+                "read_timeout",
+                "write_timeout",
+                "ssl_disabled",
+            )
+            if getattr(self, k) is not None and not (k == "database" and is_external_catalog)
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        return engine_adapter.DorisEngineAdapter
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        from pymysql import connect
+
+        return connect
+
+    @property
+    def _cursor_init(self) -> t.Optional[t.Callable[[t.Any], None]]:
+        if not self.catalog and not self.session_variables:
+            return None
+
+        def init(cursor: t.Any) -> None:
+            if self.session_variables:
+                self._validate_session_variables(self.session_variables)
+                for k, v in self.session_variables.items():
+                    val_sql = exp.convert(v).sql("doris", comments=False)
+                    cursor.execute(f"SET `{k}` = {val_sql}")
+            if self.catalog:
+                catalog_sql = exp.to_identifier(self.catalog, quoted=True).sql("doris")
+                cursor.execute(f"SWITCH {catalog_sql}")
+                if self.database:
+                    db_sql = exp.to_identifier(self.database, quoted=True).sql("doris")
+                    cursor.execute(f"USE {db_sql}")
+
+        return init
+
+    def get_catalog(self) -> t.Optional[str]:
+        return self.catalog
 
 
 CONNECTION_CONFIG_TO_TYPE = {

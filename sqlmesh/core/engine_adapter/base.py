@@ -525,10 +525,23 @@ class EngineAdapter:
         if not target_columns_to_types and table_exists:
             target_columns_to_types = self.columns(target_table)
         query = source_queries[0].query_factory()
-        self_referencing = any(
-            quote_identifiers(table) == quote_identifiers(target_table)
-            for table in query.find_all(exp.Table)
-        )
+
+        def _is_target_table(node: exp.Expr) -> bool:
+            if not isinstance(node, exp.Table):
+                return False
+            if quote_identifiers(node.copy()) == quote_identifiers(target_table.copy()):
+                return True
+            if self.default_catalog:
+                norm_node = node.copy()
+                if not norm_node.catalog and norm_node.db:
+                    norm_node.set("catalog", exp.parse_identifier(self.default_catalog))
+                norm_target = target_table.copy()
+                if not norm_target.catalog and norm_target.db:
+                    norm_target.set("catalog", exp.parse_identifier(self.default_catalog))
+                return quote_identifiers(norm_node) == quote_identifiers(norm_target)
+            return False
+
+        self_referencing = any(_is_target_table(table) for table in query.find_all(exp.Table))
         # If a query references itself then it must have a table created regardless of approach used.
         if self_referencing:
             if not target_columns_to_types:
@@ -572,10 +585,7 @@ class EngineAdapter:
                 for source_query in source_queries:
                     source_query.add_transform(
                         lambda node: (  # type: ignore
-                            temp_table  # type: ignore
-                            if isinstance(node, exp.Table)
-                            and quote_identifiers(node) == quote_identifiers(target_table)
-                            else node
+                            temp_table if _is_target_table(node) else node  # type: ignore
                         )
                     )
                 return self._insert_overwrite_by_condition(
@@ -2718,7 +2728,7 @@ class EngineAdapter:
         Yields:
             The table expression
         """
-        name = exp.to_table(name)
+        name = exp.to_table(name).copy()
         # ensure that we use default catalog if none is not specified
         if isinstance(name, exp.Table) and not name.catalog and name.db and self.default_catalog:
             name.set("catalog", exp.parse_identifier(self.default_catalog))
