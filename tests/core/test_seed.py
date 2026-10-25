@@ -175,6 +175,24 @@ def test_declared_columns_honor_csv_settings():
     assert _values(df["n"]) == [1, None]
 
 
+@pytest.mark.parametrize("na_value", [1, "1"], ids=["int", "str"])
+def test_declared_columns_keep_numeric_na_markers_null(na_value):
+    # pandas also matches numeric NA markers against parsed numbers (1.00 matches 1), which
+    # the raw string re-read doesn't, so restored columns keep the NULLs of the original read
+    seed = Seed(content="code,n,id\n1.00,1.00,10\n2,,20\n,3,30\n")
+    settings = CsvSettings(na_values=[na_value])
+    df = next(
+        seed.reader(
+            settings=settings, columns_to_types=_declared(code="text", n="int", id="int")
+        ).read()
+    )
+
+    assert _values(df["code"]) == [None, "2", None]
+    assert _values(df["n"]) == [None, None, 3]
+    assert [type(v) for v in df["n"]] == [type(None), type(None), int]
+    assert df["id"].to_list() == [10, 20, 30]
+
+
 def test_declared_columns_match_normalized_csv_headers():
     seed = Seed(content="Code,N\n001,1\n,2\n")
     reader = seed.reader(dialect="snowflake", columns_to_types=_declared(CODE="text", N="int"))

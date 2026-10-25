@@ -155,7 +155,9 @@ class CsvSeedReader:
         Inference turns TEXT columns like `00123` into integers (dropping leading zeros) and
         integer columns with blanks into floats. Such columns are re-read as raw strings: TEXT
         columns keep them as is, and integer columns are converted to Python ints (exact and
-        unbounded), unless a value isn't an integer literal, in which case they're left as is.
+        unbounded), unless a non-NULL value isn't an integer literal, in which case they're left
+        as is. Restored columns keep the NULLs of the original read, whose NA markers
+        (`na_values`) can also match parsed numbers, unlike the raw re-read.
         """
         import pandas as pd
 
@@ -183,12 +185,12 @@ class CsvSeedReader:
 
         raw_df = self._read_csv(dtype=str)
         for name in text_columns:
-            df[name] = raw_df[name]
+            df[name] = raw_df[name].where(df[name].notna())
 
         for name in int_columns:
             try:
                 df[name] = pd.Series(
-                    [None if pd.isna(v) else int(v) for v in raw_df[name]],
+                    [None if is_na else int(v) for is_na, v in zip(df[name].isna(), raw_df[name])],
                     index=df.index,
                     dtype=object,
                 )
