@@ -281,6 +281,31 @@ export default function SearchList<
   )
 }
 
+export function HighlightedText({
+  source,
+  search,
+}: {
+  source: string
+  search: string
+}): JSX.Element {
+  return (
+    <>
+      {highlightMatch(source, search).map(({ text, isMatch }, idx) =>
+        isMatch ? (
+          <b
+            key={idx}
+            className="inline-block text-brand-500 bg-brand-10"
+          >
+            {text}
+          </b>
+        ) : (
+          <Fragment key={idx}>{text}</Fragment>
+        ),
+      )}
+    </>
+  )
+}
+
 function SearchResult<T extends Record<string, any> = Record<string, any>>({
   item,
   index,
@@ -322,21 +347,23 @@ function SearchResult<T extends Record<string, any> = Record<string, any>>({
               <TBKModelName text={item[displayBy]}></TBKModelName>
             )}
           </span>
-          <small
-            className="block text-neutral-600 italic overflow-hidden whitespace-nowrap overflow-ellipsis"
-            dangerouslySetInnerHTML={{
-              __html: highlightMatch(index, search),
-            }}
-          ></small>
+          <small className="block text-neutral-600 italic overflow-hidden whitespace-nowrap overflow-ellipsis">
+            <HighlightedText
+              source={index}
+              search={search}
+            />
+          </small>
         </>
       ) : (
         <span
           title={item[displayBy]}
           className="font-bold"
-          dangerouslySetInnerHTML={{
-            __html: highlightMatch(item[displayBy], search),
-          }}
-        ></span>
+        >
+          <HighlightedText
+            source={item[displayBy]}
+            search={search}
+          />
+        </span>
       )}
       {isNotNil(descriptionBy) && (
         <small className="block text-neutral-600 italic overflow-hidden whitespace-nowrap overflow-ellipsis">
