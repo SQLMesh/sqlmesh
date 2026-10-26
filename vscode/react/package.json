@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@chromatic-com/storybook": "^4.0.1",
-    "@storybook/addon-a11y": "^9.0.18",
+    "@storybook/addon-a11y": "^10.6.3",
     "@storybook/addon-docs": "^9.0.18",
     "@storybook/addon-onboarding": "^9.0.18",
     "@storybook/addon-vitest": "^9.0.18",
