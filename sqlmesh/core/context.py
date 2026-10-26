@@ -3182,6 +3182,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         current_ts = now_timestamp()
         failures: t.List[str] = []
 
+        self._load_materializations()
+
         # Clean up expired environments by removing their views and schemas
         failures.extend(
             self._cleanup_environments(
