@@ -173,7 +173,7 @@
     "@vitest/ui": "^3.2.4",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.5.2",
-    "@vscode/vsce": "^3.6.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.25.8",
     "eslint": "^9.31.0",
     "ts-loader": "^9.5.2",
