@@ -86,6 +86,29 @@ def test_table_name(init_and_plan_context: t.Callable):
     )
 
 
+def test_janitor_loads_materialization(mocker: MockerFixture, tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    test_model = models_dir / "model.sql"
+
+    with open(test_model, "w") as f:
+        f.write(
+            "MODEL(name test.model, kind CUSTOM (materialization 'custom_full')); SELECT 1 AS col"
+        )
+
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    ctx = Context(paths=[tmp_path], config=config)
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+
+    load_materializations_spy = mocker.spy(Context, "_load_materializations")
+
+    ctx.invalidate_environment("dev")
+    ctx.run_janitor(ignore_ttl=True)
+
+    load_materializations_spy.assert_called_once()
+
+
 def test_janitor_cleanup_order(mocker: MockerFixture, tmp_path: Path):
     def setup_scenario():
         models_dir = tmp_path / "models"
