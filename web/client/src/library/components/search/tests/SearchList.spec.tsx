@@ -12,6 +12,21 @@ describe('highlightMatch', () => {
     ])
   })
 
+  it('should handle adjacent matches and matches at the edges', () => {
+    expect(highlightMatch('abab', 'ab')).toEqual([
+      { text: 'ab', isMatch: true },
+      { text: 'ab', isMatch: true },
+    ])
+    expect(highlightMatch('xab', 'ab')).toEqual([
+      { text: 'x', isMatch: false },
+      { text: 'ab', isMatch: true },
+    ])
+  })
+
+  it('should return no parts for an empty source', () => {
+    expect(highlightMatch('', 'ab')).toEqual([])
+  })
+
   it('should return the whole source when there is no match', () => {
     expect(highlightMatch('abc', '')).toEqual([{ text: 'abc', isMatch: false }])
     expect(highlightMatch('abc', 'x')).toEqual([
