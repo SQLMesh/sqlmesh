@@ -1,65 +1,66 @@
-import { describe, it, expect } from 'vitest'
-import { render } from '../../../../tests/utils'
-import { HighlightedText } from '../SearchList'
-import { highlightMatch } from '../help'
+import { describe, it, expect, vi } from 'vitest'
+import { MemoryRouter } from 'react-router'
+import { render, fireEvent } from '../../../../tests/utils'
+import SearchList from '../SearchList'
 
-describe('highlightMatch', () => {
-  it('should split source into matched and unmatched parts', () => {
-    expect(highlightMatch('abcab', 'ab')).toEqual([
-      { text: 'ab', isMatch: true },
-      { text: 'c', isMatch: false },
-      { text: 'ab', isMatch: true },
-    ])
+// jsdom has no ResizeObserver, which TBKResizeObserver needs to mount
+vi.stubGlobal(
+  'ResizeObserver',
+  class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  },
+)
+
+const PAYLOAD = '<img src=x onerror="alert(1)">'
+
+function renderSearch(
+  name: string,
+  search: string,
+  showIndex: boolean,
+): HTMLElement {
+  const { container } = render(
+    <MemoryRouter>
+      <SearchList<{ name: string }>
+        list={[{ name }]}
+        searchBy="name"
+        displayBy="name"
+        showIndex={showIndex}
+      />
+    </MemoryRouter>,
+  )
+
+  fireEvent.input(container.querySelector('input')!, {
+    target: { value: search },
   })
 
-  it('should handle adjacent matches and matches at the edges', () => {
-    expect(highlightMatch('abab', 'ab')).toEqual([
-      { text: 'ab', isMatch: true },
-      { text: 'ab', isMatch: true },
-    ])
-    expect(highlightMatch('xab', 'ab')).toEqual([
-      { text: 'x', isMatch: false },
-      { text: 'ab', isMatch: true },
-    ])
+  return container.querySelector('[role="menuitem"]')!
+}
+
+describe.each([true, false])('SearchList with showIndex=%s', showIndex => {
+  it('should render markup in project text as text', () => {
+    const name = `${PAYLOAD}model`
+    const result = renderSearch(name, 'model', showIndex)
+
+    expect(result.querySelector('img')).toBeNull()
+    expect(result.textContent).toContain(name)
+    expect(result.querySelector('b')?.textContent).toBe('model')
   })
 
-  it('should return no parts for an empty source', () => {
-    expect(highlightMatch('', 'ab')).toEqual([])
+  it('should render markup in the search string as text', () => {
+    const result = renderSearch(`a${PAYLOAD}b`, PAYLOAD, showIndex)
+
+    expect(result.querySelector('img')).toBeNull()
+    expect(result.querySelector('b')?.textContent).toBe(PAYLOAD)
   })
 
-  it('should return the whole source when there is no match', () => {
-    expect(highlightMatch('abc', '')).toEqual([{ text: 'abc', isMatch: false }])
-    expect(highlightMatch('abc', 'x')).toEqual([
-      { text: 'abc', isMatch: false },
-    ])
-  })
-})
+  it('should highlight every match, including adjacent and trailing ones', () => {
+    const result = renderSearch('ababxab', 'ab', showIndex)
 
-describe('HighlightedText', () => {
-  it('should render project text as text, not HTML', () => {
-    const source = '<img src=x onerror="alert(1)">model'
-    const { container } = render(
-      <HighlightedText
-        source={source}
-        search="model"
-      />,
-    )
-
-    expect(container.querySelector('img')).toBeNull()
-    expect(container.textContent).toBe(source)
-    expect(container.querySelector('b')?.textContent).toBe('model')
-  })
-
-  it('should not interpret markup in the search string', () => {
-    const search = '<img src=x onerror="alert(1)">'
-    const { container } = render(
-      <HighlightedText
-        source={`a${search}b`}
-        search={search}
-      />,
-    )
-
-    expect(container.querySelector('img')).toBeNull()
-    expect(container.querySelector('b')?.textContent).toBe(search)
+    expect(
+      Array.from(result.querySelectorAll('b'), b => b.textContent),
+    ).toEqual(['ab', 'ab', 'ab'])
+    expect(result.textContent).toContain('ababxab')
   })
 })

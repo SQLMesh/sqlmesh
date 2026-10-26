@@ -281,7 +281,7 @@ export default function SearchList<
   )
 }
 
-export function HighlightedText({
+function HighlightedText({
   source,
   search,
 }: {
