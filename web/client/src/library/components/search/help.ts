@@ -3,11 +3,26 @@ export { filterListBy, highlightMatch }
 export const EMPTY_STRING = ''
 const MATCHED_LENGTH_TO_DISPLAY = 40
 
-function highlightMatch(source: string, match: string): string {
-  return source.replaceAll(
-    match,
-    `<b class="inline-block text-brand-500 bg-brand-10">${match}</b>`,
-  )
+export interface HighlightPart {
+  text: string
+  isMatch: boolean
+}
+
+// NOTE: Returns plain text parts so callers can render them as React text nodes
+function highlightMatch(source: string, match: string): HighlightPart[] {
+  if (match === EMPTY_STRING) return [{ text: source, isMatch: false }]
+
+  return source
+    .split(match)
+    .flatMap((text, idx) =>
+      idx === 0
+        ? [{ text, isMatch: false }]
+        : [
+            { text: match, isMatch: true },
+            { text, isMatch: false },
+          ],
+    )
+    .filter(part => part.text !== EMPTY_STRING)
 }
 
 // NOTE: This function is used to filter the list of models in the search bar
