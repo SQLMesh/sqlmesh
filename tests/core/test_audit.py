@@ -852,6 +852,44 @@ def test_not_constant_audit(model: Model):
     )
 
 
+def test_valid_uuid_audit(model: Model):
+    import duckdb
+
+    rendered_query = model.render_audit_query(builtin.valid_uuid_audit, column=exp.column("a"))
+    assert (
+        rendered_query.sql()
+        == """SELECT * FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE NOT REGEXP_LIKE(LOWER("a"), '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') AND TRUE"""
+    )
+
+    valid = [
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c8",  # v1
+        "000003e8-2363-21ef-b200-325096b39f47",  # v2
+        "5df41881-3aed-3515-88a7-2f4a814cf09e",  # v3
+        "919108F7-52D1-4320-9BAC-F847DB4148A8",  # v4, upper case
+        "2ed6657d-e927-568b-95e1-2665a8aea6a2",  # v5
+        "1ec9414c-232a-6b00-b3c8-9f6bdeced846",  # v6
+        "017f22e2-79b0-7cc3-98c4-dc0c0c07398f",  # v7
+        "2489e9ad-2ee2-8e00-8ec9-32d5f69181c0",  # v8
+    ]
+    invalid = [
+        "017f22e2-79b0-9cc3-98c4-dc0c0c07398f",  # unknown version
+        "017f22e2-79b0-7cc3-c8c4-dc0c0c07398f",  # non-RFC variant
+        "017f22e279b07cc398c4dc0c0c07398f",  # no hyphens
+        "not-a-uuid",
+    ]
+
+    connection = duckdb.connect()
+    connection.execute("CREATE SCHEMA db")
+    connection.execute("CREATE TABLE db.test_model (a TEXT, b INT, ds TEXT)")
+    connection.executemany(
+        "INSERT INTO db.test_model VALUES (?, 1, '1970-01-01')",
+        [[value] for value in valid + invalid + [None]],
+    )
+
+    failing_rows = connection.execute(rendered_query.sql(dialect="duckdb")).fetchall()
+    assert sorted(row[0] for row in failing_rows) == sorted(invalid)
+
+
 def test_condition_with_macro_var(model: Model):
     rendered_query = model.render_audit_query(
         builtin.not_null_audit,
