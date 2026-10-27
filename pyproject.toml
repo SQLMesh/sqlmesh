@@ -116,6 +116,7 @@ db2 = [
     "ibm_db",
     "db2-sqlglot-dialect;python_version>=\"3.10\""
 ]
+doris = ["pymysql"]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
 fabric-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
@@ -290,6 +291,7 @@ markers = [
     "trino: test for Trino (all connectors)",
     "risingwave: test for Risingwave",
     "starrocks: test for StarRocks",
+    "doris: test for Doris",
 
     # Other
     "set_default_connection",

@@ -525,10 +525,55 @@ class EngineAdapter:
         if not target_columns_to_types and table_exists:
             target_columns_to_types = self.columns(target_table)
         query = source_queries[0].query_factory()
-        self_referencing = any(
-            quote_identifiers(table) == quote_identifiers(target_table)
-            for table in query.find_all(exp.Table)
-        )
+
+        quoted_target = quote_identifiers(target_table.copy())
+        default_catalog: t.Optional[str] = None
+        default_catalog_loaded = False
+        qualified_target: t.Optional[exp.Table] = None
+
+        def _table_parts(
+            table: exp.Table,
+        ) -> t.Tuple[t.Optional[exp.Expr], t.Optional[exp.Expr], t.Optional[exp.Expr]]:
+            return (table.args.get("catalog"), table.args.get("db"), table.this)
+
+        def _qualified(table: exp.Table, catalog: str) -> exp.Table:
+            table = table.copy()
+            if not table.catalog and table.db:
+                table.set("catalog", exp.parse_identifier(catalog))
+            return quote_identifiers(table)
+
+        def _is_target_table(node: exp.Expr) -> bool:
+            nonlocal default_catalog, default_catalog_loaded, qualified_target
+            if not isinstance(node, exp.Table):
+                return False
+            quoted_node = quote_identifiers(node.copy())
+            if _table_parts(quoted_node) == _table_parts(quoted_target):
+                return True
+            if quoted_node.this != quoted_target.this or quoted_node.args.get(
+                "db"
+            ) != quoted_target.args.get("db"):
+                return False
+            if not default_catalog_loaded:
+                default_catalog = self.default_catalog
+                default_catalog_loaded = True
+                if default_catalog:
+                    qualified_target = _qualified(target_table, default_catalog)
+            return (
+                default_catalog is not None
+                and qualified_target is not None
+                and _table_parts(_qualified(node, default_catalog))
+                == _table_parts(qualified_target)
+            )
+
+        def _replace_target_table(node: exp.Expr, replacement_table: exp.Table) -> exp.Expr:
+            if not _is_target_table(node):
+                return node
+            replacement = replacement_table.copy()
+            if isinstance(node, exp.Table) and node.args.get("alias") is not None:
+                replacement.set("alias", node.args["alias"].copy())
+            return replacement
+
+        self_referencing = any(_is_target_table(table) for table in query.find_all(exp.Table))
         # If a query references itself then it must have a table created regardless of approach used.
         if self_referencing:
             if not target_columns_to_types:
@@ -571,12 +616,7 @@ class EngineAdapter:
             ) as temp_table:
                 for source_query in source_queries:
                     source_query.add_transform(
-                        lambda node: (  # type: ignore
-                            temp_table  # type: ignore
-                            if isinstance(node, exp.Table)
-                            and quote_identifiers(node) == quote_identifiers(target_table)
-                            else node
-                        )
+                        lambda node: _replace_target_table(node, temp_table)  # type: ignore
                     )
                 return self._insert_overwrite_by_condition(
                     target_table,
@@ -2718,7 +2758,7 @@ class EngineAdapter:
         Yields:
             The table expression
         """
-        name = exp.to_table(name)
+        name = exp.to_table(name).copy()
         # ensure that we use default catalog if none is not specified
         if isinstance(name, exp.Table) and not name.catalog and name.db and self.default_catalog:
             name.set("catalog", exp.parse_identifier(self.default_catalog))
