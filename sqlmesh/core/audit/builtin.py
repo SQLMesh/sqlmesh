@@ -318,10 +318,14 @@ WHERE @AND(NOT REGEXP_LIKE(@column, '^(https?|ftp)://[^\s/$.?#].[^\s]*$'), @cond
 # valid_http_method(column=column_name)
 valid_http_method_audit = ModelAudit(
     name="valid_http_method",
+    defaults={"condition": exp.true()},
     query="""
 SELECT *
 FROM @this_model
-WHERE NOT @column IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT')
+WHERE @AND(
+  NOT @column IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT'),
+  @condition,
+)
     """,
 )
 
@@ -432,7 +436,7 @@ SELECT
   @column,
   (@column - mean_@column) / NULLIF(stddev_@column, 0) AS z_score
 FROM @this_model, stats
-WHERE ABS((@column - mean_@column) / NULLIF(stddev_@column, 0)) > @threshold
+WHERE @AND(ABS((@column - mean_@column) / NULLIF(stddev_@column, 0)) > @threshold, @condition)
     """,
 )
 
