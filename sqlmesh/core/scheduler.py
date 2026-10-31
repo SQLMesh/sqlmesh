@@ -8,6 +8,11 @@ from datetime import datetime
 from sqlglot import exp
 from sqlmesh.core import constants as c
 from sqlmesh.core.console import Console, get_console
+from sqlmesh.core.execution_observation import (
+    action,
+    console_observer_scope,
+    execution_context_factory,
+)
 from sqlmesh.core.environment import EnvironmentNamingInfo, execute_environment_statements
 from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.model.definition import AuditResult
@@ -454,178 +459,43 @@ class Scheduler:
         Returns:
             A tuple of errors and skipped intervals.
         """
-        execution_time = execution_time or now_timestamp()
+        with console_observer_scope(self.console):
+            execution_time = execution_time or now_timestamp()
 
-        selected_snapshots = [self.snapshots[sid] for sid in (selected_snapshot_ids or set())]
-        if not selected_snapshots:
-            selected_snapshots = list(merged_intervals)
+            selected_snapshots = [self.snapshots[sid] for sid in (selected_snapshot_ids or set())]
+            if not selected_snapshots:
+                selected_snapshots = list(merged_intervals)
 
-        # Build the full DAG from all snapshots to preserve transitive dependencies
-        full_dag = snapshots_to_dag(self.snapshots.values())
+            # Build the full DAG from all snapshots to preserve transitive dependencies
+            full_dag = snapshots_to_dag(self.snapshots.values())
 
-        # Create a subdag that includes the selected snapshots and all their upstream dependencies
-        # This ensures that transitive dependencies are preserved even when intermediate nodes are not selected
-        selected_snapshot_ids_set = {s.snapshot_id for s in selected_snapshots}
-        snapshot_dag = full_dag.subdag(*selected_snapshot_ids_set)
+            # Create a subdag that includes the selected snapshots and all their upstream dependencies
+            # This ensures that transitive dependencies are preserved even when intermediate nodes are not selected
+            selected_snapshot_ids_set = {s.snapshot_id for s in selected_snapshots}
+            snapshot_dag = full_dag.subdag(*selected_snapshot_ids_set)
 
-        batched_intervals = self.batch_intervals(
-            merged_intervals,
-            deployability_index,
-            environment_naming_info,
-            dag=snapshot_dag,
-            is_restatement=is_restatement,
-        )
-        self.console.start_evaluation_progress(
-            batched_intervals,
-            environment_naming_info,
-            self.default_catalog,
-            audit_only=audit_only,
-        )
-
-        if run_environment_statements:
-            environment_statements = self.state_sync.get_environment_statements(
-                environment_naming_info.name
+            batched_intervals = self.batch_intervals(
+                merged_intervals,
+                deployability_index,
+                environment_naming_info,
+                dag=snapshot_dag,
+                is_restatement=is_restatement,
             )
-            execute_environment_statements(
-                adapter=self.snapshot_evaluator.adapter,
-                environment_statements=environment_statements,
-                runtime_stage=RuntimeStage.BEFORE_ALL,
-                environment_naming_info=environment_naming_info,
-                default_catalog=self.default_catalog,
-                snapshots=self.snapshots_by_name,
-                start=start,
-                end=end,
-                execution_time=execution_time,
-                selected_models=selected_models,
+            self.console.start_evaluation_progress(
+                batched_intervals,
+                environment_naming_info,
+                self.default_catalog,
+                audit_only=audit_only,
             )
 
-        # We only need to create physical tables if the snapshot is not representative or if it
-        # needs backfill
-        snapshots_to_create_candidates = [
-            s
-            for s in selected_snapshots
-            if not deployability_index.is_representative(s) or s in batched_intervals
-        ]
-        snapshots_to_create = {
-            s.snapshot_id
-            for s in self.snapshot_evaluator.get_snapshots_to_create(
-                snapshots_to_create_candidates, deployability_index
-            )
-        }
-
-        dag = self._dag(
-            batched_intervals, snapshot_dag=snapshot_dag, snapshots_to_create=snapshots_to_create
-        )
-
-        def run_node(node: SchedulingUnit) -> None:
-            if circuit_breaker and circuit_breaker():
-                raise CircuitBreakerError()
-            if isinstance(node, DummyNode):
-                return
-
-            snapshot = self.snapshots_by_name[node.snapshot_name]
-
-            if isinstance(node, EvaluateNode):
-                self.console.start_snapshot_evaluation_progress(snapshot)
-                execution_start_ts = now_timestamp()
-                evaluation_duration_ms: t.Optional[int] = None
-                start, end = node.interval
-
-                audit_results: t.List[AuditResult] = []
-                try:
-                    assert execution_time  # mypy
-                    assert deployability_index  # mypy
-
-                    if audit_only:
-                        audit_results = self._audit_snapshot(
-                            snapshot=snapshot,
-                            environment_naming_info=environment_naming_info,
-                            deployability_index=deployability_index,
-                            snapshots=self.snapshots_by_name,
-                            start=start,
-                            end=end,
-                            execution_time=execution_time,
-                        )
-                    else:
-                        # If batch_index > 0, then the target table must exist since the first batch would have created it
-                        target_table_exists = (
-                            snapshot.snapshot_id not in snapshots_to_create or node.batch_index > 0
-                        )
-                        audit_results = self.evaluate(
-                            snapshot=snapshot,
-                            environment_naming_info=environment_naming_info,
-                            start=start,
-                            end=end,
-                            execution_time=execution_time,
-                            deployability_index=deployability_index,
-                            batch_index=node.batch_index,
-                            allow_destructive_snapshots=allow_destructive_snapshots,
-                            allow_additive_snapshots=allow_additive_snapshots,
-                            target_table_exists=target_table_exists,
-                            selected_models=selected_models,
-                        )
-
-                    evaluation_duration_ms = now_timestamp() - execution_start_ts
-                finally:
-                    num_audits = len(audit_results)
-                    num_audits_failed = sum(1 for result in audit_results if result.count)
-
-                    execution_stats = self.snapshot_evaluator.execution_tracker.get_execution_stats(
-                        SnapshotIdBatch(snapshot_id=snapshot.snapshot_id, batch_id=node.batch_index)
-                    )
-
-                    self.console.update_snapshot_evaluation_progress(
-                        snapshot,
-                        batched_intervals[snapshot][node.batch_index],
-                        node.batch_index,
-                        evaluation_duration_ms,
-                        num_audits - num_audits_failed,
-                        num_audits_failed,
-                        execution_stats=execution_stats,
-                        auto_restatement_triggers=auto_restatement_triggers.get(
-                            snapshot.snapshot_id
-                        ),
-                    )
-            elif isinstance(node, CreateNode):
-                self.snapshot_evaluator.create_snapshot(
-                    snapshot=snapshot,
-                    snapshots=self.snapshots_by_name,
-                    deployability_index=deployability_index,
-                    allow_destructive_snapshots=allow_destructive_snapshots or set(),
-                    allow_additive_snapshots=allow_additive_snapshots or set(),
-                )
-
-        try:
-            with self.snapshot_evaluator.concurrent_context():
-                errors, skipped_intervals = concurrent_apply_to_dag(
-                    dag,
-                    run_node,
-                    self.max_workers,
-                    raise_on_error=False,
-                )
-                self.console.stop_evaluation_progress(success=not errors)
-
-                skipped_snapshots = {
-                    i.snapshot_name for i in skipped_intervals if isinstance(i, EvaluateNode)
-                }
-                self.console.log_skipped_models(skipped_snapshots)
-                for skipped in skipped_snapshots:
-                    logger.info(f"SKIPPED snapshot {skipped}\n")
-
-                for error in errors:
-                    if isinstance(error.__cause__, CircuitBreakerError):
-                        raise error.__cause__
-                    logger.info(str(error), exc_info=error)
-
-                self.console.log_failed_models(errors)
-
-                return errors, skipped_intervals
-        finally:
             if run_environment_statements:
+                environment_statements = self.state_sync.get_environment_statements(
+                    environment_naming_info.name
+                )
                 execute_environment_statements(
                     adapter=self.snapshot_evaluator.adapter,
                     environment_statements=environment_statements,
-                    runtime_stage=RuntimeStage.AFTER_ALL,
+                    runtime_stage=RuntimeStage.BEFORE_ALL,
                     environment_naming_info=environment_naming_info,
                     default_catalog=self.default_catalog,
                     snapshots=self.snapshots_by_name,
@@ -635,7 +505,166 @@ class Scheduler:
                     selected_models=selected_models,
                 )
 
-            self.state_sync.recycle()
+            # We only need to create physical tables if the snapshot is not representative or if it
+            # needs backfill
+            snapshots_to_create_candidates = [
+                s
+                for s in selected_snapshots
+                if not deployability_index.is_representative(s) or s in batched_intervals
+            ]
+            snapshots_to_create = {
+                s.snapshot_id
+                for s in self.snapshot_evaluator.get_snapshots_to_create(
+                    snapshots_to_create_candidates, deployability_index
+                )
+            }
+
+            dag = self._dag(
+                batched_intervals,
+                snapshot_dag=snapshot_dag,
+                snapshots_to_create=snapshots_to_create,
+            )
+
+            def run_node(node: SchedulingUnit) -> None:
+                if isinstance(node, EvaluateNode):
+                    with action(
+                        "model",
+                        "audit_only" if audit_only else "evaluate",
+                        snapshot=self.snapshots_by_name[node.snapshot_name],
+                        interval=node.interval,
+                        batch_index=node.batch_index,
+                        execution_time=execution_time,
+                        audit_only=audit_only,
+                    ):
+                        execute_node(node)
+                else:
+                    execute_node(node)
+
+            def execute_node(node: SchedulingUnit) -> None:
+                if circuit_breaker and circuit_breaker():
+                    raise CircuitBreakerError()
+                if isinstance(node, DummyNode):
+                    return
+
+                snapshot = self.snapshots_by_name[node.snapshot_name]
+
+                if isinstance(node, EvaluateNode):
+                    self.console.start_snapshot_evaluation_progress(snapshot)
+                    execution_start_ts = now_timestamp()
+                    evaluation_duration_ms: t.Optional[int] = None
+                    start, end = node.interval
+
+                    audit_results: t.List[AuditResult] = []
+                    try:
+                        assert execution_time  # mypy
+                        assert deployability_index  # mypy
+
+                        if audit_only:
+                            audit_results = self._audit_snapshot(
+                                snapshot=snapshot,
+                                environment_naming_info=environment_naming_info,
+                                deployability_index=deployability_index,
+                                snapshots=self.snapshots_by_name,
+                                start=start,
+                                end=end,
+                                execution_time=execution_time,
+                            )
+                        else:
+                            # If batch_index > 0, then the target table must exist since the first batch would have created it
+                            target_table_exists = (
+                                snapshot.snapshot_id not in snapshots_to_create
+                                or node.batch_index > 0
+                            )
+                            audit_results = self.evaluate(
+                                snapshot=snapshot,
+                                environment_naming_info=environment_naming_info,
+                                start=start,
+                                end=end,
+                                execution_time=execution_time,
+                                deployability_index=deployability_index,
+                                batch_index=node.batch_index,
+                                allow_destructive_snapshots=allow_destructive_snapshots,
+                                allow_additive_snapshots=allow_additive_snapshots,
+                                target_table_exists=target_table_exists,
+                                selected_models=selected_models,
+                            )
+
+                        evaluation_duration_ms = now_timestamp() - execution_start_ts
+                    finally:
+                        num_audits = len(audit_results)
+                        num_audits_failed = sum(1 for result in audit_results if result.count)
+
+                        execution_stats = (
+                            self.snapshot_evaluator.execution_tracker.get_execution_stats(
+                                SnapshotIdBatch(
+                                    snapshot_id=snapshot.snapshot_id, batch_id=node.batch_index
+                                )
+                            )
+                        )
+
+                        self.console.update_snapshot_evaluation_progress(
+                            snapshot,
+                            batched_intervals[snapshot][node.batch_index],
+                            node.batch_index,
+                            evaluation_duration_ms,
+                            num_audits - num_audits_failed,
+                            num_audits_failed,
+                            execution_stats=execution_stats,
+                            auto_restatement_triggers=auto_restatement_triggers.get(
+                                snapshot.snapshot_id
+                            ),
+                        )
+                elif isinstance(node, CreateNode):
+                    self.snapshot_evaluator.create_snapshot(
+                        snapshot=snapshot,
+                        snapshots=self.snapshots_by_name,
+                        deployability_index=deployability_index,
+                        allow_destructive_snapshots=allow_destructive_snapshots or set(),
+                        allow_additive_snapshots=allow_additive_snapshots or set(),
+                    )
+
+            try:
+                with self.snapshot_evaluator.concurrent_context():
+                    errors, skipped_intervals = concurrent_apply_to_dag(
+                        dag,
+                        run_node,
+                        self.max_workers,
+                        raise_on_error=False,
+                        context_factory=execution_context_factory(),
+                    )
+                    self.console.stop_evaluation_progress(success=not errors)
+
+                    skipped_snapshots = {
+                        i.snapshot_name for i in skipped_intervals if isinstance(i, EvaluateNode)
+                    }
+                    self.console.log_skipped_models(skipped_snapshots)
+                    for skipped in skipped_snapshots:
+                        logger.info(f"SKIPPED snapshot {skipped}\n")
+
+                    for error in errors:
+                        if isinstance(error.__cause__, CircuitBreakerError):
+                            raise error.__cause__
+                        logger.info(str(error), exc_info=error)
+
+                    self.console.log_failed_models(errors)
+
+                    return errors, skipped_intervals
+            finally:
+                if run_environment_statements:
+                    execute_environment_statements(
+                        adapter=self.snapshot_evaluator.adapter,
+                        environment_statements=environment_statements,
+                        runtime_stage=RuntimeStage.AFTER_ALL,
+                        environment_naming_info=environment_naming_info,
+                        default_catalog=self.default_catalog,
+                        snapshots=self.snapshots_by_name,
+                        start=start,
+                        end=end,
+                        execution_time=execution_time,
+                        selected_models=selected_models,
+                    )
+
+                self.state_sync.recycle()
 
     def _dag(
         self,
