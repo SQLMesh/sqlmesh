@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sqlglot import exp
 from sqlglot.dialects.dialect import DialectType
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core.console import get_console
 from sqlmesh.core.engine_adapter import EngineAdapter
@@ -98,7 +99,12 @@ def get_columns(
     """
     try:
         columns = adapter.columns(table, include_pseudo_columns=True)
-        return {c: dtype.sql(dialect=dialect) for c, dtype in columns.items()}
+        result = {}
+        for c, dtype in columns.items():
+            if normalize_identifiers(c, dialect=dialect).name != c:
+                c = exp.to_identifier(c).sql(dialect=dialect, identify=True)
+            result[c] = dtype.sql(dialect=dialect)
+        return result
     except Exception as e:
         msg = f"Unable to get schema for '{table}': '{e}'."
         if strict:
