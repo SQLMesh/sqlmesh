@@ -2706,7 +2706,14 @@ class EngineAdapter:
 
             provider = self.query_execution_context_provider
             try:
-                context = provider() if provider is not None else None
+                if provider is None:
+                    from sqlmesh.core.query_execution_context_observer import (
+                        get_automatic_query_execution_context,
+                    )
+
+                    context = get_automatic_query_execution_context()
+                else:
+                    context = provider()
             except Exception:
                 self._warn_query_execution_context_once(
                     "provider",

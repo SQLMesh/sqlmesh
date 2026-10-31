@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import re
 import shutil
 import typing as t
 from pathlib import Path
+
+import pytest
 
 from examples.query_execution_context.observer import QueryContextObserver
 from sqlmesh.core.config import Config, ModelDefaultsConfig
@@ -15,6 +18,7 @@ from sqlmesh.core.config.gateway import GatewayConfig
 from sqlmesh.core.context import Context
 from sqlmesh.core.engine_adapter.base import EngineAdapter
 from sqlmesh.core.execution_observation import observer_scope
+from sqlmesh.core.query_execution import get_query_execution_context
 from sqlmesh.core.state_sync import CachingStateSync, EngineAdapterStateSync
 
 
@@ -23,9 +27,18 @@ def _payload(sql: str) -> t.Optional[t.Dict[str, t.Any]]:
     return json.loads(match[1]) if match else None
 
 
-def _new_context(root: Path, enabled: bool) -> Context:
+def _new_context(root: Path, enabled: bool, yaml_config: bool = False) -> Context:
     models = Path(__file__).parents[3] / "examples/query_execution_context/models"
     shutil.copytree(models, root / "models")
+    if yaml_config:
+        (root / "config.yaml").write_text(
+            "gateways:\n  local:\n    connection:\n      type: duckdb\n"
+            f"      database: {json.dumps(str(root / 'warehouse.duckdb'))}\n"
+            "      concurrent_tasks: 2\n"
+            f"      query_execution_context: {str(enabled).lower()}\n"
+            "default_gateway: local\nmodel_defaults:\n  dialect: duckdb\n"
+        )
+        return Context(paths=root, load=False)
     config = Config(
         gateways={
             "local": GatewayConfig(
@@ -60,6 +73,11 @@ def _batch_ids(
         assert payload["workload"]["version"]
         operation = payload["operation"]
         assert operation["type"] == "evaluate"
+        assert payload["query"]["role"] == ("audit" if phase == "audit" else "query")
+        assert (
+            dt.datetime.fromisoformat(operation["interval_end"])
+            - dt.datetime.fromisoformat(operation["interval_start"])
+        ) == dt.timedelta(days=1)
         key = (
             payload["workload"]["name"],
             operation["interval_start"],
@@ -71,7 +89,8 @@ def _batch_ids(
     return batches
 
 
-def test_provider_connects_native_events_to_warehouse_history(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["provider", "automatic", "automatic_default"])
+def test_context_connects_native_events_to_warehouse_history(tmp_path, monkeypatch, mode):
     submitted = []
     original_execute = EngineAdapter._execute
 
@@ -82,33 +101,54 @@ def test_provider_connects_native_events_to_warehouse_history(tmp_path, monkeypa
     monkeypatch.setattr(EngineAdapter, "_execute", capture)
     results = []
     for enabled in (False, True):
-        context = _new_context(tmp_path / str(enabled), enabled)
+        context = _new_context(tmp_path / str(enabled), enabled, yaml_config=mode != "provider")
         events = []
 
         def observer(event, facts, error):
-            current = consumer.current_query_context()
+            current = (
+                consumer.current_query_context()
+                if mode == "provider"
+                else get_query_execution_context()
+            )
             if facts["kind"] == "model":
                 events.append(
-                    (event, facts["snapshot"].name, current.evaluation.evaluation_id, error)
+                    (
+                        event,
+                        facts["snapshot"].name,
+                        current.evaluation.evaluation_id
+                        if current and current.evaluation
+                        else None,
+                        error,
+                    )
                 )
 
         consumer = QueryContextObserver(observer)
         for adapter in context.engine_adapters.values():
-            adapter.query_execution_context_provider = consumer.current_query_context
+            assert adapter.query_execution_context_provider is None
+            if mode == "provider":
+                adapter.query_execution_context_provider = consumer.current_query_context
         context.load()
         try:
             hashes = {m.name: (m.data_hash, m.metadata_hash) for m in context.models.values()}
             submitted.clear()
-            with observer_scope(consumer):
+            scope = (
+                contextlib.nullcontext()
+                if mode == "automatic_default"
+                else observer_scope(consumer if mode == "provider" else observer)
+            )
+            with scope:
                 plan = context.plan(
                     "dev", start="2024-01-01", end="2024-01-02", no_prompts=True, skip_tests=True
                 )
                 context.apply(plan)
                 assert consumer.current_query_context() is None
-                plan_sql = [sql for _, sql in submitted]
+                assert get_query_execution_context() is None
+                plan_submitted = list(submitted)
+                plan_sql = [sql for _, sql in plan_submitted]
                 submitted.clear()
                 assert context.run("dev", start="2024-01-03", end="2024-01-03").is_success
                 assert consumer.current_query_context() is None
+                assert get_query_execution_context() is None
                 run_sql = [sql for _, sql in submitted]
                 state = context.state_sync
                 assert isinstance(state, CachingStateSync)
@@ -116,7 +156,9 @@ def test_provider_connects_native_events_to_warehouse_history(tmp_path, monkeypa
                 state_adapter = state.state_sync.engine_adapter
                 assert any(adapter is state_adapter for adapter, _ in submitted)
                 assert all(
-                    _payload(sql) is None for adapter, sql in submitted if adapter is state_adapter
+                    _payload(sql) is None
+                    for adapter, sql in plan_submitted + submitted
+                    if adapter is state_adapter
                 )
             rows = context.engine_adapter.fetchall(
                 f"SELECT ds, id FROM {context.resolve_table('e2e.events')} ORDER BY ds"
@@ -124,6 +166,11 @@ def test_provider_connects_native_events_to_warehouse_history(tmp_path, monkeypa
             assert rows == [(dt.date(2024, 1, day), 1) for day in (1, 2, 3)]
             results.append((hashes, rows))
             if enabled:
+                for sql in plan_sql + run_sql:
+                    payload = _payload(sql)
+                    if payload and payload.get("operation"):
+                        snapshot = context.snapshots[payload["workload"]["name"]]
+                        assert payload["workload"]["version"] == snapshot.snapshot_id.identifier
                 materialize = _batch_ids(plan_sql, "plan", "materialize")
                 assert _batch_ids(plan_sql, "plan", "audit") == materialize
                 assert set(materialize) == {
@@ -140,10 +187,11 @@ def test_provider_connects_native_events_to_warehouse_history(tmp_path, monkeypa
                 }
                 all_ids = set(materialize.values()) | set(later.values())
                 assert len(all_ids) == 6
-                assert {operation_id for _, _, operation_id, _ in events} == all_ids
-                assert [event for event, _, _, _ in events].count("start") == 6
-                assert [event for event, _, _, _ in events].count("finish") == 6
-                assert all(error is None for _, _, _, error in events)
+                if mode != "automatic_default":
+                    assert {operation_id for _, _, operation_id, _ in events} == all_ids
+                    assert [event for event, _, _, _ in events].count("start") == 6
+                    assert [event for event, _, _, _ in events].count("finish") == 6
+                    assert all(error is None for _, _, _, error in events)
             else:
                 assert all(_payload(sql) is None for sql in plan_sql + run_sql)
                 assert any(sql.startswith("/* SQLMESH_PLAN:") for sql in plan_sql)

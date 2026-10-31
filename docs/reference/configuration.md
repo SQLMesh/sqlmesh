@@ -212,7 +212,7 @@ Most parameters are specific to the connection engine `type` - see [below](#engi
 | `register_comments` | Whether SQLMesh should register model comments with the SQL engine (if the engine supports it). (Default: `true`.)                                                      | bool |    N     |
 | `pre_ping`          | Whether or not to pre-ping the connection before starting a new transaction to ensure it is still alive. This can only be enabled for engines with transaction support. | bool |    N     |
 | `pretty_sql`        | If SQL should be formatted before being executed, not recommended in a production setting. (Default: `false`.)                                                          | bool |    N     |
-| `query_execution_context` | Whether an opted-in engine adapter adds bounded execution metadata to SQL comments. (Default: `false`.) See [query execution context](../concepts/query_execution_context.md). | bool | N |
+| `query_execution_context` | Enables bounded query-context comments on supported adapters (Default: `false`). During `Context.apply()` and built-in scheduler runs, SQLMesh adds context for each model batch to enabled adapters without a custom provider. See [query execution context](../concepts/query_execution_context.md). | bool | N |
 
 #### Engine-specific
 

@@ -170,10 +170,10 @@ def _query_execution_context_transport_scope() -> t.Iterator[None]:
 
 
 @contextlib.contextmanager
-def query_execution_scope(context: QueryExecutionContext) -> t.Iterator[None]:
-    """Set a query execution context for this scope and restore it on exit."""
-    if not isinstance(context, QueryExecutionContext):
-        raise TypeError("context must be a QueryExecutionContext")
+def query_execution_scope(context: t.Optional[QueryExecutionContext]) -> t.Iterator[None]:
+    """Set or clear the query execution context for this scope."""
+    if context is not None and not isinstance(context, QueryExecutionContext):
+        raise TypeError("context must be a QueryExecutionContext or None")
     token = _current_query_execution_context.set(context)
     try:
         yield

@@ -19,6 +19,9 @@ import logging
 import typing as t
 from sqlmesh.core import analytics
 from sqlmesh.core.execution_observation import action, console_observer_scope
+from sqlmesh.core.query_execution_context_observer import (
+    should_enable_automatic_query_execution_context,
+)
 from sqlmesh.core import constants as c
 from sqlmesh.core.console import Console, get_console
 from sqlmesh.core.environment import EnvironmentNamingInfo, execute_environment_statements
@@ -103,7 +106,12 @@ class BuiltInPlanEvaluator(PlanEvaluator):
 
         try:
             plan_stages = stages.build_plan_stages(plan, self.state_sync, self.default_catalog)
-            with console_observer_scope(self.console):
+            with console_observer_scope(
+                self.console,
+                query_execution_context=should_enable_automatic_query_execution_context(
+                    self.snapshot_evaluator.adapters.values()
+                ),
+            ):
                 self._evaluate_stages(plan_stages, plan)
         except Exception as e:
             analytics.collector.on_plan_apply_end(plan_id=plan.plan_id, error=e)
