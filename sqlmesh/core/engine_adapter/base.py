@@ -10,11 +10,13 @@ the SnapshotEvaluator delegate them to engine adapters so these components can b
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import itertools
 import logging
 import sys
 import typing as t
 from functools import cached_property, partial
+from threading import Lock
 
 from sqlglot import Dialect, exp
 from sqlglot.errors import ErrorLevel
@@ -39,6 +41,12 @@ from sqlmesh.core.engine_adapter.shared import (
     set_catalog,
 )
 from sqlmesh.core.model.kind import TimeColumn
+from sqlmesh.core.query_execution import (
+    QueryExecutionContext,
+    _query_execution_context_transport_is_active,
+    _query_execution_context_transport_scope,
+    serialize_query_execution_context,
+)
 from sqlmesh.core.schema_diff import SchemaDiffer, TableAlterOperation
 from sqlmesh.core.snapshot.execution_tracker import QueryExecutionTracker
 from sqlmesh.utils import (
@@ -144,6 +152,10 @@ class EngineAdapter:
         correlation_id: t.Optional[CorrelationId] = None,
         schema_differ_overrides: t.Optional[t.Dict[str, t.Any]] = None,
         query_execution_tracker: t.Optional[QueryExecutionTracker] = None,
+        query_execution_context: bool = False,
+        query_execution_context_provider: t.Optional[
+            t.Callable[[], t.Optional[QueryExecutionContext]]
+        ] = None,
         **kwargs: t.Any,
     ):
         self.dialect = dialect.lower() or self.DIALECT
@@ -169,8 +181,18 @@ class EngineAdapter:
         self._schema_differ_overrides = schema_differ_overrides
         self._query_execution_tracker = query_execution_tracker
         self._data_object_cache: t.Dict[str, t.Optional[DataObject]] = {}
+        self.query_execution_context = query_execution_context
+        self.query_execution_context_provider = query_execution_context_provider
+        self._query_execution_context_warning_categories: t.Set[str] = set()
+        self._query_execution_context_warning_lock = Lock()
 
     def with_settings(self, **kwargs: t.Any) -> EngineAdapter:
+        query_execution_context = kwargs.pop(
+            "query_execution_context", self.query_execution_context
+        )
+        query_execution_context_provider = kwargs.pop(
+            "query_execution_context_provider", self.query_execution_context_provider
+        )
         extra_kwargs = {
             "null_connection": True,
             "execute_log_level": kwargs.pop("execute_log_level", self._execute_log_level),
@@ -193,6 +215,8 @@ class EngineAdapter:
             pretty_sql=self._pretty_sql,
             **extra_kwargs,
         )
+        adapter.query_execution_context = query_execution_context
+        adapter.query_execution_context_provider = query_execution_context_provider
 
         return adapter
 
@@ -2642,6 +2666,8 @@ class EngineAdapter:
                 else:
                     sql = t.cast(str, e)
 
+                if self.query_execution_context:
+                    sql = self._attach_query_execution_context(sql)
                 sql = self._attach_correlation_id(sql)
 
                 # The rendered statement and correlation comment are finalized
@@ -2655,6 +2681,69 @@ class EngineAdapter:
                         quote_identifiers=quote_identifiers,
                     )
                     self._execute(sql, track_rows_processed, **kwargs)
+
+    def _warn_query_execution_context_once(self, category: str, message: str, *args: t.Any) -> None:
+        with self._query_execution_context_warning_lock:
+            if category in self._query_execution_context_warning_categories:
+                return
+            self._query_execution_context_warning_categories.add(category)
+        logger.warning(message, *args)
+
+    def _attach_query_execution_context(self, sql: str) -> str:
+        """Attach bounded query context when enabled and generic comments are supported."""
+        if _query_execution_context_transport_is_active():
+            return sql
+
+        with _query_execution_context_transport_scope():
+            if not self.ATTACH_CORRELATION_ID:
+                self._warn_query_execution_context_once(
+                    "unsupported",
+                    "Adapter %s does not support generic SQL comment transport for "
+                    "query execution context; metadata will be omitted",
+                    self.__class__.__name__,
+                )
+                return sql
+
+            provider = self.query_execution_context_provider
+            try:
+                context = provider() if provider is not None else None
+            except Exception:
+                self._warn_query_execution_context_once(
+                    "provider",
+                    "Query execution context provider failed for adapter %s; metadata will be omitted",
+                    self.__class__.__name__,
+                )
+                return sql
+
+            if context is not None and not isinstance(context, QueryExecutionContext):
+                self._warn_query_execution_context_once(
+                    "invalid_context",
+                    "Query execution context provider returned an invalid context for adapter %s; "
+                    "metadata will be omitted",
+                    self.__class__.__name__,
+                )
+                return sql
+
+            try:
+                parent = self.correlation_id
+                if context is None:
+                    if parent is None:
+                        return sql
+                    context = QueryExecutionContext(parent=parent)
+                elif context.parent != parent:
+                    context = dataclasses.replace(context, parent=parent)
+
+                comment = serialize_query_execution_context(context)
+            except Exception:
+                self._warn_query_execution_context_once(
+                    "serialization",
+                    "Query execution context normalization or serialization failed for adapter %s; "
+                    "metadata will be omitted",
+                    self.__class__.__name__,
+                )
+                return sql
+
+            return f"{comment}{sql}" if comment is not None else sql
 
     def _attach_correlation_id(self, sql: str) -> str:
         if self.ATTACH_CORRELATION_ID and self.correlation_id:

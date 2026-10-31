@@ -109,6 +109,7 @@ class ConnectionConfig(abc.ABC, BaseConfig):
     register_comments: bool
     pre_ping: bool
     pretty_sql: bool = False
+    query_execution_context: bool = False
     schema_differ_overrides: t.Optional[t.Dict[str, t.Any]] = None
     catalog_type_overrides: t.Optional[t.Dict[str, str]] = None
 
@@ -183,7 +184,7 @@ class ConnectionConfig(abc.ABC, BaseConfig):
         """Returns a new instance of the Engine Adapter."""
 
         concurrent_tasks = concurrent_tasks or self.concurrent_tasks
-        return self._engine_adapter(
+        adapter = self._engine_adapter(
             self._connection_factory_with_kwargs,
             multithreaded=concurrent_tasks > 1,
             default_catalog=self.get_catalog(),
@@ -196,6 +197,8 @@ class ConnectionConfig(abc.ABC, BaseConfig):
             catalog_type_overrides=self.catalog_type_overrides,
             **self._extra_engine_config,
         )
+        adapter.query_execution_context = self.query_execution_context
+        return adapter
 
     def get_catalog(self) -> t.Optional[str]:
         """The catalog for this connection"""
@@ -506,6 +509,14 @@ class BaseDuckDBConnectionConfig(ConnectionConfig):
                 logger.info(
                     f"Using existing DuckDB adapter due to overlapping data file: {self._mask_sensitive_data(key)}"
                 )
+                if (
+                    adapter.query_execution_context != self.query_execution_context
+                    or adapter.query_execution_context_provider is not None
+                ):
+                    return adapter.with_settings(
+                        query_execution_context=self.query_execution_context,
+                        query_execution_context_provider=None,
+                    )
                 return adapter
 
         if data_files:

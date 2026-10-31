@@ -45,6 +45,7 @@ nav:
       - concepts/tests.md
       - concepts/audits.md
       - concepts/state.md
+      - concepts/query_execution_context.md
     - Models:
       - concepts/models/overview.md
       - concepts/models/model_kinds.md
@@ -70,6 +71,8 @@ nav:
     - Walkthroughs:
       - examples/sqlmesh_cli_crash_course.md
       - examples/incremental_time_full_walkthrough.md
+    - Projects:
+      - examples/query_execution_context.md
   - Integrations:
     - "Overview": integrations/overview.md
     - Tools:
