@@ -1,4 +1,5 @@
 .PHONY: docs
+.PHONY: clickhouse-datalake-up clickhouse-datalake-test clickhouse-datalake-down
 
 ifdef UV
     PIP := uv pip
@@ -191,6 +192,21 @@ engine-%-up: engine-%-install engine-docker-%-up
 
 engine-%-down:
 	docker compose -f ./tests/core/engine_adapter/integration/docker/compose.${*}.yaml down -v
+
+CLICKHOUSE_DATALAKE_COMPOSE = docker compose --project-name sqlmesh-clickhouse-datalake -f ./tests/core/engine_adapter/integration/docker/compose.clickhouse-datalake.yaml
+
+clickhouse-datalake-up:
+	$(CLICKHOUSE_DATALAKE_COMPOSE) up -d --wait --wait-timeout 120 clickhouse minio-init rest
+	$(CLICKHOUSE_DATALAKE_COMPOSE) run --build --rm seed
+
+clickhouse-datalake-test:
+	docker info >/dev/null
+	$(MAKE) engine-clickhouse-install
+	$(MAKE) clickhouse-datalake-up
+	SQLMESH_RUN_CLICKHOUSE_DATALAKE=1 pytest -n 0 -m "docker and clickhouse_datalake" tests/core/engine_adapter/integration/test_integration_clickhouse_datalake.py --junitxml=test-results/junit-clickhouse-datalake.xml
+
+clickhouse-datalake-down:
+	$(CLICKHOUSE_DATALAKE_COMPOSE) down -v --remove-orphans
 
 ##################
 # Docker Engines #
