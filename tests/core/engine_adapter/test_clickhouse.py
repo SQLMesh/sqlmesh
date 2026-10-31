@@ -1170,28 +1170,15 @@ def test_insert_overwrite_by_condition_where_partitioned(
         ),
     )
 
-    sql_calls = to_sql_calls(adapter)
-
-    assert len(sql_calls) == 7
-    assert sql_calls[:5] == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         """INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30'""",
         '''CREATE TABLE IF NOT EXISTS "__temp_affected_partitions_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30' UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"''',
         """INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("ds" BETWEEN '2024-02-15' AND '2024-04-30') AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_affected_partitions_abcd")""",
         'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"',
+        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
+        'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
-
-    alter_prefix = 'ALTER TABLE "__temp_existing_records_abcd" '
-    assert sql_calls[5].startswith(alter_prefix)
-    assert sorted(sql_calls[5].removeprefix(alter_prefix).split(", ")) == sorted(
-        [
-            "REPLACE PARTITION ID '1' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '2' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '4' FROM \"__temp_target_abcd\"",
-            "DROP PARTITION ID '3'",
-        ]
-    )
-    assert sql_calls[6] == 'DROP TABLE IF EXISTS "__temp_target_abcd"'
 
 
 def test_insert_overwrite_by_condition_by_key(
@@ -1301,45 +1288,22 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
         dynamic_key_unique=False,
     )
 
-    sql_calls = to_sql_calls(adapter)
-
-    assert len(sql_calls) == 14
-    assert sql_calls[:4] == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
         'CREATE TABLE IF NOT EXISTS "__temp_affected_partitions_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_affected_partitions_abcd")',
-    ]
-
-    assert sql_calls[4] == 'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"'
-    alter_prefix = 'ALTER TABLE "__temp_existing_records_abcd" '
-    assert sql_calls[5].startswith(alter_prefix)
-    assert sorted(sql_calls[5].removeprefix(alter_prefix).split(", ")) == sorted(
-        [
-            "REPLACE PARTITION ID '1' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '2' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '4' FROM \"__temp_target_abcd\"",
-            "DROP PARTITION ID '3'",
-        ]
-    )
-    assert sql_calls[6] == 'DROP TABLE IF EXISTS "__temp_target_abcd"'
-    assert sql_calls[7:11] == [
+        'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"',
+        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
+        'DROP TABLE IF EXISTS "__temp_target_abcd"',
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'CREATE TABLE IF NOT EXISTS "__temp_affected_partitions_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT DISTINCT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT DISTINCT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_affected_partitions_abcd")',
+        'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"',
+        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
+        'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
-    assert sql_calls[11] == 'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"'
-    assert sql_calls[12].startswith(alter_prefix)
-    assert sorted(sql_calls[12].removeprefix(alter_prefix).split(", ")) == sorted(
-        [
-            "REPLACE PARTITION ID '1' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '2' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '4' FROM \"__temp_target_abcd\"",
-            "DROP PARTITION ID '3'",
-        ]
-    )
-    assert sql_calls[13] == 'DROP TABLE IF EXISTS "__temp_target_abcd"'
 
 
 def test_insert_overwrite_by_condition_inc_by_partition(
@@ -1375,23 +1339,12 @@ def test_insert_overwrite_by_condition_inc_by_partition(
         keep_existing_partition_rows=False,
     )
 
-    sql_calls = to_sql_calls(adapter)
-
-    assert len(sql_calls) == 4
-    assert sql_calls[:2] == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
+        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd\"""",
+        'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
-    alter_prefix = 'ALTER TABLE "__temp_existing_records_abcd" '
-    assert sql_calls[2].startswith(alter_prefix)
-    assert sorted(sql_calls[2].removeprefix(alter_prefix).split(", ")) == sorted(
-        [
-            "REPLACE PARTITION ID '1' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '2' FROM \"__temp_target_abcd\"",
-            "REPLACE PARTITION ID '4' FROM \"__temp_target_abcd\"",
-        ]
-    )
-    assert sql_calls[3] == 'DROP TABLE IF EXISTS "__temp_target_abcd"'
 
 
 def test_to_time_column():
