@@ -499,6 +499,20 @@ in the mapping. When SQLMesh has injected a virtual catalog, a source can also u
 SQLMesh raises an error for other catalogs. Without a non-empty mapping or an injected virtual
 catalog, SQLMesh does not apply DataLake mapping or catalog validation during materialization.
 
+This mapping rewrites parsed query sources. It does not rewrite table names used for metadata
+operations such as `columns()` or `table_exists()`. The `sqlmesh create_external_models` command also
+uses the source name as supplied when it fetches column types, so it cannot infer columns for a
+source named `lake.analytics.orders` through the mapping. In a ClickHouse-only project, registering
+that three-part logical name as an external model can also fail SQLMesh's schema nesting check,
+because ClickHouse project models use two-part names.
+
+To register column metadata until mapped names are supported there, use ClickHouse's physical
+two-part name in both the external model and the query. For example, use
+`iceberg."analytics.orders"` for the table exposed by database `iceberg`. This matches ClickHouse's
+`database."schema.table"` name and keeps the model at ClickHouse's two-part nesting level. The
+mapping still lets SQLMesh render queries that use mapped logical names. Without registered
+column metadata, SQLMesh cannot fully optimize those queries or produce column-level lineage.
+
 An injected virtual catalog takes precedence over a mapping key with the same name. SQLMesh treats
 that name as its virtual catalog. Use different names for the virtual catalog and DataLakeCatalog
 source catalogs. The mapping applies to query source references. It does not rewrite SQL strings

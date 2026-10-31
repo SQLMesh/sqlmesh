@@ -165,6 +165,37 @@ def test_ctas_reads_mapped_source(request: pytest.FixtureRequest, adapter_fixtur
         adapter.drop_table(target, exists=True)
 
 
+@pytest.mark.parametrize("alias", ["t", "lake", "__clickhouse_datalake__"])
+def test_insert_append_preserves_nested_fields(
+    injected_engine_adapter: ClickhouseEngineAdapter, alias: str
+) -> None:
+    adapter = injected_engine_adapter
+    source = "default.sqlmesh_datalake_nested_source"
+    target = "default.sqlmesh_datalake_nested_target"
+    columns = {"id": _COLUMN_TYPES["id"]}
+    adapter.drop_table(source, exists=True)
+    adapter.drop_table(target, exists=True)
+    try:
+        adapter.execute(
+            f"CREATE TABLE {source} (payload Tuple(user Tuple(id Int64))) ENGINE = Memory"
+        )
+        adapter.execute(f"INSERT INTO {source} SELECT tuple(tuple(7))")
+        adapter.create_table(target, columns, exists=False)
+        query = parse_one(
+            f"SELECT {alias}.payload.user.id AS id FROM {source} AS {alias}",
+            dialect="clickhouse",
+        )
+        original = query.copy()
+
+        adapter.insert_append(target, query, target_columns_to_types=columns)
+
+        assert adapter.fetchall(f"SELECT id FROM {target}") == [(7,)]
+        assert query == original
+    finally:
+        adapter.drop_table(target, exists=True)
+        adapter.drop_table(source, exists=True)
+
+
 @pytest.mark.parametrize("adapter_fixture", ["engine_adapter", "injected_engine_adapter"])
 def test_insert_append_reads_mapped_source(
     request: pytest.FixtureRequest, adapter_fixture: str

@@ -5,6 +5,7 @@ import logging
 import re
 from functools import cached_property
 from sqlglot import exp, maybe_parse
+from sqlglot.optimizer.scope import Scope, find_all_in_scope, traverse_scope
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import LogicalMergeMixin
 from sqlmesh.core.engine_adapter.base import EngineAdapterWithIndexSupport
@@ -84,11 +85,13 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
             expression.set("expression", self._map_catalog_references(expression.expression))
         return super()._to_sql(expression, quote=quote, **kwargs)
 
-    def _virtual_catalog_references(self, expression: exp.Expr) -> t.Iterator[exp.Expr]:
+    def _virtual_catalog_references(
+        self, expression: exp.Expr
+    ) -> t.Iterator[t.Union[exp.Table, exp.Column]]:
         virtual_catalog = self._default_catalog or self._extra_config.get("virtual_catalog")
         return (
             reference
-            for reference in expression.find_all(exp.Table, exp.Column)
+            for reference in self._catalog_references(expression)
             if virtual_catalog and reference.text("catalog") == virtual_catalog
         )
 
@@ -118,24 +121,75 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
         mapped_catalogs = {self._default_catalog, *mapping}
         query = query.copy()
-        for table in query.find_all(exp.Table):
-            if not table.catalog or (preserve_unmapped and table.catalog not in mapped_catalogs):
+        for reference in self._catalog_references(query):
+            if not reference.catalog or (
+                preserve_unmapped and reference.catalog not in mapped_catalogs
+            ):
                 continue
-            self._map_catalog_reference(table)
-        for column in query.find_all(exp.Column):
-            if not column.catalog or (preserve_unmapped and column.catalog not in mapped_catalogs):
+            if isinstance(reference, exp.Table):
+                self._map_catalog_reference(reference)
                 continue
+
             table = self._map_catalog_reference(
                 exp.Table(
-                    this=column.args["table"].copy(),
-                    db=column.args["db"].copy(),
-                    catalog=column.args["catalog"].copy(),
+                    this=reference.args["table"].copy(),
+                    db=reference.args["db"].copy(),
+                    catalog=reference.args["catalog"].copy(),
                 )
             )
             for column_key, table_key in (("table", "this"), ("db", "db"), ("catalog", "catalog")):
                 value = table.args.get(table_key)
-                column.set(column_key, value.copy() if value is not None else None)
+                reference.set(column_key, value.copy() if value is not None else None)
         return query
+
+    def _catalog_references(self, expression: exp.Expr) -> t.List[t.Union[exp.Table, exp.Column]]:
+        """Use query scopes to distinguish qualified columns from nested-field paths."""
+        tables = list(expression.find_all(exp.Table))
+        references: t.List[t.Union[exp.Table, exp.Column]] = list(tables)
+        root_tables = list(find_all_in_scope(expression, exp.Table))
+        scoped_columns = set()
+        virtual_catalog = self._default_catalog or self._extra_config.get("virtual_catalog")
+
+        def matches_source_table(column: exp.Column, table: exp.Table) -> bool:
+            if (column.catalog, column.db, column.table) == (table.catalog, table.db, table.name):
+                return True
+            # ClickHouse strips the virtual catalog from DML targets before SQL rendering.
+            return (
+                column.catalog == virtual_catalog
+                and not table.catalog
+                and (column.db, column.table) == (table.db, table.name)
+            )
+
+        def add_column_reference(column: exp.Column, scope: t.Optional[Scope]) -> None:
+            if not column.catalog:
+                return
+            current_scope = scope
+            while current_scope is not None:
+                # The nearest alias or CTE name takes precedence as a nested-field path.
+                if column.catalog in current_scope.sources:
+                    return
+                if any(
+                    isinstance(source, exp.Table) and matches_source_table(column, source)
+                    for source in current_scope.sources.values()
+                ):
+                    references.append(column)
+                    return
+                current_scope = current_scope.parent
+
+            if column.catalog in {table.alias_or_name for table in root_tables}:
+                return
+            if any(matches_source_table(column, table) for table in root_tables):
+                references.append(column)
+
+        for scope in traverse_scope(expression):
+            for column in scope.find_all(exp.Column):
+                scoped_columns.add(id(column))
+                add_column_reference(column, scope)
+
+        for column in find_all_in_scope(expression, exp.Column):
+            if id(column) not in scoped_columns:
+                add_column_reference(column, None)
+        return references
 
     def _map_catalog_reference(self, table: exp.Table) -> exp.Table:
         """Map catalog.schema.table to a ClickHouse DataLakeCatalog database.table reference."""

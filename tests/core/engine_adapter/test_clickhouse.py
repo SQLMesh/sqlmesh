@@ -1656,6 +1656,11 @@ def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapte
         "__ch_gw__.mydb.target",
         "__ch_gw__.mydb.target.id IN (SELECT id FROM __ch_gw__.mydb.source)",
     )
+    adapter.delete_from(
+        "__ch_gw__.mydb.target",
+        "EXISTS (SELECT 1 FROM __ch_gw__.mydb.source "
+        "WHERE __ch_gw__.mydb.target.id = __ch_gw__.mydb.source.id)",
+    )
 
     assert to_sql_calls(adapter) == [
         'CREATE TABLE IF NOT EXISTS "mydb"."target" ENGINE=MergeTree ORDER BY () AS '
@@ -1663,6 +1668,8 @@ def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapte
         '(SELECT "mydb"."source"."id" FROM "mydb"."source") AS "_subquery"',
         'DELETE FROM "mydb"."target" WHERE "mydb"."target"."id" IN '
         '(SELECT "id" FROM "mydb"."source")',
+        'DELETE FROM "mydb"."target" WHERE EXISTS(SELECT 1 FROM "mydb"."source" WHERE '
+        '"mydb"."target"."id" = "mydb"."source"."id")',
     ]
 
 
@@ -2285,6 +2292,140 @@ def test_clickhouse_datalake_mapping_rewrites_materialized_query_sources(
     rendered = "\n".join(to_sql_calls(adapter))
     assert '"iceberg"."source.events"' in rendered
     assert '"lake"."source"."events"' not in rendered
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    "alias,virtual_catalog",
+    [
+        ("t", None),
+        ("lake", None),
+        ("t", "t"),
+        ("__clickhouse_gw__", None),
+    ],
+)
+def test_clickhouse_datalake_mapping_preserves_nested_fields_qualified_by_alias(
+    make_mocked_engine_adapter: t.Callable,
+    alias: str,
+    virtual_catalog: t.Optional[str],
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog=virtual_catalog,
+        datalake_catalog_mapping={"lake": "iceberg"},
+    )
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one(
+        f"SELECT {alias}.payload.user.id FROM db.src AS {alias}", dialect="clickhouse"
+    )
+    original = query.copy()
+
+    adapter.insert_append(
+        "analytics.target",
+        query,
+        {"id": exp.DataType.build("Int64", dialect="clickhouse")},
+        track_rows_processed=False,
+    )
+
+    assert any(
+        f'SELECT "{alias}"."payload"."user"."id" FROM "db"."src" AS "{alias}"' in call
+        for call in to_sql_calls(adapter)
+    )
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    "virtual_catalog,alias",
+    [
+        ("t", "t"),
+        ("__clickhouse_gw__", "__clickhouse_gw__"),
+    ],
+)
+def test_clickhouse_virtual_catalog_keeps_direct_read_alias_nested_fields(
+    make_mocked_engine_adapter: t.Callable,
+    virtual_catalog: str,
+    alias: str,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog=virtual_catalog,
+        datalake_catalog_mapping={"lake": "iceberg"},
+    )
+    query = parse_one(
+        f"SELECT {alias}.payload.user.id FROM db.src AS {alias}", dialect="clickhouse"
+    )
+    original = query.copy()
+
+    adapter.fetchall(query, quote_identifiers=True)
+
+    assert to_sql_calls(adapter) == [
+        f'SELECT "{alias}"."payload"."user"."id" FROM "db"."src" AS "{alias}"'
+    ]
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    "query_sql,expected_sql",
+    [
+        (
+            "WITH t AS (SELECT payload FROM db.src) SELECT t.payload.user.id FROM t",
+            'INSERT INTO "analytics"."target" ("id") WITH "t" AS '
+            '(SELECT "payload" FROM "db"."src") SELECT '
+            '"t"."payload"."user"."id" FROM "t"',
+        ),
+        (
+            "SELECT sub.payload.user.id FROM (SELECT payload FROM db.src) AS sub",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"sub"."payload"."user"."id" FROM '
+            '(SELECT "payload" FROM "db"."src") AS "sub"',
+        ),
+        (
+            "SELECT t.payload.user.id FROM db.src AS t WHERE EXISTS ("
+            "SELECT 1 FROM db.other WHERE t.payload.user.id = 1)",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"t"."payload"."user"."id" FROM "db"."src" AS "t" '
+            'WHERE EXISTS(SELECT 1 FROM "db"."other" WHERE '
+            '"t"."payload"."user"."id" = 1)',
+        ),
+        (
+            "SELECT lake.source.events.id FROM lake.source.events WHERE EXISTS ("
+            "SELECT 1 FROM db.src AS lake WHERE lake.payload.user.id = 1)",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"iceberg"."source.events"."id" FROM "iceberg"."source.events" '
+            'WHERE EXISTS(SELECT 1 FROM "db"."src" AS "lake" WHERE '
+            '"lake"."payload"."user"."id" = 1)',
+        ),
+        (
+            "SELECT lake.id FROM db.src AS lake WHERE EXISTS ("
+            "SELECT lake.source.events.id FROM lake.source.events)",
+            'INSERT INTO "analytics"."target" ("id") SELECT "lake"."id" '
+            'FROM "db"."src" AS "lake" WHERE EXISTS(SELECT '
+            '"iceberg"."source.events"."id" FROM "iceberg"."source.events")',
+        ),
+        (
+            "SELECT payload.user.event.id FROM db.src",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"payload"."user"."event"."id" FROM "db"."src"',
+        ),
+    ],
+)
+def test_clickhouse_datalake_mapping_resolves_nested_paths_in_query_scope(
+    make_mocked_engine_adapter: t.Callable, query_sql: str, expected_sql: str
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    query = parse_one(query_sql, dialect="clickhouse")
+    original = query.copy()
+
+    adapter.insert_append(
+        "analytics.target",
+        query,
+        {"id": exp.DataType.build("Int64", dialect="clickhouse")},
+        track_rows_processed=False,
+    )
+
+    assert to_sql_calls(adapter) == [expected_sql]
     assert query == original
 
 
