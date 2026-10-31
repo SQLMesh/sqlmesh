@@ -10,12 +10,15 @@ Run it from the SQLMesh repository root with the development environment:
 .venv/bin/python examples/query_execution_context/run_local.py
 ```
 
-The script attaches `QueryContextObserver.current_query_context` to the warehouse
-adapter providers. The observer builds one context for each model batch and
-delegates events to the observer supplied by the console. The run checks that four
-initial batches and two later batches use the same IDs in the model events,
-materialization SQL, and audits. It also checks that the resulting model rows are
-correct and that the query-context scope is restored after the run.
+The script registers `QueryContextObserver.current_query_context` as the provider
+on each warehouse adapter. `QueryContextObserver` tracks the active context from
+SQLMesh's native observation events. A callback records the model operation IDs
+used by the assertions.
+
+The plan covers four model batches, and the later run covers two. The script
+checks that model events, materialization SQL, and audits use matching operation
+IDs. It also checks the model rows and confirms that the query context is cleared
+after the run.
 
 The example uses a temporary DuckDB database and makes no external connections.
 See [query execution context](../concepts/query_execution_context.md) for the

@@ -4,9 +4,10 @@ SQLMesh can add structured metadata to warehouse statements so a query-history
 tool can connect a statement to the plan or run, model, and evaluation that issued
 it. The metadata is a versioned JSON object in a `QUERY_CONTEXT` SQL comment.
 
-Enable `query_execution_context` on a connection and give its engine adapter a
-provider that returns a `QueryExecutionContext`. The flag defaults to `false`.
-For YAML configuration, set the option under the gateway's `connection`:
+Enable `query_execution_context` on a connection and set a provider on its
+engine adapter. The provider returns a `QueryExecutionContext`. The flag defaults
+to `false`. For YAML configuration, set the option under the gateway's
+`connection`:
 
 ```yaml
 gateways:
@@ -16,21 +17,20 @@ gateways:
       query_execution_context: true
 ```
 
-The configuration flag enables transport. It does not create a model-context
-provider. Without a provider, SQLMesh adds parent metadata only when a plan or run
-correlation ID is available. SQLMesh calls the provider after rendering each
-statement and before executing it. The provider sees the current worker's context,
-so concurrent model evaluations can supply different IDs to a shared adapter.
+The flag enables context comments but does not infer model context. Without a
+provider, SQLMesh adds parent metadata only when a plan or run correlation ID is
+available. SQLMesh calls the provider after rendering each statement and before
+executing it. The call runs in the current worker's context, so concurrent model
+evaluations can return different IDs for a shared adapter.
 
-This provider API does not add automatic model tagging to a stock project.
-For a provider that reads native observer events, see the
+To build a provider from native observer events, see the
 [query execution context example](../examples/query_execution_context.md).
 
 ## Configure a provider
 
-For a Python `Context`, configure its warehouse adapters before loading the
-project. The `Context` clones these adapters when it creates its snapshot
-evaluator, so the provider and flag carry to those clones.
+Set the provider on warehouse adapters before loading a Python `Context`. When
+`Context` creates its snapshot evaluator, it clones those adapters and preserves
+the provider and flag.
 
 ```python
 from sqlmesh.core.context import Context
@@ -51,22 +51,19 @@ with observer_scope(observer):
     context.run("dev")
 ```
 
-The provider returns the immutable context currently active in that worker, or
-`None` when no context applies. An observer can set an evaluation ID when
-SQLMesh reports a model batch, then restore its prior context when that
-action ends. The sample observer composes with the observer returned by the
-console. It preserves that observer's facts and events.
+`QueryContextObserver` returns the immutable context active in its worker, or
+`None` when no context applies. It assigns an evaluation ID when SQLMesh reports
+a model batch and restores the previous context when that event finishes. It also
+forwards the same event, facts, and error to the observer returned by the console.
 
-Use the adapter instance that the evaluator will use. Adapters created with
-`with_settings` inherit the flag and provider. Passing
-`query_execution_context_provider=None` to `with_settings` clears the inherited
-provider. Setting the flag to `false` disables provider calls and comment output.
+Adapters created with `with_settings` inherit the flag and provider. Pass
+`query_execution_context_provider=None` to clear the inherited provider. Setting
+the flag to `false` disables provider calls and comment output.
 
-Connection settings also provide defaults to other adapters. Configure the
-warehouse adapters where you want model context in query history. The built-in
-scheduler can derive its state adapter from the warehouse settings, but it
-disables query context on that fallback. To annotate state SQL, configure the
-`state_connection` explicitly and provide a context provider for its adapter.
+When `state_connection` is omitted, the built-in scheduler uses the warehouse
+connection for its state adapter and disables query-context comments on that
+adapter. To add context to state SQL, configure `state_connection` explicitly
+and set a provider on its adapter.
 
 ## Read the payload
 
@@ -96,14 +93,13 @@ that are unavailable are omitted.
 }
 ```
 
-The operation ID groups statements for one model evaluation, including nested
-audits. A later evaluation gets a new ID. The provider owns the ID; SQLMesh does
-not create another operation ID at the adapter boundary. Consumers can compare
-the value they supplied with records from their execution observer.
+The provider assigns an operation ID to the statements for one model evaluation,
+including nested audits. A later evaluation gets a new ID. The adapter preserves
+the provider's ID. Consumers can compare it with the execution observer's record.
 
-The adapter's own correlation ID sets the payload's `parent`. SQLMesh replaces
-a different provider-supplied parent with the adapter's value. When the adapter
-has no correlation ID, SQLMesh clears a parent from the provided context.
+The adapter's correlation ID sets `parent` and replaces any parent supplied by
+the provider. If the adapter has no correlation ID, SQLMesh clears the provider's
+parent.
 
 Consumers must accept absent fields and unknown future phase or role values.
 The `workload` identity is the tuple `(system, type, name)`. Its `version` is
@@ -111,33 +107,35 @@ opaque and does not change that identity.
 
 ## SQL comment behavior
 
-SQLMesh prefixes the context comment after rendering. When a plan or run marker
-is present, SQLMesh keeps that legacy marker first. The submitted statement may
-look like this:
+SQLMesh adds the context comment after rendering. If a plan or run marker is
+present, SQLMesh keeps that marker first. The submitted statement may look like
+this:
 
 ```sql
 /* SQLMESH_RUN: run-123 */ /* QUERY_CONTEXT: {"schema_version":1,"emitter":"sqlmesh","parent":{"system":"sqlmesh","type":"run","id":"run-123"},"query":{"phase":"unknown","role":"query"}} */ SELECT 1
 ```
 
-The generic comment is bounded to 8,192 UTF-8 bytes. Each identifier is bounded
-to 1,024 UTF-8 bytes before JSON escaping. SQLMesh escapes metadata so it cannot
-end the comment. In JSON, SQLMesh also escapes slash characters so an identifier
-cannot form a nested comment delimiter. If an identifier is invalid or either
-limit is exceeded, SQLMesh
-omits the complete `QUERY_CONTEXT` comment and logs a warning. It never truncates
-the JSON or fails the query for an omitted annotation.
+The comment is at most 8,192 UTF-8 bytes. Each identifier is at most 1,024 bytes
+before JSON escaping. SQLMesh JSON-escapes metadata and encodes `/` as `\u002f`,
+so values cannot end or nest the SQL comment.
 
-The submitted SQL changes, while rendered model definitions and model fingerprints
-do not. If a downstream query-history system hashes raw SQL text, it must account
-for the additional comment.
+If an identifier cannot be encoded or a size limit is exceeded, SQLMesh omits the
+complete `QUERY_CONTEXT` comment and logs a warning. It does not truncate the JSON
+or fail the query because context was omitted.
 
-An adapter that does not support generic SQL comments keeps its SQL unchanged
-and logs one warning per adapter when the option is enabled. It does not call the
-provider. Athena does not support this transport. Engines can override the adapter
-hook to add native metadata transport in a separate implementation.
+SQLMesh adds the comment after rendering. Model definitions and fingerprints
+exclude it. Query-history systems that hash submitted SQL must account for the
+added comment.
 
-If the provider raises an ordinary exception or returns an invalid value, SQLMesh
-omits the rich comment, logs a bounded warning without provider data, and executes
-the statement with its legacy correlation marker. It tries the provider again
-for the next statement. `KeyboardInterrupt`, `SystemExit`, and other cancellation
-exceptions keep their normal behavior and propagate.
+Adapters that do not support generic SQL comments leave SQL unchanged and skip
+the provider. SQLMesh logs one warning per adapter when the option is enabled.
+Athena does not support this transport. Engines can override the adapter hook to
+add native metadata.
+
+If the provider raises an ordinary exception, returns an invalid value, or
+produces a context that cannot be serialized, SQLMesh omits the context comment
+and logs a bounded warning without provider data. It continues with the
+correlation marker if one is available. SQLMesh calls the provider again for the
+next statement. On transaction-capable adapters, a provider or driver
+`BaseException` rolls back any transaction SQLMesh opened for the statement and
+propagates the original exception.

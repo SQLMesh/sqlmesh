@@ -22,6 +22,10 @@ from sqlmesh.core.query_execution import (
 from sqlmesh.utils import CorrelationId
 
 
+class _QueryCancellation(BaseException):
+    pass
+
+
 def _context(evaluation_id: str = "eval-1") -> QueryExecutionContext:
     return QueryExecutionContext(
         evaluation=ModelExecutionContext(
@@ -366,15 +370,28 @@ def test_provider_returning_invalid_type_omits_comment(
     assert "invalid context" in caplog.text
 
 
-def test_provider_cancellation_resets_transport_guard_and_scope(
+@pytest.mark.parametrize(
+    "exception_type",
+    [KeyboardInterrupt, SystemExit, _QueryCancellation],
+    ids=["keyboard-interrupt", "system-exit", "custom-base-exception"],
+)
+@pytest.mark.parametrize(
+    "nested",
+    [False, True],
+    ids=["adapter-owned-transaction", "nested-under-owner"],
+)
+def test_provider_base_exception_rolls_back_and_adapter_recovers(
+    exception_type: type[BaseException],
+    nested: bool,
     make_mocked_engine_adapter: Callable[..., EngineAdapter],
 ):
+    cancellation = exception_type("cancel query")
     attempts = []
 
     def provider() -> QueryExecutionContext:
         attempts.append(True)
         if len(attempts) == 1:
-            raise KeyboardInterrupt()
+            raise cancellation
         return _context("eval-after-cancellation")
 
     adapter = make_mocked_engine_adapter(
@@ -382,18 +399,106 @@ def test_provider_cancellation_resets_transport_guard_and_scope(
         query_execution_context=True,
         query_execution_context_provider=provider,
     )
-    with pytest.raises(KeyboardInterrupt):
-        adapter.execute("SELECT 1")
+
+    with pytest.raises(BaseException) as raised:
+        if nested:
+            with adapter.transaction():
+                adapter.execute("SELECT 1")
+        else:
+            adapter.execute("SELECT 1")
+
+    assert raised.value is cancellation
+    assert get_query_execution_context() is None
+    assert adapter.cursor.execute.call_count == 0
+    assert adapter.cursor.rollback.call_count == 1
+    assert not adapter._connection_pool.is_transaction_active
 
     adapter.execute("SELECT 2")
 
-    assert get_query_execution_context() is None
-    assert attempts == [True, True]
     sql = _executed_sql(adapter)
     assert len(sql) == 1
+    assert sql[0].endswith("SELECT 2")
     payload = _query_execution_payload(sql[0])
     assert payload is not None
     assert payload["operation"]["id"] == "eval-after-cancellation"
+    assert adapter.cursor.begin.call_count == 2
+    assert adapter.cursor.commit.call_count == 1
+    assert adapter.cursor.rollback.call_count == 1
+    assert not adapter._connection_pool.is_transaction_active
+    assert attempts == [True, True]
+
+
+def test_provider_cancellation_does_not_open_transaction_when_adapter_disables_them(
+    make_mocked_engine_adapter: Callable[..., EngineAdapter],
+):
+    class NonTransactionalEngineAdapter(EngineAdapter):
+        SUPPORTS_TRANSACTIONS = False
+
+    cancellation = _QueryCancellation("cancel without transaction")
+    attempts = []
+
+    def provider() -> QueryExecutionContext:
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise cancellation
+        return _context("eval-after-cancellation")
+
+    adapter = make_mocked_engine_adapter(
+        NonTransactionalEngineAdapter,
+        query_execution_context=True,
+        query_execution_context_provider=provider,
+    )
+
+    with pytest.raises(_QueryCancellation) as raised:
+        adapter.execute("SELECT 1")
+
+    assert raised.value is cancellation
+    assert adapter.cursor.execute.call_count == 0
+    assert adapter.cursor.begin.call_count == 0
+    assert adapter.cursor.rollback.call_count == 0
+    assert adapter.cursor.commit.call_count == 0
+
+    adapter.execute("SELECT 2")
+
+    sql = _executed_sql(adapter)
+    assert len(sql) == 1
+    assert sql[0].endswith("SELECT 2")
+    assert adapter.cursor.begin.call_count == 0
+    assert adapter.cursor.rollback.call_count == 0
+    assert adapter.cursor.commit.call_count == 0
+    assert attempts == [True, True]
+
+
+def test_disabled_query_context_driver_cancellation_rolls_back_and_recovers(
+    make_mocked_engine_adapter: Callable[..., EngineAdapter],
+):
+    cancellation = _QueryCancellation("driver cancelled query")
+    execute_attempts = []
+
+    def execute(sql: str) -> None:
+        execute_attempts.append(sql)
+        if len(execute_attempts) == 1:
+            raise cancellation
+
+    adapter = make_mocked_engine_adapter(EngineAdapter, query_execution_context=False)
+    adapter.cursor.execute.side_effect = execute
+
+    with pytest.raises(_QueryCancellation) as raised:
+        adapter.execute("SELECT 1")
+
+    assert raised.value is cancellation
+    assert execute_attempts == ["SELECT 1"]
+    assert adapter.cursor.rollback.call_count == 1
+    assert not adapter._connection_pool.is_transaction_active
+
+    adapter.execute("SELECT 2")
+
+    assert execute_attempts == ["SELECT 1", "SELECT 2"]
+    assert _executed_sql(adapter) == ["SELECT 1", "SELECT 2"]
+    assert adapter.cursor.begin.call_count == 2
+    assert adapter.cursor.commit.call_count == 1
+    assert adapter.cursor.rollback.call_count == 1
+    assert not adapter._connection_pool.is_transaction_active
 
 
 def test_provider_reentry_skips_nested_rich_context_across_adapters(

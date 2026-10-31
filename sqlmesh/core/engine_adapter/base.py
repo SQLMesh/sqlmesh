@@ -2617,9 +2617,9 @@ class EngineAdapter:
         self._connection_pool.begin()
         try:
             yield
-        except Exception as e:
+        except BaseException:
             self._connection_pool.rollback()
-            raise e
+            raise
         else:
             self._connection_pool.commit()
 
