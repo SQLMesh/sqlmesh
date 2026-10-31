@@ -1324,6 +1324,38 @@ def test_macro_parse():
     )
 
 
+@pytest.mark.parametrize(
+    "dialect, sql",
+    [
+        ("tsql", "SELECT @@DATEFIRST AS x"),
+        ("bigquery", "SELECT @@query_label AS x"),
+        ("mysql", "SELECT @@session.time_zone AS x"),
+    ],
+)
+def test_double_at_system_variable_is_not_a_macro(dialect: str, sql: str):
+    query = parse_one(sql, read=dialect)
+    assert not list(query.find_all(d.MacroVar))
+    assert query.sql(dialect) == sql
+
+
+def test_double_at_system_variable_in_model():
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL (name db.m, dialect tsql);
+            SELECT (DATEPART(WEEKDAY, d) + @@DATEFIRST - 2) % 7 + 1 AS iso_weekday, @x AS x FROM t
+            """,
+            default_dialect="tsql",
+        ),
+        dialect="tsql",
+        variables={"x": 1},
+    )
+    assert model.render_query_or_raise().sql("tsql") == (
+        "SELECT (DATEPART(WEEKDAY, [d]) + @@DATEFIRST - 2) % 7 + 1 AS [iso_weekday], 1 AS [x] "
+        "FROM [t] AS [t]"
+    )
+
+
 def test_conditional_statement():
     q = parse_one(
         """
