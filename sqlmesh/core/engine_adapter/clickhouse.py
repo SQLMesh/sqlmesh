@@ -80,6 +80,20 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
                 reference.set("catalog", None)
         if isinstance(expression, exp.Query):
             expression = self._map_catalog_references(expression, preserve_unmapped=True)
+        elif isinstance(expression, exp.Delete):
+            where = expression.args.get("where")
+            if where and any(where.find_all(exp.Query)):
+                expression = expression.copy()
+                where = expression.args["where"]
+                expression.set(
+                    "where",
+                    where.transform(
+                        lambda node: self._map_catalog_references(node)
+                        if isinstance(node, exp.Query)
+                        else node,
+                        copy=False,
+                    ),
+                )
         elif isinstance(expression, exp.Insert) and isinstance(expression.expression, exp.Query):
             expression = expression.copy()
             expression.set("expression", self._map_catalog_references(expression.expression))

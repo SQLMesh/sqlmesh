@@ -2182,6 +2182,91 @@ def test_clickhouse_datalake_mapping_rewrites_direct_query_sources(
     assert query == original
 
 
+@pytest.mark.parametrize(
+    ("target", "target_alias", "predicate_sql", "expected_sql"),
+    [
+        (
+            "db.target",
+            None,
+            "id IN (SELECT id FROM lake.analytics.events)",
+            'DELETE FROM "db"."target" WHERE "id" IN '
+            '(SELECT "id" FROM "iceberg"."analytics.events")',
+        ),
+        (
+            "lake.analytics.target",
+            None,
+            "id IN (SELECT id FROM lake.analytics.events)",
+            'DELETE FROM "lake"."analytics"."target" WHERE "id" IN '
+            '(SELECT "id" FROM "iceberg"."analytics.events")',
+        ),
+        (
+            "db.target",
+            None,
+            "id IN (SELECT id FROM lake.analytics.events "
+            "UNION ALL SELECT id FROM lake.analytics.archive)",
+            'DELETE FROM "db"."target" WHERE "id" IN '
+            '(SELECT "id" FROM "iceberg"."analytics.events" UNION ALL '
+            'SELECT "id" FROM "iceberg"."analytics.archive")',
+        ),
+        (
+            "db.target",
+            None,
+            "id IN (SELECT nested.id FROM (SELECT id FROM lake.analytics.events) AS nested)",
+            'DELETE FROM "db"."target" WHERE "id" IN '
+            '(SELECT "nested"."id" FROM (SELECT "id" FROM '
+            '"iceberg"."analytics.events") AS "nested")',
+        ),
+        (
+            "db.target",
+            "lake",
+            "EXISTS (SELECT lake.analytics.events.id FROM lake.analytics.events)",
+            'DELETE FROM "db"."target" AS "lake" WHERE EXISTS(SELECT '
+            '"iceberg"."analytics.events"."id" FROM "iceberg"."analytics.events")',
+        ),
+        (
+            "db.target",
+            "lake",
+            "EXISTS (SELECT lake.payload.user.id FROM lake.analytics.events AS lake)",
+            'DELETE FROM "db"."target" AS "lake" WHERE EXISTS(SELECT '
+            '"lake"."payload"."user"."id" FROM "iceberg"."analytics.events" AS "lake")',
+        ),
+    ],
+)
+def test_clickhouse_datalake_mapping_rewrites_delete_subquery_sources(
+    make_mocked_engine_adapter: t.Callable,
+    target: str,
+    target_alias: t.Optional[str],
+    predicate_sql: str,
+    expected_sql: str,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    predicate = parse_one(predicate_sql, dialect="clickhouse")
+    original_predicate = predicate.copy()
+    delete_target = exp.to_table(target)
+    if target_alias:
+        delete_target.set("alias", exp.TableAlias(this=exp.to_identifier(target_alias)))
+
+    adapter.delete_from(delete_target, predicate)
+
+    assert to_sql_calls(adapter) == [expected_sql]
+    assert predicate == original_predicate
+
+
+def test_clickhouse_datalake_mapping_leaves_raw_delete_sql_unchanged(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    statement = "DELETE FROM db.target WHERE id IN (SELECT id FROM lake.analytics.events)"
+
+    adapter.execute(statement)
+
+    assert to_sql_calls(adapter) == [statement]
+
+
 @pytest.mark.parametrize("mapping", [{}, {"lake": "iceberg"}])
 def test_clickhouse_datalake_mapping_preserves_unmapped_foreign_read_catalogs(
     make_mocked_engine_adapter: t.Callable, mapping: t.Dict[str, str]
