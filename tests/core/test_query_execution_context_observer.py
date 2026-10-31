@@ -120,6 +120,55 @@ def test_default_console_installs_context_and_derives_nested_phases(
     assert all(event[1]["batch_index"] == 0 for event in model_events)
 
 
+@pytest.mark.parametrize(("action_name", "audit_only"), [("audit_only", False), ("evaluate", True)])
+def test_audit_only_context_tags_nested_audits_and_restores(
+    action_name: str,
+    audit_only: bool,
+    make_mocked_engine_adapter: Callable[..., EngineAdapter],
+):
+    adapter = make_mocked_engine_adapter(EngineAdapter, query_execution_context=True)
+    observed = []
+
+    def observer(event, facts, error):
+        if facts["kind"] == "model":
+            observed.append((event, facts["action"], get_query_execution_context()))
+
+    console = SimpleNamespace(get_execution_observer=lambda: observer)
+    with console_observer_scope(console, query_execution_context=True):
+        with action(
+            "model",
+            action_name,
+            snapshot=_snapshot(),
+            interval=_interval(1),
+            batch_index=0,
+            audit_only=audit_only,
+        ):
+            outer = get_query_execution_context()
+            assert outer is not None
+            adapter.execute("SELECT audited model")
+            model_sql = _last_sql(adapter)
+            with action("audit", "audit", audit_name="not_null"):
+                adapter.execute("SELECT audit")
+                audit_sql = _last_sql(adapter)
+            assert get_query_execution_context() == outer
+        assert get_query_execution_context() is None
+
+    evaluation = outer.evaluation
+    assert evaluation is not None
+    assert evaluation.operation_type.value == "audit"
+    model_payload = _payload(model_sql)
+    audit_payload = _payload(audit_sql)
+    assert model_payload is not None
+    assert audit_payload is not None
+    assert model_payload["operation"]["id"] == evaluation.evaluation_id
+    assert audit_payload["operation"]["id"] == evaluation.evaluation_id
+    assert model_payload["operation"]["type"] == "audit"
+    assert model_payload["query"] == {"phase": "audit", "role": "audit"}
+    assert audit_payload["query"] == {"phase": "audit", "role": "audit"}
+    assert [event for event, _, _ in observed] == ["start", "finish"]
+    assert all(context == outer for _, _, context in observed)
+
+
 def test_explicit_disabled_scope_suppresses_transport_then_outer_context_resumes(
     make_mocked_engine_adapter: Callable[..., EngineAdapter],
 ):
@@ -160,6 +209,61 @@ def test_explicit_disabled_scope_suppresses_transport_then_outer_context_resumes
     assert resumed is not None
     assert outer.evaluation is not None
     assert resumed["operation"]["id"] == outer.evaluation.evaluation_id
+
+
+def test_nonmodel_and_malformed_nested_model_clear_then_restore_outer_context(
+    make_mocked_engine_adapter: Callable[..., EngineAdapter],
+):
+    adapter = make_mocked_engine_adapter(EngineAdapter, query_execution_context=True)
+    console = SimpleNamespace(get_execution_observer=lambda: None)
+    with console_observer_scope(console, query_execution_context=True):
+        with action(
+            "model",
+            "evaluate",
+            snapshot=_snapshot(),
+            interval=_interval(1),
+            batch_index=0,
+        ):
+            outer = get_query_execution_context()
+            assert outer is not None
+
+            with action(
+                "model",
+                "evaluate",
+                snapshot=SimpleNamespace(is_model=False),
+                interval=_interval(2),
+                batch_index=1,
+            ):
+                assert get_query_execution_context() is None
+                adapter.execute("SELECT nonmodel")
+                nonmodel_sql = _last_sql(adapter)
+            assert get_query_execution_context() == outer
+
+            with action(
+                "model",
+                "evaluate",
+                snapshot=_snapshot("analytics.malformed"),
+                interval=_interval(3),
+                batch_index=-1,
+            ):
+                assert get_query_execution_context() is None
+                adapter.execute("SELECT malformed model")
+                malformed_sql = _last_sql(adapter)
+            assert get_query_execution_context() == outer
+
+            with action("stage", "unclassified"):
+                assert get_query_execution_context() == outer
+                adapter.execute("SELECT outer context")
+                outer_sql = _last_sql(adapter)
+
+        assert get_query_execution_context() is None
+
+    assert _payload(nonmodel_sql) is None
+    assert _payload(malformed_sql) is None
+    outer_payload = _payload(outer_sql)
+    assert outer_payload is not None
+    assert outer.evaluation is not None
+    assert outer_payload["operation"]["id"] == outer.evaluation.evaluation_id
 
 
 @pytest.mark.parametrize("provider_kind", ["value", "none"])
