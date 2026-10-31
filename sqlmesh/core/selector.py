@@ -146,7 +146,27 @@ class Selector(abc.ABC):
             models[model.fqn] = model
 
         if needs_update:
+            schema_update_fqns = set(dag.graph)
+            unselected_external_hashes = {
+                fqn: (model.json(), model.data_hash, model.metadata_hash)
+                for fqn, model in models.items()
+                if fqn in env_models
+                and fqn not in all_selected_models
+                and fqn in schema_update_fqns
+                and model.kind.is_external
+            }
             update_model_schemas(dag, models=models, cache_dir=self._cache_dir)
+            for fqn, (
+                serialized_model,
+                data_hash,
+                metadata_hash,
+            ) in unselected_external_hashes.items():
+                model = models.get(fqn)
+                if model and model.json() == serialized_model:
+                    # Schema updates can rehash an unselected external model loaded from state.
+                    # Keep its deployed hash when its serialized definition did not change.
+                    model._data_hash = data_hash
+                    model._metadata_hash = metadata_hash
 
         return models, all_selected_models
 
