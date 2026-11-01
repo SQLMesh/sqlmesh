@@ -1,0 +1,12 @@
+# Groups the notes that GitHub generates for each release. See RELEASING.md.
+changelog:
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - "*"
