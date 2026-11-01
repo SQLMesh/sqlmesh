@@ -1348,3 +1348,16 @@ def test_standalone_audit_metadata_hash_includes_referenced_package_macros():
     assert not audit_1.jinja_macros.root_macros
     assert audit_1.metadata_hash == audit_1_again.metadata_hash
     assert audit_1.metadata_hash != audit_2.metadata_hash
+
+
+def test_standalone_audit_metadata_hash_ignores_attribute_only_jinja():
+    # `{{ target.name }}` reads an attribute and calls no macro, but trimming still leaves an empty
+    # `target` package in the registry. The hash must match the value computed on main before
+    # Jinja macros were hashed, so that such audits are not rehashed on upgrade.
+    audit = _load_standalone_audit_with_macros(
+        "", "SELECT * FROM db.tbl WHERE name = '{{ target.name }}'"
+    )
+    assert audit.jinja_macros.packages == {"target": {}}
+    assert not audit.jinja_macros.root_macros
+
+    assert audit.metadata_hash == "3822507146"

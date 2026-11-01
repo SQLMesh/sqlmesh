@@ -295,8 +295,10 @@ class StandaloneAudit(_Node, AuditMixin):
             # Only include the registry when it holds macros, so that audits without Jinja
             # macros keep their existing hash. The registry is trimmed to the referenced macros.
             # The refs / sources / vars from `global_objs` are therefore hashed only when macros
-            # are present, which matches how models hash their registry.
-            if self.jinja_macros.root_macros or self.jinja_macros.packages:
+            # are present, which matches how models hash their registry. Trimming can leave empty
+            # packages behind (for example `target` from `{{ target.name }}`), so only packages that
+            # hold macros count.
+            if self.jinja_macros.root_macros or any(self.jinja_macros.packages.values()):
                 data.extend(self.jinja_macros.data_hash_values)
 
             self._metadata_hash = hash_data(data)
