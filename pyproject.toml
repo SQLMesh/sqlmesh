@@ -114,7 +114,7 @@ dbt = ["dbt-core<2"]
 dlt = ["dlt"]
 db2 = [
     "ibm_db",
-    "db2-sqlglot-dialect;python_version>=\"3.10\""
+    "db2-sqlglot-dialect>=1.1.0;python_version>=\"3.10\""
 ]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
