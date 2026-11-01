@@ -1,0 +1,113 @@
+name: PR Labels
+# Checks the PR title format and applies the labels that .github/release.yml
+# uses to group release notes.
+#
+# pull_request_target is used so that labels can be applied to PRs from forks.
+# This workflow never checks out or runs code from the PR.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: Check title and label by type
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        with:
+          script: |
+            const title = process.env.PR_TITLE;
+            const pr = context.payload.pull_request.number;
+            const { owner, repo } = context.repo;
+
+            const typeLabels = {
+              feat: 'feature',
+              fix: 'bug',
+              perf: 'performance',
+              docs: 'documentation',
+              refactor: 'maintenance',
+              chore: 'maintenance',
+              build: 'maintenance',
+              revert: null,
+              ci: 'ci',
+              test: 'test',
+            };
+            // Scopes for internal-only work, which release notes leave out
+            // (e.g. "fix(ci): ..." is labelled ci, not bug).
+            const scopeLabels = { ci: 'ci', test: 'test', tests: 'test' };
+            const colors = {
+              'breaking-change': 'b60205',
+              feature: '0e8a16',
+              bug: 'd73a4a',
+              performance: 'fbca04',
+              documentation: '0075ca',
+              maintenance: 'c5def5',
+              ci: 'ededed',
+              test: 'ededed',
+            };
+
+            // "type(optional scope)!: description" -> labels, or null if malformed.
+            function labelsFor(t) {
+              const m = /^([a-z]+)(?:\(([^)]+)\))?(!)?: \S/.exec(t || '');
+              if (!m || !(m[1] in typeLabels)) return null;
+              const [, type, scope, bang] = m;
+              const labels = new Set();
+              const label = (scope && scopeLabels[scope.toLowerCase()]) || typeLabels[type];
+              if (label) labels.add(label);
+              if (bang) labels.add('breaking-change');
+              return labels;
+            }
+
+            const wanted = labelsFor(title);
+            if (!wanted) {
+              core.setFailed(
+                `PR title "${title}" must look like "type(scope): description" or ` +
+                `"type: description", where type is one of: ${Object.keys(typeLabels).join(', ')}. ` +
+                `Add "!" after the type or scope for a breaking change, e.g. "feat(plan)!: ...". ` +
+                `See CONTRIBUTING.md.`
+              );
+              return;
+            }
+
+            const current = context.payload.pull_request.labels.map((l) => l.name);
+
+            // When the title is edited, drop the labels the old title produced.
+            // Labels added by people or by the path labeler are never removed.
+            const previous = labelsFor(context.payload.changes?.title?.from) || new Set();
+            for (const name of previous) {
+              if (!wanted.has(name) && current.includes(name)) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: pr, name });
+              }
+            }
+
+            const toAdd = [...wanted].filter((name) => !current.includes(name));
+            for (const name of toAdd) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+                await github.rest.issues.createLabel({ owner, repo, name, color: colors[name] });
+              }
+            }
+            if (toAdd.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: toAdd });
+            }
+
+  paths:
+    name: Label by changed files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v6
+        with:
+          configuration-path: .github/labeler.yml

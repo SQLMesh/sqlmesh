@@ -69,3 +69,6 @@ jobs:
         with:
           generate_release_notes: true
           tag_name: ${{ github.ref_name }}
+          # Created as a draft so a maintainer can add highlights and upgrade
+          # notes before publishing. Publishing to PyPI does not wait for this.
+          draft: true

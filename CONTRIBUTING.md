@@ -87,6 +87,25 @@ Optionally, `make install-pre-commit` installs git hooks so ruff and mypy run on
 - Include a DCO sign-off on all commits (`git commit -s`)
 - Be responsive to review feedback from maintainers
 
+### Pull Request Titles
+
+Pull requests are squash-merged, so the title becomes the commit message and the
+entry in the release notes. Titles must follow this format, which CI checks:
+
+```
+type(scope): description
+```
+
+- `type` is one of `feat`, `fix`, `perf`, `docs`, `refactor`, `chore`, `build`, `revert`, `ci` or `test`.
+- `scope` is optional and names the area changed, e.g. `snowflake`, `plan`, `dbt` or `vscode`.
+- Add `!` after the type or scope for a breaking change, e.g. `feat(plan)!: drop support for X`.
+- Write the description for users: say what changed for them, not how the code changed.
+
+Release notes are grouped using labels that are applied automatically from the title
+and the files changed. Use `ci`/`test` as the type or scope for internal-only changes
+(e.g. `fix(ci): ...`) so they are left out of the release notes. A maintainer can add the
+`skip-changelog` label to leave out any other PR.
+
 ## Licensing
 
 Code contributions are licensed under the [Apache License 2.0](LICENSE). Documentation contributions are licensed under [Creative Commons Attribution 4.0 International (CC-BY-4.0)](https://creativecommons.org/licenses/by/4.0/). See the LICENSE file and the [technical charter](sqlmesh-technical-charter.pdf) for details.

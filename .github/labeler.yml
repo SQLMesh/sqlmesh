@@ -1,0 +1,85 @@
+# Path-based PR labels, applied by workflows/pr-labels.yaml.
+
+migration:
+  - changed-files:
+      - added-files: 'sqlmesh/migrations/v*.py'
+
+dbt:
+  - changed-files:
+      - any-glob-to-any-file: ['sqlmesh/dbt/**', 'sqlmesh_dbt/**']
+
+vscode:
+  - changed-files:
+      - any-glob-to-any-file: ['vscode/**', 'sqlmesh/lsp/**']
+
+web-ui:
+  - changed-files:
+      - any-glob-to-any-file: ['web/**']
+
+cicd-bot:
+  - changed-files:
+      - any-glob-to-any-file: ['sqlmesh/integrations/github/**', 'sqlmesh/cicd/**']
+
+engine:athena:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/athena.py'
+
+engine:bigquery:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/bigquery.py'
+
+engine:clickhouse:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/clickhouse.py'
+
+engine:databricks:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/databricks.py'
+
+engine:db2:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/db2.py'
+
+engine:duckdb:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/duckdb.py'
+
+engine:fabric:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/fabric.py'
+
+engine:mssql:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/mssql.py'
+
+engine:mysql:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/mysql.py'
+
+engine:postgres:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/postgres.py'
+
+engine:redshift:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/redshift.py'
+
+engine:risingwave:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/risingwave.py'
+
+engine:snowflake:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/snowflake.py'
+
+engine:spark:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/spark.py'
+
+engine:starrocks:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/starrocks.py'
+
+engine:trino:
+  - changed-files:
+      - any-glob-to-any-file: 'sqlmesh/core/engine_adapter/trino.py'
