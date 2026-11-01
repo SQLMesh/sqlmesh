@@ -126,6 +126,7 @@ def test_drop_catalog_motherduck(make_mocked_engine_adapter: t.Callable) -> None
     assert to_sql_calls(adapter) == ['DROP DATABASE IF EXISTS "foo" CASCADE']
 
 
+@pytest.mark.isolated
 def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
     catalog = "a_ducklake_db"
 
@@ -156,6 +157,7 @@ def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
     assert partition_info.shape[0] == 1
 
 
+@pytest.mark.isolated
 def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, duck_conn, tmp_path):
     # DuckLake does not implement DROP TABLE/VIEW ... CASCADE, so the adapter must
     # omit CASCADE for objects in a DuckLake catalog while keeping it for native catalogs.
@@ -187,6 +189,7 @@ def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, duck_conn, tmp_p
     assert not adapter.table_exists("memory.main.native_v")
 
 
+@pytest.mark.isolated
 def test_drop_table_ducklake_no_cascade_mixed_case_alias(
     adapter: EngineAdapter, duck_conn, tmp_path
 ):
