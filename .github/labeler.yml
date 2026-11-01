@@ -1,8 +1,6 @@
 # Path-based PR labels, applied by workflows/pr-labels.yaml.
-
-migration:
-  - changed-files:
-      - added-files: 'sqlmesh/migrations/v*.py'
+# The migration label is applied by that workflow too, since labeler can't
+# tell added files from modified ones.
 
 dbt:
   - changed-files:
