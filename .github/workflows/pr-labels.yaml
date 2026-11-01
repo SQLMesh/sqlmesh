@@ -22,8 +22,8 @@ concurrency:
 jobs:
   title:
     name: Check title and label by type
-    # The title can't change on a push, so there is nothing to do.
-    if: github.event.action != 'synchronize'
+    # Runs on pushes too: GitHub keeps only one pending run per concurrency
+    # group, so a push can replace a queued run for a title edit.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v8
@@ -135,7 +135,19 @@ jobs:
             const added = files.some(
               (f) => f.status === 'added' && /^sqlmesh\/migrations\/v\d+_.*\.py$/.test(f.filename)
             );
-            if (!added) return;
+            const labels = context.payload.pull_request.labels.map((l) => l.name);
+            if (!added) {
+              // The PR no longer adds a migration, e.g. the file was removed.
+              if (labels.includes('migration')) {
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'migration' });
+                } catch (e) {
+                  if (e.status !== 404) throw e;
+                }
+              }
+              return;
+            }
+            if (labels.includes('migration')) return;
             try {
               await github.rest.issues.getLabel({ owner, repo, name: 'migration' });
             } catch (e) {

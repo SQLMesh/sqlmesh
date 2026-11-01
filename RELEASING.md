@@ -24,16 +24,24 @@ Each step publishes immediately and there's no approval gate. Check `main` befor
 ### Steps
 
 1. Pick the commit to release. It must be on `main`, and every required check must pass on it. Check the latest **pr.yaml** run for that commit on the [Actions page](https://github.com/SQLMesh/sqlmesh/actions/workflows/pr.yaml).
-2. Pick the version. Find the latest tag with `git tag --sort=-creatordate | head -1` and increment it.
-3. Tag the commit and push the tag:
+2. Pick the version. Fetch the tags, then find the highest released version and increment it:
 
     ```bash
     git fetch <sqlmesh-remote> main --tags
-    git tag v0.236.5 <commit-sha>
-    git push <sqlmesh-remote> v0.236.5
+    git tag --list 'v[0-9]*' --sort=-v:refname | head -1
     ```
 
-    Replace `<sqlmesh-remote>` with your remote for `SQLMesh/sqlmesh`. Push only the tag, not a branch.
+    Replace `<sqlmesh-remote>` with your remote for `SQLMesh/sqlmesh`.
+
+3. Tag the commit and push the tag. Set `VERSION` to the version from step 2, for example `v0.236.5`:
+
+    ```bash
+    VERSION=v0.236.5
+    git tag "$VERSION" <commit-sha>
+    git push <sqlmesh-remote> "$VERSION"
+    ```
+
+    Push only the tag, not a branch.
 
 4. Watch the [Release](https://github.com/SQLMesh/sqlmesh/actions/workflows/release.yaml) run until it finishes.
 5. Check that the new version is on [PyPI](https://pypi.org/project/sqlmesh/#history).
@@ -48,6 +56,8 @@ GitHub builds the notes from merged pull request titles and groups them by label
 - A `!` in the title, such as `fix!:` or `feat!:`, puts the pull request under **Breaking changes**.
 - A pull request that adds a state migration goes under **State migrations**.
 - CI, test and Dependabot pull requests are left out. Add the `skip-changelog` label to leave out any other pull request.
+
+Each pull request appears in only one section: the first one in this list that matches its labels. A breaking change that also adds a state migration is listed under **Breaking changes**, so its upgrade note in step 6 should say to run `sqlmesh migrate`.
 
 To move a pull request to another section, change its title. The workflow resets the type labels from the title.
 
