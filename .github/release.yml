@@ -2,6 +2,7 @@
 # `generate_release_notes` in workflows/release.yaml) by PR label.
 # Labels are applied automatically by workflows/pr-labels.yaml.
 # A PR is listed under the first category whose labels it matches.
+# RELEASING.md refers to these section titles, so keep the two in sync.
 changelog:
   exclude:
     labels:
@@ -10,27 +11,27 @@ changelog:
       - test
       - dependencies
   categories:
-    - title: ⚠️ Breaking Changes
+    - title: Breaking changes
       labels:
         - breaking-change
-    - title: 🗄️ State Migrations (run `sqlmesh migrate` after upgrading)
+    - title: State migrations (run `sqlmesh migrate` after upgrading)
       labels:
         - migration
-    - title: 🚀 Features
+    - title: Features
       labels:
         - feature
-    - title: ⚡ Performance
+    - title: Performance
       labels:
         - performance
-    - title: 🐛 Bug Fixes
+    - title: Bug fixes
       labels:
         - bug
-    - title: 📚 Documentation
+    - title: Documentation
       labels:
         - documentation
-    - title: 🧰 Maintenance
+    - title: Maintenance
       labels:
         - maintenance
-    - title: Other Changes
+    - title: Other changes
       labels:
         - "*"
