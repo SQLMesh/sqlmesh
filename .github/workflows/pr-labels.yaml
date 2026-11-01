@@ -120,16 +120,11 @@ jobs:
               await github.rest.issues.addLabels({ owner, repo, issue_number, labels: toAdd });
             }
 
-  paths:
-    name: Label by changed files
+  migrations:
+    name: Label new state migrations
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/labeler@v6
-        with:
-          configuration-path: .github/labeler.yml
-
-      - name: Label new state migrations
-        uses: actions/github-script@v8
+      - uses: actions/github-script@v8
         with:
           script: |
             const issue_number = context.payload.pull_request.number;

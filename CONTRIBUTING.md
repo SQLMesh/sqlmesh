@@ -111,6 +111,10 @@ recategorize a PR, change its title rather than its labels. Use `ci` or `test` a
 or scope for internal-only changes (e.g. `fix(ci): ...`) so they are left out of the
 release notes. A maintainer can add the `skip-changelog` label to leave out any other PR.
 
+## Releases
+
+Maintainers publish releases. See [RELEASING.md](RELEASING.md) for the steps.
+
 ## Licensing
 
 Code contributions are licensed under the [Apache License 2.0](LICENSE). Documentation contributions are licensed under [Creative Commons Attribution 4.0 International (CC-BY-4.0)](https://creativecommons.org/licenses/by/4.0/). See the LICENSE file and the [technical charter](sqlmesh-technical-charter.pdf) for details.
