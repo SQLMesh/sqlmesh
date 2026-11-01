@@ -17,9 +17,9 @@ The workflow does four things:
 1. Builds the web UI and bundles it into the package.
 2. Publishes `sqlmesh` to PyPI with `make publish`.
 3. Publishes the test package to the private `tobiko-private` registry with `make publish-tests`.
-4. Creates a GitHub release with notes generated from the pull requests merged since the previous tag.
+4. Creates a draft GitHub release with notes generated from the pull requests merged since the previous tag.
 
-Each step publishes immediately and there's no approval gate. Check `main` before you tag.
+The PyPI and private registry uploads happen immediately, with no approval gate. Check `main` before you tag.
 
 ### Steps
 
@@ -37,21 +37,19 @@ Each step publishes immediately and there's no approval gate. Check `main` befor
 
 4. Watch the [Release](https://github.com/SQLMesh/sqlmesh/actions/workflows/release.yaml) run until it finishes.
 5. Check that the new version is on [PyPI](https://pypi.org/project/sqlmesh/#history).
-6. Edit the generated GitHub release. Under **Breaking changes**, add a short upgrade note for each entry. Say what users will see after upgrading, such as a migration or a metadata-only change in `sqlmesh plan`.
+6. Open the draft release on the [Releases page](https://github.com/SQLMesh/sqlmesh/releases). Under **Breaking changes**, add a short upgrade note for each entry. Say what users will see after upgrading, such as a migration or a metadata-only change in `sqlmesh plan`. Then publish it. Until you do, no GitHub release appears for the version, even though it's on PyPI.
 
 If the workflow fails after the PyPI step, don't delete or reuse the tag. PyPI doesn't accept the same version twice. Fix the cause and release the next version.
 
 ### Release Notes
 
-GitHub builds the notes from merged pull request titles and groups them by label, as configured in [`.github/release.yml`](.github/release.yml):
+GitHub builds the notes from merged pull request titles and groups them by label, as configured in [`.github/release.yml`](.github/release.yml). The [PR Labels](.github/workflows/pr-labels.yaml) workflow applies the labels from each pull request's title (`type(scope): description`) and the files it changes. See [Pull Request Titles](CONTRIBUTING.md#pull-request-titles) in `CONTRIBUTING.md`.
 
-| Label | Section |
-|---|---|
-| `breaking-change` | Breaking changes |
-| `dependencies` | Dependencies |
-| Any other label, or none | Other changes |
+- A `!` in the title, such as `fix!:` or `feat!:`, puts the pull request under **Breaking changes**.
+- A pull request that adds a state migration goes under **State migrations**.
+- CI, test and Dependabot pull requests are left out. Add the `skip-changelog` label to leave out any other pull request.
 
-Dependabot adds `dependencies` automatically. Add `breaking-change` by hand to any pull request whose title has a `!`, such as `fix!:` or `feat!:`, before it merges. Without the label, the change appears under **Other changes**.
+To move a pull request to another section, change its title. The workflow resets the type labels from the title.
 
 ## Release the VS Code Extension
 

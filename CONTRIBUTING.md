@@ -87,10 +87,10 @@ Optionally, `make install-pre-commit` installs git hooks so ruff and mypy run on
 - Include a DCO sign-off on all commits (`git commit -s`)
 - Be responsive to review feedback from maintainers
 
-## Releases
-
-Maintainers publish releases. See [RELEASING.md](RELEASING.md) for the steps.
-
 ## Licensing
 
 Code contributions are licensed under the [Apache License 2.0](LICENSE). Documentation contributions are licensed under [Creative Commons Attribution 4.0 International (CC-BY-4.0)](https://creativecommons.org/licenses/by/4.0/). See the LICENSE file and the [technical charter](sqlmesh-technical-charter.pdf) for details.
+
+## Releases
+
+Maintainers publish releases. See [RELEASING.md](RELEASING.md) for the steps.
