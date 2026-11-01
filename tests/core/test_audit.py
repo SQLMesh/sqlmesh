@@ -697,6 +697,89 @@ def test_pattern_audits(model: Model):
     )
 
 
+def test_z_score_audit(model: Model):
+    rendered_query = model.render_audit_query(
+        builtin.z_score_audit,
+        column=exp.to_column("a"),
+        threshold=exp.convert(3),
+    )
+    assert (
+        rendered_query.sql()
+        == """WITH "stats" AS (SELECT AVG("a") AS "mean_a", STDDEV("a") AS "stddev_a" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE TRUE) SELECT "a" AS "a", ("a" - "mean_a") / NULLIF("stddev_a", 0) AS "z_score" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_1", "stats" AS "stats" WHERE ABS(("a" - "mean_a") / NULLIF("stddev_a", 0)) > 3 AND TRUE"""
+    )
+
+    # The condition must filter the rows being checked, not just the rows used to compute the stats
+    rendered_query = model.render_audit_query(
+        builtin.z_score_audit,
+        column=exp.to_column("a"),
+        threshold=exp.convert(3),
+        condition=parse_one("b > 0"),
+    )
+    assert (
+        rendered_query.sql()
+        == """WITH "stats" AS (SELECT AVG("a") AS "mean_a", STDDEV("a") AS "stddev_a" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE "b" > 0) SELECT "a" AS "a", ("a" - "mean_a") / NULLIF("stddev_a", 0) AS "z_score" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_1", "stats" AS "stats" WHERE ABS(("a" - "mean_a") / NULLIF("stddev_a", 0)) > 3 AND "b" > 0"""
+    )
+
+
+def test_valid_http_method_audit(model: Model):
+    rendered_query = model.render_audit_query(
+        builtin.valid_http_method_audit,
+        column=exp.to_column("a"),
+    )
+    assert (
+        rendered_query.sql()
+        == """SELECT * FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE NOT "a" IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT') AND TRUE"""
+    )
+
+    rendered_query = model.render_audit_query(
+        builtin.valid_http_method_audit,
+        column=exp.to_column("a"),
+        condition=parse_one("b > 0"),
+    )
+    assert (
+        rendered_query.sql()
+        == """SELECT * FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE NOT "a" IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT') AND "b" > 0"""
+    )
+
+
+def test_builtin_audits_condition_filters_audited_rows():
+    import duckdb
+
+    model = create_sql_model(
+        "db.test_model",
+        parse_one("SELECT region, v, method FROM db.src"),
+        kind=FullKind(),
+        dialect="duckdb",
+    )
+    connection = duckdb.connect()
+    connection.execute(
+        "CREATE SCHEMA db; CREATE TABLE db.test_model AS "
+        "SELECT * FROM (VALUES ('us', 10, 'GET'), ('us', 10, 'POST'), ('us', 11, 'PUT'), "
+        "('eu', 1000, 'get'), ('eu', 1000, 'post')) AS t(region, v, method)"
+    )
+    condition = parse_one("region = 'us'", dialect="duckdb")
+
+    z_score_query = model.render_audit_query(
+        builtin.z_score_audit,
+        column=exp.to_column("v"),
+        threshold=exp.convert(1),
+        condition=condition,
+    )
+    # Only the rows matching the condition are compared against the stats computed for them
+    assert connection.execute(z_score_query.sql("duckdb")).fetchall() == [
+        (11, pytest.approx(1.1547005))
+    ]
+
+    valid_http_method_query = model.render_audit_query(
+        builtin.valid_http_method_audit,
+        column=exp.to_column("method"),
+        condition=condition,
+    )
+    assert connection.execute(valid_http_method_query.sql("duckdb")).fetchall() == []
+
+    connection.close()
+
+
 def test_standalone_audit(model: Model, assert_exp_eq):
     audit = StandaloneAudit(
         name="test_audit", query=parse_one(f"SELECT * FROM {model.name} WHERE col IS NULL")
