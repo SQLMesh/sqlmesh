@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, it, expect, vi } from 'vitest'
 import { MemoryRouter } from 'react-router'
 import { render, fireEvent } from '../../../../tests/utils'
