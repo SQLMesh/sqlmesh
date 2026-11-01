@@ -54,6 +54,7 @@ Other extras are required to use specific SQL engines, like Bigquery or Postgres
     | Bigquery      | `pip install "sqlmesh[bigquery]"`    |
     | ClickHouse    | `pip install "sqlmesh[clickhouse]"`  |
     | Databricks    | `pip install "sqlmesh[databricks]"`  |
+    | Doris         | `pip install "sqlmesh[doris]"`       |
     | Fabric        | `pip install "sqlmesh[fabric]"`      |
     | GCP Postgres  | `pip install "sqlmesh[gcppostgres]"` |
     | MS SQL Server | `pip install "sqlmesh[mssql]"`       |

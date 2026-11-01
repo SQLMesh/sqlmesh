@@ -13,7 +13,7 @@ from sqlglot.helper import ensure_list
 from sqlmesh.core import dialect as d
 from sqlmesh.core.dialect import normalize_model_name
 from sqlmesh.core.engine_adapter import EngineAdapter, EngineAdapterWithIndexSupport
-from sqlmesh.core.engine_adapter.shared import InsertOverwriteStrategy, DataObject
+from sqlmesh.core.engine_adapter.shared import CatalogSupport, InsertOverwriteStrategy, DataObject
 from sqlmesh.core.schema_diff import SchemaDiffer, TableAlterOperation, NestedSupport
 from sqlmesh.utils import columns_to_types_to_struct
 from sqlmesh.utils.date import to_ds
@@ -3286,6 +3286,42 @@ def test_replace_query_self_referencing_not_exists_known(
     assert to_sql_calls(adapter) == [
         'CREATE TABLE IF NOT EXISTS "test" ("a" INT)',
         'CREATE OR REPLACE TABLE "test" AS SELECT CAST("a" AS INT) AS "a" FROM (SELECT "a" FROM "test") AS "_subquery"',
+    ]
+
+
+def test_replace_query_self_referencing_two_part_and_aliased(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    mocker.patch.object(
+        EngineAdapter,
+        "catalog_support",
+        new_callable=mocker.PropertyMock,
+        return_value=CatalogSupport.FULL_SUPPORT,
+    )
+    adapter = make_mocked_engine_adapter(EngineAdapter, default_catalog="catalog")
+    adapter.SUPPORTS_REPLACE_TABLE = False
+    adapter.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+
+    mocker.patch.object(
+        adapter,
+        "get_data_object",
+        return_value=DataObject(catalog="catalog", schema="db", name="test", type="table"),
+    )
+    mocker.patch("sqlmesh.core.engine_adapter.base.random_id", return_value="abcdefgh")
+
+    adapter.replace_query(
+        "catalog.db.test",
+        parse_one("SELECT t.a FROM db.test AS t"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "catalog"."db"."test" ("a" INT)',
+        'CREATE SCHEMA IF NOT EXISTS "catalog"."db"',
+        'CREATE TABLE IF NOT EXISTS "catalog"."db"."__temp_test_abcdefgh" AS SELECT CAST("a" AS INT) AS "a" FROM (SELECT "a" FROM "catalog"."db"."test") AS "_subquery"',
+        'DELETE FROM "catalog"."db"."test" WHERE TRUE',
+        'INSERT INTO "catalog"."db"."test" ("a") SELECT "t"."a" FROM "catalog"."db"."__temp_test_abcdefgh" AS "t"',
+        'DROP TABLE IF EXISTS "catalog"."db"."__temp_test_abcdefgh"',
     ]
 
 
