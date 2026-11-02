@@ -669,6 +669,31 @@ def test_create_managed_table(make_mocked_engine_adapter: t.Callable, mocker: Mo
     ]
 
 
+@pytest.mark.parametrize("table_format", [None, "iceberg"])
+def test_create_managed_table_column_comments(
+    make_mocked_engine_adapter: t.Callable, table_format: t.Optional[str]
+):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    # Unknown column types require a post-creation comment command.
+    adapter.create_managed_table(
+        table_name="test_table",
+        query=parse_one("SELECT a, b FROM source_table"),
+        table_format=table_format,
+        table_properties={
+            "target_lag": exp.Literal.string("20 minutes"),
+            "warehouse": exp.to_identifier("test_warehouse"),
+        },
+        column_descriptions={"a": "a column description", "b": "b column description"},
+    )
+
+    table_kind = "DYNAMIC ICEBERG TABLE" if table_format else "DYNAMIC TABLE"
+    assert to_sql_calls(adapter) == [
+        f'CREATE OR REPLACE {table_kind} "test_table" TARGET_LAG=\'20 minutes\' WAREHOUSE="test_warehouse" AS SELECT "a", "b" FROM "source_table"',
+        """ALTER TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
+    ]
+
+
 def test_drop_managed_table(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
 
