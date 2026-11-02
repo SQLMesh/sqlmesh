@@ -993,7 +993,9 @@ class EngineAdapter:
             self._create_table_comment(table_name, table_description)
         if column_descriptions and schema is None and self.comments_enabled:
             self._create_column_comments(
-                table_name, column_descriptions, table_format=kwargs.get("table_format")
+                table_name,
+                column_descriptions,
+                table_format=None if table_kind else kwargs.get("table_format"),
             )
 
     def _create_table(
