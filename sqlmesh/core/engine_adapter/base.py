@@ -1047,12 +1047,15 @@ class EngineAdapter:
     ) -> exp.Create:
         exists = False if replace else exists
         catalog_name = None
+        target_table: t.Optional[exp.Table] = None
         if not isinstance(table_name_or_schema, exp.Schema):
             table_name_or_schema = exp.to_table(table_name_or_schema)
             catalog_name = table_name_or_schema.catalog
+            target_table = table_name_or_schema
         else:
             if isinstance(table_name_or_schema.this, exp.Table):
                 catalog_name = table_name_or_schema.this.catalog
+                target_table = table_name_or_schema.this
 
         properties = (
             self._build_table_properties_exp(
@@ -1061,6 +1064,9 @@ class EngineAdapter:
                 target_columns_to_types=target_columns_to_types,
                 table_description=table_description,
                 table_kind=table_kind,
+                # Passed so an adapter can vary properties by target object, not just by
+                # connection. Additive: every override accepts **kwargs.
+                table=target_table,
             )
             if kwargs or table_description
             else None
@@ -1368,6 +1374,8 @@ class EngineAdapter:
                 else None
             ),
             physical_cluster=create_kwargs.pop("physical_cluster", None),
+            # See the note on the table-properties call site above.
+            table=exp.to_table(view_name),
         )
         if create_view_properties:
             for view_property in create_view_properties.expressions:
@@ -2640,12 +2648,17 @@ class EngineAdapter:
 
                 sql = self._attach_correlation_id(sql)
 
-                self._log_sql(
-                    sql,
-                    expression=e if isinstance(e, exp.Expr) else None,
-                    quote_identifiers=quote_identifiers,
-                )
-                self._execute(sql, track_rows_processed, **kwargs)
+                # The rendered statement and correlation comment are finalized
+                # here; observe the exact invocation, including driver errors.
+                from sqlmesh.core.execution_observation import action
+
+                with action("query", "execute", engine=self.dialect):
+                    self._log_sql(
+                        sql,
+                        expression=e if isinstance(e, exp.Expr) else None,
+                        quote_identifiers=quote_identifiers,
+                    )
+                    self._execute(sql, track_rows_processed, **kwargs)
 
     def _attach_correlation_id(self, sql: str) -> str:
         if self.ATTACH_CORRELATION_ID and self.correlation_id:

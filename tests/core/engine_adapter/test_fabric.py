@@ -4,10 +4,12 @@ import typing as t
 
 import pandas as pd  # noqa: TID253
 import pytest
+import requests
 from pytest_mock import MockerFixture
 from sqlglot import exp, parse_one
 
 from sqlmesh.core.engine_adapter import FabricEngineAdapter
+from sqlmesh.core.engine_adapter.fabric import FabricHttpClient
 from tests.core.engine_adapter import to_sql_calls
 from sqlmesh.core.engine_adapter.shared import DataObject
 
@@ -17,6 +19,26 @@ pytestmark = [pytest.mark.engine, pytest.mark.fabric]
 @pytest.fixture
 def adapter(make_mocked_engine_adapter: t.Callable) -> FabricEngineAdapter:
     return make_mocked_engine_adapter(FabricEngineAdapter)
+
+
+@pytest.fixture
+def fabric_http_client(mocker: MockerFixture) -> FabricHttpClient:
+    client = FabricHttpClient(
+        tenant_id="tenant-id",
+        workspace_id="workspace-id",
+        client_id="client-id",
+        client_secret="client-secret",
+    )
+    client.session = mocker.MagicMock()
+    return client
+
+
+def _conflict_response(mocker: MockerFixture, error_code: str) -> t.Any:
+    resp = mocker.MagicMock()
+    resp.status_code = 409
+    resp.json.return_value = {"errorCode": error_code}
+    resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+    return resp
 
 
 def test_get_current_catalog_uses_only_explicit_target_catalog(
@@ -451,3 +473,24 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
     create_table_comment_mock.assert_not_called()
     create_column_comments_mock.assert_not_called()
     assert to_sql_calls(adapter) == []
+
+
+def test_create_warehouse_already_exists_is_noop(
+    fabric_http_client: FabricHttpClient, mocker: MockerFixture
+) -> None:
+    fabric_http_client.session.post.return_value = _conflict_response(
+        mocker, "ItemDisplayNameAlreadyInUse"
+    )
+
+    fabric_http_client.create_warehouse("my_warehouse")
+
+    fabric_http_client.session.post.assert_called_once()
+
+
+def test_create_warehouse_unrelated_conflict_still_raises(
+    fabric_http_client: FabricHttpClient, mocker: MockerFixture
+) -> None:
+    fabric_http_client.session.post.return_value = _conflict_response(mocker, "SomeOtherError")
+
+    with pytest.raises(requests.HTTPError):
+        fabric_http_client.create_warehouse("my_warehouse")
