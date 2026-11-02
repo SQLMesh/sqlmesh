@@ -13,7 +13,9 @@ from sqlglot.helper import ensure_list
 import sqlmesh.core.dialect as d
 from sqlmesh.core.engine_adapter import BigQueryEngineAdapter
 from sqlmesh.core.engine_adapter.bigquery import select_partitions_expr
-from sqlmesh.core.engine_adapter.shared import DataObjectType
+from sqlmesh.core.engine_adapter.mixins import TableAlterDropClusterKeyOperation
+from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
+from sqlmesh.core.schema_diff import TableAlterDropColumnOperation
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.utils import AttributeDict
 from sqlmesh.utils.errors import SQLMeshError
@@ -1380,3 +1382,108 @@ def test_sync_grants_config_no_schema(
 
     with pytest.raises(ValueError, match="Table test_table does not have a schema \\(dataset\\)"):
         adapter.sync_grants_config(relation, new_grants_config)
+
+
+def _mock_bq_data_objects(
+    mocker: MockerFixture,
+    adapter: BigQueryEngineAdapter,
+    current_obj: DataObject,
+    target_obj: DataObject,
+) -> None:
+    """Patch _get_data_objects on *adapter* to return the supplied DataObjects."""
+
+    def _side_effect(
+        schema_name: t.Any, object_names: t.Optional[t.Set[str]] = None
+    ) -> t.List[DataObject]:
+        results = []
+        for obj in [current_obj, target_obj]:
+            if object_names is None or obj.name in object_names:
+                results.append(obj)
+        return results
+
+    mocker.patch.object(adapter, "_get_data_objects", side_effect=_side_effect)
+
+
+def test_bigquery_clustering_column_drop_before_clustering_change(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """BigQuery keeps the historical order: DROP COLUMN before clustering key change.
+
+    Dropping a column that belongs to the current clustering key must NOT trigger
+    a reorder.  BigQuery must emit DROP COLUMN first, then DROP CLUSTERING KEY.
+    """
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter, patch_get_data_objects=False)
+
+    current_columns = {"tenant_id": "INT64", "partition_month": "INT64"}
+    target_columns = {"tenant_id": "INT64"}
+    adapter.columns = lambda table_name, **kwargs: {
+        k: exp.DataType.build(v, dialect="bigquery")
+        for k, v in (
+            current_columns if table_name == "project.dataset.current_table" else target_columns
+        ).items()
+    }
+
+    _mock_bq_data_objects(
+        mocker,
+        adapter,
+        current_obj=DataObject(
+            catalog="project",
+            schema="dataset",
+            name="current_table",
+            type=DataObjectType.TABLE,
+            clustering_key="(partition_month)",
+        ),
+        target_obj=DataObject(
+            catalog="project",
+            schema="dataset",
+            name="target_table",
+            type=DataObjectType.TABLE,
+            clustering_key=None,
+        ),
+    )
+
+    operations = adapter.get_alter_operations(
+        "project.dataset.current_table", "project.dataset.target_table"
+    )
+
+    assert len(operations) == 2
+    assert isinstance(operations[0], TableAlterDropColumnOperation)
+    assert isinstance(operations[1], TableAlterDropClusterKeyOperation)
+
+
+def test_bigquery_no_column_change_clustering_drop_only(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """BigQuery: same columns, only clustering key removed — one DROP CLUSTERING KEY."""
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter, patch_get_data_objects=False)
+
+    columns = {"tenant_id": "INT64", "partition_month": "INT64"}
+    adapter.columns = lambda table_name, **kwargs: {
+        k: exp.DataType.build(v, dialect="bigquery") for k, v in columns.items()
+    }
+
+    _mock_bq_data_objects(
+        mocker,
+        adapter,
+        current_obj=DataObject(
+            catalog="project",
+            schema="dataset",
+            name="current_table",
+            type=DataObjectType.TABLE,
+            clustering_key="(partition_month)",
+        ),
+        target_obj=DataObject(
+            catalog="project",
+            schema="dataset",
+            name="target_table",
+            type=DataObjectType.TABLE,
+            clustering_key=None,
+        ),
+    )
+
+    operations = adapter.get_alter_operations(
+        "project.dataset.current_table", "project.dataset.target_table"
+    )
+
+    assert len(operations) == 1
+    assert isinstance(operations[0], TableAlterDropClusterKeyOperation)

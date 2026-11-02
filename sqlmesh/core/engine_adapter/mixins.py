@@ -383,22 +383,39 @@ class ClusteredByMixin(EngineAdapter):
             self.get_data_objects(target_table_schema, {target_table.name}), 0
         )
 
+        clustering_operation: t.Optional[TableAlterClusterByOperation] = None
         if current_table_info and target_table_info:
             if target_table_info.is_clustered:
                 if target_table_info.clustering_key and (
                     current_table_info.clustering_key != target_table_info.clustering_key
                 ):
-                    operations.append(
-                        TableAlterChangeClusterKeyOperation(
-                            target_table=current_table,
-                            clustering_key=target_table_info.clustering_key,
-                            dialect=self.dialect,
-                        )
+                    clustering_operation = TableAlterChangeClusterKeyOperation(
+                        target_table=current_table,
+                        clustering_key=target_table_info.clustering_key,
+                        dialect=self.dialect,
                     )
             elif current_table_info.is_clustered:
-                operations.append(TableAlterDropClusterKeyOperation(target_table=current_table))
+                clustering_operation = TableAlterDropClusterKeyOperation(target_table=current_table)
+
+        if clustering_operation:
+            self._apply_clustering_operation(operations, clustering_operation, current_table_info)
 
         return operations
+
+    def _apply_clustering_operation(
+        self,
+        operations: t.List[TableAlterOperation],
+        clustering_operation: "TableAlterClusterByOperation",
+        current_table_info: t.Any,
+    ) -> None:
+        """Insert the clustering operation into the alter operations list.
+
+        The default implementation appends the clustering change after all column
+        changes (historical order). Snowflake overrides this to handle the case
+        where the old key must be dropped before a column it names is removed,
+        and the new key must be set after new columns are added.
+        """
+        operations.append(clustering_operation)
 
 
 def logical_merge(
