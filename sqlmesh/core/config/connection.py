@@ -836,12 +836,6 @@ class DatabricksConnectionConfig(ConnectionConfig):
     _concurrent_tasks_validator = concurrent_tasks_validator
     _http_headers_validator = http_headers_validator
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def shared_connection(self) -> bool:
-        """The connection should only be shared if U2M OAuth is being used"""
-        return self.auth_type is not None and self.oauth_client_secret is None
-
     @model_validator(mode="before")
     def _databricks_connect_validator(cls, data: t.Any) -> t.Any:
         # SQLQueryContextLogger will output any error SQL queries even if they are in a try/except block.
@@ -992,6 +986,17 @@ class DatabricksConnectionConfig(ConnectionConfig):
                 else:
                     # if auth_type is set to an 'oauth' type but no client_id/secret are set, then we are using U2M
                     # ref: https://docs.databricks.com/en/dev-tools/python-sql-connector.html#oauth-user-to-machine-u2m-authentication
+                    # All connections share one login so that each thread can have its own connection without
+                    # running its own browser flow. `credentials_provider` takes precedence over `auth_type` in
+                    # the connector, but `auth_type` is still passed for anything else in the connector that reads it.
+                    from sqlmesh.utils.databricks import get_shared_u2m_credentials_provider
+
+                    if t.TYPE_CHECKING:
+                        assert self.server_hostname is not None
+
+                    conn_kwargs["credentials_provider"] = get_shared_u2m_credentials_provider(
+                        self.server_hostname, self.auth_type
+                    )
                     conn_kwargs["auth_type"] = self.auth_type
 
             return conn_kwargs
