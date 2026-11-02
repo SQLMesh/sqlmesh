@@ -1334,6 +1334,19 @@ def test_standalone_audit_metadata_hash_ignores_global_objs_without_macros():
     assert empty.metadata_hash == "435209792"
 
 
+def test_standalone_audit_metadata_hash_with_date_var():
+    from datetime import date
+
+    # dbt loads an unquoted YAML date as a `date` object, which `json.dumps` can't serialize.
+    audit = _load_standalone_audit_with_macros(
+        "{% macro jone() %}1{% endmacro %}",
+        "SELECT * FROM db.tbl WHERE id <> {{ jone() }}",
+        global_objs={"vars": {"cutoff": date(2024, 1, 2)}},
+    )
+
+    assert audit.metadata_hash
+
+
 def test_standalone_audit_metadata_hash_includes_referenced_package_macros():
     query = "SELECT * FROM db.tbl WHERE id <> {{ pkg.jone() }}"
 

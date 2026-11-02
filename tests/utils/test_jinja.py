@@ -353,3 +353,23 @@ def test_builtin_b64decode_with_env_var(monkeypatch):
 
     config = yaml.load("password: \"{{ env_var('SNOWFLAKE_PW_B64') | b64decode }}\"")
     assert config == {"password": "super-secret-pw"}
+
+
+def test_macro_registry_data_hash_values_with_non_json_vars():
+    from datetime import date
+
+    macros = MacroExtractor().extract("{% macro m() %}1{% endmacro %}")
+
+    # dbt loads an unquoted YAML date such as `cutoff: 2024-01-02` as a `date` object.
+    registry = JinjaMacroRegistry(global_objs={"vars": {"cutoff": date(2024, 1, 2)}})
+    registry.add_macros(macros)
+    assert registry.data_hash_values[-1] == '{"vars": {"cutoff": "2024-01-02"}}'
+
+    # JSON-serializable globals produce the same values as before.
+    plain = JinjaMacroRegistry(global_objs={"vars": {"cutoff": "2024-01-02", "limit": 10}})
+    plain.add_macros(macros)
+    assert plain.data_hash_values == [
+        "m",
+        "{% macro m() %}1{% endmacro %}",
+        '{"vars": {"cutoff": "2024-01-02", "limit": 10}}',
+    ]
