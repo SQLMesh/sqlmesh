@@ -221,6 +221,103 @@ def test_load_standalone_with_macros(assert_exp_eq):
     assert "extra_macro" not in audit.python_env
 
 
+def test_load_multiple_single_standalone_with_macros():
+    # Regression test for https://github.com/SQLMesh/sqlmesh/issues/6119
+    # A standalone audit that is the *last* (and in this case only) AUDIT in its
+    # file must still have access to project python macros passed into
+    # `load_multiple_audits`.
+    expressions = parse(
+        """
+        AUDIT (
+            name only_allowed,
+            standalone true,
+        );
+
+        SELECT 1 FROM some_table WHERE name NOT IN @allowed()
+    """
+    )
+
+    macros = {
+        "allowed": Executable(payload="def allowed(evaluator):\n    return ['a']"),
+    }
+
+    (audit,) = load_multiple_audits(expressions, path="/path/to/audit", macros=macros)
+
+    assert "allowed" in audit.python_env
+
+
+def test_load_multiple_last_standalone_with_macros():
+    # Same as above, but for the last audit of a *multi*-audit file, to make sure
+    # the fix doesn't just special-case single-audit files.
+    expressions = parse(
+        """
+        AUDIT (
+            name first_audit,
+            standalone true,
+        );
+
+        SELECT 1 FROM some_table WHERE col1 IS NULL;
+
+        AUDIT (
+            name second_audit,
+            standalone true,
+        );
+
+        SELECT 1 FROM some_table WHERE name NOT IN @allowed()
+    """
+    )
+
+    macros = {
+        "allowed": Executable(payload="def allowed(evaluator):\n    return ['a']"),
+    }
+
+    first_audit, second_audit = load_multiple_audits(
+        expressions, path="/path/to/audit", macros=macros
+    )
+
+    assert "allowed" not in first_audit.python_env
+    assert "allowed" in second_audit.python_env
+
+
+def test_load_multiple_last_standalone_with_jinja_macros():
+    # Regression test for https://github.com/SQLMesh/sqlmesh/issues/6119
+    # Same as test_load_multiple_single_standalone_with_macros, but for jinja macros:
+    # a standalone audit that is the last (and in this case only) AUDIT in its file
+    # must still have access to project jinja macros passed into `load_multiple_audits`.
+    expressions = parse(
+        """
+        AUDIT (
+            name only_allowed,
+            standalone true,
+        );
+
+        JINJA_QUERY_BEGIN;
+        SELECT
+            *,
+            {{ test_macro(1) }},
+        FROM
+            db.table t1
+        WHERE
+            col IS NULL
+        JINJA_QUERY_END;
+    """
+    )
+
+    macros = """
+    {% macro test_macro(v) %}{{ v }}{% endmacro %}
+
+    {% macro extra_macro(v) %}{{ v + 1 }}{% endmacro %}
+    """
+
+    jinja_macros = JinjaMacroRegistry()
+    jinja_macros.add_macros(MacroExtractor().extract(macros))
+
+    (audit,) = load_multiple_audits(expressions, path="/path/to/audit", jinja_macros=jinja_macros)
+
+    assert "test_macro" in audit.jinja_macros.root_macros
+    assert "extra_macro" not in audit.jinja_macros.root_macros
+
+
 def test_load_standalone_with_jinja_macros(assert_exp_eq):
     expressions = parse(
         """
