@@ -836,6 +836,19 @@ class DatabricksConnectionConfig(ConnectionConfig):
     _concurrent_tasks_validator = concurrent_tasks_validator
     _http_headers_validator = http_headers_validator
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def shared_connection(self) -> bool:
+        """U2M OAuth connections share one login, so each thread can have its own connection. Connectors too old
+        to support that fall back to sharing a single connection, so only one browser flow is run."""
+        from sqlmesh.utils.databricks import supports_shared_u2m_login
+
+        return self._uses_u2m_oauth and not supports_shared_u2m_login()
+
+    @property
+    def _uses_u2m_oauth(self) -> bool:
+        return bool(self.auth_type and "oauth" in self.auth_type and not self.oauth_client_secret)
+
     @model_validator(mode="before")
     def _databricks_connect_validator(cls, data: t.Any) -> t.Any:
         # SQLQueryContextLogger will output any error SQL queries even if they are in a try/except block.
@@ -987,16 +1000,18 @@ class DatabricksConnectionConfig(ConnectionConfig):
                     # if auth_type is set to an 'oauth' type but no client_id/secret are set, then we are using U2M
                     # ref: https://docs.databricks.com/en/dev-tools/python-sql-connector.html#oauth-user-to-machine-u2m-authentication
                     # All connections share one login so that each thread can have its own connection without
-                    # running its own browser flow. `credentials_provider` takes precedence over `auth_type` in
-                    # the connector, but `auth_type` is still passed for anything else in the connector that reads it.
-                    from sqlmesh.utils.databricks import get_shared_u2m_credentials_provider
-
-                    if t.TYPE_CHECKING:
-                        assert self.server_hostname is not None
-
-                    conn_kwargs["credentials_provider"] = get_shared_u2m_credentials_provider(
-                        self.server_hostname, self.auth_type
+                    # running its own browser flow. `credentials_provider` takes precedence over `auth_type` on the
+                    # connector's Thrift and SEA backends. `auth_type` is still passed because the connector's kernel
+                    # backend rejects a custom `credentials_provider` and runs its own U2M flow from `auth_type`.
+                    from sqlmesh.utils.databricks import (
+                        get_shared_u2m_credentials_provider,
+                        supports_shared_u2m_login,
                     )
+
+                    if self.server_hostname and supports_shared_u2m_login():
+                        conn_kwargs["credentials_provider"] = get_shared_u2m_credentials_provider(
+                            self.server_hostname, self.auth_type
+                        )
                     conn_kwargs["auth_type"] = self.auth_type
 
             return conn_kwargs

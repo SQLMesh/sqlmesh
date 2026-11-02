@@ -1472,6 +1472,34 @@ def test_databricks__u2m_oauth__connection_pool(make_config):
     )
 
 
+def test_databricks__u2m_oauth__old_connector_shares_connection(make_config):
+    """Connectors without the internals the shared login builds on fall back to one shared connection."""
+    from sqlmesh.utils import databricks
+    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+
+    databricks.supports_shared_u2m_login.cache_clear()
+    try:
+        with patch("importlib.util.find_spec", return_value=None):
+            config = make_config(
+                type="databricks",
+                server_hostname="dbc-test.cloud.databricks.com",
+                http_path="sql/test/foo",
+                auth_type="databricks-oauth",
+                concurrent_tasks=4,
+            )
+            assert isinstance(config, DatabricksConnectionConfig)
+            assert config.shared_connection is True
+
+            adapter = config.create_engine_adapter()
+            assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+
+            connection_kwargs = config._connection_factory_with_kwargs.keywords
+            assert connection_kwargs["auth_type"] == "databricks-oauth"
+            assert "credentials_provider" not in connection_kwargs
+    finally:
+        databricks.supports_shared_u2m_login.cache_clear()
+
+
 @patch.object(DatabricksConnectionConfig, "_connection_factory_with_kwargs")
 def test_databricks__m2m_oauth__connection_pool(mock_connection_factory_with_kwargs, make_config):
     from sqlmesh.utils.connection_pool import ThreadLocalConnectionPool

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
+import re
 import typing as t
+from functools import lru_cache
 from threading import Lock
 
 HeaderFactory = t.Callable[[], t.Dict[str, str]]
@@ -18,6 +21,9 @@ class SharedU2MCredentialsProvider:
     Instead, a single connector OAuth provider is created lazily (behind a lock, so the browser flow only runs once)
     and every connection reads its headers from it. Reads are also serialized so only one thread can refresh the
     token at a time. This lets each thread have its own connection while sharing a single login.
+
+    If reading the token fails (for example because the refresh token expired or was revoked) the login is
+    discarded, so the next connection or request logs in again rather than failing for the rest of the process.
     """
 
     def __init__(self, server_hostname: str, auth_type: str):
@@ -25,23 +31,50 @@ class SharedU2MCredentialsProvider:
         self._auth_type = auth_type
         self._auth_provider: t.Optional[t.Any] = None
         self._lock = Lock()
+        # Incremented when a login attempt finishes, so threads that waited on a failed attempt can tell it happened
+        self._login_attempts_finished = 0
+        self._login_error: t.Optional[Exception] = None
 
     def auth_type(self) -> str:
         return self._auth_type
 
     def __call__(self, *args: t.Any, **kwargs: t.Any) -> HeaderFactory:
+        login_attempts_seen = self._login_attempts_finished
         with self._lock:
-            if self._auth_provider is None:
-                self._auth_provider = self._create_auth_provider()
+            self._ensure_logged_in(login_attempts_seen)
         return self._headers
 
     def _headers(self) -> t.Dict[str, str]:
         headers: t.Dict[str, str] = {}
+        login_attempts_seen = self._login_attempts_finished
         with self._lock:
-            if t.TYPE_CHECKING:
-                assert self._auth_provider is not None
-            self._auth_provider.add_headers(headers)
+            auth_provider = self._ensure_logged_in(login_attempts_seen)
+            try:
+                auth_provider.add_headers(headers)
+            except Exception:
+                self._auth_provider = None
+                raise
         return headers
+
+    def _ensure_logged_in(self, login_attempts_seen: int) -> t.Any:
+        """Returns the shared connector auth provider, logging in if needed. Must be called with the lock held."""
+        if self._auth_provider is not None:
+            return self._auth_provider
+
+        # A login attempt failed while this thread was waiting on the lock. Re-raise its error rather than opening
+        # another browser window for every waiting thread; callers that arrive afterwards will try again.
+        if self._login_attempts_finished != login_attempts_seen and self._login_error is not None:
+            raise self._login_error
+
+        try:
+            self._auth_provider = self._create_auth_provider()
+            self._login_error = None
+        except Exception as e:
+            self._login_error = e
+            raise
+        finally:
+            self._login_attempts_finished += 1
+        return self._auth_provider
 
     def _create_auth_provider(self) -> t.Any:
         # These are internal to the connector, but using them means the OAuth flow is identical to the one the
@@ -61,6 +94,15 @@ class SharedU2MCredentialsProvider:
         )
 
 
+@lru_cache(maxsize=1)
+def supports_shared_u2m_login() -> bool:
+    """Whether the installed connector has the internals `SharedU2MCredentialsProvider` builds on (4.1.0+)."""
+    try:
+        return importlib.util.find_spec("databricks.sql.common.unified_http_client") is not None
+    except ModuleNotFoundError:
+        return False
+
+
 _shared_u2m_credentials_providers: t.Dict[t.Tuple[str, str], SharedU2MCredentialsProvider] = {}
 _shared_u2m_credentials_providers_lock = Lock()
 
@@ -73,10 +115,13 @@ def get_shared_u2m_credentials_provider(
     Engine adapters and config copies are created several times per process, so the provider is kept at module
     level to avoid prompting the user to log in more than once.
     """
-    key = (server_hostname, auth_type)
+    # The same workspace can be written with or without a scheme or trailing slash
+    normalized_hostname = re.sub(r"^https?://", "", server_hostname.strip(), flags=re.I)
+    normalized_hostname = normalized_hostname.rstrip("/").lower()
+    key = (normalized_hostname, auth_type)
     with _shared_u2m_credentials_providers_lock:
         if key not in _shared_u2m_credentials_providers:
             _shared_u2m_credentials_providers[key] = SharedU2MCredentialsProvider(
-                server_hostname, auth_type
+                normalized_hostname, auth_type
             )
         return _shared_u2m_credentials_providers[key]
