@@ -272,8 +272,15 @@ def reset_console():
 
 
 @pytest.fixture
-def duck_conn() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect()
+def duck_conn() -> t.Generator[duckdb.DuckDBPyConnection, None, None]:
+    conn = duckdb.connect()
+    yield conn
+    # Explicitly close so that any extension DLLs loaded during the test are
+    # released before teardown.  On Windows an open DLL handle prevents
+    # install_extension() from moving the newly-downloaded file into place,
+    # causing an "Access is denied" IOException when subsequent tests in the
+    # same xdist worker call install_extension() for the same extension.
+    conn.close()
 
 
 def push_plan(context: Context, plan: Plan) -> None:
