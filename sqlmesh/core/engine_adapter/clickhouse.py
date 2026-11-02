@@ -5,6 +5,7 @@ import logging
 import re
 from functools import cached_property
 from sqlglot import exp, maybe_parse
+from sqlglot.optimizer.scope import Scope, find_all_in_scope, traverse_scope
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.mixins import LogicalMergeMixin
 from sqlmesh.core.engine_adapter.base import EngineAdapterWithIndexSupport
@@ -20,6 +21,7 @@ from sqlmesh.core.engine_adapter.shared import (
 )
 from sqlmesh.core.schema_diff import TableAlterOperation
 from sqlmesh.utils import get_source_columns_to_types
+from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
     import pandas as pd
@@ -71,17 +73,164 @@ class ClickhouseEngineAdapter(EngineAdapterWithIndexSupport, LogicalMergeMixin):
 
     def _to_sql(self, expression: exp.Expr, quote: bool = True, **kwargs: t.Any) -> str:
         """Render SQL without the virtual catalog, which ClickHouse does not support."""
-        if self._default_catalog and any(self._virtual_catalog_references(expression)):
+        virtual_catalog = self._default_catalog or self._extra_config.get("virtual_catalog")
+        if virtual_catalog and any(self._virtual_catalog_references(expression)):
             expression = expression.copy()
             for reference in list(self._virtual_catalog_references(expression)):
                 reference.set("catalog", None)
+        if isinstance(expression, exp.Query):
+            expression = self._map_catalog_references(expression, preserve_unmapped=True)
+        elif isinstance(expression, exp.Delete):
+            where = expression.args.get("where")
+            if where and any(where.find_all(exp.Query)):
+                expression = expression.copy()
+                where = expression.args["where"]
+                expression.set(
+                    "where",
+                    where.transform(
+                        lambda node: self._map_catalog_references(node)
+                        if isinstance(node, exp.Query)
+                        else node,
+                        copy=False,
+                    ),
+                )
+        elif isinstance(expression, exp.Insert) and isinstance(expression.expression, exp.Query):
+            expression = expression.copy()
+            expression.set("expression", self._map_catalog_references(expression.expression))
         return super()._to_sql(expression, quote=quote, **kwargs)
 
-    def _virtual_catalog_references(self, expression: exp.Expr) -> t.Iterator[exp.Expr]:
+    def _virtual_catalog_references(
+        self, expression: exp.Expr
+    ) -> t.Iterator[t.Union[exp.Table, exp.Column]]:
+        virtual_catalog = self._default_catalog or self._extra_config.get("virtual_catalog")
         return (
             reference
-            for reference in expression.find_all(exp.Table, exp.Column)
-            if reference.text("catalog") == self._default_catalog
+            for reference in self._catalog_references(expression)
+            if virtual_catalog and reference.text("catalog") == virtual_catalog
+        )
+
+    def _get_source_queries(
+        self,
+        query_or_df: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
+        target_table: TableName,
+        *,
+        batch_size: t.Optional[int] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+    ) -> t.List[SourceQuery]:
+        if isinstance(query_or_df, exp.Query):
+            query_or_df = self._map_catalog_references(query_or_df)
+        return super()._get_source_queries(
+            query_or_df,
+            target_columns_to_types,
+            target_table,
+            batch_size=batch_size,
+            source_columns=source_columns,
+        )
+
+    def _map_catalog_references(self, query: Query, *, preserve_unmapped: bool = False) -> Query:
+        mapping = self._extra_config.get("datalake_catalog_mapping") or {}
+        if not self._default_catalog and not mapping:
+            return query
+
+        mapped_catalogs = {self._default_catalog, *mapping}
+        query = query.copy()
+        for reference in self._catalog_references(query):
+            if not reference.catalog or (
+                preserve_unmapped and reference.catalog not in mapped_catalogs
+            ):
+                continue
+            if isinstance(reference, exp.Table):
+                self._map_catalog_reference(reference)
+                continue
+
+            table = self._map_catalog_reference(
+                exp.Table(
+                    this=reference.args["table"].copy(),
+                    db=reference.args["db"].copy(),
+                    catalog=reference.args["catalog"].copy(),
+                )
+            )
+            for column_key, table_key in (("table", "this"), ("db", "db"), ("catalog", "catalog")):
+                value = table.args.get(table_key)
+                reference.set(column_key, value.copy() if value is not None else None)
+        return query
+
+    def _catalog_references(self, expression: exp.Expr) -> t.List[t.Union[exp.Table, exp.Column]]:
+        """Use query scopes to distinguish qualified columns from nested-field paths."""
+        tables = list(expression.find_all(exp.Table))
+        references: t.List[t.Union[exp.Table, exp.Column]] = list(tables)
+        root_tables = list(find_all_in_scope(expression, exp.Table))
+        scoped_columns = set()
+        virtual_catalog = self._default_catalog or self._extra_config.get("virtual_catalog")
+
+        def matches_source_table(column: exp.Column, table: exp.Table) -> bool:
+            if (column.catalog, column.db, column.table) == (table.catalog, table.db, table.name):
+                return True
+            # ClickHouse strips the virtual catalog from DML targets before SQL rendering.
+            return (
+                column.catalog == virtual_catalog
+                and not table.catalog
+                and (column.db, column.table) == (table.db, table.name)
+            )
+
+        def add_column_reference(column: exp.Column, scope: t.Optional[Scope]) -> None:
+            if not column.catalog:
+                return
+            current_scope = scope
+            while current_scope is not None:
+                # The nearest alias or CTE name takes precedence as a nested-field path.
+                if column.catalog in current_scope.sources:
+                    return
+                if any(
+                    isinstance(source, exp.Table) and matches_source_table(column, source)
+                    for source in current_scope.sources.values()
+                ):
+                    references.append(column)
+                    return
+                current_scope = current_scope.parent
+
+            if column.catalog in {table.alias_or_name for table in root_tables}:
+                return
+            if any(matches_source_table(column, table) for table in root_tables):
+                references.append(column)
+
+        for scope in traverse_scope(expression):
+            for column in scope.find_all(exp.Column):
+                scoped_columns.add(id(column))
+                add_column_reference(column, scope)
+
+        for column in find_all_in_scope(expression, exp.Column):
+            if id(column) not in scoped_columns:
+                add_column_reference(column, None)
+        return references
+
+    def _map_catalog_reference(self, table: exp.Table) -> exp.Table:
+        """Map catalog.schema.table to a ClickHouse DataLakeCatalog database.table reference."""
+        catalog = table.catalog
+        if not catalog:
+            return table
+        if catalog == self._default_catalog:
+            table.set("catalog", None)
+            return table
+
+        target_database = (self._extra_config.get("datalake_catalog_mapping") or {}).get(catalog)
+        if target_database:
+            if not table.db:
+                raise SQLMeshError(
+                    f"ClickHouse DataLakeCatalog mapping for '{catalog}' requires a "
+                    "three-level catalog.schema.table reference"
+                )
+            source_table = f"{table.db}.{table.name}"
+            table.set("catalog", None)
+            table.set("db", exp.to_identifier(target_database))
+            table.set("this", exp.to_identifier(source_table, quoted=True))
+            return table
+
+        raise SQLMeshError(
+            f"{self.dialect} requires that all catalog operations be against the virtual "
+            f"catalog {self._default_catalog!r} or a configured DataLakeCatalog mapping. "
+            f"Provided catalog: {catalog}"
         )
 
     @property
