@@ -99,43 +99,71 @@ class MetricMeta(PydanticModel, frozen=True):
         self, metas: t.Dict[str, MetricMeta], metrics: UniqueKeyDict[str, Metric]
     ) -> Metric:
         """Converts a metric meta into a fully expanded and standalone metric."""
-        metric_refs = {}
-        agg_or_ref = False
+        # Suspend each expression walk while resolving a dependency so cycles of
+        # any depth can be diagnosed without using the Python call stack.
+        stack: t.List[t.Tuple[MetricMeta, t.Iterator[exp.Expr], t.Dict[exp.Column, str], bool]] = [
+            (self, self.expression.walk(), {}, False)
+        ]
+        visiting = {self.name}
 
-        for node in self.expression.walk():
-            if isinstance(node, exp.Alias):
-                _raise_metric_config_error(
-                    f"Alias found for metric '{self.name}' which is not allowed", self._path
-                )
-            elif isinstance(node, exp.AggFunc):
-                agg_or_ref = True
-            elif isinstance(node, exp.Column) and not node.table:
-                agg_or_ref = True
-                ref = node.sql(dialect=self.dialect)
+        while True:
+            meta, nodes, metric_refs, agg_or_ref = stack.pop()
 
-                if ref not in metrics:
-                    metrics[ref] = metas[ref].to_metric(metas, metrics)
+            for node in nodes:
+                if isinstance(node, exp.Alias):
+                    _raise_metric_config_error(
+                        f"Alias found for metric '{meta.name}' which is not allowed", meta._path
+                    )
+                elif isinstance(node, exp.AggFunc):
+                    agg_or_ref = True
+                elif isinstance(node, exp.Column) and not node.table:
+                    agg_or_ref = True
+                    ref = node.name.lower()
+                    metric_refs[node] = ref
 
-                metric_refs[node] = metrics[ref]
+                    if ref not in metrics:
+                        is_cycle = ref in visiting
+                        if is_cycle or ref not in metas:
+                            dependency_path = " -> ".join(
+                                [frame[0].name for frame in stack] + [meta.name, ref]
+                            )
+                            if is_cycle:
+                                message = f"Metric dependency cycle detected: {dependency_path}"
+                            else:
+                                message = (
+                                    f"Unknown metric '{ref}' referenced by metric '{meta.name}' "
+                                    f"(dependency path: {dependency_path})"
+                                )
+                            _raise_metric_config_error(message, meta._path)
 
-        if not agg_or_ref:
-            _raise_metric_config_error(
-                f"Metric '{self.name}' missing an aggregation or metric ref", self._path
-            )
+                        dependency = metas[ref]
+                        stack.append((meta, nodes, metric_refs, agg_or_ref))
+                        stack.append((dependency, dependency.expression.walk(), {}, False))
+                        visiting.add(ref)
+                        break
+            else:
+                if not agg_or_ref:
+                    _raise_metric_config_error(
+                        f"Metric '{meta.name}' missing an aggregation or metric ref", meta._path
+                    )
 
-        if metric_refs:
-            expanded = self.expression.copy()
-            for column in expanded.find_all(exp.Column):
-                metric = metric_refs.get(column)
+                if metric_refs:
+                    expanded = meta.expression.copy()
+                    for column in expanded.find_all(exp.Column):
+                        reference = metric_refs.get(column)
+                        if reference is not None:
+                            column.replace(metrics[reference].expanded.copy())
+                else:
+                    expanded = exp.alias_(meta.expression, meta.name)
 
-                if metric:
-                    column.replace(metric.expanded.copy())
-        else:
-            expanded = exp.alias_(self.expression, self.name)
+                metric = Metric(**meta.dict(), expanded=expanded)
+                metric._path = meta._path
+                visiting.remove(meta.name)
 
-        metric = Metric(**self.dict(), expanded=expanded)
-        metric._path = self._path
-        return metric
+                if not stack:
+                    return metric
+
+                metrics[meta.name] = metric
 
 
 class Metric(MetricMeta, frozen=True):
