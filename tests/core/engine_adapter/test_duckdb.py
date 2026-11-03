@@ -126,12 +126,26 @@ def test_drop_catalog_motherduck(make_mocked_engine_adapter: t.Callable) -> None
     assert to_sql_calls(adapter) == ['DROP DATABASE IF EXISTS "foo" CASCADE']
 
 
+def _ensure_ducklake(conn) -> None:
+    """Load DuckLake without reinstalling it when a previous test already did.
+
+    On Windows, install_extension moves a file into the extension directory.
+    A ducklake.dll that is still mapped from an earlier test in this process
+    makes that move fail with "Access is denied".
+    """
+    installed = conn.execute(
+        "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'ducklake'"
+    ).fetchone()
+    if not installed or not installed[0]:
+        conn.install_extension("ducklake")
+    conn.load_extension("ducklake")
+
+
 @pytest.mark.xdist_group("ducklake_extension")
 def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
     catalog = "a_ducklake_db"
 
-    duck_conn.install_extension("ducklake")
-    duck_conn.load_extension("ducklake")
+    _ensure_ducklake(duck_conn)
     duck_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} (DATA_PATH '{tmp_path}');"
     )
@@ -163,8 +177,7 @@ def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, duck_conn, tmp_p
     # omit CASCADE for objects in a DuckLake catalog while keeping it for native catalogs.
     catalog = "a_ducklake_db"
 
-    duck_conn.install_extension("ducklake")
-    duck_conn.load_extension("ducklake")
+    _ensure_ducklake(duck_conn)
     duck_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} (DATA_PATH '{tmp_path}');"
     )
@@ -195,8 +208,7 @@ def test_drop_table_ducklake_no_cascade_mixed_case_alias(
 ):
     # Catalog aliases keep their case in duckdb_databases(), but SQLMesh normalizes
     # table names to lowercase, so the catalog type lookup must be case-insensitive.
-    duck_conn.install_extension("ducklake")
-    duck_conn.load_extension("ducklake")
+    _ensure_ducklake(duck_conn)
     duck_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/my_lake.ducklake' AS \"MyLake\" (DATA_PATH '{tmp_path}');"
     )
