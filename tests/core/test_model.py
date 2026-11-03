@@ -13553,6 +13553,7 @@ def test_external_model_does_not_inherit_model_defaults_gateway() -> None:
 
 
 def test_external_model_does_not_inherit_model_defaults_statements() -> None:
+    """External models drop the default statements but keep explicit ones; SQL models inherit them."""
     defaults = ModelDefaultsConfig(
         dialect="duckdb",
         pre_statements=["SET a = 1"],

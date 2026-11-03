@@ -2583,6 +2583,12 @@ def _create_model(
     use_original_sql: bool = False,
     **kwargs: t.Any,
 ) -> Model:
+    """Creates a model of the given class, applying the project's model defaults.
+
+    Defaults that don't apply to the model class are dropped. External models, for example, don't
+    inherit the default gateway or the default pre-statements, post-statements and on-virtual-update
+    statements.
+    """
     validate_extra_and_required_fields(
         klass,
         {"name", *kwargs} - {"grain", "table_properties"},

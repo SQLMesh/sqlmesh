@@ -4431,6 +4431,11 @@ ON_VIRTUAL_UPDATE_END;
 def test_model_defaults_statements_not_applied_to_external_models(
     tmp_path: Path, statement_type: str
 ):
+    """Changing a default statement that calls a project macro doesn't break the plan.
+
+    External models used to inherit the statement without the project's macros, so the second
+    plan failed when it rendered their copy to compare it.
+    """
     (tmp_path / "macros").mkdir()
     (tmp_path / "macros" / "tag.py").write_text(
         """
