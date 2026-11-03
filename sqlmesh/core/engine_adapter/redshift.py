@@ -291,11 +291,18 @@ class RedshiftEngineAdapter(
 
             distkey = table_properties.get("DISTKEY")
             if distkey:
-                properties.append(exp.DistKeyProperty(this=_to_identifier_if_string(distkey)))
+                properties.append(
+                    exp.DistKeyProperty(this=_to_identifier_if_string(distkey.unnest()))
+                )
 
             sortkey = table_properties.get("SORTKEY")
             if sortkey:
-                sortkey_expressions = sortkey.expressions if sortkey.expressions else [sortkey]
+                if isinstance(sortkey, (exp.Tuple, exp.Array)):
+                    sortkey_expressions = sortkey.expressions
+                elif isinstance(sortkey, exp.Paren):
+                    sortkey_expressions = [sortkey.unnest()]
+                else:
+                    sortkey_expressions = [sortkey]
                 properties.append(
                     exp.SortKeyProperty(
                         this=[

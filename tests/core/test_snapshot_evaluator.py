@@ -28,6 +28,7 @@ from sqlmesh.core.engine_adapter.shared import (
 from sqlmesh.core.environment import EnvironmentNamingInfo
 from sqlmesh.core.macros import RuntimeStage, macro, MacroEvaluator, MacroFunc
 from sqlmesh.core.model import (
+    AuditResult,
     Model,
     FullKind,
     IncrementalByTimeRangeKind,
@@ -245,6 +246,122 @@ def test_evaluate(mocker: MockerFixture, adapter_mock, make_snapshot):
         column_descriptions={},
         **common_kwargs,
     )
+
+
+def test_evaluate_reports_materialization_through_transaction_exit(
+    duck_conn, mocker: MockerFixture, make_snapshot
+):
+    from sqlmesh.core.engine_adapter import DuckDBEngineAdapter
+    from sqlmesh.core.execution_observation import observer_scope
+
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=FullKind(),
+        query=parse_one("SELECT 1 AS value"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    duck_conn.execute("CREATE SCHEMA sqlmesh__test_schema")
+    evaluator = SnapshotEvaluator(DuckDBEngineAdapter(lambda: duck_conn))
+    observations: t.List[t.Tuple[str, t.Dict[str, t.Any], t.Optional[BaseException]]] = []
+    materialize_active = False
+
+    def observer(phase, facts, error):
+        nonlocal materialize_active
+        observations.append((phase, dict(facts), error))
+        if facts["action"] == "materialize":
+            materialize_active = phase == "start"
+
+    target = snapshot.table_name()
+    transaction_failure = RuntimeError("transaction exit failed")
+    transaction_depth = 0
+    transaction = evaluator.adapter.transaction
+
+    @contextlib.contextmanager
+    def fail_outer_transaction(*args: t.Any, **kwargs: t.Any) -> t.Iterator[None]:
+        nonlocal transaction_depth
+        outermost = transaction_depth == 0
+        fail_on_exit = outermost and materialize_active
+        transaction_depth += 1
+        try:
+            with transaction(*args, **kwargs):
+                yield
+            if fail_on_exit:
+                raise transaction_failure
+        finally:
+            transaction_depth -= 1
+
+    mocker.patch.object(evaluator.adapter, "transaction", new=fail_outer_transaction)
+    with observer_scope(observer), pytest.raises(RuntimeError) as raised:
+        evaluator.evaluate(
+            snapshot,
+            start="2020-01-01",
+            end="2020-01-02",
+            execution_time="2020-01-02",
+            snapshots={},
+            target_table_exists=False,
+        )
+
+    assert raised.value is transaction_failure
+    assert evaluator.adapter.table_exists(target)
+    materialize_events = [event for event in observations if event[1]["action"] == "materialize"]
+    assert [phase for phase, _, _ in materialize_events] == ["start", "finish"]
+    assert all(facts["kind"] == "physical" for _, facts, _ in materialize_events)
+    assert all(facts["target"] == target for _, facts, _ in materialize_events)
+    assert all(facts["creating"] is True for _, facts, _ in materialize_events)
+    assert materialize_events[0][2] is None
+    assert materialize_events[1][2] is transaction_failure
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_create_physical_schemas_preserves_observation_context(duck_conn, make_snapshot, workers):
+    from contextvars import ContextVar
+
+    from sqlmesh.core.engine_adapter import DuckDBEngineAdapter
+    from sqlmesh.core.execution_observation import observer_scope
+
+    snapshots = []
+    for index in ("one", "two"):
+        snapshot = make_snapshot(
+            SqlModel(
+                name=f"schema_{index}.model",
+                kind=FullKind(),
+                query=parse_one("SELECT 1 AS value"),
+            )
+        )
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots.append(snapshot)
+    evaluator = SnapshotEvaluator(
+        DuckDBEngineAdapter(lambda: duck_conn), ddl_concurrent_tasks=workers
+    )
+    consumer = ContextVar("schema_consumer", default=None)
+    observed = []
+
+    def observer(phase, facts, error):
+        observed.append((phase, dict(facts), error, consumer.get()))
+
+    token = consumer.set("parent")
+    try:
+        with observer_scope(observer):
+            evaluator.create_physical_schemas(snapshots, DeployabilityIndex.all_deployable())
+    finally:
+        consumer.reset(token)
+
+    query_events = [event for event in observed if event[1]["kind"] == "query"]
+    assert len(query_events) == 4
+    assert sum(phase == "start" for phase, _, _, _ in query_events) == 2
+    assert sum(phase == "finish" for phase, _, _, _ in query_events) == 2
+    assert all(facts["action"] == "execute" for _, facts, _, _ in query_events)
+    assert all(context == "parent" for _, _, _, context in query_events)
+    assert all(error is None for phase, _, error, _ in query_events if phase == "finish")
+
+    created_schemas = {
+        row[0]
+        for row in duck_conn.execute(
+            "SELECT schema_name FROM information_schema.schemata"
+        ).fetchall()
+    }
+    assert {"sqlmesh__schema_one", "sqlmesh__schema_two"} <= created_schemas
 
 
 def test_runtime_stages(capsys, mocker, adapter_mock, make_snapshot):
@@ -3328,6 +3445,26 @@ def test_standalone_audit(mocker: MockerFixture, adapter_mock, make_snapshot):
     adapter_mock.session.assert_not_called()
 
 
+def _audit_observed(
+    evaluator: SnapshotEvaluator,
+    snapshot: Snapshot,
+    *,
+    observe_result: t.Callable[[AuditResult], None],
+    **kwargs: t.Any,
+) -> t.List[AuditResult]:
+    """Exercise the generic hook at the real per-audit evaluator boundary."""
+    from sqlmesh.core.execution_observation import observer_scope
+
+    def observer(
+        phase: str, facts: t.Mapping[str, t.Any], error: t.Optional[BaseException]
+    ) -> None:
+        if phase == "finish" and facts["kind"] == "audit" and "audit_result" in facts:
+            observe_result(facts["audit_result"])
+
+    with observer_scope(observer):
+        return evaluator.audit(snapshot, **kwargs)
+
+
 def test_audit_wap(adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]) -> None:
     evaluator = SnapshotEvaluator(adapter_mock)
 
@@ -3353,8 +3490,15 @@ def test_audit_wap(adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot])
     expected_table_name = f"spark_catalog.test_schema.test_table.branch_wap_{wap_id}"
     adapter_mock.wap_table_name.return_value = expected_table_name
     adapter_mock.fetchone.return_value = (0,)
+    observed_results: t.List[AuditResult] = []
 
-    evaluator.audit(snapshot, snapshots={}, wap_id=wap_id)
+    _audit_observed(
+        evaluator,
+        snapshot,
+        snapshots={},
+        wap_id=wap_id,
+        observe_result=observed_results.append,
+    )
 
     call_args = adapter_mock.fetchone.call_args_list
     assert len(call_args) == 2
@@ -3373,6 +3517,123 @@ def test_audit_wap(adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot])
 
     adapter_mock.wap_table_name.assert_called_once_with(snapshot.table_name(), wap_id)
     adapter_mock.wap_publish.assert_called_once_with(snapshot.table_name(), wap_id)
+    assert [result.audit.name for result in observed_results] == ["not_null", "test_audit"]
+
+
+def test_audit_observer_preserves_completed_results_when_a_later_audit_fails(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    evaluator = SnapshotEvaluator(adapter_mock)
+    model = SqlModel(
+        name="test_schema.test_table",
+        kind=FullKind(),
+        query=parse_one("SELECT a::int FROM tbl"),
+        audits=[
+            ("not_null", {"columns": exp.to_column("a")}),
+            ("unique_values", {"columns": exp.convert(["a"])}),
+        ],
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    observed_results: t.List[AuditResult] = []
+    fetch_count = 0
+
+    def fetch_audit_result(*args: t.Any, **kwargs: t.Any) -> t.Tuple[int]:
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            assert [result.audit.name for result in observed_results] == ["not_null"]
+            raise RuntimeError("second audit failed")
+        return (0,)
+
+    adapter_mock.fetchone.side_effect = fetch_audit_result
+
+    with pytest.raises(RuntimeError, match="second audit failed"):
+        _audit_observed(
+            evaluator,
+            snapshot,
+            snapshots={},
+            observe_result=observed_results.append,
+        )
+
+    assert [result.audit.name for result in observed_results] == ["not_null"]
+
+
+def test_audit_observer_failure_does_not_abort_remaining_audits(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    evaluator = SnapshotEvaluator(adapter_mock)
+    model = SqlModel(
+        name="test_schema.test_table",
+        kind=FullKind(),
+        query=parse_one("SELECT a::int, b::int FROM tbl"),
+        audits=[
+            ("not_null", {"columns": exp.to_column("a")}),
+            ("not_null", {"columns": exp.to_column("b")}),
+        ],
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    adapter_mock.fetchone.return_value = (0,)
+
+    def fail_observer(_result: AuditResult) -> None:
+        raise RuntimeError("observer unavailable")
+
+    results = _audit_observed(
+        evaluator,
+        snapshot,
+        snapshots={},
+        observe_result=fail_observer,
+    )
+
+    assert len(results) == adapter_mock.fetchone.call_count == 2
+
+
+def test_audit_observer_reports_failed_skipped_and_repeated_results_once_in_order(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    evaluator = SnapshotEvaluator(adapter_mock)
+    skipped_audit = ModelAudit(
+        name="skipped_audit",
+        query="SELECT * FROM test_schema.test_table",
+        skip=True,
+    )
+    model = SqlModel(
+        name="test_schema.test_table",
+        kind=FullKind(),
+        query=parse_one("SELECT a::int, b::int FROM tbl"),
+        audits=[
+            ("not_null", {"columns": exp.to_column("a")}),
+            ("skipped_audit", {}),
+            ("not_null", {"columns": exp.to_column("b")}),
+        ],
+        audit_definitions={skipped_audit.name: skipped_audit},
+    )
+    snapshot = make_snapshot(model)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    adapter_mock.fetchone.side_effect = [(2,), (0,)]
+    observed_results: t.List[AuditResult] = []
+
+    returned_results = _audit_observed(
+        evaluator,
+        snapshot,
+        snapshots={},
+        observe_result=observed_results.append,
+    )
+
+    assert observed_results == returned_results
+    assert [result.audit.name for result in observed_results] == [
+        "not_null",
+        "skipped_audit",
+        "not_null",
+    ]
+    assert [result.count for result in observed_results] == [2, None, 0]
+    assert [result.skipped for result in observed_results] == [False, True, False]
+    assert [observed_results[index].audit_args["columns"].sql() for index in (0, 2)] == [
+        "a",
+        "b",
+    ]
+    assert adapter_mock.fetchone.call_count == 2
 
 
 def test_audit_with_datetime_macros(adapter_mock, make_snapshot):
@@ -4853,9 +5114,15 @@ def test_multiple_engine_virtual_layer(snapshot: Snapshot, adapters, make_snapsh
     )
 
 
+@pytest.mark.parametrize("observer_enabled", [False, True])
 def test_wap_basic(
-    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot], mocker: MockerFixture
+    adapter_mock: Mock,
+    make_snapshot: t.Callable[..., Snapshot],
+    mocker: MockerFixture,
+    observer_enabled: bool,
 ) -> None:
+    from sqlmesh.core.execution_observation import observer_scope
+
     evaluator = SnapshotEvaluator(adapter_mock)
 
     model = SqlModel(
@@ -4871,19 +5138,25 @@ def test_wap_basic(
     expected_wap_table = "test_schema.test_table.branch_wap_12345678"
     adapter_mock.wap_prepare.return_value = expected_wap_table
 
-    wap_id = evaluator.evaluate(
-        snapshot,
-        start="2020-01-01",
-        end="2020-01-01",
-        execution_time="2020-01-01",
-        snapshots={},
-        target_table_exists=True,  # Use parameter to control table existence
-    )
+    observations = []
+
+    def observer(phase, facts, error):
+        observations.append((phase, dict(facts), error))
+
+    expected_table_name = snapshot.table_name()
+    with observer_scope(observer if observer_enabled else None):
+        wap_id = evaluator.evaluate(
+            snapshot,
+            start="2020-01-01",
+            end="2020-01-01",
+            execution_time="2020-01-01",
+            snapshots={},
+            target_table_exists=True,  # Use parameter to control table existence
+        )
 
     assert wap_id is not None
     assert len(wap_id) == 8
 
-    expected_table_name = snapshot.table_name()
     adapter_mock.wap_prepare.assert_called_once_with(expected_table_name, wap_id)
     adapter_mock.replace_query.assert_called_once_with(
         expected_wap_table,
@@ -4899,6 +5172,21 @@ def test_wap_basic(
         target_columns_to_types=mocker.ANY,
         source_columns=mocker.ANY,
     )
+
+    materialization_observations = [
+        (phase, facts, error)
+        for phase, facts, error in observations
+        if facts.get("kind") == "physical" and facts.get("action") == "materialize"
+    ]
+    if observer_enabled:
+        assert [
+            (phase, facts["target"], error) for phase, facts, error in materialization_observations
+        ] == [
+            ("start", expected_table_name, None),
+            ("finish", expected_table_name, None),
+        ]
+    else:
+        assert observations == []
 
 
 def test_wap_model_wap_supported(
@@ -5095,12 +5383,24 @@ def test_wap_publish_failure(adapter_mock: Mock, make_snapshot: t.Callable[..., 
     adapter_mock.wap_table_name.return_value = expected_wap_table_name
     adapter_mock.fetchone.return_value = (0,)
 
-    # Mock WAP publish to raise an exception
-    adapter_mock.wap_publish.side_effect = Exception("WAP publish failed")
+    observed_results: t.List[AuditResult] = []
 
-    # Execute audit with WAP ID and expect it to raise the exception
-    with pytest.raises(Exception, match="WAP publish failed"):
-        evaluator.audit(snapshot, snapshots={}, wap_id=wap_id)
+    def fail_wap_publish(*args: t.Any, **kwargs: t.Any) -> None:
+        assert [result.audit.name for result in observed_results] == ["not_null"]
+        raise RuntimeError("WAP publish failed")
+
+    adapter_mock.wap_publish.side_effect = fail_wap_publish
+
+    with pytest.raises(RuntimeError, match="WAP publish failed"):
+        _audit_observed(
+            evaluator,
+            snapshot,
+            snapshots={},
+            wap_id=wap_id,
+            observe_result=observed_results.append,
+        )
+
+    assert [result.audit.name for result in observed_results] == ["not_null"]
 
 
 def test_properties_are_preserved_in_both_create_statements(
@@ -5699,3 +5999,160 @@ def test_grants_in_production_with_dev_only_vde(
         # Should still apply grants to physical table when target layer is ALL or PHYSICAL
         sync_grants_mock.assert_called_once()
         assert sync_grants_mock.call_args[0][1] == {"select": ["user1"], "insert": ["role1"]}
+
+
+def test_promote_virtual_properties_see_snapshots_by_name(mocker: MockerFixture, make_snapshot):
+    """Promotion receives snapshots keyed by SnapshotId, but renderers expect them keyed by name.
+    Virtual properties must see the same name-keyed snapshots as `on_virtual_update` does."""
+
+    @macro()
+    def upstream_version(evaluator):
+        upstream = evaluator.snapshots.get('"test_schema"."upstream"')
+        return exp.Literal.string(upstream.version if upstream else "missing")
+
+    @macro()
+    def local_or_missing(evaluator, name):
+        value = evaluator.locals.get(name.name)
+        if isinstance(value, exp.Expr):
+            value = value.sql(evaluator.dialect, comments=False)
+        return exp.Literal.string(value or "missing")
+
+    adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
+    adapter_mock.dialect = "duckdb"
+    adapter_mock.with_settings.return_value = adapter_mock
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    upstream = load_sql_based_model(
+        d.parse("MODEL (name test_schema.upstream, kind FULL); SELECT 1 AS a")
+    )
+    upstream_snapshot = make_snapshot(upstream)
+    upstream_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name test_schema.test_model,
+                kind FULL,
+                virtual_properties (
+                    upstream_version = @upstream_version(),
+                    kind_name = @local_or_missing('model_kind_name'),
+                    this_view = @local_or_missing('this_model'),
+                ),
+            );
+            SELECT a FROM test_schema.upstream
+            """
+        )
+    )
+    snapshot = make_snapshot(model, nodes={upstream.fqn: upstream})
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    snapshots = {s.snapshot_id: s for s in (upstream_snapshot, snapshot)}
+    environment_naming_info = EnvironmentNamingInfo(name="test_env")
+    evaluator.promote(
+        [snapshot],
+        environment_naming_info,
+        snapshots=snapshots,
+        table_mapping=to_view_mapping(snapshots.values(), environment_naming_info),
+    )
+
+    view_properties = adapter_mock.create_view.call_args.kwargs["view_properties"]
+    assert view_properties["upstream_version"] == exp.Literal.string(upstream_snapshot.version)
+    assert view_properties["kind_name"] == exp.Literal.string("FULL")
+    # The environment view mapping still takes precedence over the physical table.
+    assert view_properties["this_view"] == exp.Literal.string(
+        '"test_schema__test_env"."test_model"'
+    )
+
+
+def test_promote_resolves_this_model_with_single_mapping_entry(
+    mocker: MockerFixture, make_snapshot
+):
+    """Rendering a promoted view's properties must not re-normalize the whole environment's view
+    mapping for every view (https://github.com/SQLMesh/sqlmesh/issues/6017)."""
+    adapter_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter")
+    adapter_mock.dialect = "duckdb"
+    adapter_mock.with_settings.return_value = adapter_mock
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    snapshots = {}
+    for i in range(20):
+        model = load_sql_based_model(
+            d.parse(
+                f"""
+                MODEL (
+                    name test_schema.model_{i},
+                    kind FULL,
+                    virtual_properties (description = 'model {i}'),
+                );
+                SELECT 1 AS a
+                """
+            )
+        )
+        snapshot = make_snapshot(model)
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        snapshots[snapshot.snapshot_id] = snapshot
+
+    environment_naming_info = EnvironmentNamingInfo(name="test_env")
+    table_mapping = to_view_mapping(snapshots.values(), environment_naming_info)
+    spy = mocker.spy(exp, "replace_tables")
+
+    evaluator.promote(
+        list(snapshots.values()),
+        environment_naming_info,
+        snapshots=snapshots,
+        table_mapping=table_mapping,
+    )
+
+    assert adapter_mock.create_view.call_count == 20
+    # One call per view, to resolve `this_model`.
+    assert spy.call_count == 20
+    for call in spy.call_args_list:
+        assert len(call.args[1]) == 1
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("operation", ["create", "promote", "demote", "migrate"])
+def test_observation_propagates_through_snapshot_dispatch(
+    mocker, adapter_mock, snapshot, workers, operation
+):
+    from contextvars import ContextVar
+    from sqlmesh.core.execution_observation import observer_scope
+
+    evaluator = SnapshotEvaluator(adapter_mock, ddl_concurrent_tasks=workers)
+    consumer = ContextVar("snapshot_dispatch_consumer", default=None)
+    events = []
+
+    def observer(phase, facts, error):
+        assert consumer.get() == "admission"
+        assert facts["snapshot"] is snapshot
+        events.append((phase, facts["action"], error))
+
+    naming = EnvironmentNamingInfo(name="test")
+    mocker.patch.object(evaluator, "_get_virtual_data_objects", return_value={})
+    mocker.patch.object(
+        evaluator, "_get_physical_data_objects", return_value={snapshot.snapshot_id: mocker.Mock()}
+    )
+    mocker.patch.object(evaluator, "_create_schemas")
+    token = consumer.set("admission")
+    try:
+        with observer_scope(observer):
+            if operation == "create":
+                evaluator._create_snapshots(
+                    [snapshot],
+                    {snapshot.name: snapshot},
+                    DeployabilityIndex.all_deployable(),
+                    None,
+                    set(),
+                    set(),
+                )
+            elif operation == "promote":
+                evaluator.promote([snapshot], naming)
+            elif operation == "demote":
+                evaluator.demote([snapshot], naming)
+            else:
+                evaluator.migrate([snapshot], {snapshot.snapshot_id: snapshot})
+    finally:
+        consumer.reset(token)
+    action = "schema_migration" if operation == "migrate" else operation
+    assert events == [("start", action, None), ("finish", action, None)]

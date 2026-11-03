@@ -89,6 +89,7 @@ ENGINES = [
     IntegrationTestEngine("snowflake", native_dataframe_type="snowpark", cloud=True),
     IntegrationTestEngine("fabric", cloud=True),
     IntegrationTestEngine("gcp_postgres", cloud=True),
+    IntegrationTestEngine("db2", cloud=False),
 ]
 
 ENGINES_BY_NAME = {e.engine: e for e in ENGINES}
@@ -542,6 +543,14 @@ class TestContext:
                     CAST(ep.value AS NVARCHAR(MAX)) comment 
                 FROM fn_listextendedproperty('MS_Description', 'schema', '{schema_name}', '{kind}', '{table_name}', DEFAULT, DEFAULT) ep
             """
+        elif self.dialect == "db2":
+            # Db2 stores table/view remarks in SYSCAT.TABLES
+            query = f"""
+                SELECT TABNAME, REMARKS
+                FROM SYSCAT.TABLES
+                WHERE UPPER(TABSCHEMA) = '{schema_name.upper()}'
+                AND UPPER(TABNAME) = '{table_name.upper()}'
+            """
 
         result = self.engine_adapter.fetchall(query)
 
@@ -661,6 +670,14 @@ class TestContext:
                 FROM INFORMATION_SCHEMA.COLUMNS col
                 CROSS APPLY fn_listextendedproperty('MS_Description', 'schema', col.TABLE_SCHEMA, '{kind}', col.TABLE_NAME, 'column', col.COLUMN_NAME) ep
                 WHERE col.TABLE_SCHEMA = '{schema_name}' AND col.TABLE_NAME = '{table_name}'
+            """
+        elif self.dialect == "db2":
+            # Db2 stores column remarks in SYSCAT.COLUMNS
+            query = f"""
+                SELECT COLNAME, REMARKS
+                FROM SYSCAT.COLUMNS
+                WHERE UPPER(TABSCHEMA) = '{schema_name.upper()}'
+                AND UPPER(TABNAME) = '{table_name.upper()}'
             """
 
         result = self.engine_adapter.fetchall(query)
@@ -809,6 +826,10 @@ class TestContext:
             project_id = self.engine_adapter.get_current_catalog()
             service_account = f"sqlmesh-test-{role_name}@{project_id}.iam.gserviceaccount.com"
             return f"serviceAccount:{service_account}", None
+        if self.dialect == "db2":
+            # Db2 LUW uses OS-level users for authentication, but database roles
+            # work for GRANT/REVOKE testing without requiring OS user setup.
+            return username, f"CREATE ROLE {username}"
         raise ValueError(f"User creation not supported for dialect: {self.dialect}")
 
     def _create_user_or_role(self, username: str, password: t.Optional[str] = None) -> str:
@@ -874,7 +895,7 @@ class TestContext:
                 """)
                 self.engine_adapter.execute(f'DROP OWNED BY "{user_name}"')
                 self.engine_adapter.execute(f'DROP USER IF EXISTS "{user_name}"')
-            elif self.dialect == "snowflake":
+            elif self.dialect in ["snowflake", "db2"]:
                 self.engine_adapter.execute(f"DROP ROLE IF EXISTS {user_name}")
             elif self.dialect in ["databricks", "bigquery"]:
                 # For Databricks and BigQuery, we use pre-created accounts that should not be deleted
