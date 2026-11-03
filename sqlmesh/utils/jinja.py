@@ -267,6 +267,12 @@ def sort_dict_recursive(
 JinjaGlobalAttribute = t.Union[str, int, float, bool, AttributeDict]
 
 
+def _hashable_json_value(value: t.Any) -> t.Dict[str, str]:
+    """Represents a value that JSON can't serialize, keeping its type so that, for example, a date
+    and its ISO string hash differently."""
+    return {"__type__": f"{type(value).__module__}.{type(value).__qualname__}", "value": str(value)}
+
+
 class JinjaMacroRegistry(PydanticModel):
     """Registry for Jinja macros.
 
@@ -529,10 +535,10 @@ class JinjaMacroRegistry(PydanticModel):
         trimmed_global_objs = {
             k: self.global_objs[k] for k in ("refs", "sources", "vars") if k in self.global_objs
         }
-        # `default=str` covers values that JSON can't represent, such as dbt vars loaded from an
-        # unquoted YAML date. It doesn't apply to JSON-serializable values, so their hashes are
-        # unchanged.
-        data.append(json.dumps(trimmed_global_objs, sort_keys=True, default=str))
+        # `_hashable_json_value` covers values that JSON can't represent, such as dbt vars loaded
+        # from an unquoted YAML date. It doesn't apply to JSON-serializable values, so their hashes
+        # are unchanged.
+        data.append(json.dumps(trimmed_global_objs, sort_keys=True, default=_hashable_json_value))
 
         return data
 
