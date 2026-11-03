@@ -24,6 +24,7 @@ class SharedU2MCredentialsProvider:
 
     If reading the token fails (for example because the refresh token expired or was revoked) the login is
     discarded, so the next connection or request logs in again rather than failing for the rest of the process.
+    Network failures while refreshing keep the login, so the next request retries the refresh without a browser flow.
     """
 
     def __init__(self, server_hostname: str, auth_type: str):
@@ -39,18 +40,26 @@ class SharedU2MCredentialsProvider:
         return self._auth_type
 
     def __call__(self, *args: t.Any, **kwargs: t.Any) -> HeaderFactory:
+        """Called by the connector once per connection. Logs in if needed and returns that connection's header factory."""
         login_attempts_seen = self._login_attempts_finished
         with self._lock:
             self._ensure_logged_in(login_attempts_seen)
         return self._headers
 
     def _headers(self) -> t.Dict[str, str]:
+        """Returns the auth headers for one request, refreshing the token if it has expired."""
+        from databricks.sql.exc import RequestError
+
         headers: t.Dict[str, str] = {}
         login_attempts_seen = self._login_attempts_finished
         with self._lock:
             auth_provider = self._ensure_logged_in(login_attempts_seen)
             try:
                 auth_provider.add_headers(headers)
+            except RequestError:
+                # A network failure while refreshing leaves the login intact, since the connector only replaces its
+                # tokens after a successful refresh, so the next request retries the refresh rather than logging in
+                raise
             except Exception:
                 self._auth_provider = None
                 raise
@@ -113,7 +122,8 @@ def get_shared_u2m_credentials_provider(
     """Returns the process-wide U2M credentials provider for the given workspace and auth type.
 
     Engine adapters and config copies are created several times per process, so the provider is kept at module
-    level to avoid prompting the user to log in more than once.
+    level to avoid prompting the user to log in more than once. U2M OAuth is an interactive, single-user login, so
+    every connection to a workspace in this process uses the identity of whoever completed the browser flow.
     """
     # The same workspace can be written with or without a scheme or trailing slash
     normalized_hostname = re.sub(r"^https?://", "", server_hostname.strip(), flags=re.I)

@@ -143,6 +143,34 @@ def test_failed_token_read_discards_login():
     assert mock_create_auth_provider.call_count == 2
 
 
+def test_network_failure_during_token_read_keeps_login():
+    from databricks.sql.exc import RequestError
+
+    provider = SharedU2MCredentialsProvider("dbc-test.cloud.databricks.com", "databricks-oauth")
+    fake_auth_provider = FakeAuthProvider()
+    refresh_attempts = 0
+
+    class FlakyAuthProvider:
+        def add_headers(self, request_headers: t.Dict[str, str]) -> None:
+            nonlocal refresh_attempts
+            refresh_attempts += 1
+            if refresh_attempts == 1:
+                raise RequestError("HTTP request failed: connection reset")
+            fake_auth_provider.add_headers(request_headers)
+
+    with patch.object(
+        provider, "_create_auth_provider", return_value=FlakyAuthProvider()
+    ) as mock_create_auth_provider:
+        header_factory = provider()
+        with pytest.raises(RequestError):
+            header_factory()
+
+        # The refresh is retried on the next request without another browser flow
+        assert header_factory() == {"Authorization": "Bearer token"}
+
+    assert mock_create_auth_provider.call_count == 1
+
+
 def test_get_shared_u2m_credentials_provider():
     provider = get_shared_u2m_credentials_provider(
         "dbc-test.cloud.databricks.com", "databricks-oauth"
