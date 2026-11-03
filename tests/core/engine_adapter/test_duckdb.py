@@ -126,32 +126,35 @@ def test_drop_catalog_motherduck(make_mocked_engine_adapter: t.Callable) -> None
     assert to_sql_calls(adapter) == ['DROP DATABASE IF EXISTS "foo" CASCADE']
 
 
-def _ensure_ducklake(conn) -> None:
+@pytest.fixture
+def ducklake_conn(duck_conn):
     """Load DuckLake without reinstalling it when a previous test already did.
 
     On Windows, install_extension moves a file into the extension directory.
     A ducklake.dll that is still mapped from an earlier test in this process
-    makes that move fail with "Access is denied".
+    makes that move fail with "Access is denied".  Installing only when
+    duckdb_extensions() says it is absent, then calling load_extension, avoids
+    the second install while the DLL is still mapped.
     """
-    installed = conn.execute(
+    installed = duck_conn.execute(
         "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'ducklake'"
     ).fetchone()
     if not installed or not installed[0]:
-        conn.install_extension("ducklake")
-    conn.load_extension("ducklake")
+        duck_conn.install_extension("ducklake")
+    duck_conn.load_extension("ducklake")
+    return duck_conn
 
 
 @pytest.mark.xdist_group("ducklake_extension")
-def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
+def test_ducklake_partitioning(adapter: EngineAdapter, ducklake_conn, tmp_path):
     catalog = "a_ducklake_db"
 
-    _ensure_ducklake(duck_conn)
-    duck_conn.execute(
+    ducklake_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} (DATA_PATH '{tmp_path}');"
     )
 
     # no partitions on catalog creation
-    partition_info = duck_conn.execute(
+    partition_info = ducklake_conn.execute(
         f"SELECT * FROM __ducklake_metadata_{catalog}.main.ducklake_partition_info"
     ).fetchdf()
     assert partition_info.empty
@@ -165,31 +168,30 @@ def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
     )
 
     # 1 partition after table creation
-    partition_info = duck_conn.execute(
+    partition_info = ducklake_conn.execute(
         f"SELECT * FROM __ducklake_metadata_{catalog}.main.ducklake_partition_info"
     ).fetchdf()
     assert partition_info.shape[0] == 1
 
 
 @pytest.mark.xdist_group("ducklake_extension")
-def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, duck_conn, tmp_path):
+def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, ducklake_conn, tmp_path):
     # DuckLake does not implement DROP TABLE/VIEW ... CASCADE, so the adapter must
     # omit CASCADE for objects in a DuckLake catalog while keeping it for native catalogs.
     catalog = "a_ducklake_db"
 
-    _ensure_ducklake(duck_conn)
-    duck_conn.execute(
+    ducklake_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} (DATA_PATH '{tmp_path}');"
     )
 
-    duck_conn.execute(f"CREATE SCHEMA {catalog}.phys")
-    duck_conn.execute(f"CREATE SCHEMA {catalog}.virt")
-    duck_conn.execute(f"CREATE TABLE {catalog}.phys.t (i INTEGER)")
-    duck_conn.execute(f"CREATE VIEW {catalog}.virt.v AS SELECT * FROM {catalog}.phys.t")
+    ducklake_conn.execute(f"CREATE SCHEMA {catalog}.phys")
+    ducklake_conn.execute(f"CREATE SCHEMA {catalog}.virt")
+    ducklake_conn.execute(f"CREATE TABLE {catalog}.phys.t (i INTEGER)")
+    ducklake_conn.execute(f"CREATE VIEW {catalog}.virt.v AS SELECT * FROM {catalog}.phys.t")
 
     # native catalog, cascade is passed through
-    duck_conn.execute("CREATE TABLE memory.main.native_t (i INTEGER)")
-    duck_conn.execute("CREATE VIEW memory.main.native_v AS SELECT * FROM memory.main.native_t")
+    ducklake_conn.execute("CREATE TABLE memory.main.native_t (i INTEGER)")
+    ducklake_conn.execute("CREATE VIEW memory.main.native_v AS SELECT * FROM memory.main.native_t")
 
     adapter.drop_table(f"{catalog}.phys.t", cascade=True)
     adapter.drop_view(f"{catalog}.virt.v", cascade=True)
@@ -204,17 +206,16 @@ def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, duck_conn, tmp_p
 
 @pytest.mark.xdist_group("ducklake_extension")
 def test_drop_table_ducklake_no_cascade_mixed_case_alias(
-    adapter: EngineAdapter, duck_conn, tmp_path
+    adapter: EngineAdapter, ducklake_conn, tmp_path
 ):
     # Catalog aliases keep their case in duckdb_databases(), but SQLMesh normalizes
     # table names to lowercase, so the catalog type lookup must be case-insensitive.
-    _ensure_ducklake(duck_conn)
-    duck_conn.execute(
+    ducklake_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/my_lake.ducklake' AS \"MyLake\" (DATA_PATH '{tmp_path}');"
     )
-    duck_conn.execute("CREATE SCHEMA MyLake.phys")
-    duck_conn.execute("CREATE TABLE MyLake.phys.t (i INTEGER)")
-    duck_conn.execute("CREATE VIEW MyLake.phys.v AS SELECT * FROM MyLake.phys.t")
+    ducklake_conn.execute("CREATE SCHEMA MyLake.phys")
+    ducklake_conn.execute("CREATE TABLE MyLake.phys.t (i INTEGER)")
+    ducklake_conn.execute("CREATE VIEW MyLake.phys.v AS SELECT * FROM MyLake.phys.t")
 
     adapter.drop_table("mylake.phys.t", cascade=True)
     adapter.drop_view("mylake.phys.v", cascade=True)
