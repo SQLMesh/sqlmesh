@@ -1574,7 +1574,7 @@ class SnapshotEvaluator:
     def _can_clone(self, snapshot: Snapshot, deployability_index: DeployabilityIndex) -> bool:
         adapter = self.get_adapter(snapshot.model.gateway)
         return (
-            snapshot.is_forward_only
+            deployability_index.is_representative(snapshot)
             and snapshot.is_materialized
             and bool(snapshot.previous_versions)
             and adapter.SUPPORTS_CLONING

@@ -1738,7 +1738,9 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                         children_deployable = False
             else:
                 children_deployable = False
-                if not snapshots[node].is_paused:
+                if not snapshot.is_paused or (
+                    snapshot.is_indirect_non_breaking and snapshot.intervals
+                ):
                     representative_shared_version_ids.add(node)
 
             deployability_mapping[node] = this_deployable
