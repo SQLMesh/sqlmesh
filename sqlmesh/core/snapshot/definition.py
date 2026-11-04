@@ -1675,7 +1675,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
     ) -> DeployabilityIndex:
         def _snapshot_is_representative(snapshot: Snapshot) -> bool:
             return not snapshot.is_paused or (
-                snapshot.is_indirect_non_breaking and snapshot.intervals
+                snapshot.is_indirect_non_breaking and bool(snapshot.intervals)
             )
 
         if not isinstance(snapshots, dict):
