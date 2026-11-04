@@ -420,6 +420,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        self._materializations_loaded: bool = False
         self._load_state: bool = load_state
         self._uncached_model_names: t.Set[str] = set()
         self._selector_cls = selector or NativeSelector
@@ -807,6 +808,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
         self._loaded = True
+        self._materializations_loaded = True
         return self
 
     def _update_model_schemas_and_validate(self, model_fqns: t.Optional[t.Set[str]] = None) -> None:
@@ -3375,9 +3377,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     def _load_materializations(self) -> None:
-        if not self._loaded:
+        if not self._materializations_loaded:
             for loader in self._loaders:
                 loader.load_materializations()
+            self._materializations_loaded = True
 
     def _select_models_for_run(
         self,
