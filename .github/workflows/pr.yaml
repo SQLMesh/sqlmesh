@@ -150,6 +150,10 @@ jobs:
           . ./venv/Scripts/activate
           python.exe -m pip install --upgrade pip
           make install-dev
+      - name: Install DuckLake extension
+        run: |
+          . ./venv/Scripts/activate
+          python -c "import duckdb; duckdb.connect().install_extension('ducklake')"
       - name: Run fast unit tests
         run: |
           . ./venv/Scripts/activate
