@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import typing as t
 import numpy as np  # noqa: TID253
 import pandas as pd  # noqa: TID253
@@ -22,6 +24,8 @@ from sqlmesh.utils.date import to_datetime, to_timestamp
 from tests.core.integration.utils import add_projection_to_model
 
 pytestmark = pytest.mark.slow
+
+logging.getLogger("sqlmesh").setLevel(logging.ERROR)
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
@@ -62,14 +66,7 @@ def test_forward_only_plan_with_effective_date(context_fixture: Context, request
     plan = plan_builder.set_effective_from("2023-01-05").build()
     # Default start should be set to effective_from
     assert plan.missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-05"), to_timestamp("2023-01-06")),
-                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
+        # top_waiters_snapshot has no missing intervals as it is an INDIRECT_NON_BREAKING change.
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[
@@ -83,13 +80,7 @@ def test_forward_only_plan_with_effective_date(context_fixture: Context, request
     plan = plan_builder.set_start("2023-01-06").build()
     # Start override should take precedence
     assert plan.missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
+        # top_waiters_snapshot has no missing intervals as it is an INDIRECT_NON_BREAKING change.
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[
@@ -103,13 +94,7 @@ def test_forward_only_plan_with_effective_date(context_fixture: Context, request
     # Start should remain unchanged
     assert plan.start == "2023-01-06"
     assert plan.missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
+        # top_waiters_snapshot has no missing intervals as it is an INDIRECT_NON_BREAKING change.
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[
@@ -133,6 +118,7 @@ def test_forward_only_plan_with_effective_date(context_fixture: Context, request
     # Make sure that the previously set effective_from is respected
     assert prod_plan.start == to_timestamp("2023-01-04")
     assert prod_plan.missing_intervals == [
+        # top_waiters_snapshot has missing intervals in the production environment despite it being an INDIRECT_NON_BREAKING change.
         SnapshotIntervals(
             snapshot_id=top_waiters_snapshot.snapshot_id,
             intervals=[
@@ -208,18 +194,7 @@ def test_forward_only_model_regular_plan(init_and_plan_context: t.Callable):
     )
     plan_builder.set_start("2023-01-06")
     assert plan_builder.build().missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-01"), to_timestamp("2023-01-02")),
-                (to_timestamp("2023-01-02"), to_timestamp("2023-01-03")),
-                (to_timestamp("2023-01-03"), to_timestamp("2023-01-04")),
-                (to_timestamp("2023-01-04"), to_timestamp("2023-01-05")),
-                (to_timestamp("2023-01-05"), to_timestamp("2023-01-06")),
-                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
+        # top_waiters_snapshot has no missing intervals as it is an INDIRECT_NON_BREAKING change.
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[
@@ -232,18 +207,7 @@ def test_forward_only_model_regular_plan(init_and_plan_context: t.Callable):
     # Make sure that changed start is reflected in missing intervals
     plan_builder.set_start("2023-01-07")
     assert plan_builder.build().missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-01"), to_timestamp("2023-01-02")),
-                (to_timestamp("2023-01-02"), to_timestamp("2023-01-03")),
-                (to_timestamp("2023-01-03"), to_timestamp("2023-01-04")),
-                (to_timestamp("2023-01-04"), to_timestamp("2023-01-05")),
-                (to_timestamp("2023-01-05"), to_timestamp("2023-01-06")),
-                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
+        # top_waiters_snapshot has no missing intervals as it is an INDIRECT_NON_BREAKING change.
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[
