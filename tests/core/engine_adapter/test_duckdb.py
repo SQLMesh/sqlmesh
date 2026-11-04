@@ -1,5 +1,6 @@
 import typing as t
 
+import duckdb  # noqa: TID253
 import pandas as pd  # noqa: TID253
 import pytest
 from pytest_mock.plugin import MockerFixture
@@ -128,20 +129,15 @@ def test_drop_catalog_motherduck(make_mocked_engine_adapter: t.Callable) -> None
 
 @pytest.fixture
 def ducklake_conn(duck_conn):
-    """Load DuckLake without reinstalling it when a previous test already did.
-
-    On Windows, install_extension moves a file into the extension directory.
-    A ducklake.dll that is still mapped from an earlier test in this process
-    makes that move fail with "Access is denied".  Installing only when
-    duckdb_extensions() says it is absent, then calling load_extension, avoids
-    the second install while the DLL is still mapped.
-    """
-    installed = duck_conn.execute(
-        "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'ducklake'"
-    ).fetchone()
-    if not installed or not installed[0]:
+    # Once loaded, the DuckLake DLL stays mapped until the process exits, and on
+    # Windows install_extension then fails with "Access is denied".
+    # duckdb_extensions() can still report it as not installed on a new
+    # connection, so install only when loading fails.
+    try:
+        duck_conn.load_extension("ducklake")
+    except duckdb.Error:
         duck_conn.install_extension("ducklake")
-    duck_conn.load_extension("ducklake")
+        duck_conn.load_extension("ducklake")
     return duck_conn
 
 
