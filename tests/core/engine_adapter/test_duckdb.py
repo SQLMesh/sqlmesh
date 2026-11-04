@@ -1,6 +1,5 @@
 import typing as t
 
-import duckdb  # noqa: TID253
 import pandas as pd  # noqa: TID253
 import pytest
 from pytest_mock.plugin import MockerFixture
@@ -129,15 +128,10 @@ def test_drop_catalog_motherduck(make_mocked_engine_adapter: t.Callable) -> None
 
 @pytest.fixture
 def ducklake_conn(duck_conn):
-    # Once loaded, the DuckLake DLL stays mapped until the process exits, and on
-    # Windows install_extension then fails with "Access is denied".
-    # duckdb_extensions() can still report it as not installed on a new
-    # connection, so install only when loading fails.
-    try:
-        duck_conn.load_extension("ducklake")
-    except duckdb.Error:
-        duck_conn.install_extension("ducklake")
-        duck_conn.load_extension("ducklake")
+    # Don't call install_extension here: on Windows it fails with "Access is denied"
+    # once an earlier test in this process has loaded DuckLake. LOAD auto-installs it
+    # when missing, and Windows CI pre-installs it before pytest.
+    duck_conn.load_extension("ducklake")
     return duck_conn
 
 
