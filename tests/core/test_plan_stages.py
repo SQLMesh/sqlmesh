@@ -78,6 +78,34 @@ def snapshot_c(make_snapshot, snapshot_a: Snapshot) -> Snapshot:
     return snapshot
 
 
+@pytest.fixture
+def snapshot_d(make_snapshot, snapshot_a: Snapshot) -> Snapshot:
+    snapshot = make_snapshot(
+        SqlModel(
+            name="d",
+            query=parse_one("select * from a"),
+            kind=dict(name=ModelKindName.VIEW),
+        ),
+        nodes={'"a"': snapshot_a.model},
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+    return snapshot
+
+
+@pytest.fixture
+def snapshot_e(make_snapshot, snapshot_d: Snapshot) -> Snapshot:
+    snapshot = make_snapshot(
+        SqlModel(
+            name="e",
+            query=parse_one("select * from d"),
+            kind=dict(name=ModelKindName.VIEW),
+        ),
+        nodes={'"d"': snapshot_d.model},
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
+    return snapshot
+
+
 def test_build_plan_stages_basic(
     snapshot_a: Snapshot, snapshot_b: Snapshot, mocker: MockerFixture
 ) -> None:
@@ -1686,6 +1714,84 @@ def test_build_plan_stages_indirect_non_breaking_view_migration(
     assert isinstance(stages[6], BackfillStage)
     assert isinstance(stages[7], VirtualLayerUpdateStage)
     assert isinstance(stages[8], FinalizeEnvironmentStage)
+
+
+def test_build_plan_stages_indirect_non_breaking_view_dev(
+    snapshot_d: Snapshot, snapshot_e: Snapshot, make_snapshot, mocker: MockerFixture
+) -> None:
+    # Create environment
+    state_reader = mocker.Mock(spec=StateReader)
+    state_reader.get_snapshots.return_value = {}
+    existing_environment = Environment(
+        name="prod",
+        snapshots=[snapshot_d.table_info, snapshot_e.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="previous_plan",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[snapshot_d.snapshot_id, snapshot_e.snapshot_id],
+        finalized_ts=to_timestamp("2023-01-02"),
+    )
+    state_reader.get_environment.return_value = existing_environment
+
+    environment = Environment(
+        name="dev",
+        snapshots=[snapshot_d.table_info, snapshot_e.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="test_plan",
+        previous_plan_id="previous_plan",
+        promoted_snapshot_ids=[snapshot_d.snapshot_id, snapshot_e.snapshot_id],
+    )
+
+    # Create evaluatable plan
+    plan = EvaluatablePlan(
+        start="2023-01-01",
+        end="2023-01-02",
+        new_snapshots=[snapshot_d, snapshot_e],
+        environment=environment,
+        no_gaps=False,
+        skip_backfill=False,
+        empty_backfill=False,
+        restatements={},
+        restate_all_snapshots=False,
+        is_dev=False,
+        allow_destructive_models=set(),
+        allow_additive_models=set(),
+        forward_only=False,
+        end_bounded=False,
+        ensure_finalized_snapshots=False,
+        ignore_cron=False,
+        directly_modified_snapshots=[snapshot_d.snapshot_id],
+        indirectly_modified_snapshots={
+            snapshot_d.name: [snapshot_e.snapshot_id],
+        },
+        metadata_updated_snapshots=[],
+        removed_snapshots=[],
+        requires_backfill=True,
+        models_to_backfill=None,
+        execution_time="2023-01-02",
+        disabled_restatement_models=set(),
+        environment_statements=None,
+        user_provided_flags=None,
+    )
+
+    # Build plan stages
+    stages = build_plan_stages(plan, state_reader, None)
+
+    # Verify stages
+    assert len(stages) == 7
+
+    assert isinstance(stages[0], CreateSnapshotRecordsStage)
+    assert isinstance(stages[1], PhysicalLayerSchemaCreationStage)
+    assert isinstance(stages[2], BackfillStage)
+    assert isinstance(stages[3], EnvironmentRecordUpdateStage)
+    assert isinstance(stages[4], BackfillStage)
+    assert isinstance(stages[5], VirtualLayerUpdateStage)
+    assert isinstance(stages[6], FinalizeEnvironmentStage)
+
+    ## Verify that indirect non breaking change does not trigger a backfill
+    assert stages[2].selected_snapshot_ids == {snapshot_d.snapshot_id}
 
 
 def test_build_plan_stages_virtual_environment_mode_filtering(

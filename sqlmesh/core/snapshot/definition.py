@@ -1673,6 +1673,11 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         start: t.Optional[TimeLike] = None,  # plan start
         start_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ) -> DeployabilityIndex:
+        def _snapshot_is_representative(snapshot: Snapshot) -> bool:
+            return not snapshot.is_paused or (
+                snapshot.is_indirect_non_breaking and snapshot.intervals
+            )
+
         if not isinstance(snapshots, dict):
             snapshots = {s.snapshot_id: s for s in snapshots}
 
@@ -1728,9 +1733,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                     # Similarly, if the model depends on past and the start date is not aligned with the
                     # model's start, we should consider this snapshot non-deployable.
                     this_deployable = False
-                    if not snapshot.is_paused or (
-                        snapshot.is_indirect_non_breaking and snapshot.intervals
-                    ):
+                    if _snapshot_is_representative(snapshot):
                         # This snapshot represents what's currently deployed in prod.
                         representative_shared_version_ids.add(node)
                     else:
@@ -1738,9 +1741,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                         children_deployable = False
             else:
                 children_deployable = False
-                if not snapshot.is_paused or (
-                    snapshot.is_indirect_non_breaking and snapshot.intervals
-                ):
+                if _snapshot_is_representative(snapshot):
                     representative_shared_version_ids.add(node)
 
             deployability_mapping[node] = this_deployable
