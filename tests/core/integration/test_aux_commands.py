@@ -88,6 +88,28 @@ def test_table_name(init_and_plan_context: t.Callable):
     )
 
 
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_run_loads_materializations_once(init_and_plan_context: t.Callable, mocker: MockerFixture):
+    """Verify janitor and run dispatch loading while loaders execute only once."""
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+    load_dispatch_spy = mocker.spy(context, "_load_materializations")
+    loader_spies = [mocker.spy(loader, "load_materializations") for loader in context._loaders]
+    assert loader_spies
+    assert context._materializations_loaded is True
+
+    # Reset the guard to exercise lazy loading through run's janitor and scheduler paths.
+    context._materializations_loaded = False
+    context.run(skip_janitor=False)
+
+    # The janitor and run each call the context wrapper; the second call is guarded.
+    assert load_dispatch_spy.call_count == 2
+
+    # Only the janitor's first dispatch reaches the loaders.
+    for loader_spy in loader_spies:
+        assert loader_spy.call_count == 1
+
+
 def test_janitor_loads_materialization(tmp_path: Path):
     config_file_path = Path("config.yaml")
     database = tmp_path / "janitor_test.duckdb"
