@@ -272,10 +272,8 @@ def reset_console():
 
 
 @pytest.fixture
-def duck_conn() -> t.Generator[duckdb.DuckDBPyConnection, None, None]:
-    conn = duckdb.connect()
-    yield conn
-    conn.close()
+def duck_conn() -> duckdb.DuckDBPyConnection:
+    return duckdb.connect()
 
 
 def push_plan(context: Context, plan: Plan) -> None:
