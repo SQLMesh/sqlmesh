@@ -363,15 +363,13 @@ def test_macro_registry_data_hash_values_with_non_json_vars():
     # dbt loads an unquoted YAML date such as `cutoff: 2024-01-02` as a `date` object.
     registry = JinjaMacroRegistry(global_objs={"vars": {"cutoff": date(2024, 1, 2)}})
     registry.add_macros(macros)
-    assert (
-        registry.data_hash_values[-1]
-        == '{"vars": {"cutoff": {"__type__": "datetime.date", "value": "2024-01-02"}}}'
-    )
+    assert registry.data_hash_values[-1] == '{"vars": {"cutoff": "2024-01-02"}}'
 
-    # The type is part of the hash, so a date and its ISO string don't collide.
-    as_string = JinjaMacroRegistry(global_objs={"vars": {"cutoff": "2024-01-02"}})
-    as_string.add_macros(macros)
-    assert as_string.data_hash_values != registry.data_hash_values
+    # Saving a snapshot to state stores the date as a string. The hash must not change when the
+    # registry is loaded back, because migrations recompute fingerprints from stored snapshots.
+    reloaded = JinjaMacroRegistry.parse_raw(registry.json())
+    assert reloaded.global_objs["vars"]["cutoff"] == "2024-01-02"
+    assert reloaded.data_hash_values == registry.data_hash_values
 
     # JSON-serializable globals produce the same values as before.
     plain = JinjaMacroRegistry(global_objs={"vars": {"cutoff": "2024-01-02", "limit": 10}})
