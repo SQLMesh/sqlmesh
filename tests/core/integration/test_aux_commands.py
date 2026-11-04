@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import typing as t
+import subprocess
+import sys
 from unittest.mock import patch
 import pytest
 from pathlib import Path
@@ -86,27 +88,77 @@ def test_table_name(init_and_plan_context: t.Callable):
     )
 
 
-def test_janitor_loads_materialization(mocker: MockerFixture, tmp_path: Path):
-    models_dir = tmp_path / "models"
-    models_dir.mkdir(exist_ok=True)
+def test_janitor_loads_materialization(tmp_path: Path):
+    config_file_path = Path("config.yaml")
+    database = tmp_path / "janitor_test.duckdb"
+    materialization_name = "dummy_materialization"
+    materialization_file_path = Path(f"materializations/{materialization_name}.py")
+    schema_name = "test"
+    model_name = "dummy_model"
+    model_file_path = Path(f"models/{model_name}.sql")
+    config_yaml = f"""\
+gateways:
+    local:
+        connection:
+            type: duckdb
+            database: {database}
+default_gateway: local
+model_defaults:
+    dialect: duckdb
+"""
+    materialization_code = f"""from sqlmesh.core.snapshot.evaluator import CustomMaterialization
+class DummyMaterialization(CustomMaterialization):
+    NAME = "{materialization_name}"
+    def insert(self, table_name, query_or_df, model, is_first_insert, render_kwargs, **kwargs):
+        self._replace_query_for_model(model, table_name, query_or_df, render_kwargs)
+"""
+    model_code = f"""MODEL(name {schema_name}.{model_name}, kind CUSTOM (materialization '{materialization_name}'));
+SELECT 1 AS col"""
 
-    test_model = models_dir / "model.sql"
+    create_temp_file(tmp_path, config_file_path, config_yaml)
+    create_temp_file(tmp_path, materialization_file_path, materialization_code)
+    create_temp_file(tmp_path, model_file_path, model_code)
 
-    with open(test_model, "w") as f:
-        f.write(
-            "MODEL(name test.model, kind CUSTOM (materialization 'custom_full')); SELECT 1 AS col"
-        )
-
-    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
-    ctx = Context(paths=[tmp_path], config=config)
+    ctx = Context(paths=[tmp_path])
     ctx.plan("dev", no_prompts=True, auto_apply=True)
 
-    load_materializations_spy = mocker.spy(Context, "_load_materializations")
-
+    snapshot = ctx.get_snapshot(f"{schema_name}.{model_name}")
+    assert snapshot
+    table_name = snapshot.table_name()
+    assert ctx.engine_adapter.table_exists(table_name)
+    assert ctx.state_sync.get_snapshots([snapshot.snapshot_id])
+    assert ctx._loaded
+    assert ctx._materializations_loaded
     ctx.invalidate_environment("dev")
-    ctx.run_janitor(ignore_ttl=True)
+    ctx.close()
 
-    load_materializations_spy.assert_called_once()
+    # A fresh interpreter cannot reuse materialization classes loaded during setup.
+    program = """\
+import sys
+from sqlmesh.core.context import Context
+
+ctx = Context(paths=[sys.argv[1]], load=False)
+table_name = sys.argv[2]
+assert not ctx._loaded
+assert not ctx._materializations_loaded
+assert ctx.engine_adapter.table_exists(table_name)
+
+assert ctx.run_janitor(ignore_ttl=True)
+
+assert not ctx.engine_adapter.table_exists(table_name)
+assert not ctx._loaded
+assert ctx._materializations_loaded
+ctx.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), table_name],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_janitor_cleanup_order(mocker: MockerFixture, tmp_path: Path):
