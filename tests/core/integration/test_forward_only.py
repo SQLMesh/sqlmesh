@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-
 import typing as t
 import numpy as np  # noqa: TID253
 import pandas as pd  # noqa: TID253
@@ -24,8 +22,6 @@ from sqlmesh.utils.date import to_datetime, to_timestamp
 from tests.core.integration.utils import add_projection_to_model
 
 pytestmark = pytest.mark.slow
-
-logging.getLogger("sqlmesh").setLevel(logging.ERROR)
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
