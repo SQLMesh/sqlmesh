@@ -88,7 +88,8 @@ class MSSQLEngineAdapter(
         decimal_precision: int = 3,
         timestamp_precision: int = RowDiffMixin.MAX_TIMESTAMP_PRECISION,
     ) -> exp.Expr:
-        # T-SQL truncates CAST(x AS VARCHAR) to 30 characters when no length is given
+        # T-SQL truncates CAST(x AS VARCHAR) to 30 characters when no length is given.
+        # Keep this VARCHAR rather than NVARCHAR: Fabric inherits it and has no NVARCHAR type.
         normalized = super().normalize_value(expr, type, decimal_precision, timestamp_precision)
         normalized.set("to", exp.DataType.build("VARCHAR(MAX)", dialect=self.dialect))
         return normalized
