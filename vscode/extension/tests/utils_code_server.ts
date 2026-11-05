@@ -80,6 +80,13 @@ export async function startCodeServer({
   const userDataDir = await fs.mkdtemp(
     path.join(os.tmpdir(), 'vscode-test-sushi-user-data-dir-'),
   )
+  const userSettingsDir = path.join(userDataDir, 'User')
+  await fs.ensureDir(userSettingsDir)
+  await fs.writeJson(path.join(userSettingsDir, 'settings.json'), {
+    // `--disable-telemetry` disables code-server's own telemetry, but VS Code
+    // derives `env.isTelemetryEnabled` from this global user preference.
+    'telemetry.telemetryLevel': 'off',
+  })
 
   // Start code-server instance using the shared extensions directory
   const codeServerProcess = spawn(
