@@ -1287,6 +1287,33 @@ def test_clickhouse(make_config):
     assert not config3._static_connection_kwargs["compress"]
 
 
+def test_clickhouse_insert_quorum_user_setting(make_config):
+    user_settings = {"insert_quorum": "0"}
+    config = make_config(
+        type="clickhouse",
+        host="localhost",
+        username="default",
+        password="default",
+        cluster="default",
+        connection_settings=user_settings,
+    )
+
+    # A user-provided insert_quorum is respected in cluster mode
+    assert config._static_connection_kwargs["insert_quorum"] == "0"
+    # The user's dict is not mutated by building the connection kwargs
+    assert user_settings == {"insert_quorum": "0"}
+
+    # Without a user value, cluster mode still defaults to "auto"
+    config_default = make_config(
+        type="clickhouse",
+        host="localhost",
+        username="default",
+        password="default",
+        cluster="default",
+    )
+    assert config_default._static_connection_kwargs["insert_quorum"] == "auto"
+
+
 def test_athena(make_config):
     config = make_config(type="athena", work_group="primary")
     assert isinstance(config, AthenaConnectionConfig)
