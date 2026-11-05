@@ -141,9 +141,15 @@ class EnvironmentRecordUpdateStage:
 
     Args:
         no_gaps_snapshot_names: Names of snapshots for which there should be no interval gaps.
+        all_snapshots: All snapshots in the plan by name.
+        selected_snapshot_ids: The snapshots to include in a just-in-time no-gaps backfill.
+        deployability_index: Deployability index for a just-in-time no-gaps backfill.
     """
 
     no_gaps_snapshot_names: t.Set[str]
+    all_snapshots: t.Dict[str, Snapshot]
+    selected_snapshot_ids: t.Set[SnapshotId]
+    deployability_index: DeployabilityIndex
 
 
 @dataclass
@@ -370,7 +376,10 @@ class PlanStagesBuilder:
 
         stages.append(
             EnvironmentRecordUpdateStage(
-                no_gaps_snapshot_names={s.name for s in before_promote_snapshots}
+                no_gaps_snapshot_names={s.name for s in before_promote_snapshots},
+                all_snapshots=snapshots_by_name,
+                selected_snapshot_ids=before_promote_snapshots,
+                deployability_index=deployability_index,
             )
         )
 
