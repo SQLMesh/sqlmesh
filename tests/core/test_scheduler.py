@@ -677,6 +677,15 @@ def test_interval_diff():
     assert interval_diff([(1, 2), (2, 3)], [(3, 4)], uninterrupted=True) == [(1, 2), (2, 3)]
     assert interval_diff([(1, 2), (2, 3)], [(2, 3)], uninterrupted=True) == [(1, 2)]
 
+    # An interval that contains a smaller interval from `intervals_b` (for example a daily
+    # interval that contains an unready hourly parent interval) must be excluded, and the
+    # intervals after it must still be kept.
+    assert interval_diff([(0, 24), (24, 48)], [(10, 11)]) == [(24, 48)]
+    assert interval_diff(
+        [(0, 24), (24, 48), (48, 72), (72, 96)],
+        [(10, 11), (53, 54)],
+    ) == [(24, 48), (72, 96)]
+
 
 def test_signal_intervals(mocker: MockerFixture, make_snapshot, get_batched_missing_intervals):
     @signal()
@@ -868,6 +877,75 @@ def test_signals_snapshots_out_of_order(
         snapshot_b: [(to_timestamp("2023-01-01"), to_timestamp("2023-01-04"))],
         snapshot_c: [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))],
     }
+
+
+def test_signals_unready_hourly_parent_blocks_daily_child(
+    mocker: MockerFixture, make_snapshot, get_batched_missing_intervals
+):
+    @signal()
+    def hourly_ready(batch: DatetimeRanges):
+        # 2023-01-01 10:00 and 2023-01-03 05:00 are not ready yet
+        return [i for i in batch if (i[0].day, i[0].hour) not in ((1, 10), (3, 5))]
+
+    signals = signal.get_registry()
+
+    parent = make_snapshot(
+        load_sql_based_model(
+            parse(  # type: ignore
+                """
+                MODEL (
+                    name hourly_parent,
+                    kind INCREMENTAL_BY_TIME_RANGE(
+                      time_column dt,
+                    ),
+                    cron '@hourly',
+                    start '2023-01-01',
+                    signals HOURLY_READY(),
+                );
+                SELECT @start_dt AS dt;
+                """
+            ),
+            signal_definitions=signals,
+        ),
+    )
+
+    child = make_snapshot(
+        load_sql_based_model(
+            parse(  # type: ignore
+                """
+                MODEL (
+                    name daily_child,
+                    kind INCREMENTAL_BY_TIME_RANGE(
+                      time_column dt,
+                    ),
+                    start '2023-01-01',
+                );
+                SELECT dt FROM hourly_parent
+                """
+            ),
+            signal_definitions=signals,
+        ),
+        nodes={parent.name: parent.model},
+    )
+
+    snapshot_evaluator = SnapshotEvaluator(adapters=mocker.MagicMock(), ddl_concurrent_tasks=1)
+    scheduler = Scheduler(
+        snapshots=[parent, child],
+        snapshot_evaluator=snapshot_evaluator,
+        state_sync=mocker.MagicMock(),
+        max_workers=2,
+        default_catalog=None,
+    )
+
+    batches = get_batched_missing_intervals(
+        scheduler, "2023-01-01", "2023-01-04", "2023-01-05 01:00:00"
+    )
+
+    # Days containing an unready parent hour must not be evaluated, the other days must be
+    assert batches[child] == [
+        (to_timestamp("2023-01-02"), to_timestamp("2023-01-03")),
+        (to_timestamp("2023-01-04"), to_timestamp("2023-01-05")),
+    ]
 
 
 @pytest.mark.parametrize(
