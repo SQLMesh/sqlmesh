@@ -190,15 +190,15 @@ class Scheduler:
 
         # Filtering snapshots after computing missing intervals because we need all snapshots in order
         # to correctly infer start dates.
+        #
+        # missing_intervals will already have removed any snapshots that are representative but not
+        # deployable, an additional check is included here as a safeguard.
         if selected_snapshots is not None:
             snapshots_to_intervals = {
                 s: i
                 for s, i in snapshots_to_intervals.items()
                 if s.name in selected_snapshots
-                and not (
-                    deployability_index.is_representative(s)
-                    and not deployability_index.is_deployable(s)
-                )
+                and not deployability_index.is_representative_not_deployable(s)
             }
         return snapshots_to_intervals
 

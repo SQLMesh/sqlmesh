@@ -1050,9 +1050,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
         # ever refer to the prod physical table, and so should never have any missing intervals.
-        if deployability_index.is_representative(self) and not deployability_index.is_deployable(
-            self
-        ):
+        if deployability_index.is_representative_not_deployable(self):
             return []
 
         intervals = (
@@ -1617,10 +1615,9 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         )
 
     def is_representative(self, snapshot: SnapshotIdLike) -> bool:
-        """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading, table mapping, and
-        computing missing intervals (if the snapshot is also deployable).
+        """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading and table mapping.
 
-        Note, that deployable snapshots are also representative, but the reverse is not always true.
+        Note, that deployable snapshots are always representative, but the reverse is not always true.
 
         Unlike `is_deployable`, this variant also captures FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots that
         are not deployable by their nature but are currently promoted in production. Therefore, it's safe to consider
@@ -1635,6 +1632,22 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         snapshot_id = self._snapshot_id_key(snapshot.snapshot_id)
         representative = snapshot_id in self.representative_shared_version_ids
         return representative or self.is_deployable(snapshot)
+
+    def is_representative_not_deployable(self, snapshot: SnapshotIdLike) -> bool:
+        """Returns true if the snapshot is representative (looks like prod) but not deployable (can never become prod), used for
+        computing missing intervals (if the snapshot is also deployable).
+
+        This will only return true for FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots in non-production environments.
+
+        Args:
+            snapshot: The snapshot to check.
+
+        Returns:
+            True if the snapshot is representative and not deployable, False otherwise.
+        """
+        return self.is_representative(snapshot=snapshot) and not self.is_deployable(
+            snapshot=snapshot
+        )
 
     def with_non_deployable(self, snapshot: SnapshotIdLike) -> DeployabilityIndex:
         """Creates a new index with the given snapshot marked as non-deployable."""
@@ -2079,9 +2092,7 @@ def missing_intervals(
 
         # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
         # ever refer to the prod physical table, and so should never have any missing intervals.
-        if deployability_index.is_representative(
-            snapshot
-        ) and not deployability_index.is_deployable(snapshot):
+        if deployability_index.is_representative_not_deployable(snapshot):
             continue
 
         snapshot_start_date = start_override_per_model.get(snapshot.name, start_dt)

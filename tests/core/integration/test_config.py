@@ -301,7 +301,6 @@ def test_environment_catalog_mapping(init_and_plan_context: t.Callable):
     context, plan = init_and_plan_context(
         "examples/sushi", config="environment_catalog_mapping_config"
     )
-    logging.getLogger("sqlmesh").setLevel(logging.ERROR)
     context.apply(plan)
     metadata = DuckDBMetadata(context.engine_adapter)
     state_metadata = DuckDBMetadata.from_context(context.state_sync.state_sync)

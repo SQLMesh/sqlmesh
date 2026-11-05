@@ -1719,6 +1719,9 @@ def test_build_plan_stages_indirect_non_breaking_view_migration(
 def test_build_plan_stages_indirect_non_breaking_view_dev(
     snapshot_d: Snapshot, snapshot_e: Snapshot, make_snapshot, mocker: MockerFixture
 ) -> None:
+    # Setup Snapshots
+    snapshot_e.intervals = [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
+
     # Create environment
     state_reader = mocker.Mock(spec=StateReader)
     state_reader.get_snapshots.return_value = {}
@@ -1755,7 +1758,7 @@ def test_build_plan_stages_indirect_non_breaking_view_dev(
         empty_backfill=False,
         restatements={},
         restate_all_snapshots=False,
-        is_dev=False,
+        is_dev=True,
         allow_destructive_models=set(),
         allow_additive_models=set(),
         forward_only=False,
@@ -1780,18 +1783,18 @@ def test_build_plan_stages_indirect_non_breaking_view_dev(
     stages = build_plan_stages(plan, state_reader, None)
 
     # Verify stages
-    assert len(stages) == 7
+    assert len(stages) == 6
 
     assert isinstance(stages[0], CreateSnapshotRecordsStage)
     assert isinstance(stages[1], PhysicalLayerSchemaCreationStage)
     assert isinstance(stages[2], BackfillStage)
     assert isinstance(stages[3], EnvironmentRecordUpdateStage)
-    assert isinstance(stages[4], BackfillStage)
-    assert isinstance(stages[5], VirtualLayerUpdateStage)
-    assert isinstance(stages[6], FinalizeEnvironmentStage)
+    assert isinstance(stages[4], VirtualLayerUpdateStage)
+    assert isinstance(stages[5], FinalizeEnvironmentStage)
 
-    ## Verify that indirect non breaking change does not trigger a backfill
-    assert stages[2].selected_snapshot_ids == {snapshot_d.snapshot_id}
+    ## Verify that indirect non breaking change does not trigger a schema creation or backfill
+    assert snapshot_e not in stages[1].snapshots
+    assert snapshot_e not in stages[2].snapshot_to_intervals
 
 
 def test_build_plan_stages_virtual_environment_mode_filtering(
