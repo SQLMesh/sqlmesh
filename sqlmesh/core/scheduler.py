@@ -185,11 +185,20 @@ class Scheduler:
             ignore_cron=ignore_cron,
             end_bounded=end_bounded,
         )
+
+        deployability_index = deployability_index or DeployabilityIndex.all_deployable()
+
         # Filtering snapshots after computing missing intervals because we need all snapshots in order
         # to correctly infer start dates.
+        #
+        # missing_intervals will already have removed any snapshots that are representative but not
+        # deployable, an additional check is included here as a safeguard.
         if selected_snapshots is not None:
             snapshots_to_intervals = {
-                s: i for s, i in snapshots_to_intervals.items() if s.name in selected_snapshots
+                s: i
+                for s, i in snapshots_to_intervals.items()
+                if s.name in selected_snapshots
+                and deployability_index.is_eligible_for_physical_layer(s)
             }
         return snapshots_to_intervals
 
