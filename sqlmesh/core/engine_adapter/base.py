@@ -457,6 +457,14 @@ class EngineAdapter:
         """Returns the catalog name of the current connection."""
         raise NotImplementedError()
 
+    def _get_current_catalog_for_set_catalog(self) -> t.Optional[str]:
+        """Catalog token @set_catalog saves and restores.
+
+        Override when get_current_catalog() reports a default catalog name but
+        the restore must keep an internal sentinel so the connection is not reopened.
+        """
+        return self.get_current_catalog()
+
     def set_current_catalog(self, catalog: str) -> None:
         """Sets the catalog name of the current connection."""
         raise NotImplementedError()
