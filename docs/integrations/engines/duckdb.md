@@ -344,6 +344,31 @@ Using a dictionary allows you to assign custom names to your secrets for better 
     )
     ```
 
+##### S3-Compatible Endpoint Example
+
+An `s3` secret targets Amazon S3 by default. To use another S3-compatible object store (for example Backblaze B2, Cloudflare R2, or MinIO), set `endpoint` to the provider's S3 host:
+
+=== "YAML"
+
+    ```yaml linenums="1"
+    gateways:
+      duckdb:
+        connection:
+          type: duckdb
+          catalogs:
+            local: local.db
+            remote: "s3://bucket/data/remote.duckdb"
+          extensions:
+            - name: httpfs
+          secrets:
+            - type: s3
+              endpoint: "s3.example-region.example.com"
+              region: "YOUR_REGION"
+              key_id: "YOUR_ACCESS_KEY_ID"
+              secret: "YOUR_SECRET_ACCESS_KEY"
+              # url_style: path # For providers that require path-style addressing
+    ```
+
 After configuring the secrets, you can directly reference S3 paths in your catalogs or in SQL queries without additional authentication steps.
 
 Refer to the official DuckDB documentation for the full list of [supported S3 secret parameters](https://duckdb.org/docs/stable/extensions/httpfs/s3api.html#overview-of-s3-secret-parameters) and for more information on the [Secrets Manager configuration](https://duckdb.org/docs/configuration/secrets_manager.html).
