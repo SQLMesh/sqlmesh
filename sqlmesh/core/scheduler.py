@@ -198,7 +198,7 @@ class Scheduler:
                 s: i
                 for s, i in snapshots_to_intervals.items()
                 if s.name in selected_snapshots
-                and not deployability_index.is_representative_not_deployable(s)
+                and deployability_index.is_eligible_for_physical_layer(s)
             }
         return snapshots_to_intervals
 

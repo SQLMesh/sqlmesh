@@ -2545,15 +2545,15 @@ def test_deployability_index(make_snapshot):
 
     assert deployability_index.is_deployable(snapshot_breaking)
     assert deployability_index.is_representative(snapshot_breaking)
-    assert not deployability_index.is_representative_not_deployable(snapshot_breaking)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_breaking)
 
     assert not deployability_index.is_deployable(snapshot_breaking_forward_only)
     assert not deployability_index.is_representative(snapshot_breaking_forward_only)
-    assert not deployability_index.is_representative_not_deployable(snapshot_breaking_forward_only)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_breaking_forward_only)
 
     assert deployability_index.is_deployable(snapshot_non_breaking)
     assert deployability_index.is_representative(snapshot_non_breaking)
-    assert not deployability_index.is_representative_not_deployable(snapshot_non_breaking)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_non_breaking)
 
     assert not deployability_index.is_deployable(
         snapshot_indirect_breaking_non_representative_parent
@@ -2561,23 +2561,23 @@ def test_deployability_index(make_snapshot):
     assert not deployability_index.is_representative(
         snapshot_indirect_breaking_non_representative_parent
     )
-    assert not deployability_index.is_representative_not_deployable(
+    assert deployability_index.is_eligible_for_physical_layer(
         snapshot_indirect_breaking_non_representative_parent
     )
 
     assert deployability_index.is_deployable(snapshot_indirect_breaking_representative_parent)
     assert deployability_index.is_representative(snapshot_indirect_breaking_representative_parent)
-    assert not deployability_index.is_representative_not_deployable(
+    assert deployability_index.is_eligible_for_physical_layer(
         snapshot_indirect_breaking_representative_parent
     )
 
     assert not deployability_index.is_deployable(snapshot_indirect_non_breaking)
     assert deployability_index.is_representative(snapshot_indirect_non_breaking)
-    assert deployability_index.is_representative_not_deployable(snapshot_indirect_non_breaking)
+    assert not deployability_index.is_eligible_for_physical_layer(snapshot_indirect_non_breaking)
 
     assert not deployability_index.is_deployable(snapshot_breaking_non_representative_parent)
     assert not deployability_index.is_representative(snapshot_breaking_non_representative_parent)
-    assert not deployability_index.is_representative_not_deployable(
+    assert deployability_index.is_eligible_for_physical_layer(
         snapshot_breaking_non_representative_parent
     )
 
@@ -2585,14 +2585,14 @@ def test_deployability_index(make_snapshot):
     assert all(all_deployable_index.is_deployable(s) for s in snapshots.values())
     assert all(all_deployable_index.is_representative(s) for s in snapshots.values())
     assert all(
-        not all_deployable_index.is_representative_not_deployable(s) for s in snapshots.values()
+        all_deployable_index.is_eligible_for_physical_layer(s) for s in snapshots.values()
     )
 
     none_deployable_index = deployability_index.none_deployable()
     assert all(not none_deployable_index.is_deployable(s) for s in snapshots.values())
     assert all(not none_deployable_index.is_representative(s) for s in snapshots.values())
     assert all(
-        not none_deployable_index.is_representative_not_deployable(s) for s in snapshots.values()
+        none_deployable_index.is_eligible_for_physical_layer(s) for s in snapshots.values()
     )
 
 
@@ -2615,8 +2615,8 @@ def test_deployability_index_unpaused_forward_only(make_snapshot):
     assert deployability_index.is_representative(snapshot_a)
     assert deployability_index.is_representative(snapshot_b)
 
-    assert deployability_index.is_representative_not_deployable(snapshot_a)
-    assert not deployability_index.is_representative_not_deployable(snapshot_b)
+    assert not deployability_index.is_eligible_for_physical_layer(snapshot_a)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_b)
 
 
 def test_deployability_index_unpaused_auto_restatement(make_snapshot):
@@ -2655,9 +2655,9 @@ def test_deployability_index_unpaused_auto_restatement(make_snapshot):
     assert deployability_index.is_representative(snapshot_b)
     assert not deployability_index.is_representative(snapshot_c)
 
-    assert deployability_index.is_representative_not_deployable(snapshot_a)
-    assert deployability_index.is_representative_not_deployable(snapshot_b)
-    assert not deployability_index.is_representative_not_deployable(snapshot_c)
+    assert not deployability_index.is_eligible_for_physical_layer(snapshot_a)
+    assert not deployability_index.is_eligible_for_physical_layer(snapshot_b)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_c)
 
 
 def test_deployability_index_uncategorized_forward_only_model(make_snapshot):
@@ -2686,8 +2686,8 @@ def test_deployability_index_uncategorized_forward_only_model(make_snapshot):
     assert not deployability_index.is_representative(snapshot_a)
     assert not deployability_index.is_representative(snapshot_b)
 
-    assert not deployability_index.is_representative_not_deployable(snapshot_a)
-    assert not deployability_index.is_representative_not_deployable(snapshot_b)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_a)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_b)
 
 
 def test_deployability_index_auto_restatement_model(make_snapshot):
@@ -2718,8 +2718,8 @@ def test_deployability_index_auto_restatement_model(make_snapshot):
     assert not deployability_index.is_representative(snapshot_a)
     assert not deployability_index.is_representative(snapshot_b)
 
-    assert not deployability_index.is_representative_not_deployable(snapshot_a)
-    assert not deployability_index.is_representative_not_deployable(snapshot_b)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_a)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_b)
 
 
 def test_deployability_index_categorized_forward_only_model(make_snapshot):
@@ -2750,8 +2750,8 @@ def test_deployability_index_categorized_forward_only_model(make_snapshot):
     assert not deployability_index.is_representative(snapshot_a)
     assert not deployability_index.is_representative(snapshot_b)
 
-    assert not deployability_index.is_representative_not_deployable(snapshot_a)
-    assert not deployability_index.is_representative_not_deployable(snapshot_b)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_a)
+    assert deployability_index.is_eligible_for_physical_layer(snapshot_b)
 
 
 def test_deployability_index_missing_parent(make_snapshot):

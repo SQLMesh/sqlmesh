@@ -645,7 +645,7 @@ class PlanStagesBuilder:
                 return False
 
             # Do not create snapshots that contain production data but can never be deployed.
-            if deployability_index.is_representative_not_deployable(s):
+            if not deployability_index.is_eligible_for_physical_layer(s):
                 return False
 
             # Only create tables for snapshots that we're planning to promote or that were selected for backfill

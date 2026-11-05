@@ -1050,7 +1050,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
         # ever refer to the prod physical table, and so should never have any missing intervals.
-        if deployability_index.is_representative_not_deployable(self):
+        if not deployability_index.is_eligible_for_physical_layer(self):
             return []
 
         intervals = (
@@ -1633,11 +1633,12 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         representative = snapshot_id in self.representative_shared_version_ids
         return representative or self.is_deployable(snapshot)
 
-    def is_representative_not_deployable(self, snapshot: SnapshotIdLike) -> bool:
-        """Returns true if the snapshot is representative (looks like prod) but not deployable (can never become prod), used for
-        computing missing intervals (if the snapshot is also deployable).
+    def is_eligible_for_physical_layer(self, snapshot: SnapshotIdLike) -> bool:
+        """Returns true if the snapshot eligible for the physical layer. This will be true unless it is is representative
+        (looks like prod) but not deployable (can never become prod), and is used for computing missing intervals and
+        physical layer creation.
 
-        This will only return true for FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots in non-production environments.
+        This will only return false for FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots in non-production environments.
 
         Args:
             snapshot: The snapshot to check.
@@ -1645,7 +1646,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         Returns:
             True if the snapshot is representative and not deployable, False otherwise.
         """
-        return self.is_representative(snapshot=snapshot) and not self.is_deployable(
+        return not self.is_representative(snapshot=snapshot) or self.is_deployable(
             snapshot=snapshot
         )
 
@@ -2092,7 +2093,7 @@ def missing_intervals(
 
         # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
         # ever refer to the prod physical table, and so should never have any missing intervals.
-        if deployability_index.is_representative_not_deployable(snapshot):
+        if not deployability_index.is_eligible_for_physical_layer(snapshot):
             continue
 
         snapshot_start_date = start_override_per_model.get(snapshot.name, start_dt)
