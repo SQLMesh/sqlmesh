@@ -218,6 +218,11 @@ def _parse_macro(self: Parser, keyword_macro: str = "") -> t.Optional[exp.Expr]:
     if self._prev.text != SQLMESH_MACRO_PREFIX:
         return self._parse_parameter()
 
+    # @@name is a system variable, e.g. T-SQL's @@DATEFIRST or BigQuery's @@query_label,
+    # and can't be a macro reference, so parse it like the dialect would
+    if self._curr and self._curr.text == SQLMESH_MACRO_PREFIX and self._match(TokenType.PARAMETER):
+        return self.expression(exp.Parameter(this=self._parse_parameter()))
+
     comments = self._prev.comments
     index = self._index
     field = self._parse_primary() or self._parse_function(functions={}) or self._parse_id_var()
