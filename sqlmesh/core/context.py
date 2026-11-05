@@ -91,6 +91,7 @@ from sqlmesh.core.notification_target import (
 )
 from sqlmesh.core.plan import Plan, PlanBuilder, SnapshotIntervals, PlanExplainer
 from sqlmesh.core.plan.definition import UserProvidedFlags
+from sqlmesh.core.promotion import PromotionFrontier
 from sqlmesh.core.reference import ReferenceGraph
 from sqlmesh.core.scheduler import Scheduler, CompletionStatus
 from sqlmesh.core.schema_loader import create_external_models_file
@@ -1461,6 +1462,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         explain: t.Optional[bool] = None,
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
+        max_trailing_gap_intervals: t.Optional[int] = None,
     ) -> Plan:
         """Interactively creates a plan.
 
@@ -1511,6 +1513,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain: Whether to explain the plan instead of applying it.
             min_intervals: Adjust the plan start date on a per-model basis in order to ensure at least this many intervals are covered
                 on every model when checking for missing intervals
+            max_trailing_gap_intervals: The maximum number of trailing scheduler intervals that production
+                promotion may accept as debt when no_gaps is enabled.
 
         Returns:
             The populated Plan object.
@@ -1543,6 +1547,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             explain=explain,
             ignore_cron=ignore_cron,
             min_intervals=min_intervals,
+            max_trailing_gap_intervals=max_trailing_gap_intervals,
         )
 
         plan = plan_builder.build()
@@ -1601,6 +1606,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         ignore_cron: t.Optional[bool] = None,
         min_intervals: t.Optional[int] = None,
         always_include_local_changes: t.Optional[bool] = None,
+        max_trailing_gap_intervals: t.Optional[int] = None,
     ) -> PlanBuilder:
         """Creates a plan builder.
 
@@ -1644,6 +1650,8 @@ class GenericContext(BaseContext, t.Generic[C]):
                 on every model when checking for missing intervals
             always_include_local_changes: Usually when restatements are present, local changes in the filesystem are ignored.
                 However, it can be desirable to deploy changes + restatements in the same plan, so this flag overrides the default behaviour.
+            max_trailing_gap_intervals: The maximum number of trailing scheduler intervals that production
+                promotion may accept as debt when no_gaps is enabled.
 
         Returns:
             The plan builder.
@@ -1696,6 +1704,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         diff_rendered = diff_rendered or False
         skip_linter = skip_linter or False
         min_intervals = min_intervals or 0
+        max_trailing_gap_intervals = (
+            0 if max_trailing_gap_intervals is None else max_trailing_gap_intervals
+        )
 
         environment = environment or self.config.default_target_environment
         environment = Environment.sanitize_name(environment)
@@ -1821,12 +1832,29 @@ class GenericContext(BaseContext, t.Generic[C]):
             backfill_models = modified_model_names or None
 
         max_interval_end_per_model = None
+        planned_frontiers: t.Dict[str, PromotionFrontier] = {}
         default_start, default_end = None, None
-        if not run:
-            ignore_cron = False
-            max_interval_end_per_model = self._get_max_interval_end_per_model(
+        should_capture_frontiers = not is_dev and no_gaps and max_trailing_gap_intervals > 0
+        if not run or should_capture_frontiers:
+            captured_max_interval_end_per_model = self._get_max_interval_end_per_model(
                 snapshots, backfill_models
             )
+            if should_capture_frontiers:
+                planned_frontiers = self._get_planned_frontiers(
+                    context_diff, captured_max_interval_end_per_model
+                )
+
+            if run:
+                # `--run` deliberately does not cap backfills at the current production
+                # frontier. Keep the captured values separate so recording promotion
+                # frontiers does not change that behavior.
+                max_interval_end_per_model = None
+            else:
+                max_interval_end_per_model = captured_max_interval_end_per_model
+
+        if not run:
+            ignore_cron = False
+            assert max_interval_end_per_model is not None
             # If no end date is specified, use the max interval end from prod
             # to prevent unintended evaluation of the entire DAG.
             default_start, default_end = self._get_plan_default_start_end(
@@ -1925,6 +1953,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             },
             explain=explain or False,
             ignore_cron=ignore_cron or False,
+            max_trailing_gap_intervals=max_trailing_gap_intervals,
+            planned_frontiers=planned_frontiers,
         )
 
     def apply(
@@ -3587,6 +3617,38 @@ class GenericContext(BaseContext, t.Generic[C]):
                 ensure_finalized_snapshots=self.config.plan.use_finalized_state,
             ).items()
         }
+
+    @staticmethod
+    def _get_planned_frontiers(
+        context_diff: ContextDiff,
+        max_interval_end_per_model: t.Mapping[str, datetime],
+    ) -> t.Dict[str, PromotionFrontier]:
+        """Capture production frontiers for changed models at plan-build time.
+
+        The interval-end query is intentionally performed before any execution-time or
+        explicit-end adjustment. The incumbent identity comes from the context diff's
+        modified snapshot tuple and is carried with the frontier so promotion can verify
+        it against the incumbent observed under its environment-row lock. A missing
+        previous plan means there is no incumbent identity to carry, so no frontier is
+        recorded and promotion remains strict.
+        """
+        if not context_diff.previous_plan_id:
+            return {}
+
+        frontiers: t.Dict[str, PromotionFrontier] = {}
+
+        for name, (current_snapshot, previous_snapshot) in context_diff.modified_snapshots.items():
+            if not current_snapshot.is_incremental or not previous_snapshot.is_incremental:
+                continue
+            if name not in max_interval_end_per_model:
+                continue
+
+            frontiers[name] = PromotionFrontier(
+                snapshot_id=previous_snapshot.snapshot_id,
+                end=to_timestamp(max_interval_end_per_model[name]),
+            )
+
+        return frontiers
 
     @staticmethod
     def _get_models_for_interval_end(

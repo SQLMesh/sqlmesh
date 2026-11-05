@@ -9,6 +9,7 @@ from pydantic import Field
 
 from sqlmesh.core.context_diff import ContextDiff
 from sqlmesh.core.environment import Environment, EnvironmentNamingInfo, EnvironmentStatements
+from sqlmesh.core.promotion import PromotionFrontier
 from sqlmesh.utils.metaprogramming import Executable  # noqa
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.snapshot import (
@@ -83,6 +84,10 @@ class Plan(PydanticModel, frozen=True):
     user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None
     selected_models: t.Optional[t.Set[str]] = None
     """Models that have been selected for this plan (used for dbt selected_resources)"""
+    max_trailing_gap_intervals: int = Field(default=0, ge=0, strict=True)
+    """Maximum number of trailing scheduler intervals that promotion may accept as debt."""
+    planned_frontiers: t.Dict[str, PromotionFrontier] = Field(default_factory=dict)
+    """The production snapshot frontier captured when the plan was built, keyed by model name."""
 
     @cached_property
     def start(self) -> TimeLike:
@@ -299,6 +304,8 @@ class Plan(PydanticModel, frozen=True):
             environment_statements=self.context_diff.environment_statements,
             user_provided_flags=self.user_provided_flags,
             selected_models=self.selected_models,
+            max_trailing_gap_intervals=self.max_trailing_gap_intervals,
+            planned_frontiers=dict(self.planned_frontiers),
         )
 
     @cached_property
@@ -338,6 +345,8 @@ class EvaluatablePlan(PydanticModel):
     environment_statements: t.Optional[t.List[EnvironmentStatements]] = None
     user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None
     selected_models: t.Optional[t.Set[str]] = None
+    max_trailing_gap_intervals: int = Field(default=0, ge=0, strict=True)
+    planned_frontiers: t.Dict[str, PromotionFrontier] = Field(default_factory=dict)
 
     def is_selected_for_backfill(self, model_fqn: str) -> bool:
         return self.models_to_backfill is None or model_fqn in self.models_to_backfill

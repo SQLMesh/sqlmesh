@@ -300,10 +300,55 @@ Below is an example of how to define the default config for the bot in either YA
 | `skip_pr_backfill`                    | Indicates if the bot should skip backfilling models in the PR environment. Default: `True`                                                                                                                                                                                                                                                                                                                |  bool  |    N     |
 | `pr_include_unmodified`               | Indicates whether to include unmodified models in the PR environment. Default to the project's config value (which defaults to `False`)                                                                                                                                                                                                                                                                   |  bool  |    N     |
 | `run_on_deploy_to_prod`               | Indicates whether to run latest intervals when deploying to prod. If set to false, the deployment will backfill only the changed models up to the existing latest interval in production, ignoring any missing intervals beyond this point. Default: `False`                                                                                                                                              |  bool  |    N     |
+| `max_trailing_gap_intervals_on_deploy_to_prod` | Maximum number of scheduler boundaries of newly observed trailing gaps that a production deployment may accept. `0` keeps the strict no-gap behavior (default); a positive value opts in to bounded trailing-gap promotion.                                                                                                                                                         |  int   |    N     |
 | `pr_environment_name`                 | The name of the PR environment to create for which a PR number will be appended to. Defaults to the repo name if not provided. Note: The name will be normalized to alphanumeric + underscore and lowercase.                                                                                                                                                                                              |  str   |    N     |
 | `prod_branch_name`                    | The name of the git branch associated with production. Ex: `prod`. Default: `main` or `master` is considered prod                                                                                                                                                                                                                                                                                         |  str   |    N     |
 | `forward_only_branch_suffix`          | If the git branch has this suffix, trigger a [forward-only](../concepts/plans.md#forward-only-plans) plan instead of a normal plan. Default: `-forward-only`                                                                                                                                                                                                                                              |  str   |    N     |
 | `check_if_blocked_on_deploy_to_prod`  | The bot normally checks if a PR is blocked from merging before deploying to production. Setting this to `False` will skip that check. Default: `True`                                                                                                                                                                                                                                                     |  bool  |    N     |
+
+### Bounded trailing gaps during production promotion
+
+`max_trailing_gap_intervals_on_deploy_to_prod` handles a scheduler race while a
+production plan is being built. It defaults to `0`, which preserves strict
+no-gap promotion. Set it to a finite,
+nonnegative integer to allow a production plan with `no_gaps=True` to accept a
+bounded, contiguous trailing suffix that is observed after the plan's immutable
+plan-time frontier. The candidate must still contain complete coverage through
+that frontier. Historical, internal, ambiguous, and over-bound gaps continue to
+block promotion.
+
+As a conservative first-release guard, promotion also rejects an otherwise
+eligible suffix when any transitive downstream model already has recorded
+coverage overlapping that suffix. A normal scheduler repair can fill the
+upstream gap, but it does not automatically invalidate downstream intervals
+that are already recorded, so the deployment fails closed in this case.
+
+The bound counts actual scheduler boundaries in stored interval coverage. It
+does not count lookback-expanded work, so one accepted missing interval can
+cause Cron to plan more intervals when it repairs a model with lookback. After
+promotion, the normal Cron scheduler discovers the missing suffix and repairs
+it using the usual dependency ordering and lookback behavior. Any subsequent
+scheduler selection must include the affected models' upstream dependencies (or
+use the scheduler's normal automatic upstream selection). A downstream-only
+selection can record incomplete data before its upstream models are repaired;
+this option does not automatically invalidate that work.
+
+The option is passed only to the production `no_gaps` plan. PR, development,
+test, and production plans built with `no_gaps=False` retain their existing
+behavior. The promotion warning identifies the environment, plan, snapshots,
+frontiers, and accepted range so the temporary freshness debt is observable.
+The warning reports the observed debt at classification time. SQLMesh does not
+fence a scheduler that is already in flight, so additional intervals may be
+recorded on the incumbent after that check; the next Cron run must reconcile
+any remaining coverage on the promoted candidate.
+
+For example:
+
+```yaml
+cicd_bot:
+  type: github
+  max_trailing_gap_intervals_on_deploy_to_prod: 1
+```
 
 Example with all properties defined:
 

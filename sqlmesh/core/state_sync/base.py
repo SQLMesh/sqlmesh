@@ -34,6 +34,7 @@ from sqlmesh.core.state_sync.common import (
     PromotionResult,
     ExpiredBatchRange,
 )
+from sqlmesh.core.promotion import PromotionFrontier
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,8 @@ class StateSync(StateReader, abc.ABC):
         environment: Environment,
         no_gaps_snapshot_names: t.Optional[t.Set[str]] = None,
         environment_statements: t.Optional[t.List[EnvironmentStatements]] = None,
+        max_trailing_gap_intervals: int = 0,
+        planned_frontiers: t.Optional[t.Dict[str, PromotionFrontier]] = None,
     ) -> PromotionResult:
         """Update the environment to reflect the current state.
 
@@ -427,6 +430,12 @@ class StateSync(StateReader, abc.ABC):
                 all snapshots will be checked. The data gap check ensures that models that are already a
                 part of the target environment have no data gaps when compared against previous
                 snapshots for same models.
+            max_trailing_gap_intervals: Maximum number of scheduler boundaries
+                of trailing incumbent coverage that may be accepted. Zero
+                preserves strict no-gap behavior.
+            planned_frontiers: The incumbent snapshot identities and coverage
+                frontiers captured while the plan was built, keyed by model
+                name.
 
         Returns:
            A tuple of (added snapshot table infos, removed snapshot table infos)
