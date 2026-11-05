@@ -258,13 +258,17 @@ class DatabricksEngineAdapter(SparkEngineAdapter, GrantsFromInfoSchemaMixin):
             df, target_columns_to_types, source_columns=source_columns
         )
 
+        temp_table = self._get_temp_table(target_table or "spark", table_only=True)
+
         def query_factory() -> Query:
-            temp_table = self._get_temp_table(target_table or "spark", table_only=True)
             pyspark_df.createOrReplaceTempView(temp_table.sql(dialect=self.dialect))
             self._connection_pool.set_attribute("use_spark_engine_adapter", True)
             return exp.select(*self._select_columns(target_columns_to_types)).from_(temp_table)
 
-        return [SourceQuery(query_factory=query_factory)]
+        def cleanup() -> None:
+            self.spark.catalog.dropTempView(temp_table.name)
+
+        return [SourceQuery(query_factory=query_factory, cleanup_func=cleanup)]
 
     def _fetch_native_df(
         self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
