@@ -1,12 +1,12 @@
 # Testing
 
-Testing allows you to protect your project from regression by continuously verifying that the output of each model matches your expectations. Unlike [audits](audits.md), tests are executed either on demand (for example, as part of a CI/CD job or via [`sqlmesh test`](../reference/cli.md#test)) or when a new [plan](plans.md) is created.
+Testing helps protect your project from regressions by verifying that model transformations produce the expected outputs for specified inputs.
 
-By default, `sqlmesh plan` runs all unit tests. Use `--test-changed-only` to run tests only for models included in the plan (added, modified, or restated), or `--skip-tests` to run none. With both `--select-model` and `--test-changed-only`, tests run only for selected models that changed.
+As in software unit testing, each test specifies a model, example inputs, and expected outputs. SQLMesh executes the model's logic using these inputs, compares the results with the expected outputs, and reports any discrepancies.
 
-Similar to unit testing in software development, SQLMesh evaluates the model's logic against predefined inputs and then compares the output to expected outcomes provided as part of each test.
+A comprehensive test suite helps data practitioners make changes with confidence by checking that models continue to behave as expected.
 
-A comprehensive suite of tests can empower data practitioners to work with confidence, as it allows them to ensure models behave as expected after changes have been applied to them.
+Unlike [audits](./audits.md), which validate model outputs against data quality expectations, tests verify transformation logic using predefined inputs and expected outputs, often with small, synthetic datasets.
 
 ## Creating tests
 
@@ -414,7 +414,9 @@ test_example_full_model:
 
 ## Running tests
 
-Tests run automatically every time a new [plan](plans.md) is created, but they can also be executed on demand as described in the following sections.
+Tests can be run directly with [`sqlmesh test`](../reference/cli.md#test) (as described in the following sections) or as part of `sqlmesh plan` (see [plans](plans.md)), which runs tests automatically before creating a new plan.
+
+By default, `sqlmesh plan` runs all unit tests. Use `--test-changed-only` to run tests only for models included in the plan (added, modified, or restated), or `--skip-tests` to run none. With both options `--select-model` and `--test-changed-only` specified, tests run only for selected models that changed.
 
 ### Testing using the CLI
 

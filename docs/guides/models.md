@@ -234,26 +234,12 @@ To delete a model:
 
 ## Viewing the DAG of a project's models
 
----
+A directed acyclic graph (DAG) shows the dependencies between your project's models. Each node represents a model, and arrows point from upstream models to the downstream models that depend on them. SQLMesh can generate an HTML file showing your project's DAG.
 
-Before generating a DAG, ensure that you have already installed the graphviz package.
-
-To install the package with `pip`, enter the following command:
+To generate the DAG, run the following command from the root of your SQLMesh project:
 
 ```bash
-pip install graphviz
+sqlmesh dag FILE
 ```
 
-Alternatively, enter the following command to install graphviz with `apt-get`:
-
-```bash
-sudo apt-get install graphviz
-```
-
----
-
-To view the DAG, enter the following command:
-
-`sqlmesh dag FILE`
-
-An html file containing your project's DAG will be placed at the root of your project folder. The DAG can then be viewed by opening this file in your browser.
+Replace `FILE` with an output filename, such as `dag.html`. Open the generated HTML file in a browser to view the DAG.
