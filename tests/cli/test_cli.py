@@ -12,6 +12,7 @@ from click import ClickException
 from click.testing import CliRunner
 from sqlglot import __version__ as SQLGLOT_VERSION
 from sqlmesh import RuntimeEnv
+from sqlmesh.cli import main as cli_main
 from sqlmesh._version import __version__ as SQLMESH_VERSION
 from sqlmesh.cli.project_init import ProjectTemplate, init_example_project
 from sqlmesh.cli.main import cli
@@ -2580,6 +2581,187 @@ def _patch_state_access(mocker):
 def _setup_local_only_project(tmp_path, mocker):
     _create_local_only_project(tmp_path, "cli_test")
     return _patch_state_access(mocker)
+
+
+@pytest.fixture
+def cli_env(monkeypatch):
+    for name in (
+        "SQLMESH_PATHS",
+        "SQLMESH_CONFIG",
+        "SQLMESH_TEST_LOCAL",
+        "SQLMESH_LINT_LOCAL",
+        "SQLMESH_DOTENV_PATH",
+        "SQLMESH__MODEL_DEFAULTS__DIALECT",
+    ):
+        # Register an undo even when absent, since dotenv can add the variable directly.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+@pytest.mark.parametrize("name", ["project", "analytics project 分析"])
+@pytest.mark.parametrize("relative", [False, True])
+def test_paths_env_selects_project_from_another_directory(
+    runner, tmp_path, monkeypatch, cli_env, name, relative
+):
+    project = tmp_path / name
+    _create_local_only_project(project, "env_project")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("SQLMESH_PATHS", os.path.relpath(project) if relative else str(project))
+    result = runner.invoke(cli, ["--log-file-dir", str(tmp_path), "info"])
+    assert result.exit_code == 0, result.output
+    assert "Models: 1" in result.output
+
+
+@pytest.mark.parametrize("command", ["test", "lint"])
+@pytest.mark.parametrize("value", ["true", "1", "false", "0", "", "invalid"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_local_env_state_gating(
+    runner, tmp_path, mocker, monkeypatch, cli_env, command, value, explicit
+):
+    state = _setup_local_only_project(tmp_path, mocker)
+    init = mocker.spy(Context, "__init__")
+    monkeypatch.setenv(f"SQLMESH_{command.upper()}_LOCAL", value)
+    args = ["--paths", str(tmp_path), command]
+    if explicit:
+        args.append("--local")
+    result = runner.invoke(cli, args)
+    if value == "invalid" and not explicit:
+        assert result.exit_code == 2, result.output
+        assert "valid boolean" in result.output
+        init.assert_not_called()
+        state.assert_not_called()
+    elif explicit or value in ("true", "1"):
+        assert result.exit_code == 0, result.output
+        assert init.call_args.kwargs["load_state"] is False
+        state.assert_not_called()
+    else:
+        assert init.call_args.kwargs["load_state"] is True
+        state.assert_called()
+
+
+@pytest.mark.parametrize("command", ["test", "lint"])
+@pytest.mark.parametrize("custom_dotenv", [False, True])
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_local_env_from_dotenv(
+    runner, tmp_path, mocker, monkeypatch, cli_env, command, custom_dotenv, value
+):
+    state = _setup_local_only_project(tmp_path, mocker)
+    init = mocker.spy(Context, "__init__")
+    variable = f"SQLMESH_{command.upper()}_LOCAL"
+    # The existing config loader lets dotenv override the process environment.
+    monkeypatch.setenv(variable, "false" if value == "true" else "true")
+    env_file = tmp_path / ("custom.env" if custom_dotenv else ".env")
+    env_file.write_text(f"{variable}={value}\n", encoding="utf-8")
+    args = ["--paths", str(tmp_path)]
+    if custom_dotenv:
+        args.extend(["--dotenv", str(env_file)])
+    result = runner.invoke(cli, [*args, command])
+    assert init.call_args.kwargs["load_state"] is (value == "false")
+    if value == "true":
+        assert result.exit_code == 0, result.output
+        state.assert_not_called()
+    else:
+        state.assert_called()
+
+
+@pytest.mark.parametrize("command", ["test", "lint", "format"])
+def test_paths_env_multiple_projects_local(runner, tmp_path, mocker, monkeypatch, cli_env, command):
+    projects = (tmp_path / "first project", tmp_path / "second 分析")
+    for index, project in enumerate(projects):
+        _create_local_only_project(project, f"project_{index}")
+    state = _patch_state_access(mocker)
+    monkeypatch.setenv("SQLMESH_PATHS", os.pathsep.join(str(project) for project in projects))
+    if command != "format":
+        monkeypatch.setenv(f"SQLMESH_{command.upper()}_LOCAL", "true")
+    result = runner.invoke(cli, [command])
+    assert result.exit_code == 0, result.output
+    state.assert_not_called()
+
+
+def test_paths_env_init_new_destination(runner, tmp_path, monkeypatch, cli_env):
+    project = tmp_path / "new project"
+    project.mkdir()
+    monkeypatch.setenv("SQLMESH_PATHS", str(project))
+    result = runner.invoke(cli, ["init", "duckdb", "--template", "empty"])
+    assert result.exit_code == 0, result.output
+    assert (project / "config.yaml").exists()
+
+
+@pytest.mark.parametrize("invalid_config", [False, True])
+def test_paths_env_project_errors(runner, tmp_path, monkeypatch, cli_env, invalid_config):
+    project = tmp_path / "project"
+    if invalid_config:
+        project.mkdir()
+        (project / "config.yaml").write_text("not a config\n", encoding="utf-8")
+    monkeypatch.setenv("SQLMESH_PATHS", str(project))
+    result = runner.invoke(cli, ["info"])
+    assert result.exit_code == 1, result.output
+    assert (
+        "Invalid YAML configuration" if invalid_config else "project config could not be found"
+    ) in result.output
+
+
+def test_paths_env_in_dotenv_does_not_change_root_paths(runner, tmp_path, monkeypatch, cli_env):
+    project = tmp_path / "project"
+    alternate = tmp_path / "alternate"
+    _create_local_only_project(project, "selected_project")
+    _create_local_only_project(alternate, "alternate_project")
+    (alternate / "models" / "second.sql").write_text(
+        "MODEL(name alternate_project.second); SELECT 2 AS col", encoding="utf-8"
+    )
+    (project / ".env").write_text(f"SQLMESH_PATHS='{alternate}'\n", encoding="utf-8")
+    monkeypatch.setenv("SQLMESH_PATHS", str(project))
+    result = runner.invoke(cli, ["info"])
+    assert result.exit_code == 0, result.output
+    assert "Models: 1" in result.output
+
+
+def test_paths_env_only_in_custom_dotenv_does_not_select_project(
+    runner, tmp_path, monkeypatch, mocker, cli_env
+):
+    project = tmp_path / "project"
+    _create_local_only_project(project, "env_project")
+    env_file = tmp_path / "custom.env"
+    env_file.write_text(f"SQLMESH_PATHS='{project}'\n", encoding="utf-8")
+    load_configs = mocker.spy(cli_main, "load_configs")
+    runner.invoke(cli, ["--dotenv", str(env_file), "info"])
+    paths = next(param for param in cli.params if param.name == "paths")
+    assert load_configs.call_args.args[2] == tuple(paths.default)
+
+
+@pytest.mark.parametrize("empty_segment", [False, True])
+def test_paths_env_preserves_loader_expansion(
+    runner, tmp_path, monkeypatch, mocker, cli_env, empty_segment
+):
+    projects = [tmp_path / "projects" / "first", tmp_path / "projects" / "second"]
+    for index, project in enumerate(projects):
+        _create_local_only_project(project, f"env_project_{index}")
+    if empty_segment:
+        invocation = tmp_path / "invocation"
+        _create_local_only_project(invocation, "invocation")
+        monkeypatch.chdir(invocation)
+        env_value = os.pathsep.join([str(projects[0]), "", str(projects[1])])
+        expected = {projects[0], invocation, projects[1]}
+    else:
+        env_value = str(tmp_path / "projects" / "*")
+        expected = set(projects)
+    monkeypatch.setenv("SQLMESH_PATHS", env_value)
+    init = mocker.spy(Context, "__init__")
+    result = runner.invoke(cli, ["format"])
+    assert result.exit_code == 0, result.output
+    assert set(init.call_args.kwargs["config"]) == expected
+
+
+def test_cli_env_separate_from_project_config(runner, tmp_path, monkeypatch, mocker, cli_env):
+    _create_local_only_project(tmp_path, "env_project")
+    monkeypatch.setenv("SQLMESH_PATHS", str(tmp_path))
+    monkeypatch.setenv("SQLMESH__MODEL_DEFAULTS__DIALECT", "spark")
+    init = mocker.spy(Context, "__init__")
+    result = runner.invoke(cli, ["info"])
+    assert result.exit_code == 0, result.output
+    assert next(iter(init.call_args.kwargs["config"].values())).model_defaults.dialect == "spark"
 
 
 def test_format_runs_without_state(runner: CliRunner, tmp_path: Path, mocker):
