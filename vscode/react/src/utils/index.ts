@@ -209,3 +209,19 @@ export function truncate(
     text.substring(textLength - displayAfter)
   )
 }
+
+/**
+ * Compares two file system paths, ignoring path separator and casing
+ * differences (e.g. `C:\a\b.sql` vs `c:/a/b.sql` on Windows). Casing is
+ * ignored on every platform, which is fine for paths within a single project.
+ */
+export function isSameFilePath(
+  a: string | undefined | null,
+  b: string | undefined | null,
+): boolean {
+  if (!a || !b) {
+    return false
+  }
+  const normalize = (path: string) => path.replace(/\\/g, '/').toLowerCase()
+  return normalize(a) === normalize(b)
+}

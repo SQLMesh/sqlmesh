@@ -11,6 +11,7 @@ import {
   toDateFormat,
   isStringEmpty,
   ensureString,
+  isSameFilePath,
 } from './index'
 
 describe('isArrayNotEmpty', () => {
@@ -207,5 +208,33 @@ describe('ensureString', () => {
 
   it('returns empty string for empty string input', () => {
     expect(ensureString('')).toBe('')
+  })
+})
+
+describe('isSameFilePath', () => {
+  test('matches identical paths', () => {
+    expect(isSameFilePath('/a/models/m.sql', '/a/models/m.sql')).toBe(true)
+  })
+
+  test('ignores drive letter casing and separator differences', () => {
+    expect(
+      isSameFilePath(
+        'C:\\proj\\models\\core\\dim_product.sql',
+        'c:\\proj\\models\\core\\dim_product.sql',
+      ),
+    ).toBe(true)
+    expect(
+      isSameFilePath('C:\\proj\\models\\m.sql', 'c:/proj/models/m.sql'),
+    ).toBe(true)
+  })
+
+  test('returns false for different paths', () => {
+    expect(isSameFilePath('/a/models/a.sql', '/a/models/b.sql')).toBe(false)
+  })
+
+  test('returns false when either path is missing', () => {
+    expect(isSameFilePath(undefined, '/a.sql')).toBe(false)
+    expect(isSameFilePath('/a.sql', undefined)).toBe(false)
+    expect(isSameFilePath('', '')).toBe(false)
   })
 })

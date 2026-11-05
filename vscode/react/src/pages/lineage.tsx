@@ -15,6 +15,7 @@ import { useEventBus } from '@/hooks/eventBus'
 import type { VSCodeEvent } from '@bus/callbacks'
 import type { Model } from '@/api/client'
 import { useRpc } from '@/utils/rpc'
+import { isSameFilePath } from '@/utils/index'
 import {
   type ModelPath,
   type ModelFullPath,
@@ -98,12 +99,9 @@ function Lineage() {
       }
       // @ts-ignore
       const filePath: string = activeFile.fileUri
-      const model = models.find((m: Model) => {
-        if (!m.full_path) {
-          return false
-        }
-        return m.full_path === filePath
-      })
+      const model = models.find((m: Model) =>
+        isSameFilePath(m.full_path, filePath),
+      )
       if (model) {
         return model.name
       }
@@ -132,8 +130,8 @@ function Lineage() {
 
   React.useEffect(() => {
     const handleChangeFocusedFile = (fileUri: { fileUri: string }) => {
-      const model = Object.values(modelsRecord).find(
-        m => m.full_path === fileUri.fileUri,
+      const model = Object.values(modelsRecord).find(m =>
+        isSameFilePath(m.full_path, fileUri.fileUri),
       )
       if (model) {
         setSelectedModel(model.name)
