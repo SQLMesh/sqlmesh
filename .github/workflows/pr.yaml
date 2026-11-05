@@ -19,6 +19,7 @@ jobs:
       vscode: ${{ steps.filter.outputs.vscode }}
       lsp: ${{ steps.filter.outputs.lsp }}
       ci: ${{ steps.filter.outputs.ci }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -44,6 +45,10 @@ jobs:
               - '.github/**'
               - 'Makefile'
               - '.pre-commit-config.yaml'
+            docs:
+              - 'docs/**'
+              - 'mkdocs.yml'
+              - '.readthedocs.yaml'
 
   doc-tests:
     needs: changes
@@ -70,6 +75,33 @@ jobs:
         run: |
           source .venv/bin/activate
           make doc-test
+
+  docs-build:
+    needs: changes
+    if:
+      needs.changes.outputs.docs == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        # Match the Python version Read the Docs builds with (.readthedocs.yaml)
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-doc
+      - name: Build docs
+        run: |
+          source .venv/bin/activate
+          mkdocs build --strict
 
   style-and-cicd-tests:
     needs: changes
