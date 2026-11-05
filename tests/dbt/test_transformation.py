@@ -1792,6 +1792,12 @@ def test_yaml(sushi_test_project: Project):
     assert context.render("{{ toyaml(invalid) }}", invalid=lambda: "") == "None"
 
     assert context.render("""{{ fromyaml('key: value') }}""") == "{'key': 'value'}"
+    assert context.render("""{{ fromyaml('[1, 2]') }}""") == "[1, 2]"
+    assert (
+        context.render("{% set my_yaml %}\n- good\n- bad\n{% endset %}{{ fromyaml(my_yaml) }}")
+        == "['good', 'bad']"
+    )
+    assert context.render("""{{ fromyaml('42') }}""") == "42"
 
 
 @pytest.mark.xdist_group("dbt_manifest")
