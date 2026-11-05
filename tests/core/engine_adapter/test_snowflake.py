@@ -303,6 +303,38 @@ def test_multiple_column_comments(make_mocked_engine_adapter: t.Callable, mocker
     ]
 
 
+def test_column_comments_iceberg(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    adapter._create_column_comments(
+        "test_table",
+        {"a": "a column description", "b": "b column description"},
+        table_format="iceberg",
+    )
+
+    assert to_sql_calls(adapter) == [
+        """ALTER ICEBERG TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
+    ]
+
+
+def test_ctas_column_comments_iceberg(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    # The column types are unknown, so the comments can't be inlined into the CTAS
+    # schema definition and are registered with a post-creation ALTER instead
+    adapter.ctas(
+        "test_table",
+        parse_one("SELECT a, b FROM source_table"),
+        table_format="iceberg",
+        column_descriptions={"a": "a column description"},
+    )
+
+    assert to_sql_calls(adapter) == [
+        """CREATE ICEBERG TABLE IF NOT EXISTS "test_table" AS SELECT "a", "b" FROM "source_table\"""",
+        """ALTER ICEBERG TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description'""",
+    ]
+
+
 def test_sync_grants_config(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
     relation = normalize_identifiers(
@@ -628,6 +660,31 @@ def test_create_managed_table(make_mocked_engine_adapter: t.Callable, mocker: Mo
         """CREATE OR REPLACE DYNAMIC TABLE "test_table" CLUSTER BY ("a") TARGET_LAG='20 minutes' WAREHOUSE="default_warehouse" AS SELECT CAST("a" AS INT) AS "a", CAST("b" AS INT) AS "b" FROM (SELECT "a", "b" FROM "source_table") AS "_subquery\"""",
         """CREATE OR REPLACE DYNAMIC TABLE "test_table" TARGET_LAG='20 minutes' REFRESH_MODE='auto' INITIALIZE='on_create' WAREHOUSE="default_warehouse" AS SELECT CAST("a" AS INT) AS "a", CAST("b" AS INT) AS "b" FROM (SELECT "a", "b" FROM "source_table") AS "_subquery\"""",
         """CREATE OR REPLACE DYNAMIC ICEBERG TABLE "test_table" TARGET_LAG='20 minutes' CATALOG='snowflake' EXTERNAL_VOLUME='test' WAREHOUSE="default_warehouse" AS SELECT CAST("a" AS INT) AS "a", CAST("b" AS INT) AS "b" FROM (SELECT "a", "b" FROM "source_table") AS "_subquery\"""",
+    ]
+
+
+@pytest.mark.parametrize("table_format", [None, "iceberg"])
+def test_create_managed_table_column_comments(
+    make_mocked_engine_adapter: t.Callable, table_format: t.Optional[str]
+):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    # Unknown column types require a post-creation comment command.
+    adapter.create_managed_table(
+        table_name="test_table",
+        query=parse_one("SELECT a, b FROM source_table"),
+        table_format=table_format,
+        table_properties={
+            "target_lag": exp.Literal.string("20 minutes"),
+            "warehouse": exp.to_identifier("test_warehouse"),
+        },
+        column_descriptions={"a": "a column description", "b": "b column description"},
+    )
+
+    table_kind = "DYNAMIC ICEBERG TABLE" if table_format else "DYNAMIC TABLE"
+    assert to_sql_calls(adapter) == [
+        f'CREATE OR REPLACE {table_kind} "test_table" TARGET_LAG=\'20 minutes\' WAREHOUSE="test_warehouse" AS SELECT "a", "b" FROM "source_table"',
+        """ALTER TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
     ]
 
 
