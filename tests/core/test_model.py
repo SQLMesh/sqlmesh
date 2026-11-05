@@ -1649,6 +1649,55 @@ def test_seed_model_boolean_nulls_are_preserved(tmp_path):
     assert "(4, NULL)" in rendered_sql
 
 
+def test_seed_model_declared_types_are_applied_when_reading_csv(tmp_path):
+    model_csv_path = (tmp_path / "model.csv").absolute()
+    model_csv_path.write_text(
+        "code,n,amt,flag,d\n00123,1,1.5,true,2026-01-02\n45958,,,false,\n,3,2.25,,2026-03-04\n",
+        encoding="utf-8",
+    )
+
+    model = create_seed_model(
+        "test_db.test_model",
+        SeedKind(path=str(model_csv_path)),
+        columns={
+            "code": "text",
+            "n": "int",
+            "amt": "double",
+            "flag": "boolean",
+            "d": "date",
+        },
+        dialect="duckdb",
+    )
+
+    df = next(model.render_seed())
+
+    assert df["code"].to_list() == ["00123", "45958", None]
+    assert df["n"].to_list() == [1, None, 3]
+    assert [type(v) for v in df["n"]] == [int, type(None), int]
+    assert df["amt"].to_list() == [1.5, None, 2.25]
+    assert df["flag"].to_list() == [True, False, None]
+    assert df["d"].to_list() == [date(2026, 1, 2), None, date(2026, 3, 4)]
+
+    context = Context(
+        config=Config(
+            default_connection=DuckDBConnectionConfig(),
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        )
+    )
+    context.upsert_model(model)
+    rendered_sql = context.render(model).sql("duckdb")
+
+    assert "('00123', 1, 1.5, TRUE, CAST('2026-01-02' AS DATE))" in rendered_sql
+    assert "('45958', NULL, NULL, FALSE, NULL)" in rendered_sql
+    assert "(NULL, 3, 2.25, NULL, CAST('2026-03-04' AS DATE))" in rendered_sql
+
+    assert context.engine_adapter.fetchall(rendered_sql) == [
+        ("00123", 1, 1.5, True, date(2026, 1, 2)),
+        ("45958", None, None, False, None),
+        (None, 3, 2.25, None, date(2026, 3, 4)),
+    ]
+
+
 def test_seed_with_special_characters_in_column(tmp_path, assert_exp_eq):
     config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
     context = Context(config=config)
