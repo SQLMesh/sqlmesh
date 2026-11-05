@@ -66,6 +66,27 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
+# DuckDB settings that control how extensions are located, installed and loaded.
+# These must be applied before any INSTALL / LOAD statement is executed, otherwise DuckDB
+# tries to reach the default extension repository before e.g. a custom repository, a local
+# extension directory or a proxy has been configured.
+DUCKDB_EXTENSION_SETTINGS = frozenset(
+    {
+        "custom_extension_repository",
+        "autoinstall_extension_repository",
+        "extension_directory",
+        "autoinstall_known_extensions",
+        "autoload_known_extensions",
+        "allow_community_extensions",
+        "allow_extensions_metadata_mismatch",
+        "http_proxy",
+        "http_proxy_username",
+        "http_proxy_password",
+    }
+)
+# Repository names that DuckDB understands as aliases (e.g. `core`, `core_nightly`, `community`)
+# are passed to INSTALL ... FROM unquoted. Anything else (local path, URL) is a string literal.
+DUCKDB_EXTENSION_REPOSITORY_ALIAS_REGEX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SUPPORTS_MSSQL_PYTHON_DRIVER = (version_info.major, version_info.minor) >= (3, 10)
 
 
@@ -365,14 +386,53 @@ class BaseDuckDBConnectionConfig(ConnectionConfig):
         import duckdb
         from duckdb import BinderException
 
+        def apply_settings(cursor: duckdb.DuckDBPyConnection, settings: t.Dict[str, t.Any]) -> None:
+            if not settings:
+                return
+
+            option_names = list(settings)
+            in_part = ",".join("?" for _ in range(len(option_names)))
+
+            cursor.execute(
+                f"SELECT name, value FROM duckdb_settings() WHERE name IN ({in_part})",
+                option_names,
+            )
+
+            existing_values = {field: setting for field, setting in cursor.fetchall()}
+
+            # only set connector_config items if the values differ from what is already set
+            # trying to set options like 'temp_directory' even to the same value can throw errors like:
+            # Not implemented Error: Cannot switch temporary directory after the current one has been used
+            for field, setting in settings.items():
+                if existing_values.get(field) != setting:
+                    try:
+                        cursor.execute(f"SET {field} = '{setting}'")
+                    except Exception as e:
+                        raise ConfigError(
+                            f"Failed to set connector config {field} to {setting}: {e}"
+                        )
+
         def init(cursor: duckdb.DuckDBPyConnection) -> None:
+            # Settings that control where extensions come from have to be in place before the
+            # first INSTALL / LOAD, otherwise DuckDB reaches out to the default repository first.
+            apply_settings(
+                cursor,
+                {
+                    field: setting
+                    for field, setting in self.connector_config.items()
+                    if field in DUCKDB_EXTENSION_SETTINGS
+                },
+            )
+
             for extension in self.extensions:
                 extension = extension if isinstance(extension, dict) else {"name": extension}
 
                 install_command = f"INSTALL {extension['name']}"
 
-                if extension.get("repository"):
-                    install_command = f"{install_command} FROM {extension['repository']}"
+                if repository := extension.get("repository"):
+                    if not DUCKDB_EXTENSION_REPOSITORY_ALIAS_REGEX.match(repository):
+                        repository = exp.Literal.string(repository).sql(dialect="duckdb")
+                    install_command = f"{install_command} FROM {repository}"
 
                 if extension.get("force_install"):
                     install_command = f"FORCE {install_command}"
@@ -383,28 +443,16 @@ class BaseDuckDBConnectionConfig(ConnectionConfig):
                 except Exception as e:
                     raise ConfigError(f"Failed to load extension {extension['name']}: {e}")
 
-            if self.connector_config:
-                option_names = list(self.connector_config)
-                in_part = ",".join("?" for _ in range(len(option_names)))
-
-                cursor.execute(
-                    f"SELECT name, value FROM duckdb_settings() WHERE name IN ({in_part})",
-                    option_names,
-                )
-
-                existing_values = {field: setting for field, setting in cursor.fetchall()}
-
-                # only set connector_config items if the values differ from what is already set
-                # trying to set options like 'temp_directory' even to the same value can throw errors like:
-                # Not implemented Error: Cannot switch temporary directory after the current one has been used
-                for field, setting in self.connector_config.items():
-                    if existing_values.get(field) != setting:
-                        try:
-                            cursor.execute(f"SET {field} = '{setting}'")
-                        except Exception as e:
-                            raise ConfigError(
-                                f"Failed to set connector config {field} to {setting}: {e}"
-                            )
+            # The remaining settings may belong to extensions (e.g. `s3_region` from httpfs),
+            # so they are applied after the extensions have been loaded.
+            apply_settings(
+                cursor,
+                {
+                    field: setting
+                    for field, setting in self.connector_config.items()
+                    if field not in DUCKDB_EXTENSION_SETTINGS
+                },
+            )
 
             if self.secrets:
                 duckdb_version = duckdb.__version__
