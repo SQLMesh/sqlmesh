@@ -920,13 +920,18 @@ class GenericContext(BaseContext, t.Generic[C]):
                 if environment_state.finalized_ts:
                     return environment_state.plan_id
                 self.console.log_warning(
-                    f"Environment '{environment}' is being updated by plan '{environment_state.plan_id}'. "
-                    f"Retrying in {self.config.run.environment_check_interval} seconds..."
+                    f"Environment '{environment}' is not finalized after plan '{environment_state.plan_id}'. "
+                    "The plan may still be running or may have failed. "
+                    "Waiting for environment finalization, "
+                    f"retrying in {self.config.run.environment_check_interval} seconds "
+                    f"(configured maximum wait: {self.config.run.environment_check_max_wait} seconds)."
                 )
                 time.sleep(self.config.run.environment_check_interval)
             raise SQLMeshError(
-                f"Exceeded the maximum wait time for environment '{environment}' to be ready. "
-                "This means that the environment either failed to update or the update is taking longer than expected. "
+                f"Exceeded the maximum wait time for environment '{environment}' to finalize "
+                f"(configured maximum wait: {self.config.run.environment_check_max_wait} seconds). "
+                "The plan may still be running or may have failed. Inspect the plan logs and, if it failed, "
+                f"resolve its errors and reapply it with `sqlmesh plan {environment}` to finalize the environment. "
                 "See https://sqlmesh.readthedocs.io/en/stable/reference/configuration/#run to adjust the timeout settings."
             )
 
