@@ -32,3 +32,22 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+  - package-ecosystem: 'pip'
+    directory: '/docs'
+    schedule:
+      interval: 'weekly'
+    groups:
+      # The docs toolchain (MkDocs, its theme and plugins, pdoc, Pygments) is
+      # built and verified as a whole, so bump it in a single PR.
+      docs:
+        patterns:
+          - '*'
+    ignore:
+      # MkDocs 2.0 removes the plugin and theme systems that Material for
+      # MkDocs and our plugins depend on, so a major bump can't be taken as-is.
+      - dependency-name: 'mkdocs'
+        update-types: ['version-update:semver-major']
+      # mkdocs-material 9.8+ requires Python >= 3.11, but Read the Docs builds
+      # with Python 3.10 (.readthedocs.yaml). Drop this once that is raised.
+      - dependency-name: 'mkdocs-material'
+        versions: ['>=9.8']
