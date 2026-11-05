@@ -110,6 +110,26 @@ def test_run_loads_materializations_once(init_and_plan_context: t.Callable, mock
         assert loader_spy.call_count == 1
 
 
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_destroy_fails_before_invalidating_environments_on_materialization_error(
+    init_and_plan_context: t.Callable, mocker: MockerFixture
+):
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+    assert context.state_reader.get_environment("prod").expiration_ts is None
+
+    for loader in context._loaders:
+        mocker.patch.object(
+            loader, "load_materializations", side_effect=SQLMeshError("broken materialization")
+        )
+    context._materializations_loaded = False
+
+    with pytest.raises(SQLMeshError, match="broken materialization"):
+        context._destroy()
+
+    assert context.state_reader.get_environment("prod").expiration_ts is None
+
+
 def test_janitor_loads_materialization(tmp_path: Path):
     config_file_path = Path("config.yaml")
     database = tmp_path / "janitor_test.duckdb"

@@ -3158,6 +3158,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     def _destroy(self) -> bool:
+        # Load materializations before any state writes so a failure aborts destroy without invalidating environments
+        self._load_materializations()
+
         # Invalidate all environments, including prod
         for environment in self.state_reader.get_environments():
             self.state_sync.invalidate_environment(name=environment.name, protect_prod=False)
