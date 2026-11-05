@@ -125,7 +125,7 @@ def test_destroy_fails_before_invalidating_environments_on_materialization_error
     context._materializations_loaded = False
 
     with pytest.raises(SQLMeshError, match="broken materialization"):
-        context._destroy()
+        context.destroy()
 
     assert context.state_reader.get_environment("prod").expiration_ts is None
 

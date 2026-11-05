@@ -1019,6 +1019,10 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     @python_api_analytics
     def destroy(self) -> bool:
+        # Load first so snapshot unpickling cannot import a custom-kind module that this load then reimports.
+        # If loading fails, abort before invalidating any environments.
+        self._load_materializations()
+
         success = False
 
         # Collect resources to be deleted
@@ -3158,9 +3162,6 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     def _destroy(self) -> bool:
-        # Load materializations before any state writes so a failure aborts destroy without invalidating environments
-        self._load_materializations()
-
         # Invalidate all environments, including prod
         for environment in self.state_reader.get_environments():
             self.state_sync.invalidate_environment(name=environment.name, protect_prod=False)
