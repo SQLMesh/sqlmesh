@@ -199,6 +199,10 @@ def _get_measure_and_dim_tables(expression: exp.Expr) -> MeasureAndDimTables:
             return is_measure(parent)
         if isinstance(parent, (exp.Binary, exp.Paren, exp.Distinct)):
             return is_measure(parent)
+        # AGG(x ORDER BY y) is parsed as AGG(Order(this=x, expressions=[Ordered(y)])).
+        # Only the Order's `this` can be the measure, not the ORDER BY expressions.
+        if isinstance(parent, exp.Order) and node.arg_key == "this":
+            return is_measure(parent)
         return False
 
     for node in expression.walk():
