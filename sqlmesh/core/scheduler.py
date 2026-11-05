@@ -13,6 +13,9 @@ from sqlmesh.core.execution_observation import (
     console_observer_scope,
     execution_context_factory,
 )
+from sqlmesh.core.query_execution_context_observer import (
+    should_enable_automatic_query_execution_context,
+)
 from sqlmesh.core.environment import EnvironmentNamingInfo, execute_environment_statements
 from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.model.definition import AuditResult
@@ -459,7 +462,12 @@ class Scheduler:
         Returns:
             A tuple of errors and skipped intervals.
         """
-        with console_observer_scope(self.console):
+        with console_observer_scope(
+            self.console,
+            query_execution_context=should_enable_automatic_query_execution_context(
+                self.snapshot_evaluator.adapters.values()
+            ),
+        ):
             execution_time = execution_time or now_timestamp()
 
             selected_snapshots = [self.snapshots[sid] for sid in (selected_snapshot_ids or set())]
