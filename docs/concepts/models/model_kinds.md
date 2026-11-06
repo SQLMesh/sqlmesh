@@ -444,6 +444,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_TIME_RANGE` kind a
 | Redshift   | DELETE by time range, then INSERT         |
 | Postgres   | DELETE by time range, then INSERT         |
 | DuckDB     | DELETE by time range, then INSERT         |
+| Doris      | DELETE by time range, then INSERT         |
 
 ## INCREMENTAL_BY_UNIQUE_KEY
 
@@ -669,6 +670,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_UNIQUE_KEY` kind a
 | Redshift   | MERGE ON unique key                 |
 | Postgres   | MERGE ON unique key                 |
 | DuckDB     | DELETE ON matched + INSERT new rows |
+| Doris      | DELETE ON matched + INSERT new rows |
 
 ## FULL
 Models of the `FULL` kind cause the dataset associated with a model to be fully refreshed (rewritten) upon each model evaluation.
@@ -761,6 +763,7 @@ Depending on the target engine, models of the `FULL` kind are materialized using
 | Redshift   | DROP TABLE, CREATE TABLE, INSERT |
 | Postgres   | DROP TABLE, CREATE TABLE, INSERT |
 | DuckDB     | CREATE OR REPLACE TABLE          |
+| Doris      | CREATE TABLE ... AS SELECT (new OLAP), DELETE + INSERT (existing OLAP) / INSERT OVERWRITE (Iceberg) |
 
 ## VIEW
 The model kinds described so far cause the output of a model query to be materialized and stored in a physical table.
@@ -837,6 +840,7 @@ MODEL (
 
 * BigQuery
 * Databricks
+* Doris
 * Snowflake
 
 During the evaluation of a model of this kind, the view will be replaced or recreated only if the model's query rendered during evaluation does not match the query used during the previous view creation for this model, or if the target view does not exist. Thus, views are recreated only when necessary in order to realize all the benefits provided by materialized views.
@@ -1629,6 +1633,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_PARTITION` kind ar
 | Redshift   | DELETE by partitioning key, then INSERT |
 | Postgres   | DELETE by partitioning key, then INSERT |
 | DuckDB     | DELETE by partitioning key, then INSERT |
+| Doris      | DELETE by partitioning key, then INSERT |
 
 ## INCREMENTAL_UNMANAGED
 

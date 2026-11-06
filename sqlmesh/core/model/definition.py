@@ -737,7 +737,10 @@ class _Model(ModelMeta, frozen=True):
             )
             for key in keys_to_resolve:
                 rendered[key] = _resolve_model_refs_to_physical_tables(
-                    rendered[key], table_mapping, self.dialect
+                    rendered[key],
+                    table_mapping,
+                    self.dialect,
+                    default_catalog=self.default_catalog,
                 )
 
         return rendered
@@ -2830,23 +2833,44 @@ def _split_sql_model_statements(
 
 
 def _resolve_model_refs_to_physical_tables(
-    value: exp.Expr, table_mapping: t.Dict[str, str], dialect: DialectType
+    value: exp.Expr,
+    table_mapping: t.Dict[str, str],
+    dialect: DialectType,
+    default_catalog: t.Optional[str] = None,
 ) -> exp.Literal:
     """Resolve managed-model references in a property value to their physical table names.
 
-    The value is a single table reference or a comma-separated list of them. Each reference that
-    matches a managed model (via ``table_mapping``) is swapped for its physical ``db.table`` name;
-    anything else (e.g. a raw source) is kept as written. Returns a single string literal so the
-    property renders just like a hand-written value.
+    The value is a single table reference, a comma-separated string of references, or a tuple/array
+    of references. Each reference that matches a managed model (via ``table_mapping``) is swapped
+    for its physical ``db.table`` name; anything else (e.g. a raw source) is kept as written.
+    Returns a single string literal so the property renders just like a hand-written value.
     """
+    if isinstance(value, exp.Paren):
+        value = value.this
+
     if isinstance(value, exp.Literal) and value.is_string:
         refs = value.this.split(",")
+    elif isinstance(value, (exp.Tuple, exp.Array)):
+        refs = [
+            part
+            for elem in value.expressions
+            for part in (
+                elem.this.split(",")
+                if isinstance(elem, exp.Literal) and elem.is_string
+                else [elem.sql(dialect=dialect)]
+            )
+        ]
     else:
         refs = [value.sql(dialect=dialect)]
 
     def resolve(ref: str) -> str:
         table = exp.to_table(ref.strip(), dialect=dialect)
         physical = table_mapping.get(exp.table_name(table, identify=True))
+        if not physical and default_catalog and not table.catalog:
+            normalized_name = d.normalize_model_name(
+                table, default_catalog=default_catalog, dialect=dialect
+            )
+            physical = table_mapping.get(normalized_name)
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         return exp.table_name(
             exp.to_table(physical, dialect=dialect) if physical else table, identify=False
