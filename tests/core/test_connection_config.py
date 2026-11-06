@@ -1426,21 +1426,20 @@ def test_databricks(make_config):
         )
 
 
-def test_databricks__u2m_oauth__shared_connection_pool(make_config):
-    """Databricks should use a shared connection pool when using OAuth to prevent CSRF races.
+def test_databricks__u2m_oauth__connection_pool(make_config):
+    """Databricks should use a connection per thread with U2M OAuth, sharing a single login.
 
-    When concurrent_tasks > 1, ThreadLocalConnectionPool creates one connection per
-    thread. For U2M OAuth, each thread triggers its own browser-based OAuth flow;
-    these race on the CSRF state parameter and cause MismatchingStateError.
-
-    For non-U2M OAuth authentication types (e.g. access_token and M2M OAuth) then
-    ThreadLocalConnectionPool should still be used.
+    If each connection ran its own U2M OAuth flow then the browser flows would race on the
+    CSRF state parameter and cause MismatchingStateError. Sharing a single connection avoids
+    that but forces all queries to run sequentially. Instead, every connection is given the
+    same credentials provider so the browser flow only runs once.
 
     See:
         https://github.com/tobymao/sqlmesh/issues/5646
         https://github.com/SQLMesh/sqlmesh/issues/5858
     """
-    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+    from sqlmesh.utils.connection_pool import ThreadLocalConnectionPool
+    from sqlmesh.utils.databricks import SharedU2MCredentialsProvider
 
     config = make_config(
         type="databricks",
@@ -1450,10 +1449,55 @@ def test_databricks__u2m_oauth__shared_connection_pool(make_config):
         concurrent_tasks=4,
     )
     assert isinstance(config, DatabricksConnectionConfig)
-    assert config.shared_connection is True
+    assert config.shared_connection is False
 
     adapter = config.create_engine_adapter()
-    assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+    assert isinstance(adapter._connection_pool, ThreadLocalConnectionPool)
+
+    connection_kwargs = config._connection_factory_with_kwargs.keywords
+    assert connection_kwargs["auth_type"] == "databricks-oauth"
+    credentials_provider = connection_kwargs["credentials_provider"]
+    assert isinstance(credentials_provider, SharedU2MCredentialsProvider)
+
+    # Separate engine adapters (and copies of the config) must reuse the same login
+    other_config = make_config(
+        type="databricks",
+        server_hostname="dbc-test.cloud.databricks.com",
+        http_path="sql/test/bar",
+        auth_type="databricks-oauth",
+    )
+    assert (
+        other_config._connection_factory_with_kwargs.keywords["credentials_provider"]
+        is credentials_provider
+    )
+
+
+def test_databricks__u2m_oauth__old_connector_shares_connection(make_config):
+    """Connectors without the internals the shared login builds on fall back to one shared connection."""
+    from sqlmesh.utils import databricks
+    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+
+    databricks.supports_shared_u2m_login.cache_clear()
+    try:
+        with patch("importlib.util.find_spec", return_value=None):
+            config = make_config(
+                type="databricks",
+                server_hostname="dbc-test.cloud.databricks.com",
+                http_path="sql/test/foo",
+                auth_type="databricks-oauth",
+                concurrent_tasks=4,
+            )
+            assert isinstance(config, DatabricksConnectionConfig)
+            assert config.shared_connection is True
+
+            adapter = config.create_engine_adapter()
+            assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+
+            connection_kwargs = config._connection_factory_with_kwargs.keywords
+            assert connection_kwargs["auth_type"] == "databricks-oauth"
+            assert "credentials_provider" not in connection_kwargs
+    finally:
+        databricks.supports_shared_u2m_login.cache_clear()
 
 
 @patch.object(DatabricksConnectionConfig, "_connection_factory_with_kwargs")
