@@ -245,3 +245,47 @@ def test_tz(init_and_plan_context):
 
         plan = context.plan_builder("prod", skip_tests=True).build()
         assert not plan.missing_intervals
+
+
+@time_machine.travel("2023-01-08 00:00:00 UTC", tick=False)
+def test_new_model_with_cron_and_no_missing_intervals(init_and_plan_context: t.Callable):
+    context, _ = init_and_plan_context("examples/sushi")
+
+    # The cron of this model hasn't elapsed for the only interval in the plan's date range
+    cron_model = load_sql_based_model(
+        d.parse(
+            """
+        MODEL (
+            name memory.sushi.cron_model,
+            kind FULL,
+            cron '20 8 * * *',
+        );
+
+        SELECT 1 AS one;
+        """
+        )
+    )
+    daily_model = load_sql_based_model(
+        d.parse(
+            """
+        MODEL (
+            name memory.sushi.daily_model,
+            kind FULL,
+            cron '@daily',
+        );
+
+        SELECT 1 AS one;
+        """
+        )
+    )
+    context.upsert_model(cron_model)
+    context.upsert_model(daily_model)
+
+    with time_machine.travel("2023-01-09 01:49:00 UTC", tick=False):
+        plan = context.plan_builder("dev", start="2023-01-08", skip_tests=True).build()
+        missing_names = {i.snapshot_id.name for i in plan.missing_intervals}
+        assert '"memory"."sushi"."daily_model"' in missing_names
+        assert '"memory"."sushi"."cron_model"' not in missing_names
+        context.apply(plan)
+
+    assert context.fetchdf("SELECT one FROM sushi__dev.cron_model")["one"].tolist() == []

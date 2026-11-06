@@ -505,12 +505,14 @@ class Scheduler:
                     selected_models=selected_models,
                 )
 
-            # We only need to create physical tables if the snapshot is not representative or if it
-            # needs backfill
+            # We only need to create physical tables if the snapshot is not representative, if it
+            # needs backfill, or if it has never been evaluated (eg. its cron hasn't elapsed yet)
             snapshots_to_create_candidates = [
                 s
                 for s in selected_snapshots
-                if not deployability_index.is_representative(s) or s in batched_intervals
+                if not deployability_index.is_representative(s)
+                or s in batched_intervals
+                or not s.intervals
             ]
             snapshots_to_create = {
                 s.snapshot_id
