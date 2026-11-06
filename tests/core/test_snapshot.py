@@ -919,6 +919,31 @@ def test_get_removal_intervals_full_history_restatement_model(make_snapshot):
     assert interval == (to_timestamp("2023-01-01"), execution_time)
 
 
+def test_get_removal_interval_full_history_does_not_render_model(
+    make_snapshot: t.Callable[..., Snapshot], mocker: MockerFixture
+):
+    # Full history restatement models are already known to depend on past intervals, so computing
+    # the removal interval must not render the model query (which may fail to hydrate user code).
+    model = SqlModel(
+        name="name",
+        kind=IncrementalUnmanagedKind(),
+        query=parse_one("SELECT 1"),
+    )
+    snapshot = make_snapshot(model)
+    snapshot.add_interval("2020-01-01", "2024-01-01")
+    # Drop the cached dependencies, as for a snapshot loaded from the state sync.
+    snapshot.model._full_depends_on = None
+
+    render_query = mocker.patch.object(SqlModel, "render_query", side_effect=ModuleNotFoundError)
+
+    execution_time = to_timestamp("2024-01-02")
+    interval = snapshot.get_removal_interval(
+        "2023-01-01", "2023-01-01", execution_time=execution_time
+    )
+    assert interval == (to_timestamp("2020-01-01"), execution_time)
+    render_query.assert_not_called()
+
+
 def test_get_removal_intervals_warns_when_requested_range_automatically_widened(
     make_snapshot: t.Callable[..., Snapshot], mocker: MockerFixture
 ):
