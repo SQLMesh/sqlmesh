@@ -5,6 +5,7 @@ import pandas as pd  # noqa: TID253
 import pytest
 from pytest_mock.plugin import MockerFixture
 from sqlglot import exp, parse_one
+from sqlglot.errors import ParseError
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 import sqlmesh.core.dialect as d
@@ -1804,3 +1805,71 @@ def test_clustering_key_issue_5813_clone_inherited_column_drop(
     ]
     for kept in ('"TENANT_ID"', '"USER_ID"', '"SESSION_START_TS"'):
         assert not any(f"DROP COLUMN {kept}" in sql for sql in sql_calls)
+
+
+def test_clustering_key_unparseable_without_column_drop_skips_parse(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """A key string that cannot be parsed is ignored unless a column is dropped.
+
+    LINEAR( is not valid Snowflake SQL. With no column drop, the current key is not
+    parsed: an unchanged key emits nothing, and a removed or replaced key is appended.
+    """
+    unchanged = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"ID": "INT"},
+        target_columns={"ID": "INT"},
+        current_clustering_key="LINEAR(",
+        target_clustering_key="LINEAR(",
+    )
+    assert (
+        unchanged.get_alter_operations("catalog.db.current_table", "catalog.db.target_table") == []
+    )
+
+    removed = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"ID": "INT"},
+        target_columns={"ID": "INT"},
+        current_clustering_key="LINEAR(",
+        target_clustering_key=None,
+    )
+    removed_operations = removed.get_alter_operations(
+        "catalog.db.current_table", "catalog.db.target_table"
+    )
+    removed.alter_table(removed_operations)
+    assert [type(op) for op in removed_operations] == [TableAlterDropClusterKeyOperation]
+    assert to_sql_calls(removed) == [_cluster_alter("DROP CLUSTERING KEY")]
+
+    replaced = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"ID": "INT"},
+        target_columns={"ID": "INT"},
+        current_clustering_key="LINEAR(",
+        target_clustering_key='LINEAR("ID")',
+    )
+    replaced_operations = replaced.get_alter_operations(
+        "catalog.db.current_table", "catalog.db.target_table"
+    )
+    replaced.alter_table(replaced_operations)
+    assert [type(op) for op in replaced_operations] == [TableAlterChangeClusterKeyOperation]
+    assert to_sql_calls(replaced) == [_cluster_alter('CLUSTER BY ("ID")')]
+
+
+def test_clustering_key_unparseable_column_drop_still_raises(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """Dropping a column still parses the current key, so a bad key still fails."""
+    adapter = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"ID": "INT", "EXTRA": "INT"},
+        target_columns={"ID": "INT"},
+        current_clustering_key="LINEAR(",
+        target_clustering_key=None,
+    )
+
+    with pytest.raises(ParseError):
+        adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")

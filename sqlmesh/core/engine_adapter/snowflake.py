@@ -704,23 +704,18 @@ class SnowflakeEngineAdapter(
     ) -> None:
         """Apply clustering DDL in the order Snowflake requires.
 
-        Snowflake rejects DROP COLUMN while the column is still named in the clustering
-        key, including when the name sits inside an expression such as TO_DATE("TS").
-        It also rejects CLUSTER BY on a column that has not yet been added. The
-        required sequence when the old key names a column being dropped is:
-
-        1. DROP CLUSTERING KEY, before any drop of a column the old key still names.
-        2. Column changes (drops and adds), in their existing schema-diff order.
-        3. CLUSTER BY, after all column changes, when the target table is clustered.
-
-        A type change that schema diff renders as DROP plus ADD uses the same sequence
-        even when the key text does not change. When no dropped column belongs to the
-        current key, an unchanged key emits nothing and a changed key stays at the end.
-        Column names from DESCRIBE are already stored as Snowflake resolved them, so
-        they are compared as returned.
+        DROP COLUMN fails while the column is still in the clustering key, including
+        inside an expression. CLUSTER BY fails on a column that does not exist yet. A
+        type change that becomes DROP plus ADD still needs the key dropped first even
+        when the key text is unchanged. An unchanged key with no matching column drop
+        emits nothing. DESCRIBE names are compared as stored.
         """
         clustering_key = current_table_info.clustering_key if current_table_info else None
-        if clustering_key:
+        operations_include_drop_column = any(
+            isinstance(op, TableAlterDropColumnOperation) for op in operations
+        )
+
+        if clustering_key and operations_include_drop_column:
             referenced = self._clustering_key_column_names(clustering_key)
             drop_index = next(
                 (
