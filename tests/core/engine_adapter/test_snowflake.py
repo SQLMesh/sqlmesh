@@ -1243,6 +1243,10 @@ def _make_snowflake_clustering_adapter(
     return adapter
 
 
+def _cluster_alter(action: str) -> str:
+    return f'ALTER TABLE "CATALOG"."db"."current_table" {action}'
+
+
 def test_clustering_key_drop_before_column_drop(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
 ) -> None:
@@ -1269,9 +1273,10 @@ def test_clustering_key_drop_before_column_drop(
     assert isinstance(operations[1], TableAlterDropColumnOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 2
-    assert "DROP CLUSTERING KEY" in sql_calls[0]
-    assert "DROP" in sql_calls[1] and "PARTITION_MONTH" in sql_calls[1]
+    assert sql_calls == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "PARTITION_MONTH"'),
+    ]
 
 
 def test_clustering_key_cluster_by_before_column_drop(
@@ -1303,10 +1308,11 @@ def test_clustering_key_cluster_by_before_column_drop(
     assert isinstance(operations[2], TableAlterChangeClusterKeyOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 3
-    assert "DROP CLUSTERING KEY" in sql_calls[0]
-    assert "DROP" in sql_calls[1] and "PARTITION_MONTH" in sql_calls[1]
-    assert "CLUSTER BY" in sql_calls[2]
+    assert sql_calls == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "PARTITION_MONTH"'),
+        _cluster_alter('CLUSTER BY ("ID")'),
+    ]
 
 
 def test_clustering_key_unchanged_when_dropped_column_not_in_key(
@@ -1363,9 +1369,10 @@ def test_clustering_key_add_column_before_cluster_by(
     assert isinstance(operations[1], TableAlterChangeClusterKeyOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 2
-    assert "ADD" in sql_calls[0] and "C" in sql_calls[0]
-    assert "CLUSTER BY" in sql_calls[1]
+    assert sql_calls == [
+        _cluster_alter('ADD "C" INT'),
+        _cluster_alter('CLUSTER BY ("C")'),
+    ]
 
 
 def test_clustering_key_drop_column_add_column_change_key(
@@ -1398,11 +1405,12 @@ def test_clustering_key_drop_column_add_column_change_key(
     assert isinstance(operations[3], TableAlterChangeClusterKeyOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 4
-    assert "DROP CLUSTERING KEY" in sql_calls[0]
-    assert "DROP" in sql_calls[1] and "B" in sql_calls[1]
-    assert "ADD" in sql_calls[2] and "C" in sql_calls[2]
-    assert "CLUSTER BY" in sql_calls[3]
+    assert sql_calls == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "B"'),
+        _cluster_alter('ADD "C" INT'),
+        _cluster_alter('CLUSTER BY ("C")'),
+    ]
 
 
 def test_clustering_key_drop_only_when_same_columns(
@@ -1430,8 +1438,7 @@ def test_clustering_key_drop_only_when_same_columns(
     assert isinstance(operations[0], TableAlterDropClusterKeyOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 1
-    assert "DROP CLUSTERING KEY" in sql_calls[0]
+    assert sql_calls == [_cluster_alter("DROP CLUSTERING KEY")]
 
 
 def test_clustering_key_inserted_between_multiple_drops(
@@ -1462,10 +1469,11 @@ def test_clustering_key_inserted_between_multiple_drops(
     assert isinstance(operations[2], TableAlterDropColumnOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 3
-    assert "DROP" in sql_calls[0] and "EXTRA" in sql_calls[0]
-    assert "DROP CLUSTERING KEY" in sql_calls[1]
-    assert "DROP" in sql_calls[2] and "PARTITION_MONTH" in sql_calls[2]
+    assert sql_calls == [
+        _cluster_alter('DROP COLUMN "EXTRA"'),
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "PARTITION_MONTH"'),
+    ]
 
 
 def test_clustering_key_cluster_by_change_inserted_between_drops(
@@ -1492,17 +1500,18 @@ def test_clustering_key_cluster_by_change_inserted_between_drops(
 
     assert len(operations) == 4
     assert isinstance(operations[0], TableAlterDropColumnOperation)
-    assert "EXTRA" in operations[0].target_table.sql(dialect="snowflake") or True
+    assert operations[0].column_parts[0].name == "EXTRA"
     assert isinstance(operations[1], TableAlterDropClusterKeyOperation)
     assert isinstance(operations[2], TableAlterDropColumnOperation)
     assert isinstance(operations[3], TableAlterChangeClusterKeyOperation)
 
     sql_calls = to_sql_calls(adapter)
-    assert len(sql_calls) == 4
-    assert "DROP" in sql_calls[0] and "EXTRA" in sql_calls[0]
-    assert "DROP CLUSTERING KEY" in sql_calls[1]
-    assert "DROP" in sql_calls[2] and "PARTITION_MONTH" in sql_calls[2]
-    assert "CLUSTER BY" in sql_calls[3]
+    assert sql_calls == [
+        _cluster_alter('DROP COLUMN "EXTRA"'),
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "PARTITION_MONTH"'),
+        _cluster_alter('CLUSTER BY ("ID")'),
+    ]
 
 
 def test_clustering_key_reorder_targets_current_table(
@@ -1547,13 +1556,13 @@ def test_clustering_key_normalization_quoted_upper_matches_upper_column(
     assert isinstance(operations[1], TableAlterDropColumnOperation)
 
 
-def test_clustering_key_normalization_quoted_upper_matches_lower_column(
+def test_clustering_key_quoted_upper_does_not_match_stored_lower_column(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
 ) -> None:
-    """LINEAR("PARTITION_MONTH") also references the column string partition_month.
+    """LINEAR("PARTITION_MONTH") does not reference a column stored as partition_month.
 
-    The unquoted column string partition_month normalizes to PARTITION_MONTH in
-    Snowflake, matching the quoted-upper key identifier.
+    DESCRIBE returns the stored name. A lowercase name was created with quotes, so it
+    is a different column from PARTITION_MONTH and the key stays in place.
     """
     adapter = _make_snowflake_clustering_adapter(
         make_mocked_engine_adapter,
@@ -1565,9 +1574,15 @@ def test_clustering_key_normalization_quoted_upper_matches_lower_column(
     )
 
     operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
 
-    assert isinstance(operations[0], TableAlterDropClusterKeyOperation)
-    assert isinstance(operations[1], TableAlterDropColumnOperation)
+    assert len(operations) == 2
+    assert isinstance(operations[0], TableAlterDropColumnOperation)
+    assert isinstance(operations[1], TableAlterDropClusterKeyOperation)
+    assert to_sql_calls(adapter) == [
+        _cluster_alter('DROP COLUMN "partition_month"'),
+        _cluster_alter("DROP CLUSTERING KEY"),
+    ]
 
 
 def test_clustering_key_normalization_quoted_lower_no_match_upper_column(
@@ -1597,24 +1612,195 @@ def test_clustering_key_normalization_quoted_lower_no_match_upper_column(
     )
 
 
-def test_clustering_key_normalization_quoted_lower_no_match_lower_column(
+def test_clustering_key_quoted_lower_matches_stored_lower_column(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
 ) -> None:
-    """LINEAR("partition_month") does NOT reference the column string partition_month.
+    """LINEAR("b") references the column stored as b.
 
-    The column string partition_month normalizes to PARTITION_MONTH in Snowflake,
-    but the quoted-lowercase key identifier stays lowercase, so they do not match.
+    The stored name is already case-resolved, so it matches the quoted key and the
+    key comes off before the drop.
     """
     adapter = _make_snowflake_clustering_adapter(
         make_mocked_engine_adapter,
         mocker,
-        current_columns={"TENANT_ID": "INT", "partition_month": "INT"},
-        target_columns={"TENANT_ID": "INT"},
-        current_clustering_key='LINEAR("partition_month")',
-        target_clustering_key='LINEAR("partition_month")',
+        current_columns={"id": "INT", "b": "INT"},
+        target_columns={"id": "INT"},
+        current_clustering_key='LINEAR("id", "b")',
+        target_clustering_key='LINEAR("id")',
     )
 
     operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
 
-    assert len(operations) == 1
-    assert isinstance(operations[0], TableAlterDropColumnOperation)
+    assert [type(op) for op in operations] == [
+        TableAlterDropClusterKeyOperation,
+        TableAlterDropColumnOperation,
+        TableAlterChangeClusterKeyOperation,
+    ]
+    assert to_sql_calls(adapter) == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "b"'),
+        _cluster_alter('CLUSTER BY ("id")'),
+    ]
+
+
+def test_clustering_key_expression_column_dropped(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """A column inside a key expression is still part of the key.
+
+    Current: TS, ID clustered on LINEAR(TO_DATE("TS"), "ID").
+    Target: ID clustered on LINEAR("ID").
+    Expected: DROP CLUSTERING KEY, DROP COLUMN TS, CLUSTER BY ("ID").
+    """
+    adapter = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"TS": "DATE", "ID": "INT"},
+        target_columns={"ID": "INT"},
+        current_clustering_key='LINEAR(TO_DATE("TS"), "ID")',
+        target_clustering_key='LINEAR("ID")',
+    )
+
+    operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
+
+    assert to_sql_calls(adapter) == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "TS"'),
+        _cluster_alter('CLUSTER BY ("ID")'),
+    ]
+
+
+def test_clustering_key_expression_keeps_expression_column(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """Inverse of dropping the column inside the key expression.
+
+    Current: TS DATE, ID INT clustered on LINEAR(TO_DATE("TS"), "ID").
+    Target: TS DATE only, clustered on LINEAR(TO_DATE("TS")).
+    The plain column ID is dropped. TS stays, because the remaining key still uses it.
+    Expected: DROP CLUSTERING KEY, DROP COLUMN ID, CLUSTER BY (TO_DATE("TS")).
+    """
+    adapter = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"TS": "DATE", "ID": "INT"},
+        target_columns={"TS": "DATE"},
+        current_clustering_key='LINEAR(TO_DATE("TS"), "ID")',
+        target_clustering_key='LINEAR(TO_DATE("TS"))',
+    )
+
+    operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
+
+    sql_calls = to_sql_calls(adapter)
+    assert sql_calls == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "ID"'),
+        _cluster_alter('CLUSTER BY (TO_DATE("TS"))'),
+    ]
+    assert not any('DROP COLUMN "TS"' in sql for sql in sql_calls)
+
+
+def test_clustering_key_substring_expression_column_dropped(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """SUBSTRING(NAME, 1, 3) still names NAME, so NAME cannot be dropped first."""
+    adapter = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"NAME": "VARCHAR", "ID": "INT"},
+        target_columns={"ID": "INT"},
+        current_clustering_key="LINEAR(SUBSTRING(NAME, 1, 3), ID)",
+        target_clustering_key="LINEAR(ID)",
+    )
+
+    operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
+
+    assert to_sql_calls(adapter) == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "NAME"'),
+        _cluster_alter('CLUSTER BY ("ID")'),
+    ]
+
+
+def test_clustering_key_type_change_on_key_column(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """VARCHAR to INT on a key column is a drop and an add, and the key stays the same.
+
+    Snowflake still rejects the drop while the column is in the key, so the key comes
+    off first and is set again after the new column exists.
+    """
+    adapter = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={"A": "INT", "B": "VARCHAR"},
+        target_columns={"A": "INT", "B": "INT"},
+        current_clustering_key="LINEAR(B)",
+        target_clustering_key="LINEAR(B)",
+    )
+
+    operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
+
+    assert to_sql_calls(adapter) == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "B"'),
+        _cluster_alter('ADD "B" INT'),
+        _cluster_alter('CLUSTER BY ("B")'),
+    ]
+
+
+def test_clustering_key_issue_5813_clone_inherited_column_drop(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    """Issue 5813: a cloned FULL snapshot still has the source clustering key.
+
+    The issue's model is ANALYTICS.SESSION_FACTS. The deployed query projects
+    tenant_id, user_id, session_start_ts, and date_trunc('month', session_start_ts)
+    AS partition_month, with clustered_by (TENANT_ID, PARTITION_MONTH). A later edit
+    removes clustered_by and stops projecting partition_month.
+
+    SQLMesh creates the new physical table with CREATE TABLE ... CLONE. Snowflake
+    copies the clustering key onto that clone. clone_table only emits the CLONE
+    statement, so this test is the alter that follows: the current table is the
+    clone and still has the inherited key. The issue does not state column types.
+    TENANT_ID and USER_ID are INT here; SESSION_START_TS is TIMESTAMP and
+    PARTITION_MONTH is DATE because the issue derives the latter with date_trunc.
+
+    Snowflake rejects DROP COLUMN PARTITION_MONTH while it is still in the key
+    (error 003203). Expected: DROP CLUSTERING KEY, then DROP COLUMN PARTITION_MONTH.
+    The columns the model still projects are not dropped, and no CLUSTER BY is
+    emitted because the target has no clustering key.
+    """
+    adapter = _make_snowflake_clustering_adapter(
+        make_mocked_engine_adapter,
+        mocker,
+        current_columns={
+            "TENANT_ID": "INT",
+            "USER_ID": "INT",
+            "SESSION_START_TS": "TIMESTAMP",
+            "PARTITION_MONTH": "DATE",
+        },
+        target_columns={
+            "TENANT_ID": "INT",
+            "USER_ID": "INT",
+            "SESSION_START_TS": "TIMESTAMP",
+        },
+        current_clustering_key='LINEAR("TENANT_ID", "PARTITION_MONTH")',
+        target_clustering_key=None,
+    )
+
+    operations = adapter.get_alter_operations("catalog.db.current_table", "catalog.db.target_table")
+    adapter.alter_table(operations)
+
+    sql_calls = to_sql_calls(adapter)
+    assert sql_calls == [
+        _cluster_alter("DROP CLUSTERING KEY"),
+        _cluster_alter('DROP COLUMN "PARTITION_MONTH"'),
+    ]
+    for kept in ('"TENANT_ID"', '"USER_ID"', '"SESSION_START_TS"'):
+        assert not any(f"DROP COLUMN {kept}" in sql for sql in sql_calls)

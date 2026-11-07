@@ -18,6 +18,7 @@ from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
     from sqlmesh.core._typing import TableName
+    from sqlmesh.core.engine_adapter.shared import DataObject
     from sqlmesh.core.engine_adapter._typing import (
         DCL,
         DF,
@@ -385,15 +386,15 @@ class ClusteredByMixin(EngineAdapter):
 
         clustering_operation: t.Optional[TableAlterClusterByOperation] = None
         if current_table_info and target_table_info:
-            if target_table_info.is_clustered:
-                if target_table_info.clustering_key and (
-                    current_table_info.clustering_key != target_table_info.clustering_key
-                ):
-                    clustering_operation = TableAlterChangeClusterKeyOperation(
-                        target_table=current_table,
-                        clustering_key=target_table_info.clustering_key,
-                        dialect=self.dialect,
-                    )
+            if target_table_info.is_clustered and target_table_info.clustering_key:
+                # Include an unchanged key. Snowflake may have to drop it and set it
+                # again when a key column is dropped and re-added. Other engines ignore
+                # that operation in _apply_clustering_operation.
+                clustering_operation = TableAlterChangeClusterKeyOperation(
+                    target_table=current_table,
+                    clustering_key=target_table_info.clustering_key,
+                    dialect=self.dialect,
+                )
             elif current_table_info.is_clustered:
                 clustering_operation = TableAlterDropClusterKeyOperation(target_table=current_table)
 
@@ -402,19 +403,32 @@ class ClusteredByMixin(EngineAdapter):
 
         return operations
 
+    def _clustering_key_is_unchanged(
+        self,
+        clustering_operation: "TableAlterClusterByOperation",
+        current_table_info: t.Optional["DataObject"],
+    ) -> bool:
+        return (
+            isinstance(clustering_operation, TableAlterChangeClusterKeyOperation)
+            and current_table_info is not None
+            and current_table_info.clustering_key == clustering_operation.clustering_key
+        )
+
     def _apply_clustering_operation(
         self,
         operations: t.List[TableAlterOperation],
         clustering_operation: "TableAlterClusterByOperation",
-        current_table_info: t.Any,
+        current_table_info: t.Optional["DataObject"],
     ) -> None:
         """Insert the clustering operation into the alter operations list.
 
-        The default implementation appends the clustering change after all column
-        changes (historical order). Snowflake overrides this to handle the case
-        where the old key must be dropped before a column it names is removed,
-        and the new key must be set after new columns are added.
+        The default implementation appends a real clustering change after all column
+        changes. An unchanged key is ignored here. Snowflake overrides this so it can
+        drop that key before removing a column the key names, then set the same key
+        after the column comes back.
         """
+        if self._clustering_key_is_unchanged(clustering_operation, current_table_info):
+            return
         operations.append(clustering_operation)
 
 

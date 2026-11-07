@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import typing as t
 
@@ -699,22 +700,26 @@ class SnowflakeEngineAdapter(
         self,
         operations: t.List[TableAlterOperation],
         clustering_operation: TableAlterClusterByOperation,
-        current_table_info: t.Any,
+        current_table_info: t.Optional[DataObject],
     ) -> None:
         """Apply clustering DDL in the order Snowflake requires.
 
         Snowflake rejects DROP COLUMN while the column is still named in the clustering
-        key, and also rejects CLUSTER BY on a column that has not yet been added.  The
+        key, including when the name sits inside an expression such as TO_DATE("TS").
+        It also rejects CLUSTER BY on a column that has not yet been added. The
         required sequence when the old key names a column being dropped is:
 
-        1. DROP CLUSTERING KEY — before any drop of a column the old key still names.
-        2. Column changes (drops and adds) — in their existing schema-diff order.
-        3. CLUSTER BY — after all column changes, if the target table is clustered.
+        1. DROP CLUSTERING KEY, before any drop of a column the old key still names.
+        2. Column changes (drops and adds), in their existing schema-diff order.
+        3. CLUSTER BY, after all column changes, when the target table is clustered.
 
-        When no column being dropped belongs to the current key the historical order is
-        kept: column changes first, then the single clustering change at the end.
+        A type change that schema diff renders as DROP plus ADD uses the same sequence
+        even when the key text does not change. When no dropped column belongs to the
+        current key, an unchanged key emits nothing and a changed key stays at the end.
+        Column names from DESCRIBE are already stored as Snowflake resolved them, so
+        they are compared as returned.
         """
-        clustering_key = getattr(current_table_info, "clustering_key", None)
+        clustering_key = current_table_info.clustering_key if current_table_info else None
         if clustering_key:
             referenced = self._clustering_key_column_names(clustering_key)
             drop_index = next(
@@ -723,10 +728,7 @@ class SnowflakeEngineAdapter(
                     for i, op in enumerate(operations)
                     if isinstance(op, TableAlterDropColumnOperation)
                     and op.column_parts
-                    and normalize_identifiers(
-                        exp.to_identifier(op.column_parts[0].name), dialect=self.dialect
-                    ).name
-                    in referenced
+                    and op.column_parts[0].name in referenced
                 ),
                 None,
             )
@@ -738,7 +740,8 @@ class SnowflakeEngineAdapter(
                 if isinstance(clustering_operation, TableAlterChangeClusterKeyOperation):
                     operations.append(clustering_operation)
                 return
-        # No key column is being dropped: append at end (historical order).
+        if self._clustering_key_is_unchanged(clustering_operation, current_table_info):
+            return
         operations.append(clustering_operation)
 
     def _clustering_key_column_names(self, clustering_key: str) -> t.Set[str]:
@@ -747,9 +750,11 @@ class SnowflakeEngineAdapter(
             clustering_key=clustering_key,
             dialect=self.dialect,
         ).cluster_key_expressions
+        cluster_columns = itertools.chain.from_iterable(
+            expression.find_all(exp.Column) for expression in expressions
+        )
         return {
-            normalize_identifiers(expression, dialect=self.dialect).name
-            for expression in expressions
+            normalize_identifiers(column, dialect=self.dialect).name for column in cluster_columns
         }
 
     def alter_table(
