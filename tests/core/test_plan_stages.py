@@ -1688,6 +1688,81 @@ def test_build_plan_stages_indirect_non_breaking_view_migration(
     assert isinstance(stages[8], FinalizeEnvironmentStage)
 
 
+def test_build_plan_stages_migrates_views_downstream_of_migrated_view(
+    snapshot_a: Snapshot, make_snapshot, mocker: MockerFixture
+) -> None:
+    base_view = make_snapshot(
+        SqlModel(name="base_view", query=parse_one("select * from a"), kind=ModelKindName.VIEW),
+        nodes={'"a"': snapshot_a.model},
+    )
+    base_view.categorize_as(SnapshotChangeCategory.BREAKING)
+    public_view = make_snapshot(
+        SqlModel(
+            name="public_view", query=parse_one("select * from base_view"), kind=ModelKindName.VIEW
+        ),
+        nodes={'"a"': snapshot_a.model, '"base_view"': base_view.model},
+    )
+    public_view.categorize_as(SnapshotChangeCategory.BREAKING)
+    forward_only = make_snapshot(
+        SqlModel(
+            name="forward_only",
+            query=parse_one("select 1, ds from base_view"),
+            kind=dict(
+                name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds", forward_only=True
+            ),
+        ),
+        nodes={'"a"': snapshot_a.model, '"base_view"': base_view.model},
+    )
+    forward_only.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshots = [snapshot_a, base_view, public_view, forward_only]
+
+    state_reader = mocker.Mock(spec=StateReader)
+    state_reader.get_snapshots.return_value = {}
+    state_reader.get_environment.return_value = None
+
+    environment = Environment(
+        snapshots=[s.table_info for s in snapshots],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="test_plan",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[s.snapshot_id for s in snapshots],
+    )
+    plan = EvaluatablePlan(
+        start="2023-01-01",
+        end="2023-01-02",
+        new_snapshots=snapshots,
+        environment=environment,
+        no_gaps=False,
+        skip_backfill=False,
+        empty_backfill=False,
+        restatements={},
+        restate_all_snapshots=False,
+        is_dev=False,
+        allow_destructive_models=set(),
+        allow_additive_models=set(),
+        forward_only=False,
+        end_bounded=False,
+        ensure_finalized_snapshots=False,
+        ignore_cron=False,
+        directly_modified_snapshots=[s.snapshot_id for s in snapshots],
+        indirectly_modified_snapshots={},
+        metadata_updated_snapshots=[],
+        removed_snapshots=[],
+        requires_backfill=True,
+        models_to_backfill=None,
+        execution_time="2023-01-02",
+        disabled_restatement_models=set(),
+        environment_statements=None,
+        user_provided_flags=None,
+    )
+
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stage = next(s for s in stages if isinstance(s, MigrateSchemasStage))
+    assert {s.snapshot_id for s in migrate_stage.snapshots} == {s.snapshot_id for s in snapshots}
+
+
 def test_build_plan_stages_virtual_environment_mode_filtering(
     make_snapshot, mocker: MockerFixture
 ) -> None:
