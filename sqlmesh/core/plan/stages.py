@@ -285,7 +285,9 @@ class PlanStagesBuilder:
             for s_id in dag:
                 snapshot = snapshots[s_id]
                 if snapshot.is_view and any(
-                    p_id in snapshot_ids_to_migrate and snapshots[p_id].is_view
+                    p_id in snapshot_ids_to_migrate
+                    and snapshots[p_id].is_view
+                    and snapshots[p_id].supports_schema_migration_in_prod
                     for p_id in snapshot.parents
                 ):
                     snapshot_ids_to_migrate.add(s_id)

@@ -1688,14 +1688,17 @@ def test_build_plan_stages_indirect_non_breaking_view_migration(
     assert isinstance(stages[8], FinalizeEnvironmentStage)
 
 
+@pytest.mark.parametrize("base_view_unpaused", [False, True])
 def test_build_plan_stages_migrates_views_downstream_of_migrated_view(
-    snapshot_a: Snapshot, make_snapshot, mocker: MockerFixture
+    snapshot_a: Snapshot, make_snapshot, mocker: MockerFixture, base_view_unpaused: bool
 ) -> None:
     base_view = make_snapshot(
         SqlModel(name="base_view", query=parse_one("select * from a"), kind=ModelKindName.VIEW),
         nodes={'"a"': snapshot_a.model},
     )
     base_view.categorize_as(SnapshotChangeCategory.BREAKING)
+    if base_view_unpaused:
+        base_view.unpaused_ts = 1
     public_view = make_snapshot(
         SqlModel(
             name="public_view", query=parse_one("select * from base_view"), kind=ModelKindName.VIEW
@@ -1760,7 +1763,8 @@ def test_build_plan_stages_migrates_views_downstream_of_migrated_view(
     stages = build_plan_stages(plan, state_reader, None)
 
     migrate_stage = next(s for s in stages if isinstance(s, MigrateSchemasStage))
-    assert {s.snapshot_id for s in migrate_stage.snapshots} == {s.snapshot_id for s in snapshots}
+    expected = [snapshot_a, forward_only] if base_view_unpaused else snapshots
+    assert {s.snapshot_id for s in migrate_stage.snapshots} == {s.snapshot_id for s in expected}
 
 
 def test_build_plan_stages_virtual_environment_mode_filtering(
