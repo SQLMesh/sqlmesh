@@ -51,3 +51,9 @@ updates:
       # with Python 3.10 (.readthedocs.yaml). Drop this once that is raised.
       - dependency-name: 'mkdocs-material'
         versions: ['>=9.8']
+      # pdoc renders the API reference through a custom template
+      # (pdoc/templates/), and the docs-build CI job doesn't run it, so a major
+      # bump would land untested. Upgrade pdoc majors by hand with
+      # `make api-docs`.
+      - dependency-name: 'pdoc'
+        update-types: ['version-update:semver-major']
