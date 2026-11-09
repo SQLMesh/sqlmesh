@@ -84,7 +84,9 @@ pip install "sqlmesh[doris,postgres]"
           port: 9030
           user: root
           password: ""
-          database: analytics
+          # Optional: omit on a fresh Doris instance so SQLMesh can create model schemas automatically,
+          # or create the database first (CREATE DATABASE IF NOT EXISTS analytics) before setting it here:
+          # database: analytics
         state_connection:
           type: duckdb
           database: state.db
@@ -108,6 +110,7 @@ pip install "sqlmesh[doris,postgres]"
           port: 9030
           user: doris_user
           password: {{ env_var('DORIS_PASSWORD') | tojson }}
+          # Must already exist in Doris if specified (or omit to let SQLMesh qualify schemas directly)
           database: analytics
           catalog: internal
           connect_timeout: 30
@@ -909,4 +912,4 @@ If you are migrating StarRocks SQLMesh models or existing Doris DDL conventions,
 | `errCode = 2, replication num 3 is larger than available backends 1` | Doris defaults to `replication_num = 3`, which fails on single-BE local/CI clusters. | Set `replication_num: 1` under `model_defaults.physical_properties` in `config.yaml` for local dev. |
 | `PARTITION BY` omitted on OLAP table (logged as a warning) | Doris OLAP tables with `PARTITION BY (...) ()` and no partition creation strategy have zero partitions and reject all `INSERT`s. | Add `auto_partition = 'true'`, `'dynamic_partition.enable' = 'true'`, or explicit `partitions = '...'` to `physical_properties`, or set `partition_by_time_column false` in `INCREMENTAL_BY_TIME_RANGE` if you do not want OLAP partitioning. |
 | `Doris only supports creating views in the 'internal' catalog` | External Iceberg catalogs do not support Doris `VIEW` or `MATERIALIZED VIEW` objects. | Set `virtual_environment_mode: dev_only` and `environment_catalog_mapping: {"^(?!prod$).*": "internal"}` in `config.yaml`. |
-| `Key column cannot be of type STRING / DOUBLE / ARRAY` | Doris forbids `STRING`/`TEXT`, floating-point (`FLOAT`/`DOUBLE`), and complex types as OLAP key columns. | SQLMesh automatically reorders valid key columns first and coerces `STRING`/`TEXT` key columns to `VARCHAR(255)`. For explicit keys on `DOUBLE`/`FLOAT`, use `DECIMAL` or an integer/date key column. |
+| `Key column cannot be of type STRING / DOUBLE / ARRAY` | Doris forbids `STRING`/`TEXT`, floating-point (`FLOAT`/`DOUBLE`), and complex types as OLAP key columns. | SQLMesh automatically reorders valid key columns first and coerces untyped `STRING`/`TEXT` key columns to `VARCHAR(255)` (for keys longer than 255 bytes, cast or declare an explicit `VARCHAR(n)` up to `VARCHAR(65533)`). For explicit keys on `DOUBLE`/`FLOAT`, use `DECIMAL` or an integer/date key column. |
