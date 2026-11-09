@@ -1187,3 +1187,27 @@ def test_drop_catalog(snowflake_mocked_engine_adapter: SnowflakeEngineAdapter) -
         """SELECT 1 FROM "INFORMATION_SCHEMA"."DATABASES" WHERE "DATABASE_NAME" = 'foo' AND "COMMENT" = 'sqlmesh_managed'""",
         'DROP DATABASE IF EXISTS "foo"',
     ]
+
+
+@pytest.mark.parametrize(
+    "catalog_name, expected_name",
+    [
+        # names that need quoting are parsed into quoted identifiers
+        ("my-db__dev", "my-db__dev"),
+        (exp.to_identifier("my db", quoted=True), "my db"),
+        (exp.to_identifier("MyDb", quoted=True), "MyDb"),
+    ],
+)
+def test_drop_catalog_quoted_name(
+    snowflake_mocked_engine_adapter: SnowflakeEngineAdapter,
+    catalog_name: t.Union[str, exp.Identifier],
+    expected_name: str,
+) -> None:
+    adapter = snowflake_mocked_engine_adapter
+    adapter.drop_catalog(catalog_name)
+
+    # the existence check must compare against the bare database name, without identifier quotes
+    assert to_sql_calls(adapter) == [
+        f"""SELECT 1 FROM "INFORMATION_SCHEMA"."DATABASES" WHERE "DATABASE_NAME" = '{expected_name}' AND "COMMENT" = 'sqlmesh_managed'""",
+        f'DROP DATABASE IF EXISTS "{expected_name}"',
+    ]
