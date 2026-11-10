@@ -944,3 +944,310 @@ def test_doris_4_1_native_merge_segment_v3_and_ann_index(ctx: TestContext):
     )
     assert len(tz_check_rows) == 2
     assert tz_check_rows[0][0] == tz_check_rows[1][0] == "2024-06-01 04:00:00.123456"
+
+
+def test_doris_sqlmesh_plan_ann_inverted_not_null_and_widen(
+    ctx: TestContext, tmp_path: t.Any
+) -> None:
+    from pathlib import Path
+
+    project_dir = Path(tmp_path) / "ann_project"
+    models_dir = project_dir / "models"
+    models_dir.mkdir(parents=True)
+
+    schema_name = ctx.schema("ann_e2e")
+    ctx.engine_adapter.create_schema(schema_name)
+    raw_tbl = exp.table_("raw_logs", db=schema_name)
+    raw_tbl_sql = ctx.engine_adapter._to_sql(raw_tbl)
+    ctx.engine_adapter.execute(
+        f"""
+        CREATE TABLE {raw_tbl_sql} (
+            `log_id` BIGINT NOT NULL,
+            `tag` VARCHAR(32) NOT NULL,
+            `message` STRING,
+            `embedding` ARRAY<FLOAT> NOT NULL,
+            `updated_at` DATETIME
+        ) DUPLICATE KEY(`log_id`)
+        DISTRIBUTED BY HASH(`log_id`) BUCKETS 1
+        PROPERTIES ('replication_num' = '1')
+        """
+    )
+    ctx.engine_adapter.execute(
+        f"INSERT INTO {raw_tbl_sql} VALUES "
+        f"(1, 'net', 'connection timeout while querying upstream', [0.1, 0.2, 0.9], '2026-01-01 00:00:00'), "
+        f"(2, 'ok', 'healthy heartbeat response', [0.9, 0.1, 0.0], '2026-01-01 00:01:00')"
+    )
+
+    uk_model_file = models_dir / "searchable_logs.sql"
+    uk_model_file.write_text(
+        f"""
+        MODEL (
+          name {schema_name}.searchable_logs,
+          kind INCREMENTAL_BY_UNIQUE_KEY (
+            unique_key log_id
+          ),
+          physical_properties (
+            enable_unique_key_merge_on_write = 'true',
+            not_null_columns = ('embedding', 'tag'),
+            storage_format = 'V3',
+            compaction_policy = 'size_based',
+            'function_column.sequence_col' = 'updated_at',
+            replication_num = 1
+          )
+        );
+
+        SELECT
+          log_id::BIGINT AS log_id,
+          tag::VARCHAR(32) AS tag,
+          message::STRING AS message,
+          embedding::ARRAY<FLOAT> AS embedding,
+          updated_at::DATETIME AS updated_at
+        FROM {schema_name}.raw_logs;
+
+        @IF(
+          @runtime_stage = 'creating',
+          ALTER TABLE @this_model ADD INDEX idx_message (message) USING INVERTED PROPERTIES ("parser" = "english", "support_phrase" = "true")
+        );
+
+        @IF(
+          @runtime_stage = 'creating',
+          BUILD INDEX idx_message ON @this_model
+        );
+
+        @IF(
+          @runtime_stage = 'creating',
+          ALTER TABLE @this_model ADD INDEX idx_embedding (embedding) USING ANN PROPERTIES ("index_type" = "hnsw", "metric_type" = "l2_distance", "dim" = "3")
+        );
+
+        @IF(
+          @runtime_stage = 'creating',
+          BUILD INDEX idx_embedding ON @this_model
+        );
+        """,
+        encoding="utf-8",
+    )
+
+    # Also test an unannotated FULL model (no `::` casts) with `not_null_columns = ('embedding')` + `USING ANN`
+    full_model_file = models_dir / "searchable_logs_full.sql"
+    full_model_file.write_text(
+        f"""
+        MODEL (
+          name {schema_name}.searchable_logs_full,
+          kind FULL,
+          physical_properties (
+            duplicate_key = ('log_id'),
+            not_null_columns = ('embedding'),
+            replication_num = 1
+          )
+        );
+
+        SELECT
+          log_id,
+          message,
+          embedding
+        FROM {schema_name}.raw_logs;
+
+        @IF(
+          @runtime_stage = 'creating',
+          ALTER TABLE @this_model ADD INDEX idx_embedding_full (embedding) USING ANN PROPERTIES ("index_type" = "hnsw", "metric_type" = "l2_distance", "dim" = "3")
+        );
+
+        @IF(
+          @runtime_stage = 'creating',
+          BUILD INDEX idx_embedding_full ON @this_model
+        );
+        """,
+        encoding="utf-8",
+    )
+
+    sm_ctx = ctx.create_context(
+        config_mutator=lambda _, cfg: setattr(cfg.model_defaults, "dialect", "doris"),
+        path=project_dir,
+    )
+    sm_ctx.plan(auto_apply=True, no_prompts=True)
+
+    search_rows = ctx.engine_adapter.fetchall(
+        parse_one(
+            f"SELECT log_id, L2_DISTANCE_APPROXIMATE(embedding, [0.1, 0.2, 0.9]) AS dist "
+            f"FROM {schema_name}.searchable_logs "
+            f"WHERE message MATCH_PHRASE 'connection timeout' AND SEARCH('message:timeout') "
+            f"ORDER BY dist ASC LIMIT 5",
+            read="doris",
+        )
+    )
+    assert [r[0] for r in search_rows] == [1]
+
+    full_rows = ctx.engine_adapter.fetchall(
+        parse_one(
+            f"SELECT log_id FROM {schema_name}.searchable_logs_full "
+            f"ORDER BY L2_DISTANCE_APPROXIMATE(embedding, [0.1, 0.2, 0.9]) ASC LIMIT 1",
+            read="doris",
+        )
+    )
+    assert [r[0] for r in full_rows] == [1]
+
+    # Widen `tag` from VARCHAR(32) to VARCHAR(128) via forward-only migration and verify `NOT NULL` is preserved
+    uk_model_file.write_text(
+        uk_model_file.read_text(encoding="utf-8").replace(
+            "tag::VARCHAR(32) AS tag", "tag::VARCHAR(128) AS tag"
+        ),
+        encoding="utf-8",
+    )
+    sm_ctx.load()
+    sm_ctx.plan(forward_only=True, auto_apply=True, no_prompts=True)
+
+    uk_snap = sm_ctx.get_snapshot(f"{schema_name}.searchable_logs")
+    assert uk_snap is not None
+    phys_tbl = uk_snap.table_name()
+    desc_rows = ctx.engine_adapter.fetchall(f"DESCRIBE {phys_tbl}", quote_identifiers=False)
+    desc_by_col = {str(r[0]): (str(r[1]).upper(), str(r[2])) for r in desc_rows}
+    assert "128" in desc_by_col["tag"][0]
+    assert desc_by_col["tag"][1].lower() == "no"
+    assert desc_by_col["embedding"][1].lower() == "no"
+
+
+def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
+    ctx: TestContext, tmp_path: t.Any
+) -> None:
+    import datetime as dt
+    from pathlib import Path
+
+    project_dir = Path(tmp_path) / "dyn_sync_project"
+    models_dir = project_dir / "models"
+    models_dir.mkdir(parents=True)
+
+    schema_name = ctx.schema("dyn_sync_e2e")
+    ctx.engine_adapter.create_schema(schema_name)
+
+    today_utc = dt.datetime.now(dt.timezone.utc).date()
+    d1 = (today_utc - dt.timedelta(days=2)).isoformat()
+    d2 = (today_utc - dt.timedelta(days=1)).isoformat()
+
+    raw_tbl = exp.table_("raw_user_events", db=schema_name)
+    raw_tbl_sql = ctx.engine_adapter._to_sql(raw_tbl)
+    ctx.engine_adapter.execute(
+        f"""
+        CREATE TABLE {raw_tbl_sql} (
+            `user_id` BIGINT NOT NULL,
+            `event_type` VARCHAR(64),
+            `event_date` DATE NOT NULL,
+            `event_time` DATETIME NOT NULL
+        ) DUPLICATE KEY(`user_id`)
+        DISTRIBUTED BY HASH(`user_id`) BUCKETS 1
+        PROPERTIES ('replication_num' = '1')
+        """
+    )
+    ctx.engine_adapter.execute(
+        f"INSERT INTO {raw_tbl_sql} VALUES "
+        f"(10, 'click', '{d1}', '{d1} 10:00:00'), "
+        f"(10, 'buy', '{d1}', '{d1} 10:00:00'), "
+        f"(20, 'view', '{d2}', '{d2} 12:00:00')"
+    )
+
+    (models_dir / "rolling_daily_events.sql").write_text(
+        f"""
+        MODEL (
+          name {schema_name}.rolling_daily_events,
+          kind INCREMENTAL_BY_TIME_RANGE (
+            time_column event_date
+          ),
+          start '{d1}',
+          partitioned_by RANGE(event_date),
+          physical_properties (
+            'dynamic_partition.enable' = 'true',
+            'dynamic_partition.time_unit' = 'DAY',
+            'dynamic_partition.time_zone' = 'UTC',
+            'dynamic_partition.start' = '-7',
+            'dynamic_partition.end' = '3',
+            'dynamic_partition.create_history_partition' = 'true',
+            'dynamic_partition.prefix' = 'p',
+            'dynamic_partition.buckets' = '1',
+            'dynamic_partition.replication_num' = '1',
+            replication_num = 1
+          )
+        );
+
+        SELECT
+          event_date::DATE AS event_date,
+          user_id::BIGINT AS user_id
+        FROM {schema_name}.raw_user_events
+        WHERE event_date BETWEEN @start_ds AND @end_ds;
+        """,
+        encoding="utf-8",
+    )
+
+    # Create TWO back-to-back synchronous MVs in `@runtime_stage = 'creating'` to verify
+    # ROLLUP state retry/synchronization, plus `@start_ts` / `@end_ts` restatement.
+    (models_dir / "user_events.sql").write_text(
+        f"""
+        MODEL (
+          name {schema_name}.user_events,
+          kind INCREMENTAL_BY_TIME_RANGE (
+            time_column event_time,
+            partition_by_time_column false
+          ),
+          start '{d1}',
+          grain (user_id, event_time),
+          physical_properties (
+            replication_num = 1
+          )
+        );
+
+        SELECT
+          user_id::BIGINT AS user_id,
+          event_type::VARCHAR(64) AS event_type,
+          event_time::DATETIME AS event_time
+        FROM {schema_name}.raw_user_events
+        WHERE event_time BETWEEN @start_ts AND @end_ts;
+
+        @IF(
+          @runtime_stage = 'creating',
+          CREATE MATERIALIZED VIEW user_events_sync_mv1 AS
+          SELECT
+            user_id AS mv_user_id,
+            event_time AS mv_event_time,
+            COUNT(event_type) AS event_count
+          FROM @this_model
+          GROUP BY user_id, event_time
+        );
+
+        @IF(
+          @runtime_stage = 'creating',
+          CREATE MATERIALIZED VIEW user_events_sync_mv2 AS
+          SELECT
+            event_time AS mv2_event_time,
+            user_id AS mv2_user_id,
+            MAX(event_type) AS max_event_type
+          FROM @this_model
+          GROUP BY event_time, user_id
+        );
+        """,
+        encoding="utf-8",
+    )
+
+    sm_ctx = ctx.create_context(
+        config_mutator=lambda _, cfg: setattr(cfg.model_defaults, "dialect", "doris"),
+        path=project_dir,
+    )
+    sm_ctx.plan(auto_apply=True, no_prompts=True)
+
+    dyn_rows = ctx.engine_adapter.fetchall(
+        f"SELECT user_id, COUNT(*) FROM {schema_name}.rolling_daily_events GROUP BY user_id ORDER BY user_id",
+        quote_identifiers=False,
+    )
+    assert list(dyn_rows) == [(10, 2), (20, 1)]
+
+    # Insert an additional source row in d1 and restate `user_events` to verify DELETE + INSERT works with active sync MVs
+    ctx.engine_adapter.execute(
+        f"INSERT INTO {raw_tbl_sql} VALUES (10, 'checkout', '{d1}', '{d1} 10:00:00')"
+    )
+    sm_ctx.plan(
+        restate_models=[f"{schema_name}.user_events"],
+        auto_apply=True,
+        no_prompts=True,
+    )
+    restated_rows = ctx.engine_adapter.fetchall(
+        f"SELECT user_id, COUNT(event_type) FROM {schema_name}.user_events GROUP BY user_id, event_time ORDER BY user_id",
+        quote_identifiers=False,
+    )
+    assert list(restated_rows) == [(10, 3), (20, 1)]

@@ -28,6 +28,8 @@ def make_mocked_engine_adapter(
         adapter = make_mocked_engine_adapter(klass, *args, **kwargs)
         if isinstance(adapter, DorisEngineAdapter):
             setattr(adapter, "_wait_for_schema_change", mocker.MagicMock())
+            setattr(adapter, "_wait_for_rollup", mocker.MagicMock())
+            setattr(adapter, "_wait_for_build_index", mocker.MagicMock())
             orig_resolve = adapter._resolve_sync_mv_source_from_metadata
             bound_default_fetchall = DorisEngineAdapter.fetchall.__get__(
                 adapter, DorisEngineAdapter
@@ -5733,7 +5735,8 @@ def test_doris_4_1_search_indexes_compaction_and_sequence_col(
     ]
     adapter.cursor.fetchall.side_effect = None
 
-    # 15. `not_null_columns` in `physical_properties` marks columns NOT NULL on CREATE TABLE and wraps CTAS projections in NON_NULLABLE(...)
+    # 15. `not_null_columns` in `physical_properties` marks columns NOT NULL on CREATE TABLE and materializes
+    #     OLAP CTAS via schema DDL + INSERT INTO (since Doris ignores NON_NULLABLE(...) on non-AUTO PARTITION CTAS columns).
     adapter.cursor.execute.reset_mock()
     adapter.create_table(
         "analytics.searchable_logs",
@@ -5748,8 +5751,30 @@ def test_doris_4_1_search_indexes_compaction_and_sequence_col(
             "enable_unique_key_merge_on_write": exp.Literal.string("true"),
         },
     )
+    # 15a. CTAS with explicit casts resolves types directly without a probe table
     adapter.ctas(
         "analytics.searchable_logs_ctas",
+        parse_one(
+            "SELECT CAST(log_id AS BIGINT) AS log_id, CAST(message AS STRING) AS message, CAST(embedding AS ARRAY<FLOAT>) AS embedding FROM raw.logs",
+            read="doris",
+        ),
+        table_properties={
+            "duplicate_key": exp.Tuple(expressions=[exp.column("log_id")]),
+            "not_null_columns": exp.Tuple(expressions=[exp.column("embedding")]),
+        },
+    )
+    # 15b. Unannotated CTAS without explicit casts probes types via a 0-row temp table, then creates NOT NULL schema + INSERT INTO
+    mocker.patch("sqlmesh.core.engine_adapter.doris.random_id", return_value="probe123")
+    adapter.cursor.fetchall.side_effect = [
+        [
+            ("__sqlmesh_probe_key", "TINYINT", "Yes", "true", None, ""),
+            ("log_id", "BIGINT", "Yes", "false", None, ""),
+            ("message", "TEXT", "Yes", "false", None, ""),
+            ("embedding", "ARRAY<FLOAT>", "Yes", "false", None, ""),
+        ]
+    ]
+    adapter.ctas(
+        "analytics.searchable_logs_unannotated",
         parse_one(
             "SELECT log_id, message, embedding FROM raw.logs",
             read="doris",
@@ -5759,9 +5784,16 @@ def test_doris_4_1_search_indexes_compaction_and_sequence_col(
             "not_null_columns": exp.Tuple(expressions=[exp.column("embedding")]),
         },
     )
+    adapter.cursor.fetchall.side_effect = None
     assert to_sql_calls(adapter) == [
         "CREATE TABLE IF NOT EXISTS `analytics`.`searchable_logs` (`log_id` BIGINT, `message` STRING, `embedding` ARRAY<FLOAT> NOT NULL) UNIQUE KEY (`log_id`) DISTRIBUTED BY HASH (`log_id`) BUCKETS 10 PROPERTIES ('enable_unique_key_merge_on_write'='true')",
-        "CREATE TABLE IF NOT EXISTS `analytics`.`searchable_logs_ctas` DUPLICATE KEY (`log_id`) AS SELECT `log_id`, `message`, NON_NULLABLE(`embedding`) AS `embedding` FROM `raw`.`logs`",
+        "CREATE TABLE IF NOT EXISTS `analytics`.`searchable_logs_ctas` (`log_id` BIGINT, `message` STRING, `embedding` ARRAY<FLOAT> NOT NULL) DUPLICATE KEY (`log_id`)",
+        "INSERT INTO `analytics`.`searchable_logs_ctas` (`log_id`, `message`, `embedding`) SELECT CAST(`log_id` AS BIGINT) AS `log_id`, CAST(`message` AS STRING) AS `message`, CAST(`embedding` AS ARRAY<FLOAT>) AS `embedding` FROM (SELECT CAST(`log_id` AS BIGINT) AS `log_id`, CAST(`message` AS STRING) AS `message`, CAST(`embedding` AS ARRAY<FLOAT>) AS `embedding` FROM `raw`.`logs`) AS `_subquery`",
+        "CREATE TABLE IF NOT EXISTS `analytics`.`__temp_searchable_logs_unannotated_probe123` DUPLICATE KEY (`__sqlmesh_probe_key`) DISTRIBUTED BY HASH (`__sqlmesh_probe_key`) BUCKETS 1 AS SELECT CAST(0 AS TINYINT) AS `__sqlmesh_probe_key`, `_q`.* FROM (SELECT `log_id`, `message`, `embedding` FROM `raw`.`logs`) AS `_q` WHERE FALSE LIMIT 0",
+        "DESCRIBE `analytics`.`__temp_searchable_logs_unannotated_probe123`",
+        "DROP TABLE IF EXISTS `analytics`.`__temp_searchable_logs_unannotated_probe123`",
+        "CREATE TABLE IF NOT EXISTS `analytics`.`searchable_logs_unannotated` (`log_id` BIGINT, `message` STRING, `embedding` ARRAY<FLOAT> NOT NULL) DUPLICATE KEY (`log_id`)",
+        "INSERT INTO `analytics`.`searchable_logs_unannotated` (`log_id`, `message`, `embedding`) SELECT CAST(`log_id` AS BIGINT) AS `log_id`, CAST(`message` AS STRING) AS `message`, CAST(`embedding` AS ARRAY<FLOAT>) AS `embedding` FROM (SELECT `log_id`, `message`, `embedding` FROM `raw`.`logs`) AS `_subquery`",
     ]
     with pytest.raises(SQLMeshError, match="not_null_columns"):
         adapter.create_table(
@@ -5771,3 +5803,252 @@ def test_doris_4_1_search_indexes_compaction_and_sequence_col(
                 "not_null_columns": exp.Tuple(expressions=[exp.column("missing_col")]),
             },
         )
+
+
+def test_doris_audit_fixes_and_docs_models(
+    make_mocked_engine_adapter: t.Callable[..., DorisEngineAdapter],
+    mocker: MockerFixture,
+):
+    from pathlib import Path
+    import re
+    import threading
+    from pandas.errors import DatabaseError
+    from sqlmesh.core import dialect as d
+    from sqlmesh.core.model import load_sql_based_model
+    from sqlmesh.utils.connection_pool import ThreadLocalConnectionPool
+
+    adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+
+    # 1. `get_alter_operations` preserves `NOT NULL` on `MODIFY COLUMN` iff column is `NOT NULL` in both
+    #    `current` and `target`, relaxes when `target` is nullable, and never forces `NOT NULL` on `ADD COLUMN`.
+    adapter.cursor.fetchall.side_effect = [
+        [
+            ("id", "BIGINT", "No", "true", None, ""),
+            ("msg_keep_nn", "VARCHAR(64)", "No", "false", None, ""),
+            ("msg_relax_null", "VARCHAR(64)", "No", "false", None, ""),
+        ],
+        [
+            ("id", "BIGINT", "No", "true", None, ""),
+            ("msg_keep_nn", "VARCHAR(128)", "No", "false", None, ""),
+            ("msg_relax_null", "VARCHAR(128)", "Yes", "false", None, ""),
+            ("added_col", "VARCHAR(32)", "No", "false", None, ""),
+        ],
+    ]
+    ops = adapter.get_alter_operations("db.curr_tbl", "db.tgt_tbl")
+    adapter.cursor.fetchall.side_effect = None
+    assert [op.expression.sql("doris", identify=True) for op in ops] == [
+        "ALTER TABLE `db`.`curr_tbl` ADD COLUMN `added_col` VARCHAR(32)",
+        "ALTER TABLE `db`.`curr_tbl` MODIFY COLUMN `msg_keep_nn` VARCHAR(128) NOT NULL",
+        "ALTER TABLE `db`.`curr_tbl` MODIFY COLUMN `msg_relax_null` VARCHAR(128)",
+    ]
+
+    # 2. `_fetch_native_df` unwraps `pandas.errors.DatabaseError` wrapping PyMySQL `OperationalError(2006)`
+    #    and reconnects + restores active catalog once.
+    class OperationalError(Exception):
+        pass
+
+    adapter.set_current_catalog("hive_cat")
+    adapter.cursor.execute.reset_mock()
+    raw_disconnect = OperationalError(2006, "MySQL server has gone away")
+    wrapped_db_err = DatabaseError("Execution failed on sql")
+    wrapped_db_err.__cause__ = raw_disconnect
+    expected_df = pd.DataFrame({"id": [1]})
+    super_fetch = mocker.patch(
+        "sqlmesh.core.engine_adapter.mixins.PandasNativeFetchDFSupportMixin._fetch_native_df",
+        side_effect=[wrapped_db_err, expected_df],
+    )
+    out_df = adapter._fetch_native_df("SELECT 1 AS id")
+    pd.testing.assert_frame_equal(t.cast(pd.DataFrame, out_df), expected_df)
+    assert super_fetch.call_count == 2
+    assert to_sql_calls(adapter) == ["SWITCH `hive_cat`"]
+
+    # 3. Catalog state tracking across `close()`, cross-thread `recycle()`, direct `SWITCH`,
+    #    and dead-socket catalog restore before a write statement (`INSERT INTO`).
+    created_cursors: t.List[t.Any] = []
+
+    def _conn_factory() -> t.Any:
+        conn = mocker.MagicMock()
+        cur = mocker.MagicMock()
+        created_cursors.append(cur)
+        conn.cursor.return_value = cur
+        return conn
+
+    pooled_adapter = DorisEngineAdapter(_conn_factory, multithreaded=True)
+    assert isinstance(pooled_adapter._connection_pool, ThreadLocalConnectionPool)
+    pooled_adapter.execute("SWITCH `iceberg_cat`")
+    assert pooled_adapter._active_catalog == "iceberg_cat"
+
+    # After `close()`, next statement on the new connection restores `SWITCH `iceberg_cat`` automatically
+    pooled_adapter.close()
+    pooled_adapter.execute("SELECT 1")
+    assert [c[0][0] for c in created_cursors[-1].execute.call_args_list] == [
+        "SWITCH `iceberg_cat`",
+        "SELECT 1",
+    ]
+
+    # Cross-thread `recycle()` closes worker thread's connection; worker's next query restores its catalog
+    def _other_thread_recycle() -> None:
+        pooled_adapter.recycle()
+
+    recycler = threading.Thread(target=_other_thread_recycle)
+    recycler.start()
+    recycler.join()
+    pooled_adapter.execute("SELECT 2")
+    assert [c[0][0] for c in created_cursors[-1].execute.call_args_list] == [
+        "SWITCH `iceberg_cat`",
+        "SELECT 2",
+    ]
+
+    # Dead socket during `_ensure_catalog_restored` before a non-idempotent write (`INSERT INTO`)
+    # reconnects cleanly during `SWITCH` and then runs the `INSERT INTO` once on the fresh connection.
+    pooled_adapter._needs_catalog_restore = True
+    created_cursors[-1].execute.side_effect = OperationalError(2006, "MySQL server has gone away")
+    pooled_adapter.execute("INSERT INTO `db`.`t` VALUES (1)")
+    assert [c[0][0] for c in created_cursors[-1].execute.call_args_list] == [
+        "SWITCH `iceberg_cat`",
+        "INSERT INTO `db`.`t` VALUES (1)",
+    ]
+
+    # 4. `_wait_for_rollup` polls `SHOW ALTER TABLE MATERIALIZED VIEW` and `execute()` retries when
+    #    Doris reports `Table[...]'s state(ROLLUP) is not NORMAL`.
+    rollup_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    setattr(
+        rollup_adapter,
+        "_wait_for_rollup",
+        DorisEngineAdapter._wait_for_rollup.__get__(rollup_adapter, DorisEngineAdapter),
+    )
+    rollup_adapter.cursor.fetchall.side_effect = [
+        [(10, "events", "2026-01-01", None, "events", "mv1", 20, 30, "RUNNING", "", "50%", 3600)],
+        [
+            (
+                10,
+                "events",
+                "2026-01-01",
+                "2026-01-01",
+                "events",
+                "mv1",
+                20,
+                30,
+                "FINISHED",
+                "",
+                "100%",
+                3600,
+            )
+        ],
+    ]
+    call_idx = {"n": 0}
+
+    def _exec_side_effect(sql_val: str, *a: t.Any, **kw: t.Any) -> None:
+        if sql_val.startswith("ALTER TABLE") and call_idx["n"] == 0:
+            call_idx["n"] += 1
+            raise OperationalError(
+                1105,
+                "errCode = 2, detailMessage = Table[events]'s state(ROLLUP) is not NORMAL. Do not allow doing ALTER ops",
+            )
+
+    rollup_adapter.cursor.execute.side_effect = _exec_side_effect
+    rollup_adapter.execute(parse_one("ALTER TABLE db.events ADD COLUMN c2 INT", read="doris"))
+    assert to_sql_calls(rollup_adapter) == [
+        "ALTER TABLE `db`.`events` ADD COLUMN `c2` INT",
+        "SHOW ALTER TABLE MATERIALIZED VIEW FROM `db` WHERE TableName = 'events'",
+        "SHOW ALTER TABLE MATERIALIZED VIEW FROM `db` WHERE TableName = 'events'",
+        "ALTER TABLE `db`.`events` ADD COLUMN `c2` INT",
+    ]
+
+    # 5. `exp.Paren` and `exp.Array` handling in `distributed_by`, `partitions`, and `partition_by`,
+    #    plus `dynamic_partition` properties and injection validation inside `exp.Paren`.
+    ddl_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    ddl_adapter.create_table(
+        "analytics.paren_props_tbl",
+        {
+            "event_date": exp.DataType.build("DATE", dialect="doris"),
+            "user_id": exp.DataType.build("BIGINT", dialect="doris"),
+        },
+        table_properties={
+            "partition_by": exp.Paren(this=exp.Literal.string("event_date")),
+            "partitions": exp.Paren(
+                this=exp.Literal.string('PARTITION p2026 VALUES LESS THAN ("2027-01-01")')
+            ),
+            "distributed_by": exp.Paren(this=exp.Literal.string("user_id")),
+            "buckets": exp.Literal.number(8),
+        },
+    )
+    ddl_adapter.create_table(
+        "analytics.dynamic_part_tbl",
+        {
+            "event_date": exp.DataType.build("DATE", dialect="doris"),
+            "user_id": exp.DataType.build("BIGINT", dialect="doris"),
+        },
+        partitioned_by=[parse_one("RANGE(event_date)", read="doris")],
+        table_properties={
+            "dynamic_partition.enable": exp.Literal.string("true"),
+            "dynamic_partition.time_unit": exp.Literal.string("DAY"),
+            "dynamic_partition.time_zone": exp.Literal.string("UTC"),
+            "dynamic_partition.start": exp.Literal.string("-32"),
+            "dynamic_partition.end": exp.Literal.string("3"),
+            "dynamic_partition.create_history_partition": exp.Literal.string("true"),
+            "dynamic_partition.prefix": exp.Literal.string("p"),
+            "dynamic_partition.buckets": exp.Literal.string("4"),
+        },
+    )
+    assert to_sql_calls(ddl_adapter) == [
+        'CREATE TABLE IF NOT EXISTS `analytics`.`paren_props_tbl` (`event_date` DATE, `user_id` BIGINT) PARTITION BY RANGE (`event_date`) (PARTITION p2026 VALUES LESS THAN ("2027-01-01")) DISTRIBUTED BY HASH (`user_id`) BUCKETS 8',
+        "CREATE TABLE IF NOT EXISTS `analytics`.`dynamic_part_tbl` (`event_date` DATE, `user_id` BIGINT) PARTITION BY RANGE (`event_date`) () PROPERTIES ('dynamic_partition.enable'='true', 'dynamic_partition.time_unit'='DAY', 'dynamic_partition.time_zone'='UTC', 'dynamic_partition.start'='-32', 'dynamic_partition.end'='3', 'dynamic_partition.create_history_partition'='true', 'dynamic_partition.prefix'='p', 'dynamic_partition.buckets'='4')",
+    ]
+    with pytest.raises(SQLMeshError, match="Invalid partition definition expression"):
+        ddl_adapter.create_table(
+            "analytics.bad_paren_part",
+            {"event_date": exp.DataType.build("DATE", dialect="doris")},
+            table_properties={
+                "partition_by": exp.Paren(this=exp.Literal.string("event_date")),
+                "partitions": exp.Paren(
+                    this=exp.Literal.string(
+                        "PARTITION p1 VALUES LESS THAN MAXVALUE); DROP TABLE x --"
+                    )
+                ),
+            },
+        )
+
+    # 6. Every `MODEL (...)` SQL block in `docs/integrations/engines/doris.md` parses cleanly as a SQLMesh model.
+    doris_doc_path = (
+        Path(__file__).resolve().parents[3] / "docs" / "integrations" / "engines" / "doris.md"
+    )
+    doc_text = doris_doc_path.read_text(encoding="utf-8")
+    sql_blocks = re.findall(r"```sql\n(.*?)```", doc_text, flags=re.DOTALL)
+    model_blocks = [
+        blk for blk in sql_blocks if re.search(r"^\s*MODEL\s*\(", blk, flags=re.MULTILINE)
+    ]
+    assert len(model_blocks) >= 17
+    for blk in model_blocks:
+        parsed_model = load_sql_based_model(d.parse(blk, default_dialect="doris"), dialect="doris")
+        assert parsed_model.name is not None
+
+    # 7. `BUILD INDEX` synchronization polls `SHOW BUILD INDEX` (for both AST and string `execute()` calls).
+    build_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    wait_build_mock = mocker.patch.object(build_adapter, "_wait_for_build_index")
+    wait_schema_mock = mocker.patch.object(build_adapter, "_wait_for_schema_change")
+    build_adapter.execute(parse_one("BUILD INDEX idx_msg ON analytics.logs", read="doris"))
+    build_adapter.execute("/* SQLMESH_PLAN: 123 */ BUILD INDEX idx_emb ON analytics.logs")
+    assert wait_build_mock.call_count == 2
+    assert wait_schema_mock.call_count == 0
+
+    raw_build_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    raw_build_adapter.cursor.description = [
+        ("JobId",),
+        ("TableName",),
+        ("PartitionName",),
+        ("AlterInvertedIndexes",),
+        ("CreateTime",),
+        ("FinishTime",),
+        ("TransactionId",),
+        ("State",),
+        ("Msg",),
+        ("Progress",),
+    ]
+    raw_build_adapter.cursor.fetchall.side_effect = [
+        [("1", "logs", "logs", "idx_msg", "t0", None, "10", "WAITING_TXN", "", None)],
+        [("1", "logs", "logs", "idx_msg", "t0", "t1", "10", "FINISHED", "", None)],
+    ]
+    mocker.patch("sqlmesh.core.engine_adapter.doris.time.sleep")
+    DorisEngineAdapter._wait_for_build_index(raw_build_adapter, "analytics.logs", timeout=5.0)
+    assert raw_build_adapter.cursor.fetchall.call_count == 2

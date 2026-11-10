@@ -1605,3 +1605,27 @@ def test_extend_sqlglot_is_idempotent():
     assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
     # The class-level registries must not grow on repeated calls.
     assert Generator.UNWRAPPED_INTERVAL_VALUES == before
+
+
+def test_doris_userdefined_isolation_and_modify_column_not_null():
+    # Non-Doris dialects must keep standard INFORMATION_SCHEMA `USER-DEFINED` behavior (`kind=None`)
+    for other_dialect in ("postgres", "mysql", "snowflake"):
+        other_udt = exp.DataType.build("USER-DEFINED", dialect=other_dialect)
+        assert other_udt.this == exp.DataType.Type.USERDEFINED
+        assert other_udt.args.get("kind") is None
+
+    # Doris dialect preserves native analytical UDT names and parameterized AGG_STATE
+    for doris_udt_sql in ("BITMAP", "QUANTILE_STATE", "AGG_STATE<max_by(INT, INT)>"):
+        doris_udt = exp.DataType.build(doris_udt_sql, dialect="doris", udt=True)
+        assert doris_udt.sql("doris") == doris_udt_sql
+
+    # Doris `ALTER TABLE ... MODIFY COLUMN ... NOT NULL` parses as structured `exp.Alter`
+    # (enabling `@this_model` macro resolution) and preserves `NOT NULL` on generation.
+    alter_ast = d.parse_one(
+        "ALTER TABLE @this_model MODIFY COLUMN msg VARCHAR(128) NOT NULL",
+        dialect="doris",
+    )
+    assert isinstance(alter_ast, exp.Alter)
+    assert (
+        alter_ast.sql("doris") == "ALTER TABLE @this_model MODIFY COLUMN msg VARCHAR(128) NOT NULL"
+    )

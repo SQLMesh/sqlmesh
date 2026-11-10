@@ -497,7 +497,9 @@ def _parse_types(
     start = self._curr
     udt_name = (
         self._curr.text.upper()
-        if self._curr and self._curr.token_type == TokenType.USERDEFINED
+        if isinstance(self, Doris.Parser)
+        and self._curr
+        and self._curr.token_type == TokenType.USERDEFINED
         else None
     )
     if udt_name == "AGG_STATE" and not check_func:
@@ -536,6 +538,7 @@ def _parse_types(
 
     if (
         udt_name
+        and udt_name != "USER-DEFINED"
         and isinstance(parsed_type, exp.DataType)
         and parsed_type.this == exp.DataType.Type.USERDEFINED
         and not parsed_type.args.get("kind")
@@ -1906,12 +1909,14 @@ def extend_sqlglot() -> None:
     _override(Snowflake.Parser, _parse_table_parts)
     _override(TSQL.Parser, _parse_alter_table_alter)
     _override(TSQL.Generator, altercolumn_sql)
+    _override(Doris.Parser, _parse_alter_table_alter)
     _override(Doris.Parser, _doris_parse_range)
     _override(Doris.Parser, _doris_parse_table_parts)
     _override(Doris.Parser, _doris_parse_version)
     _override(Doris.Parser, _doris_parse_table)
     _override(Doris.Parser, _doris_parse_index_constraint)
     _override(Doris.Parser, _doris_parse_index_params)
+    _override(Doris.Generator, altercolumn_sql)
     _override(Doris.Generator, columndef_sql)
     _override(Doris.Generator, _doris_indexconstraintoption_sql)
     _override(Doris.Generator, _doris_indexparameters_sql)

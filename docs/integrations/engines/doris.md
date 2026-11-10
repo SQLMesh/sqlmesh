@@ -212,6 +212,13 @@ MODEL (
       target.updated_at = source.updated_at
   )
 );
+
+SELECT
+  order_id::BIGINT AS order_id,
+  status::VARCHAR(32) AS status,
+  updated_at::DATETIME AS updated_at
+FROM raw.orders_changelog
+WHERE updated_at BETWEEN @start_ts AND @end_ts;
 ```
 
 ### AGGREGATE KEY model
@@ -240,7 +247,7 @@ GROUP BY user_id, event_type;
 
 ## Distribution & Bucketing
 
-Doris requires a `DISTRIBUTED BY` clause on every OLAP table. SQLMesh supports three ways to configure distribution:
+Doris OLAP tables distribute tablets across backends via `DISTRIBUTED BY HASH(...)` or `DISTRIBUTED BY RANDOM` (on Doris 2.1+, omitting `DISTRIBUTED BY` on `DUPLICATE KEY` or `AGGREGATE KEY` tables defaults to `DISTRIBUTED BY RANDOM BUCKETS AUTO`, whereas `UNIQUE KEY` tables and Doris 2.0 require explicit hash distribution). SQLMesh supports three ways to configure distribution:
 
 1. **SQLMesh `clustered_by` + optional `buckets`** (recommended for cross-engine portability):
    ```sql
@@ -252,6 +259,11 @@ Doris requires a `DISTRIBUTED BY` clause on every OLAP table. SQLMesh supports t
        buckets = 16
      )
    );
+
+   SELECT
+     user_id::BIGINT AS user_id,
+     event_type::VARCHAR(64) AS event_type
+   FROM raw.events;
    ```
 2. **Shorthand string `distributed_by`**:
    ```sql
@@ -281,7 +293,7 @@ If none of `clustered_by` or `distributed_by` is provided:
 
 ## Partitioning
 
-Doris OLAP tables support **Multi-Range Batch Partitioning**, **Explicit Partition Definitions**, **Dynamic Partitioning**, and **Auto Partitioning** (Doris 2.1+). You can specify the partition expression via the top-level `partitioned_by` model property or via `partitioned_by` / `partition_by` inside `physical_properties`.
+Doris OLAP tables support **Multi-Range Batch Partitioning**, **Explicit Partition Definitions**, **Dynamic Partitioning**, and **Auto Partitioning** (Doris 2.1+). You can specify the partition expression via the top-level `partitioned_by` model property or via `partition_by` (or quoted `'partitioned_by'`) inside `physical_properties`.
 
 !!! note "OLAP Partitioning Requirements"
     - On Doris OLAP tables, `PARTITION BY` requires at least one of `partitions`, `auto_partition = 'true'`, or `'dynamic_partition.enable' = 'true'` in `physical_properties`. If none is provided, SQLMesh omits the `PARTITION BY` clause so Doris does not create a zero-partition table that rejects inserts.
@@ -300,6 +312,12 @@ MODEL (
     partitions = 'FROM ("2023-01-01") TO ("2027-01-01") INTERVAL 1 MONTH'
   )
 );
+
+SELECT
+  event_date::DATE AS event_date,
+  user_id::BIGINT AS user_id
+FROM raw.events
+WHERE event_date BETWEEN @start_ds AND @end_ds;
 ```
 
 ### Auto partitioning (`auto_partition = true`)
@@ -317,6 +335,12 @@ MODEL (
     auto_partition = 'true'
   )
 );
+
+SELECT
+  event_time::DATETIME AS event_time,
+  user_id::BIGINT AS user_id
+FROM raw.events
+WHERE event_time BETWEEN @start_ts AND @end_ts;
 ```
 
 ### Dynamic partitioning (`dynamic_partition.enable = 'true'`)
@@ -342,6 +366,12 @@ MODEL (
     'dynamic_partition.buckets' = '16'
   )
 );
+
+SELECT
+  event_date::DATE AS event_date,
+  user_id::BIGINT AS user_id
+FROM raw.events
+WHERE event_date BETWEEN @start_ds AND @end_ds;
 ```
 
 ---
@@ -358,7 +388,8 @@ Because `DorisEngineAdapter` supports multi-catalog 3-part naming (`catalog.db.t
 MODEL (
   name silver.user_sessions,
   kind INCREMENTAL_BY_TIME_RANGE (
-    time_column session_date
+    time_column session_date,
+    partition_by_time_column false
   )
 );
 
@@ -466,7 +497,7 @@ SQLMesh's Doris dialect natively parses and transpiles Apache Iceberg snapshot t
   FROM iceberg_catalog.bronze.clickstream@tag(v1_release) AS c;
   ```
 - **Iceberg Compaction (`rewrite_data_files`) & Branch Management via Post-Statements**:
-  You can run Iceberg file compaction (`rewrite_data_files`, requires Doris 4.0.2+), snapshot expiration (`expire_snapshots`, requires Doris 4.1.0+), or branch/tag management (requires Doris 3.1+) in model post-statements. Because Doris does not support Iceberg orphan-file cleanup (`remove_orphan_files`), run orphan-file cleanup through a supported external Iceberg maintenance tool (such as Apache Spark's `remove_orphan_files` procedure):
+  You can run Iceberg file compaction (`rewrite_data_files`, requires Doris 4.0.2+), snapshot expiration (`expire_snapshots`, requires Doris 4.1.0+ with ISO-8601 `yyyy-MM-ddTHH:mm:ss` or epoch-millisecond `older_than`), or branch/tag management (requires Doris 3.1+) in model post-statements. Because Doris does not support Iceberg orphan-file cleanup (`remove_orphan_files`), run orphan-file cleanup through a supported external Iceberg maintenance tool (such as Apache Spark's `remove_orphan_files` procedure):
   ```sql
   MODEL (
     name iceberg_catalog.silver.curated_events,
@@ -682,6 +713,11 @@ MODEL (
     file_cache_ttl_seconds = '86400'
   )
 );
+
+SELECT
+  event_id::BIGINT AS event_id,
+  payload::STRING AS payload
+FROM raw.cloud_events;
 ```
 
 ---
@@ -727,7 +763,8 @@ Because SQLMesh `VIEW (materialized true)` models are promoted via a virtual vie
 MODEL (
   name analytics.user_events,
   kind INCREMENTAL_BY_TIME_RANGE (
-    time_column event_time
+    time_column event_time,
+    partition_by_time_column false
   ),
   grain (user_id, event_time)
 );
@@ -737,7 +774,7 @@ SELECT
   event_type::VARCHAR(64) AS event_type,
   event_time::DATETIME AS event_time
 FROM raw.user_events
-WHERE event_time BETWEEN @start_ds AND @end_ds;
+WHERE event_time BETWEEN @start_ts AND @end_ts;
 
 -- Note: For INCREMENTAL_BY_TIME_RANGE models, every synchronous MV (rollup) on the
 -- base table must include the time_column (event_time) in its SELECT and GROUP BY
@@ -757,10 +794,12 @@ WHERE event_time BETWEEN @start_ds AND @end_ds;
 
 ### Inverted & Vector Indexes, Full-Text Search & Compaction (Doris 2.1–5.0)
 
-You can attach Doris inverted indexes (`USING INVERTED` with tokenizer `PROPERTIES`), bloom filter indexes (`USING NGRAM_BF`), or Doris 4.x+ ANN vector indexes (`USING ANN` with `hnsw` or `ivf` index types; ANN indexes on `UNIQUE KEY` tables require Doris 4.1.4+ with Merge-on-Write enabled, whereas earlier Doris 4.x versions only support ANN indexes on `DUPLICATE KEY` tables) using post-statements. Because Doris requires ANN vector index columns to be `ARRAY<FLOAT> NOT NULL` at table creation time (and Doris does not allow `ALTER TABLE ... MODIFY COLUMN` to change an existing nullable column to `NOT NULL`), declare `not_null_columns = ('embedding')` in `physical_properties` so SQLMesh defines the vector column as `ARRAY<FLOAT> NOT NULL` during `CREATE TABLE` (or wraps it in `NON_NULLABLE(...)` during `CTAS`). For `INCREMENTAL_*` models, SQLMesh executes `@runtime_stage = 'creating'` post-statements on the newly created empty table before inserting rows during `@runtime_stage = 'evaluating'`, so all inserted rows are indexed automatically on write in both compute-storage integrated and decoupled (`storage_vault_name`) deployments. For `FULL` models—where initial table creation populates rows via `CTAS` before `@runtime_stage = 'creating'` post-statements run—or when adding an index to a table with existing rows:
+You can attach Doris inverted indexes (`USING INVERTED` with tokenizer `PROPERTIES`), bloom filter indexes (`USING NGRAM_BF`), or Doris 4.x+ ANN vector indexes (`USING ANN` with `hnsw` or `ivf` index types; ANN indexes on `UNIQUE KEY` tables require Doris 4.1.4+ with Merge-on-Write enabled, whereas earlier Doris 4.x versions only support ANN indexes on `DUPLICATE KEY` tables) using post-statements. Because Doris requires ANN vector index columns to be `ARRAY<FLOAT> NOT NULL` at table creation time (and Doris ignores `NON_NULLABLE(...)` on non-`AUTO PARTITION` CTAS columns while forbidding `ALTER TABLE ... MODIFY COLUMN` from changing an existing nullable column to `NOT NULL`), declare `not_null_columns = ('embedding')` in `physical_properties` so SQLMesh materializes the table schema with `embedding ARRAY<FLOAT> NOT NULL` before inserting rows.
 
-- **Compute-storage integrated deployments**: Run `BUILD INDEX <index_name> ON @this_model` in `@runtime_stage = 'creating'` (after `ADD INDEX`) to backfill the inverted index on rows written prior to `ADD INDEX`.
-- **Compute-storage decoupled deployments (`storage_vault_name`)**: Doris 4.x does not support `BUILD INDEX` in compute-storage decoupled mode (executing `BUILD INDEX` will fail evaluation); `ADD INDEX` only indexes newly written rows, so existing rows require a table rewrite or compaction to populate the index.
+Because SQLMesh evaluates and inserts the initial batch of rows into a new snapshot table **before** executing `@IF(@runtime_stage = 'creating', ...)` post-statements, Doris `ALTER TABLE ... ADD INDEX` alone only registers the index for subsequent writes:
+
+- **Compute-storage integrated deployments**: Follow `ALTER TABLE @this_model ADD INDEX <index_name> ...` with `BUILD INDEX <index_name> ON @this_model` inside `@runtime_stage = 'creating'` to backfill the index on the initial batch before downstream models run (`DorisEngineAdapter` automatically polls `SHOW ALTER TABLE COLUMN` and `SHOW BUILD INDEX` until `FINISHED`).
+- **Compute-storage decoupled deployments (`storage_vault_name`)**: Doris 4.x does not support `BUILD INDEX` in compute-storage decoupled mode (executing `BUILD INDEX` will fail); omit `BUILD INDEX` so `ADD INDEX` indexes subsequent writes, and run `sqlmesh plan --restate-model <model>` if you need the initial batch rewritten through the newly registered index.
 
 You can also configure OLAP `compaction_policy` (`'time_series'` or `'size_based'`) and `function_column.sequence_col` in `physical_properties`:
 
@@ -793,8 +832,8 @@ SELECT
   created_at::DATETIME(6) AS created_at
 FROM raw.logs;
 
--- DorisEngineAdapter automatically polls SHOW ALTER TABLE COLUMN after each ALTER TABLE
--- statement so asynchronous column/index schema-change jobs finish before the next statement runs.
+-- DorisEngineAdapter automatically polls SHOW ALTER TABLE COLUMN and SHOW BUILD INDEX
+-- so asynchronous index creation and backfill jobs finish before downstream models run.
 @IF(
   @runtime_stage = 'creating',
   ALTER TABLE @this_model ADD INDEX idx_message (message) USING INVERTED PROPERTIES ("parser" = "english", "support_phrase" = "true") COMMENT 'Full-text inverted index'
@@ -802,15 +841,18 @@ FROM raw.logs;
 
 @IF(
   @runtime_stage = 'creating',
+  BUILD INDEX idx_message ON @this_model
+);
+
+@IF(
+  @runtime_stage = 'creating',
   ALTER TABLE @this_model ADD INDEX idx_embedding (embedding) USING ANN PROPERTIES ("index_type" = "hnsw", "metric_type" = "l2_distance", "dim" = "3") COMMENT 'ANN vector index'
 );
 
--- Only for FULL models (where CTAS writes rows before @runtime_stage = 'creating') in
--- compute-storage integrated deployments; do NOT run BUILD INDEX in compute-storage decoupled mode:
--- @IF(
---   @runtime_stage = 'creating',
---   BUILD INDEX idx_message ON @this_model
--- );
+@IF(
+  @runtime_stage = 'creating',
+  BUILD INDEX idx_embedding ON @this_model
+);
 ```
 
 !!! note "Recovering from Failed Index Post-Statements & Forward-Only Migrations"
@@ -864,6 +906,13 @@ MODEL (
     number_of_rows(threshold := 1)
   )
 );
+
+SELECT
+  order_id::BIGINT AS order_id,
+  customer_id::BIGINT AS customer_id,
+  order_date::DATE AS order_date
+FROM raw.orders
+WHERE order_date BETWEEN @start_ds AND @end_ds;
 ```
 
 - **Constant folding in `LIMIT` clauses**: Doris requires `LIMIT` arguments to be integer literals rather than arithmetic expressions (such as `LIMIT 10 + 1` emitted by `number_of_rows`). `DorisEngineAdapter` automatically folds constant arithmetic in `LIMIT` clauses before execution.
@@ -901,7 +950,7 @@ If you are migrating StarRocks SQLMesh models or existing Doris DDL conventions,
 | `table_type = 'PRIMARY' \| 'UNIQUE' \| 'DUPLICATE' \| 'AGGREGATE'`, `keys = ('c1', 'c2')` | Maps directly to the corresponding Doris key model (`PRIMARY` maps to Doris `UNIQUE KEY`) |
 | `clustered_by (c1)` + `physical_properties (buckets = 10)` | Emits `DISTRIBUTED BY HASH(c1) BUCKETS 10` |
 | `physical_properties (partition_by = ...)` | Supported alias for top-level `partitioned_by` |
-| `physical_properties (not_null_columns = ('c1', 'c2'))` | Defines specified OLAP columns as `NOT NULL` on `CREATE TABLE` (and wraps `CTAS` projections in `NON_NULLABLE(...)`) |
+| `physical_properties (not_null_columns = ('c1', 'c2'))` | Defines specified OLAP or Iceberg columns as `NOT NULL` at `CREATE TABLE` time (materializing OLAP `CTAS` via schema DDL + `INSERT INTO`, and preserving `NOT NULL` across `ALTER TABLE ... MODIFY COLUMN` widenings) |
 
 ---
 
