@@ -6052,3 +6052,16 @@ def test_doris_audit_fixes_and_docs_models(
     mocker.patch("sqlmesh.core.engine_adapter.doris.time.sleep")
     DorisEngineAdapter._wait_for_build_index(raw_build_adapter, "analytics.logs", timeout=5.0)
     assert raw_build_adapter.cursor.fetchall.call_count == 2
+
+    # 8. External Iceberg CTAS with `not_null_columns` rejects unresolved column types instead of silently creating nullable columns.
+    iceberg_adapter = make_mocked_engine_adapter(
+        DorisEngineAdapter, catalog_types={"iceberg_cat": "iceberg"}
+    )
+    with pytest.raises(SQLMeshError, match="cannot apply not_null_columns"):
+        iceberg_adapter.ctas(
+            "iceberg_cat.db.tbl",
+            parse_one("SELECT id, payload FROM raw.events", read="doris"),
+            table_properties={
+                "not_null_columns": exp.Tuple(expressions=[exp.column("payload")]),
+            },
+        )

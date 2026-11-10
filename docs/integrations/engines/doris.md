@@ -247,7 +247,7 @@ GROUP BY user_id, event_type;
 
 ## Distribution & Bucketing
 
-Doris OLAP tables distribute tablets across backends via `DISTRIBUTED BY HASH(...)` or `DISTRIBUTED BY RANDOM` (on Doris 2.1+, omitting `DISTRIBUTED BY` on `DUPLICATE KEY` or `AGGREGATE KEY` tables defaults to `DISTRIBUTED BY RANDOM BUCKETS AUTO`, whereas `UNIQUE KEY` tables and Doris 2.0 require explicit hash distribution). SQLMesh supports three ways to configure distribution:
+Doris OLAP tables distribute tablets across backends via `DISTRIBUTED BY HASH(...)` or `DISTRIBUTED BY RANDOM` (on Doris 2.1+, omitting `DISTRIBUTED BY` defaults to `DISTRIBUTED BY RANDOM BUCKETS AUTO` for `DUPLICATE KEY` tables and `AGGREGATE KEY` tables without `REPLACE` or `REPLACE_IF_NOT_NULL` value columns; `AGGREGATE KEY` tables with `REPLACE` or `REPLACE_IF_NOT_NULL` columns, `UNIQUE KEY` tables, and Doris 2.0 reject random distribution and require explicit `DISTRIBUTED BY HASH(...)` in native DDL). SQLMesh supports three ways to configure distribution:
 
 1. **SQLMesh `clustered_by` + optional `buckets`** (recommended for cross-engine portability):
    ```sql
@@ -796,10 +796,10 @@ WHERE event_time BETWEEN @start_ts AND @end_ts;
 
 You can attach Doris inverted indexes (`USING INVERTED` with tokenizer `PROPERTIES`), bloom filter indexes (`USING NGRAM_BF`), or Doris 4.x+ ANN vector indexes (`USING ANN` with `hnsw` or `ivf` index types; ANN indexes on `UNIQUE KEY` tables require Doris 4.1.4+ with Merge-on-Write enabled, whereas earlier Doris 4.x versions only support ANN indexes on `DUPLICATE KEY` tables) using post-statements. Because Doris requires ANN vector index columns to be `ARRAY<FLOAT> NOT NULL` at table creation time (and Doris ignores `NON_NULLABLE(...)` on non-`AUTO PARTITION` CTAS columns while forbidding `ALTER TABLE ... MODIFY COLUMN` from changing an existing nullable column to `NOT NULL`), declare `not_null_columns = ('embedding')` in `physical_properties` so SQLMesh materializes the table schema with `embedding ARRAY<FLOAT> NOT NULL` before inserting rows.
 
-Because SQLMesh evaluates and inserts the initial batch of rows into a new snapshot table **before** executing `@IF(@runtime_stage = 'creating', ...)` post-statements, Doris `ALTER TABLE ... ADD INDEX` alone only registers the index for subsequent writes:
+During normal snapshot creation (when column types are fully known ahead of evaluation, such as models with explicit `columns` or fully type-annotated projections), SQLMesh creates an empty table and runs `@IF(@runtime_stage = 'creating', ...)` post-statements **before** loading data, so `ALTER TABLE ... ADD INDEX` already indexes the initial load. During **lazy** snapshot creation (when column types are not fully resolved ahead of evaluation), SQLMesh may create the table and insert the initial batch **before** running `@IF(@runtime_stage = 'creating', ...)` post-statements, in which case `ALTER TABLE ... ADD INDEX` alone only registers the index for subsequent writes:
 
-- **Compute-storage integrated deployments**: Follow `ALTER TABLE @this_model ADD INDEX <index_name> ...` with `BUILD INDEX <index_name> ON @this_model` inside `@runtime_stage = 'creating'` to backfill the index on the initial batch before downstream models run (`DorisEngineAdapter` automatically polls `SHOW ALTER TABLE COLUMN` and `SHOW BUILD INDEX` until `FINISHED`).
-- **Compute-storage decoupled deployments (`storage_vault_name`)**: Doris 4.x does not support `BUILD INDEX` in compute-storage decoupled mode (executing `BUILD INDEX` will fail); omit `BUILD INDEX` so `ADD INDEX` indexes subsequent writes, and run `sqlmesh plan --restate-model <model>` if you need the initial batch rewritten through the newly registered index.
+- **Compute-storage integrated deployments**: Follow `ALTER TABLE @this_model ADD INDEX <index_name> ...` with `BUILD INDEX <index_name> ON @this_model` inside `@runtime_stage = 'creating'` so any pre-existing rows from lazy creation are backfilled (on an empty table during normal snapshot creation, `BUILD INDEX` is a fast no-op). `DorisEngineAdapter` polls `SHOW ALTER TABLE COLUMN` and `SHOW BUILD INDEX` for up to 60 seconds, but returns early on timeout, `CANCELLED` jobs, or polling errors—verify index readiness via `SHOW ALTER TABLE COLUMN` / `SHOW BUILD INDEX` when downstream models depend on index builds completing first.
+- **Compute-storage decoupled deployments (`storage_vault_name`)**: Doris 4.x does not support `BUILD INDEX` in compute-storage decoupled mode (executing `BUILD INDEX` will fail); omit `BUILD INDEX` so `ADD INDEX` indexes subsequent writes. Snapshots created through the normal empty-table path already index the initial load; only when a snapshot uses lazy creation (initial batch loaded before `ADD INDEX`) do you need `sqlmesh plan --restate-model <model>` to rewrite that initial batch through the newly registered index.
 
 You can also configure OLAP `compaction_policy` (`'time_series'` or `'size_based'`) and `function_column.sequence_col` in `physical_properties`:
 
@@ -832,8 +832,8 @@ SELECT
   created_at::DATETIME(6) AS created_at
 FROM raw.logs;
 
--- DorisEngineAdapter automatically polls SHOW ALTER TABLE COLUMN and SHOW BUILD INDEX
--- so asynchronous index creation and backfill jobs finish before downstream models run.
+-- DorisEngineAdapter polls SHOW ALTER TABLE COLUMN and SHOW BUILD INDEX for up to 60s
+-- (verify status via SHOW ALTER TABLE COLUMN / SHOW BUILD INDEX when index readiness matters).
 @IF(
   @runtime_stage = 'creating',
   ALTER TABLE @this_model ADD INDEX idx_message (message) USING INVERTED PROPERTIES ("parser" = "english", "support_phrase" = "true") COMMENT 'Full-text inverted index'

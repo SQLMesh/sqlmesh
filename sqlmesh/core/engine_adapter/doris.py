@@ -5061,6 +5061,18 @@ class DorisEngineAdapter(
             return
 
         if (
+            has_explicit_not_null_cols
+            and not self_referencing
+            and first_query is not None
+            and not target_columns_to_types_known
+        ):
+            raise SQLMeshError(
+                f"Doris cannot apply not_null_columns {sorted(explicit_not_null_list)} to CTAS on "
+                f"'{table_name}' because the column types could not be resolved. Specify explicit "
+                "column types or CAST each projection."
+            )
+
+        if (
             requires_schema_ddl_ctas or precreated_by_replace_query
         ) and target_columns_to_types_known:
             assert target_columns_to_types is not None
