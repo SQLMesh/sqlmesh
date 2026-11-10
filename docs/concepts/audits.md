@@ -217,7 +217,9 @@ MODEL (
 SELECT 1 AS customer_id, 'us' AS region;
 ```
 
-For compound predicates, use parentheses to preserve `AND` / `OR` precedence, such as `condition := (region = 'us' AND (customer_id > 0 OR customer_id IS NULL))`. As with SQL `WHERE`, only rows for which the condition evaluates to `TRUE` are included. A `NULL` result excludes the row; use `IS NULL` or explicit null handling when those rows should be included.
+For compound predicates, use parentheses to preserve `AND` / `OR` precedence, such as `condition := (region = 'us' AND (customer_id > 0 OR customer_id IS NULL))`. As with SQL `WHERE`, only rows for which the condition evaluates to `TRUE` are included. If a predicate such as `region = 'us'` evaluates to `NULL`, that row is excluded; use `IS NULL` or explicit null handling when those rows should be included.
+
+Do not use the literal `condition := NULL` to select no rows. Some built-in audits, including `not_null`, combine the condition with other checks using the `@AND` macro, which removes literal `NULL` arguments when rendering SQL. In those audits, a literal `NULL` does not restrict the audited rows. Use `condition := FALSE` to select no rows.
 
 Aggregate and window-based audits perform their checks over the selected rows. For example, `unique_values` checks duplicates within that population. The following invocation requires at least one row with `region = 'us'`:
 
