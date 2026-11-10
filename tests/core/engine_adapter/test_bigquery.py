@@ -13,7 +13,10 @@ from sqlglot.helper import ensure_list
 import sqlmesh.core.dialect as d
 from sqlmesh.core.engine_adapter import BigQueryEngineAdapter
 from sqlmesh.core.engine_adapter.bigquery import select_partitions_expr
-from sqlmesh.core.engine_adapter.mixins import TableAlterDropClusterKeyOperation
+from sqlmesh.core.engine_adapter.mixins import (
+    TableAlterClusterByOperation,
+    TableAlterDropClusterKeyOperation,
+)
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 from sqlmesh.core.schema_diff import TableAlterDropColumnOperation
 from sqlmesh.core.node import IntervalUnit
@@ -1487,3 +1490,53 @@ def test_bigquery_no_column_change_clustering_drop_only(
 
     assert len(operations) == 1
     assert isinstance(operations[0], TableAlterDropClusterKeyOperation)
+
+
+def test_unchanged_clustering_key_is_not_altered_when_column_added(
+    adapter: BigQueryEngineAdapter, mocker: MockerFixture
+):
+    # Adding a column to a clustered table must not emit a clustering change when the key
+    # itself is unchanged. BigQuery applies a new key by rewriting the clustered columns.
+    current_columns = {"c1": exp.DataType.build("INT64", dialect="bigquery")}
+    target_columns = {
+        **current_columns,
+        "c2": exp.DataType.build("INT64", dialect="bigquery"),
+    }
+
+    def columns(table_name: str, include_pseudo_columns: bool = False) -> t.Dict[str, exp.DataType]:
+        if exp.to_table(table_name).name == "current_table":
+            return current_columns
+        return target_columns
+
+    mocker.patch.object(adapter, "columns", side_effect=columns)
+
+    def get_data_objects(
+        schema_name: exp.Table,
+        object_names: t.Optional[t.Set[str]] = None,
+        safe_to_cache: bool = False,
+    ) -> t.List[DataObject]:
+        assert object_names is not None
+        return [
+            DataObject(
+                schema=schema_name.db,
+                name=next(iter(object_names)),
+                type=DataObjectType.TABLE,
+                clustering_key="(c1)",
+            )
+        ]
+
+    mocker.patch.object(adapter, "get_data_objects", side_effect=get_data_objects)
+    # Let a wrongly emitted clustering change surface as the column-rewrite UPDATE.
+    mocker.patch.object(adapter, "_get_table", return_value=mocker.Mock())
+    mocker.patch.object(adapter, "_db_call")
+
+    operations = adapter.get_alter_operations(
+        "test_schema.current_table", "test_schema.target_table"
+    )
+    assert not any(isinstance(operation, TableAlterClusterByOperation) for operation in operations)
+
+    adapter.alter_table(operations)
+
+    assert _to_sql_calls(adapter) == [
+        "ALTER TABLE `test_schema`.`current_table` ADD COLUMN `c2` INT64"
+    ]
