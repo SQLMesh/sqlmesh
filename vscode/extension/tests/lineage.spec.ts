@@ -1,9 +1,10 @@
-import { test, Page } from './fixtures'
+import { test, expect, Page } from './fixtures'
 import path from 'path'
 import fs from 'fs-extra'
 import os from 'os'
 import {
   openLineageView,
+  openFile,
   openServerPage,
   SUSHI_SOURCE_PATH,
   waitForLoadedSQLMesh,
@@ -19,7 +20,7 @@ async function testLineageWithProjectPath(page: Page): Promise<void> {
   await waitForLoadedSQLMesh(page)
 }
 
-test('Lineage panel renders correctly - no project path config (default)', async ({
+test('Lineage panel follows the initial editor and model switches - no project path config (default)', async ({
   page,
   sharedCodeServer,
   tempDir,
@@ -28,7 +29,28 @@ test('Lineage panel renders correctly - no project path config (default)', async
   await createPythonInterpreterSettingsSpecifier(tempDir)
 
   await openServerPage(page, tempDir, sharedCodeServer)
-  await testLineageWithProjectPath(page)
+  await openFile(page, 'models/waiters.py')
+  await waitForLoadedSQLMesh(page)
+  await openLineageView(page)
+
+  // The main model has the brand ring; checking it distinguishes selection
+  // from a model that merely appears as a dependency in the graph.
+  const expectMainModel = async (name: string) => {
+    await expect
+      .poll(async () => {
+        for (const frame of page.frames()) {
+          const main = frame.locator('.react-flow__node .ring-brand-50')
+          if (await main.locator(`[title*="${name}"]`).count()) return true
+        }
+        return false
+      })
+      .toBe(true)
+  }
+  await expectMainModel('waiters')
+  await openFile(page, 'models/orders.py')
+  await expectMainModel('orders')
+  await openFile(page, 'models/waiters.py')
+  await expectMainModel('waiters')
 })
 
 test('Lineage panel renders correctly - relative project path', async ({
@@ -129,7 +151,6 @@ test('Lineage panel renders correctly - absolute path project outside of workspa
   await testLineageWithProjectPath(page)
 })
 
-// These work on local machine when debuggin but not on CI, so skipping for now
 test('Lineage panel renders correctly - multiworkspace setup', async ({
   page,
   sharedCodeServer,
@@ -174,7 +195,12 @@ test('Lineage panel renders correctly - multiworkspace setup', async ({
   )
 
   await openServerPage(page, workspaceFilePath, sharedCodeServer)
-  await page.reload()
+  await expect(
+    page.getByRole('treeitem', { name: 'sushi1', exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('treeitem', { name: 'sushi2', exact: true }),
+  ).toBeVisible()
   await testLineageWithProjectPath(page)
 })
 
@@ -228,6 +254,11 @@ test('Lineage panel renders correctly - multiworkspace setup reversed', async ({
   )
 
   await openServerPage(page, workspaceFilePath, sharedCodeServer)
-  await page.reload()
+  await expect(
+    page.getByRole('treeitem', { name: 'sushi1', exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('treeitem', { name: 'sushi2', exact: true }),
+  ).toBeVisible()
   await testLineageWithProjectPath(page)
 })
