@@ -195,6 +195,42 @@ SQLMesh comes with a suite of built-in generic audits that cover a broad set of 
 
 This section describes the audits, grouped by general purpose.
 
+### Filter rows with condition
+
+All built-in audits accept an optional `condition` argument to select the rows to audit. Set it on an audit invocation in the model's `audits` property. Omitting it is equivalent to `condition := TRUE`, which keeps the audit's existing row scope.
+
+Write the condition as a SQL boolean expression in the model's dialect. Use column identifiers and SQL literals normally, without quoting the entire expression as a string. For example, this model checks `customer_id` for `NULL` only in rows where `region = 'us'`:
+
+```sql linenums="1"
+MODEL (
+  name demo.orders,
+  kind FULL,
+  dialect duckdb,
+  audits (
+    not_null(
+      columns := (customer_id),
+      condition := (region = 'us')
+    )
+  )
+);
+
+SELECT 1 AS customer_id, 'us' AS region;
+```
+
+For compound predicates, use parentheses to preserve `AND` / `OR` precedence, such as `condition := (region = 'us' AND (customer_id > 0 OR customer_id IS NULL))`. As with SQL `WHERE`, only rows for which the condition evaluates to `TRUE` are included. A `NULL` result excludes the row; use `IS NULL` or explicit null handling when those rows should be included.
+
+Aggregate and window-based audits perform their checks over the selected rows. For example, `unique_values` checks duplicates within that population. The following invocation requires at least one row with `region = 'us'`:
+
+```sql
+number_of_rows(threshold := 0, condition := (region = 'us'))
+```
+
+If no rows match, the result depends on the audit. The filtered `not_null` check above passes, while this `number_of_rows` check fails.
+
+Each invocation has its own condition and arguments. A condition affects only that audit; it does not filter model materialization, other audits, or downstream models. For incremental by time range models, it further restricts the interval SQLMesh is auditing, without adding historical intervals.
+
+The `_non_blocking` variants accept the same argument. The condition selects rows, while blocking controls what happens if the audit fails. For a user-defined audit, a parameter named `condition` only filters rows if its query uses the parameter, such as `WHERE @condition`.
+
 ### Generic assertion audit
 
 The `forall` audit is the most generic built-in audit, allowing arbitrary boolean SQL expressions.
