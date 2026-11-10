@@ -1213,9 +1213,11 @@ Example configuration:
 
 #### Default connections/scheduler
 
-The `default_connection`, `default_test_connection`, and `default_scheduler` keys are used to specify shared defaults across multiple gateways.
+The `default_connection`, `default_test_connection`, and `default_scheduler` keys specify a connection or scheduler for gateways that do not define their own.
 
 For example, you might have a specific connection where your tests should run regardless of which gateway is being used. Instead of duplicating the test connection information in each gateway specification, specify it once in the `default_test_connection` key.
+
+A default is only used when a gateway omits the corresponding key entirely. If a gateway specifies its own `connection`, `test_connection`, or `scheduler`, SQLMesh uses that configuration as written and ignores the default. Fields are not merged, so a gateway connection cannot inherit individual fields such as `type` from `default_connection`. Each gateway connection must be a complete connection configuration.
 
 Example configuration specifying a Postgres default connection, in-memory DuckDB default test connection, and builtin default scheduler:
 
