@@ -639,6 +639,41 @@ def test_get_data_objects_labels_connected_warehouse_after_lazy_restore(
     assert fetchdf.call_count == 2
 
 
+def test_get_data_objects_non_default_warehouse_skips_default_cache(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    """dbo and ci_abc.dbo share the base cache key. planning must not use that entry."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_abc",
+        database="ci_abc",
+        patch_get_data_objects=False,
+    )
+    frames = {
+        "default": pd.DataFrame([{"name": "t", "schema_name": "dbo", "type": "TABLE"}]),
+        "planning": pd.DataFrame([{"name": "t", "schema_name": "dbo", "type": "VIEW"}]),
+    }
+    current = {"warehouse": "default"}
+    mocker.patch.object(
+        adapter, "fetchdf", side_effect=lambda *_args, **_kwargs: frames[current["warehouse"]]
+    )
+
+    cached = adapter.get_data_objects("ci_abc.dbo", {"t"}, safe_to_cache=True)
+    assert cached[0].type == DataObjectType.TABLE
+
+    adapter.set_current_catalog("planning")
+    adapter.set_current_catalog(None)
+    current["warehouse"] = "planning"
+    listed = adapter.get_data_objects("dbo", {"t"}, safe_to_cache=True)
+    assert listed[0].catalog == "planning"
+    assert listed[0].type == DataObjectType.VIEW
+
+    again = adapter.get_data_objects("ci_abc.dbo", {"t"}, safe_to_cache=True)
+    assert again[0].catalog == "ci_abc"
+    assert again[0].type == DataObjectType.TABLE
+
+
 def test_drop_data_object_default_catalog_drops_without_requalifying(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,

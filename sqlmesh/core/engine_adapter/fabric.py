@@ -284,13 +284,13 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         object_names: t.Optional[t.Set[str]] = None,
         safe_to_cache: bool = False,
     ) -> t.List[DataObject]:
-        # Runs after the cache read. _get_data_objects blanked the default warehouse
-        # so the cached key stays schema.table. Callers still need that name on the
-        # returned objects. A schema that already names a warehouse wins; otherwise
-        # use the connection actually queried, which may still be the previous
-        # warehouse after a lazy restore.
-        objects = super().get_data_objects(schema_name, object_names, safe_to_cache)
         catalog = to_schema(schema_name).catalog or self._resolved_catalog()
+        default_catalog = self._default_catalog or self._extra_config.get("database")
+        if catalog and catalog != default_catalog:
+            objects = self._get_data_objects(schema_name, object_names)
+        else:
+            # Cache key is schema.table, so only the default warehouse may use it.
+            objects = super().get_data_objects(schema_name, object_names, safe_to_cache)
         if not catalog:
             return objects
         return [
