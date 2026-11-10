@@ -29,6 +29,7 @@ export type VSCodeCallbackShape = Record<string, any>
 export type VSCodeCallback = {
   changeFocusOnFile: {
     path: string
+    isWindows?: boolean
   }
   savedFile: {
     fileUri: string
@@ -47,6 +48,7 @@ export type RPCMethods = {
     params: {}
     result: {
       fileUri?: string
+      isWindows?: boolean
     }
   }
   api_query: {
