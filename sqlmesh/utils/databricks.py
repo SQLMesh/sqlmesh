@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
+import inspect
+import logging
 import re
 import typing as t
 from functools import lru_cache
 from threading import Lock
+
+logger = logging.getLogger(__name__)
 
 HeaderFactory = t.Callable[[], t.Dict[str, str]]
 
@@ -105,11 +108,39 @@ class SharedU2MCredentialsProvider:
 
 @lru_cache(maxsize=1)
 def supports_shared_u2m_login() -> bool:
-    """Whether the installed connector has the internals `SharedU2MCredentialsProvider` builds on (4.1.0+)."""
+    """Whether the connector internals `SharedU2MCredentialsProvider` builds on accept the arguments it passes them.
+
+    These internals aren't public, so a connector upgrade could change them. If one has, U2M OAuth falls back to
+    sharing a single connection rather than failing to connect.
+    """
     try:
-        return importlib.util.find_spec("databricks.sql.common.unified_http_client") is not None
-    except ModuleNotFoundError:
+        from databricks.sql import __version__
+    except ImportError:
+        # The connector isn't installed, so there are no connections to share a login across
         return False
+
+    try:
+        from databricks.sql.auth.auth import get_python_sql_connector_auth_provider
+        from databricks.sql.common.unified_http_client import UnifiedHttpClient
+        from databricks.sql.exc import RequestError  # noqa: F401
+        from databricks.sql.utils import build_client_context
+
+        inspect.signature(build_client_context).bind(
+            "hostname", __version__, user_agent_entry="sqlmesh"
+        )
+        inspect.signature(UnifiedHttpClient).bind(None)
+        inspect.signature(get_python_sql_connector_auth_provider).bind(
+            "hostname", http_client=None, auth_type="databricks-oauth"
+        )
+    except Exception as e:
+        logger.warning(
+            "Databricks SQL connector %s is not compatible with SQLMesh's shared U2M OAuth login (%s). U2M OAuth "
+            "connections will share a single connection, so queries will run one at a time.",
+            __version__,
+            e,
+        )
+        return False
+    return True
 
 
 _shared_u2m_credentials_providers: t.Dict[t.Tuple[str, str], SharedU2MCredentialsProvider] = {}
