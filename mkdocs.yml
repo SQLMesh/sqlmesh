@@ -82,6 +82,7 @@ nav:
       - integrations/engines/bigquery.md
       - integrations/engines/clickhouse.md
       - integrations/engines/databricks.md
+      - integrations/engines/db2.md
       - integrations/engines/duckdb.md
       - integrations/engines/fabric.md
       - integrations/engines/motherduck.md
@@ -105,6 +106,7 @@ nav:
       - reference/cli.md
       - reference/notebook.md
       - reference/python.md
+      - reference/execution_observations.md
     - Configuration:
       - reference/configuration.md
       - reference/model_configuration.md

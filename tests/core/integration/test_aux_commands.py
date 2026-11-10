@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import typing as t
+import subprocess
+import sys
 from unittest.mock import patch
 import pytest
 from pathlib import Path
@@ -84,6 +86,121 @@ def test_table_name(init_and_plan_context: t.Callable):
         context.table_name("sushi.waiter_revenue_by_day", "dev_b", prod=True)
         == f"memory.sqlmesh__sushi.sushi__waiter_revenue_by_day__{snapshot.version}"
     )
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_run_loads_materializations_once(init_and_plan_context: t.Callable, mocker: MockerFixture):
+    """Verify janitor and run dispatch loading while loaders execute only once."""
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+    load_dispatch_spy = mocker.spy(context, "_load_materializations")
+    loader_spies = [mocker.spy(loader, "load_materializations") for loader in context._loaders]
+    assert loader_spies
+    assert context._materializations_loaded is True
+
+    # Reset the guard to exercise lazy loading through run's janitor and scheduler paths.
+    context._materializations_loaded = False
+    context.run(skip_janitor=False)
+
+    # The janitor and run each call the context wrapper; the second call is guarded.
+    assert load_dispatch_spy.call_count == 2
+
+    # Only the janitor's first dispatch reaches the loaders.
+    for loader_spy in loader_spies:
+        assert loader_spy.call_count == 1
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_destroy_fails_before_invalidating_environments_on_materialization_error(
+    init_and_plan_context: t.Callable, mocker: MockerFixture
+):
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+    assert context.state_reader.get_environment("prod").expiration_ts is None
+
+    for loader in context._loaders:
+        mocker.patch.object(
+            loader, "load_materializations", side_effect=SQLMeshError("broken materialization")
+        )
+    context._materializations_loaded = False
+
+    with pytest.raises(SQLMeshError, match="broken materialization"):
+        context.destroy()
+
+    assert context.state_reader.get_environment("prod").expiration_ts is None
+
+
+def test_janitor_loads_materialization(tmp_path: Path):
+    config_file_path = Path("config.yaml")
+    database = tmp_path / "janitor_test.duckdb"
+    materialization_name = "dummy_materialization"
+    materialization_file_path = Path(f"materializations/{materialization_name}.py")
+    schema_name = "test"
+    model_name = "dummy_model"
+    model_file_path = Path(f"models/{model_name}.sql")
+    config_yaml = f"""\
+gateways:
+    local:
+        connection:
+            type: duckdb
+            database: {database}
+default_gateway: local
+model_defaults:
+    dialect: duckdb
+"""
+    materialization_code = f"""from sqlmesh.core.snapshot.evaluator import CustomMaterialization
+class DummyMaterialization(CustomMaterialization):
+    NAME = "{materialization_name}"
+    def insert(self, table_name, query_or_df, model, is_first_insert, render_kwargs, **kwargs):
+        self._replace_query_for_model(model, table_name, query_or_df, render_kwargs)
+"""
+    model_code = f"""MODEL(name {schema_name}.{model_name}, kind CUSTOM (materialization '{materialization_name}'));
+SELECT 1 AS col"""
+
+    create_temp_file(tmp_path, config_file_path, config_yaml)
+    create_temp_file(tmp_path, materialization_file_path, materialization_code)
+    create_temp_file(tmp_path, model_file_path, model_code)
+
+    ctx = Context(paths=[tmp_path])
+    ctx.plan("dev", no_prompts=True, auto_apply=True)
+
+    snapshot = ctx.get_snapshot(f"{schema_name}.{model_name}")
+    assert snapshot
+    table_name = snapshot.table_name()
+    assert ctx.engine_adapter.table_exists(table_name)
+    assert ctx.state_sync.get_snapshots([snapshot.snapshot_id])
+    assert ctx._loaded
+    assert ctx._materializations_loaded
+    ctx.invalidate_environment("dev")
+    ctx.close()
+
+    # A fresh interpreter cannot reuse materialization classes loaded during setup.
+    program = """\
+import sys
+from sqlmesh.core.context import Context
+
+ctx = Context(paths=[sys.argv[1]], load=False)
+table_name = sys.argv[2]
+assert not ctx._loaded
+assert not ctx._materializations_loaded
+assert ctx.engine_adapter.table_exists(table_name)
+
+assert ctx.run_janitor(ignore_ttl=True)
+
+assert not ctx.engine_adapter.table_exists(table_name)
+assert not ctx._loaded
+assert ctx._materializations_loaded
+ctx.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), table_name],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_janitor_cleanup_order(mocker: MockerFixture, tmp_path: Path):
