@@ -40,9 +40,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.10'
+          # 3.13.17+ bundles pip 26.2.2+, which no longer trusts the compromised eMudhra/emSign root CA.
+          python-version: '3.13'
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      - name: Check pip includes the eMudhra/emSign CA removal
+        run: |
+          python -c "import sys, pip; v = tuple(int(p) for p in pip.__version__.split('.')[:3]); sys.exit(0 if v >= (26, 2, 2) else f'pip {pip.__version__} predates the eMudhra/emSign CA removal; need >= 26.2.2')"
       - name: Install build dependencies
         run: pip install build twine setuptools_scm
       - name: Publish Python package

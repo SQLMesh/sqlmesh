@@ -11,6 +11,7 @@ from sqlglot import parse_one
 import sqlmesh.core.dialect as d
 from sqlmesh.core.engine_adapter import RedshiftEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
+from sqlmesh.core.schema_diff import TableAlterDropColumnOperation
 from sqlmesh.core.model import load_sql_based_model
 from sqlmesh.core.model.definition import SqlModel
 from sqlmesh.utils.errors import SQLMeshError
@@ -912,3 +913,46 @@ def test_merge_logical(
         'INSERT INTO "target" ("ID", "ts") SELECT "ID", "ts" FROM (SELECT "ID" AS "ID", "ts" AS "ts", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "ID") AS _row_number FROM "__temp_test_abcdefgh") AS _t WHERE _row_number = 1',
         'DROP TABLE IF EXISTS "__temp_test_abcdefgh"',
     ]
+
+
+def test_redshift_no_clustering_operations_on_column_drop(
+    make_mocked_engine_adapter: t.Callable,
+) -> None:
+    """Dropping a column on Redshift never emits clustering statements."""
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+    adapter.cursor.fetchall.return_value = []
+
+    current_columns = {"TENANT_ID": "INT", "PARTITION_MONTH": "INT"}
+    target_columns = {"TENANT_ID": "INT"}
+    adapter.columns = lambda table_name, **kwargs: {
+        k: exp.DataType.build(v)
+        for k, v in (current_columns if "current" in str(table_name) else target_columns).items()
+    }
+
+    operations = adapter.get_alter_operations("current_table", "target_table")
+
+    assert len(operations) == 1
+    assert all(isinstance(op, TableAlterDropColumnOperation) for op in operations)
+
+
+def test_redshift_multiple_column_drops_no_clustering_operations(
+    make_mocked_engine_adapter: t.Callable,
+) -> None:
+    """Dropping multiple columns on Redshift preserves the schema-diff order.
+
+    No clustering operations must be injected between or after the column drops.
+    """
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+    adapter.cursor.fetchall.return_value = []
+
+    current_columns = {"EXTRA": "INT", "PARTITION_MONTH": "INT", "TENANT_ID": "INT"}
+    target_columns = {"TENANT_ID": "INT"}
+    adapter.columns = lambda table_name, **kwargs: {
+        k: exp.DataType.build(v)
+        for k, v in (current_columns if "current" in str(table_name) else target_columns).items()
+    }
+
+    operations = adapter.get_alter_operations("current_table", "target_table")
+
+    assert len(operations) == 2
+    assert all(isinstance(op, TableAlterDropColumnOperation) for op in operations)
