@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PropsWithChildren } from 'react'
 import { EventBusProvider } from '@/hooks/eventBus'
@@ -139,6 +146,59 @@ describe('lineage active-editor selection', () => {
     render(page())
     await act(async () => {})
     expect(screen.queryByTestId('selected-model')).toBeNull()
+    expect(screen.queryByText('Loading models...')).toBeNull()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Select a model' }), {
+      target: { value: 'lower' },
+    })
+    await selected('lower')
+  })
+
+  it('offers model selection when the active-file lookup fails', async () => {
+    rpc.mockRejectedValue(new Error('RPC unavailable'))
+    render(page())
+    await screen.findByText(
+      'Unable to determine the active model. Select a model to view its lineage.',
+    )
+    expect(screen.queryByText('Loading models...')).toBeNull()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Select a model' }), {
+      target: { value: 'second' },
+    })
+    await selected('second')
+  })
+
+  it('ignores a rejected lookup after a newer focus selects a model', async () => {
+    let reject!: (reason: Error) => void
+    rpc.mockReturnValue(
+      new Promise((_, fail) => {
+        reject = fail
+      }),
+    )
+    render(page())
+    focus('c:/project/SECOND.SQL', true)
+    await selected('second')
+    await act(async () => {
+      reject(new Error('RPC unavailable'))
+    })
+    await selected('second')
+    expect(screen.queryByRole('combobox')).toBeNull()
+  })
+
+  it('keeps a manual selection when a pending initial lookup finishes', async () => {
+    let resolve!: (value: { fileUri: string; isWindows: boolean }) => void
+    rpc.mockReturnValue(
+      new Promise(done => {
+        resolve = done
+      }),
+    )
+    render(page())
+    fireEvent.change(screen.getByRole('combobox', { name: 'Select a model' }), {
+      target: { value: 'second' },
+    })
+    await selected('second')
+    await act(async () => {
+      resolve({ fileUri: models[0].full_path, isWindows: true })
+    })
+    await selected('second')
   })
 
   it.each([undefined, 'C:/project/README.md'])(
@@ -161,6 +221,7 @@ describe('lineage active-editor selection', () => {
     api.mockReturnValue({ data: [], isLoading: false })
     const view = render(page())
     expect(rpc).not.toHaveBeenCalled()
+    expect(screen.getByText('No models available.')).toBeTruthy()
     expect(screen.queryByTestId('selected-model')).toBeNull()
     api.mockReturnValue({ data: models, isLoading: false })
     view.rerender(page())
