@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import typing as t
 
@@ -16,7 +17,11 @@ from sqlmesh.core.engine_adapter.mixins import (
     ClusteredByMixin,
     RowDiffMixin,
     GrantsFromInfoSchemaMixin,
+    TableAlterChangeClusterKeyOperation,
+    TableAlterClusterByOperation,
+    TableAlterDropClusterKeyOperation,
 )
+from sqlmesh.core.schema_diff import TableAlterDropColumnOperation, TableAlterOperation
 from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
     DataObject,
@@ -24,7 +29,6 @@ from sqlmesh.core.engine_adapter.shared import (
     SourceQuery,
     set_catalog,
 )
-from sqlmesh.core.schema_diff import TableAlterOperation
 from sqlmesh.utils import optional_import, get_source_columns_to_types
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.pandas import columns_to_types_from_dtypes
@@ -691,6 +695,62 @@ class SnowflakeEngineAdapter(
             table_kind=table_kind,
             **kwargs,
         )
+
+    def _apply_clustering_operation(
+        self,
+        operations: t.List[TableAlterOperation],
+        clustering_operation: TableAlterClusterByOperation,
+        current_table_info: t.Optional[DataObject],
+    ) -> None:
+        """Apply clustering DDL in the order Snowflake requires.
+
+        DROP COLUMN fails while the column is still in the clustering key, including
+        inside an expression. CLUSTER BY fails on a column that does not exist yet. A
+        type change that becomes DROP plus ADD still needs the key dropped first even
+        when the key text is unchanged. An unchanged key with no matching column drop
+        emits nothing. DESCRIBE names are compared as stored.
+        """
+        clustering_key = current_table_info.clustering_key if current_table_info else None
+        operations_include_drop_column = any(
+            isinstance(op, TableAlterDropColumnOperation) for op in operations
+        )
+
+        if clustering_key and operations_include_drop_column:
+            referenced = self._clustering_key_column_names(clustering_key)
+            drop_index = next(
+                (
+                    i
+                    for i, op in enumerate(operations)
+                    if isinstance(op, TableAlterDropColumnOperation)
+                    and op.column_parts
+                    and op.column_parts[0].name in referenced
+                ),
+                None,
+            )
+            if drop_index is not None:
+                drop_key_op = TableAlterDropClusterKeyOperation(
+                    target_table=clustering_operation.target_table
+                )
+                operations.insert(drop_index, drop_key_op)
+                if isinstance(clustering_operation, TableAlterChangeClusterKeyOperation):
+                    operations.append(clustering_operation)
+                return
+        if self._clustering_key_is_unchanged(clustering_operation, current_table_info):
+            return
+        operations.append(clustering_operation)
+
+    def _clustering_key_column_names(self, clustering_key: str) -> t.Set[str]:
+        expressions = TableAlterChangeClusterKeyOperation(
+            target_table=exp.to_table("_"),
+            clustering_key=clustering_key,
+            dialect=self.dialect,
+        ).cluster_key_expressions
+        cluster_columns = itertools.chain.from_iterable(
+            expression.find_all(exp.Column) for expression in expressions
+        )
+        return {
+            normalize_identifiers(column, dialect=self.dialect).name for column in cluster_columns
+        }
 
     def alter_table(
         self,

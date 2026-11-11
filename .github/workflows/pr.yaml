@@ -150,6 +150,10 @@ jobs:
           . ./venv/Scripts/activate
           python.exe -m pip install --upgrade pip
           make install-dev
+      - name: Install DuckLake extension
+        run: |
+          . ./venv/Scripts/activate
+          python -c "import duckdb; duckdb.connect().install_extension('ducklake')"
       - name: Run fast unit tests
         run: |
           . ./venv/Scripts/activate
@@ -267,6 +271,7 @@ jobs:
             trino,
             spark,
             clickhouse,
+            clickhouse-datalake,
             risingwave,
             starrocks,
             doris,
@@ -294,6 +299,9 @@ jobs:
         run: |
           source .venv/bin/activate
           make ${{ matrix.engine }}-test
+      - name: Stop DataLake services
+        if: ${{ always() && matrix.engine == 'clickhouse-datalake' }}
+        run: make clickhouse-datalake-down
       - name: Upload test results
         uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}

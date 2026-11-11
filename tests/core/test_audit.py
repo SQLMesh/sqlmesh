@@ -221,6 +221,103 @@ def test_load_standalone_with_macros(assert_exp_eq):
     assert "extra_macro" not in audit.python_env
 
 
+def test_load_multiple_single_standalone_with_macros():
+    # Regression test for https://github.com/SQLMesh/sqlmesh/issues/6119
+    # A standalone audit that is the *last* (and in this case only) AUDIT in its
+    # file must still have access to project python macros passed into
+    # `load_multiple_audits`.
+    expressions = parse(
+        """
+        AUDIT (
+            name only_allowed,
+            standalone true,
+        );
+
+        SELECT 1 FROM some_table WHERE name NOT IN @allowed()
+    """
+    )
+
+    macros = {
+        "allowed": Executable(payload="def allowed(evaluator):\n    return ['a']"),
+    }
+
+    (audit,) = load_multiple_audits(expressions, path="/path/to/audit", macros=macros)
+
+    assert "allowed" in audit.python_env
+
+
+def test_load_multiple_last_standalone_with_macros():
+    # Same as above, but for the last audit of a *multi*-audit file, to make sure
+    # the fix doesn't just special-case single-audit files.
+    expressions = parse(
+        """
+        AUDIT (
+            name first_audit,
+            standalone true,
+        );
+
+        SELECT 1 FROM some_table WHERE col1 IS NULL;
+
+        AUDIT (
+            name second_audit,
+            standalone true,
+        );
+
+        SELECT 1 FROM some_table WHERE name NOT IN @allowed()
+    """
+    )
+
+    macros = {
+        "allowed": Executable(payload="def allowed(evaluator):\n    return ['a']"),
+    }
+
+    first_audit, second_audit = load_multiple_audits(
+        expressions, path="/path/to/audit", macros=macros
+    )
+
+    assert "allowed" not in first_audit.python_env
+    assert "allowed" in second_audit.python_env
+
+
+def test_load_multiple_last_standalone_with_jinja_macros():
+    # Regression test for https://github.com/SQLMesh/sqlmesh/issues/6119
+    # Same as test_load_multiple_single_standalone_with_macros, but for jinja macros:
+    # a standalone audit that is the last (and in this case only) AUDIT in its file
+    # must still have access to project jinja macros passed into `load_multiple_audits`.
+    expressions = parse(
+        """
+        AUDIT (
+            name only_allowed,
+            standalone true,
+        );
+
+        JINJA_QUERY_BEGIN;
+        SELECT
+            *,
+            {{ test_macro(1) }},
+        FROM
+            db.table t1
+        WHERE
+            col IS NULL
+        JINJA_QUERY_END;
+    """
+    )
+
+    macros = """
+    {% macro test_macro(v) %}{{ v }}{% endmacro %}
+
+    {% macro extra_macro(v) %}{{ v + 1 }}{% endmacro %}
+    """
+
+    jinja_macros = JinjaMacroRegistry()
+    jinja_macros.add_macros(MacroExtractor().extract(macros))
+
+    (audit,) = load_multiple_audits(expressions, path="/path/to/audit", jinja_macros=jinja_macros)
+
+    assert "test_macro" in audit.jinja_macros.root_macros
+    assert "extra_macro" not in audit.jinja_macros.root_macros
+
+
 def test_load_standalone_with_jinja_macros(assert_exp_eq):
     expressions = parse(
         """
@@ -933,6 +1030,44 @@ def test_not_constant_audit(model: Model):
         rendered_query.sql()
         == """SELECT 1 AS "1" FROM (SELECT COUNT(DISTINCT "x") AS "t_cardinality" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE "x" > 1) AS "r" WHERE "r"."t_cardinality" <= 1"""
     )
+
+
+def test_valid_uuid_audit(model: Model):
+    import duckdb
+
+    rendered_query = model.render_audit_query(builtin.valid_uuid_audit, column=exp.column("a"))
+    assert (
+        rendered_query.sql()
+        == """SELECT * FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN '1970-01-01' AND '1970-01-01') AS "_0" WHERE NOT REGEXP_LIKE(LOWER("a"), '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') AND TRUE"""
+    )
+
+    valid = [
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c8",  # v1
+        "000003e8-2363-21ef-b200-325096b39f47",  # v2
+        "5df41881-3aed-3515-88a7-2f4a814cf09e",  # v3
+        "919108F7-52D1-4320-9BAC-F847DB4148A8",  # v4, upper case
+        "2ed6657d-e927-568b-95e1-2665a8aea6a2",  # v5
+        "1ec9414c-232a-6b00-b3c8-9f6bdeced846",  # v6
+        "017f22e2-79b0-7cc3-98c4-dc0c0c07398f",  # v7
+        "2489e9ad-2ee2-8e00-8ec9-32d5f69181c0",  # v8
+    ]
+    invalid = [
+        "017f22e2-79b0-9cc3-98c4-dc0c0c07398f",  # unknown version
+        "017f22e2-79b0-7cc3-c8c4-dc0c0c07398f",  # non-RFC variant
+        "017f22e279b07cc398c4dc0c0c07398f",  # no hyphens
+        "not-a-uuid",
+    ]
+
+    connection = duckdb.connect()
+    connection.execute("CREATE SCHEMA db")
+    connection.execute("CREATE TABLE db.test_model (a TEXT, b INT, ds TEXT)")
+    connection.executemany(
+        "INSERT INTO db.test_model VALUES (?, 1, '1970-01-01')",
+        [[value] for value in valid + invalid + [None]],
+    )
+
+    failing_rows = connection.execute(rendered_query.sql(dialect="duckdb")).fetchall()
+    assert sorted(row[0] for row in failing_rows) == sorted(invalid)
 
 
 def test_condition_with_macro_var(model: Model):
