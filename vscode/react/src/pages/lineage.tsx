@@ -75,10 +75,12 @@ export function LineagePage() {
   )
 }
 
+/** Follow editor focus without choosing arbitrarily between ambiguous model paths. */
 function Lineage() {
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     undefined,
   )
+  const [activeFileError, setActiveFileError] = useState(false)
   const { on } = useEventBus()
   const queryClient = useQueryClient()
 
@@ -100,21 +102,27 @@ function Lineage() {
     let current = true
     const version = focusVersion.current
     // get_active_file uses a plain payload on the existing RPC wire protocol.
-    rpc('get_active_file', {}).then(response => {
-      if (!current || focusVersion.current !== version) return
-      const activeFile =
-        response as unknown as RPCMethods['get_active_file']['result']
-      const matches = findModelsByPath(
-        models,
-        activeFile.fileUri,
-        activeFile.isWindows,
-      )
-      setSelectedModel(
-        previous =>
-          previous ??
-          (matches.length > 1 ? undefined : (matches[0] ?? models[0]).name),
-      )
-    })
+    setActiveFileError(false)
+    rpc('get_active_file', {})
+      .then(response => {
+        if (!current || focusVersion.current !== version) return
+        const activeFile =
+          response as unknown as RPCMethods['get_active_file']['result']
+        const matches = findModelsByPath(
+          models,
+          activeFile.fileUri,
+          activeFile.isWindows,
+        )
+        setSelectedModel(
+          previous =>
+            previous ??
+            (matches.length > 1 ? undefined : (matches[0] ?? models[0]).name),
+        )
+      })
+      .catch(() => {
+        if (!current || focusVersion.current !== version) return
+        setActiveFileError(true)
+      })
     return () => {
       current = false
     }
@@ -172,16 +180,46 @@ function Lineage() {
     return <div>Error: {modelsError.message}</div>
   }
 
-  if (
-    isLoadingModels ||
-    models === undefined ||
-    modelsRecord === false ||
-    selectedModel === undefined
-  ) {
+  if (isLoadingModels || models === undefined || modelsRecord === false) {
     return <div>Loading models...</div>
   }
   if (!Array.isArray(models)) {
     return <div>Error: Models data is not in the expected format</div>
+  }
+
+  if (!models.length) {
+    return <div>No models available.</div>
+  }
+  if (selectedModel === undefined) {
+    return (
+      <div>
+        <p>
+          {activeFileError
+            ? 'Unable to determine the active model. Select a model to view its lineage.'
+            : 'Select a model to view its lineage.'}
+        </p>
+        <select
+          aria-label="Select a model"
+          value=""
+          onChange={event => setSelectedModel(event.target.value)}
+        >
+          <option
+            value=""
+            disabled
+          >
+            Select a model
+          </option>
+          {models.map(model => (
+            <option
+              key={model.name}
+              value={model.name}
+            >
+              {model.name}
+            </option>
+          ))}
+        </select>
+      </div>
+    )
   }
 
   return (
