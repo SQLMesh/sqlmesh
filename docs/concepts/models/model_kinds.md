@@ -670,7 +670,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_UNIQUE_KEY` kind a
 | Redshift   | MERGE ON unique key                 |
 | Postgres   | MERGE ON unique key                 |
 | DuckDB     | DELETE ON matched + INSERT new rows |
-| Doris      | DELETE ON matched + INSERT new rows (or native MERGE when `when_matched` / `merge_filter` is set on Doris 4.1+; direct INSERT when a sequence column is configured) |
+| Doris      | DELETE ON matched + INSERT new rows (or native MERGE when `when_matched` / `merge_filter` is set on Doris 4.1+ internal OLAP `UNIQUE KEY` tables — external catalogs and `DUPLICATE KEY` / `AGGREGATE KEY` tables are not supported for native MERGE; direct INSERT when a sequence column is configured) |
 
 ## FULL
 Models of the `FULL` kind cause the dataset associated with a model to be fully refreshed (rewritten) upon each model evaluation.
