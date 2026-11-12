@@ -3410,9 +3410,16 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
     assert to_sql_calls(adapter) == []
 
     # Trino resolves the session catalog (get_current_catalog) before _default_catalog
+    from sqlmesh.core.engine_adapter.trino import TrinoEngineAdapter
+
     adapter.dialect = "trino"
     adapter._default_catalog = "dev"
     mocker.patch.object(adapter, "get_current_catalog", return_value="prod")
+    mocker.patch.object(
+        adapter,
+        "_resolve_session_catalog",
+        TrinoEngineAdapter._resolve_session_catalog.__get__(adapter, TrinoEngineAdapter),
+    )
     adapter.cursor.execute.reset_mock()
     adapter.replace_query(
         "db.test",
@@ -3466,7 +3473,7 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
 
     # When an active session database (e.g., via get_current_database / SELECT DATABASE()) differs from
     # configured schema/database, bare table reference is not misclassified as target_table
-    adapter.get_current_database = lambda: "otherdb"  # type: ignore[attr-defined]
+    mocker.patch.object(adapter, "get_current_database", return_value="otherdb")
     adapter.cursor.execute.reset_mock()
     adapter.replace_query(
         "db.test",
@@ -3477,11 +3484,11 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         'DELETE FROM "db"."test" WHERE TRUE',
         'INSERT INTO "db"."test" ("a") SELECT "a" FROM "test"',
     ]
-    delattr(adapter, "get_current_database")
+    mocker.patch.object(adapter, "get_current_database", return_value=None)
 
     # Partition selection on self-referencing table is preserved when temp table exposes matching partitions
     adapter.dialect = "doris"
-    adapter._get_table_partition_names = lambda _tbl: {"p1"}  # type: ignore[attr-defined]
+    mocker.patch.object(adapter, "_get_table_partition_names", return_value={"p1"})
     adapter.cursor.execute.reset_mock()
     adapter.replace_query(
         "db.test",
@@ -3496,7 +3503,7 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         "INSERT INTO `db`.`test` (`a`) SELECT `a` FROM `dev`.`db`.`__temp_test_abcdefgh` PARTITION(`p1`)",
         "DROP TABLE IF EXISTS `dev`.`db`.`__temp_test_abcdefgh`",
     ]
-    delattr(adapter, "_get_table_partition_names")
+    mocker.patch.object(adapter, "_get_table_partition_names", return_value=set())
 
 
 def test_create_table_like(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):

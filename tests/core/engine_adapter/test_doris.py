@@ -6065,3 +6065,24 @@ def test_doris_audit_fixes_and_docs_models(
                 "not_null_columns": exp.Tuple(expressions=[exp.column("payload")]),
             },
         )
+
+    # 9. Doris TIMESTAMPTZ support is gated at 4.1.0; Doris 2.1 falls back to DATETIME.
+    from sqlmesh.core.engine_adapter.doris import _build_doris_schema_differ_kwargs
+
+    v21_kwargs = _build_doris_schema_differ_kwargs((2, 1, 0))
+    v41_kwargs = _build_doris_schema_differ_kwargs((4, 1, 0))
+    assert exp.DataType.Type.TIMESTAMPTZ not in v21_kwargs["parameterized_type_defaults"]
+    assert exp.DataType.Type.TIMESTAMPTZ in v41_kwargs["parameterized_type_defaults"]
+
+    v21_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    v21_adapter._doris_version = (2, 1)
+    assert (
+        v21_adapter._to_sql(parse_one("SELECT CAST(ts AS TIMESTAMPTZ(6))", read="doris"))
+        == "SELECT CAST(`ts` AS DATETIME(6))"
+    )
+    v41_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    v41_adapter._doris_version = (4, 1)
+    assert (
+        v41_adapter._to_sql(parse_one("SELECT CAST(ts AS TIMESTAMPTZ(6))", read="doris"))
+        == "SELECT CAST(`ts` AS TIMESTAMPTZ(6))"
+    )

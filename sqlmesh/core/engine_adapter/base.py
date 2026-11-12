@@ -295,6 +295,42 @@ class EngineAdapter:
             )
         return default_catalog
 
+    def get_current_database(self) -> t.Optional[str]:
+        """Returns the database/schema name of the current session, if supported."""
+        return None
+
+    def _default_schema_from_config(self) -> t.Optional[str]:
+        val = self._extra_config.get("schema")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        return None
+
+    def _resolve_session_database(self) -> t.Optional[str]:
+        try:
+            current_db = self.get_current_database()
+            if isinstance(current_db, str):
+                return current_db.strip() or None
+        except Exception:
+            pass
+        return self._default_schema_from_config()
+
+    def _resolve_session_catalog(self) -> t.Optional[str]:
+        try:
+            if self.default_catalog:
+                return self.default_catalog
+        except MissingDefaultCatalogError:
+            pass
+        try:
+            current_cat = self.get_current_catalog()
+            if isinstance(current_cat, str) and current_cat:
+                return current_cat
+        except Exception:
+            pass
+        return None
+
+    def _get_table_partition_names(self, table: exp.Table) -> t.Set[str]:
+        return set()
+
     @property
     def engine_run_mode(self) -> EngineRunMode:
         return EngineRunMode.SINGLE_MODE_ENGINE
@@ -593,38 +629,7 @@ class EngineAdapter:
                     return False
                 if not default_db_loaded:
                     default_db_loaded = True
-                    session_db_resolved = False
-                    default_db = getattr(self, "_active_database", None)
-                    if isinstance(default_db, str) and default_db.strip():
-                        default_db = default_db.strip()
-                        session_db_resolved = True
-                    else:
-                        default_db = None
-                    if not session_db_resolved and callable(
-                        getattr(self, "get_current_database", None)
-                    ):
-                        try:
-                            current_db = getattr(self, "get_current_database")()
-                            if isinstance(current_db, str):
-                                session_db_resolved = True
-                                default_db = current_db.strip() or None
-                        except Exception:
-                            pass
-                    if not session_db_resolved and self.dialect in ("doris", "mysql", "starrocks"):
-                        try:
-                            db_row = self.fetchone("SELECT DATABASE()")
-                            if isinstance(db_row, (list, tuple)) and db_row:
-                                session_db_resolved = True
-                                if isinstance(db_row[0], str) and db_row[0].strip():
-                                    default_db = db_row[0].strip()
-                        except Exception:
-                            pass
-                    if not session_db_resolved and not default_db:
-                        for key in ("database", "schema"):
-                            val = self._extra_config.get(key)
-                            if isinstance(val, str) and val.strip():
-                                default_db = val.strip()
-                                break
+                    default_db = self._resolve_session_database()
                 if not default_db:
                     raise SQLMeshError(
                         f"Cannot disambiguate unqualified schema reference '{node.sql(dialect=self.dialect)}' "
@@ -647,26 +652,7 @@ class EngineAdapter:
                 return False
             if not default_catalog_loaded:
                 default_catalog_loaded = True
-                default_catalog = getattr(self, "_active_catalog", None)
-                if not default_catalog and self.dialect == "trino":
-                    try:
-                        current_cat = self.get_current_catalog()
-                        if isinstance(current_cat, str) and current_cat:
-                            default_catalog = current_cat
-                    except Exception:
-                        pass
-                if not default_catalog:
-                    try:
-                        default_catalog = self.default_catalog
-                    except MissingDefaultCatalogError:
-                        default_catalog = None
-                if not default_catalog and self.dialect != "trino":
-                    try:
-                        current_cat = self.get_current_catalog()
-                        if isinstance(current_cat, str) and current_cat:
-                            default_catalog = current_cat
-                    except Exception:
-                        pass
+                default_catalog = self._resolve_session_catalog()
             if default_catalog is None:
                 raise SQLMeshError(
                     f"Cannot disambiguate unqualified catalog reference '{node.sql(dialect=self.dialect)}' "
@@ -696,27 +682,12 @@ class EngineAdapter:
             if temp_table_partitions is not None:
                 return temp_table_partitions
             names: t.Set[str] = set()
-            getter = getattr(self, "_get_table_partition_names", None)
-            if callable(getter):
-                try:
-                    res = getter(temp_table)
-                    if isinstance(res, (set, list, tuple)):
-                        names.update(str(x).lower() for x in res if x)
-                except Exception:
-                    pass
-            if not names and self.dialect in ("doris", "starrocks"):
-                try:
-                    rows = self.fetchall(f"SHOW PARTITIONS FROM {self._to_sql(temp_table)}")
-                    if isinstance(rows, (list, tuple)):
-                        for row in rows:
-                            if (
-                                isinstance(row, (list, tuple))
-                                and len(row) > 1
-                                and isinstance(row[1], str)
-                            ):
-                                names.add(row[1].strip().lower())
-                except Exception:
-                    pass
+            try:
+                for part_name in self._get_table_partition_names(temp_table):
+                    if part_name:
+                        names.add(str(part_name).lower())
+            except Exception:
+                pass
             temp_table_partitions = names
             return names
 

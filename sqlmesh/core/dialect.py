@@ -930,6 +930,28 @@ def _doris_parse_alter_drop(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr],
     return self._parse_alter_table_drop()
 
 
+DORIS_TIMESTAMPTZ_MIN_VERSION: t.Tuple[int, int, int] = (4, 1, 0)
+
+
+def doris_supports_timestamptz(version: t.Optional[t.Tuple[int, ...]] = None) -> bool:
+    if version is None:
+        return True
+    return (*version, 0, 0)[:3] >= DORIS_TIMESTAMPTZ_MIN_VERSION
+
+
+def _doris_datatype_sql(self: Generator, expression: exp.DataType) -> str:
+    if expression.is_type(exp.DataType.Type.TIMESTAMPTZ) and not doris_supports_timestamptz(
+        getattr(self.dialect, "version", None)
+    ):
+        fallback = expression.copy()
+        fallback.set("this", exp.DataType.Type.DATETIME)
+        return self._datatype_sql(fallback)  # type: ignore
+    return self._datatype_sql(expression)  # type: ignore
+
+
+_doris_datatype_sql.__name__ = "datatype_sql"
+
+
 def _doris_alter_sql(self: Generator, expression: exp.Alter) -> str:
     actions = expression.args.get("actions") or []
     if expression.text("kind") == "BUILD_INDEX":
@@ -1748,6 +1770,7 @@ def extend_sqlglot() -> None:
     if Doris.tokenizer_class.__name__ != "_DorisTokenizer":
 
         class _DorisTokenizer(Doris.tokenizer_class):  # type: ignore
+            TIMESTAMPTZ_MIN_VERSION = DORIS_TIMESTAMPTZ_MIN_VERSION
             KEYWORDS = {
                 **Doris.tokenizer_class.KEYWORDS,
                 "AGG_STATE": TokenType.USERDEFINED,
@@ -1763,9 +1786,24 @@ def extend_sqlglot() -> None:
                 "JSONB": TokenType.JSONB,
                 "LARGEINT": TokenType.INT128,
                 "QUANTILE_STATE": TokenType.USERDEFINED,
-                "TIMESTAMPTZ": TokenType.TIMESTAMPTZ,
+                "TIMESTAMPTZ": (
+                    TokenType.TIMESTAMPTZ
+                    if doris_supports_timestamptz(TIMESTAMPTZ_MIN_VERSION)
+                    else TokenType.DATETIME
+                ),
                 "VARIANT": TokenType.VARIANT,
             }
+
+            def tokenize(self, sql: str) -> t.List[Token]:
+                tokens = super().tokenize(sql)
+                if not doris_supports_timestamptz(getattr(self.dialect, "version", None)):
+                    for token in tokens:
+                        if (
+                            token.token_type == TokenType.TIMESTAMPTZ
+                            and token.text.upper() == "TIMESTAMPTZ"
+                        ):
+                            token.token_type = TokenType.DATETIME
+                return tokens
 
         Doris.Tokenizer = _DorisTokenizer
         Doris.tokenizer_class = _DorisTokenizer
@@ -1798,7 +1836,11 @@ def extend_sqlglot() -> None:
             exp.DataType.Type.IPV4: "IPV4",
             exp.DataType.Type.IPV6: "IPV6",
             exp.DataType.Type.JSONB: "JSONB",
-            exp.DataType.Type.TIMESTAMPTZ: "TIMESTAMPTZ",
+            exp.DataType.Type.TIMESTAMPTZ: (
+                "TIMESTAMPTZ"
+                if doris_supports_timestamptz(DORIS_TIMESTAMPTZ_MIN_VERSION)
+                else "DATETIME"
+            ),
             exp.DataType.Type.VARIANT: "VARIANT",
         }
     )
@@ -1921,6 +1963,7 @@ def extend_sqlglot() -> None:
     _override(Doris.Parser, _doris_parse_index_params)
     _override(Doris.Generator, altercolumn_sql)
     _override(Doris.Generator, columndef_sql)
+    _override(Doris.Generator, _doris_datatype_sql)
     _override(Doris.Generator, _doris_indexconstraintoption_sql)
     _override(Doris.Generator, _doris_indexparameters_sql)
     _override(Doris.Generator, _doris_alter_sql)

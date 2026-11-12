@@ -17,7 +17,11 @@ from sqlglot import exp, parse, parse_one
 from sqlglot.helper import ensure_list
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 
-from sqlmesh.core.dialect import to_schema
+from sqlmesh.core.dialect import (
+    DORIS_TIMESTAMPTZ_MIN_VERSION,
+    doris_supports_timestamptz,
+    to_schema,
+)
 from sqlmesh.core.engine_adapter.base import (
     EngineAdapterWithIndexSupport,
     InsertOverwriteStrategy,
@@ -68,6 +72,135 @@ class _DorisNotNullChangeColumnTypeOperation(TableAlterChangeColumnTypeOperation
         ]
 
 
+def _build_doris_schema_differ_kwargs(
+    version: t.Optional[t.Tuple[int, ...]] = DORIS_TIMESTAMPTZ_MIN_VERSION,
+    dialect: str = "doris",
+) -> t.Dict[str, t.Any]:
+    has_timestamptz = doris_supports_timestamptz(version)
+    parameterized_type_defaults: t.Dict[t.Any, t.List[t.Tuple[int, ...]]] = {
+        exp.DataType.build("DECIMAL", dialect=dialect).this: [(9, 0), (0,)],
+        exp.DataType.build("CHAR", dialect=dialect).this: [(1,), (255,)],
+        exp.DataType.build("VARCHAR", dialect=dialect).this: [(65533,)],
+        exp.DataType.build("DATETIME", dialect=dialect).this: [(0,)],
+        **(
+            {exp.DataType.build("TIMESTAMPTZ", dialect=dialect).this: [(0,)]}
+            if has_timestamptz
+            else {}
+        ),
+        exp.DataType.build("INT", dialect=dialect).this: [(11,)],
+        exp.DataType.build("BIGINT", dialect=dialect).this: [(20,)],
+        exp.DataType.build("SMALLINT", dialect=dialect).this: [(6,)],
+        exp.DataType.build("TINYINT", dialect=dialect).this: [(4,), (1,)],
+    }
+    compatible_types: t.Dict[exp.DataType, t.Set[exp.DataType]] = {
+        exp.DataType.build("BOOLEAN", dialect=dialect): {
+            exp.DataType.build("TINYINT", dialect=dialect),
+            exp.DataType.build("SMALLINT", dialect=dialect),
+            exp.DataType.build("INT", dialect=dialect),
+            exp.DataType.build("BIGINT", dialect=dialect),
+            exp.DataType.build("INT128", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("TINYINT", dialect=dialect): {
+            exp.DataType.build("SMALLINT", dialect=dialect),
+            exp.DataType.build("INT", dialect=dialect),
+            exp.DataType.build("BIGINT", dialect=dialect),
+            exp.DataType.build("INT128", dialect=dialect),
+            exp.DataType.build("DOUBLE", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("SMALLINT", dialect=dialect): {
+            exp.DataType.build("INT", dialect=dialect),
+            exp.DataType.build("BIGINT", dialect=dialect),
+            exp.DataType.build("INT128", dialect=dialect),
+            exp.DataType.build("DOUBLE", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("INT", dialect=dialect): {
+            exp.DataType.build("BIGINT", dialect=dialect),
+            exp.DataType.build("INT128", dialect=dialect),
+            exp.DataType.build("DOUBLE", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("BIGINT", dialect=dialect): {
+            exp.DataType.build("INT128", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("INT128", dialect=dialect): {
+            exp.DataType.build("LARGEINT", dialect=dialect, udt=True),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("LARGEINT", dialect=dialect, udt=True): {
+            exp.DataType.build("INT128", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("FLOAT", dialect=dialect): {
+            exp.DataType.build("DOUBLE", dialect=dialect),
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("DOUBLE", dialect=dialect): {
+            exp.DataType.build("TEXT", dialect=dialect),
+        },
+        exp.DataType.build("DATE", dialect=dialect): {
+            exp.DataType.build("DATETIME", dialect=dialect),
+            *(exp.DataType.build(f"DATETIME({p})", dialect="doris") for p in range(0, 7)),
+        },
+        exp.DataType.build("DATETIME", dialect=dialect): {
+            *(exp.DataType.build(f"DATETIME({p})", dialect="doris") for p in range(0, 7)),
+        },
+        exp.DataType.build("DATETIME(0)", dialect=dialect): {
+            exp.DataType.build("DATETIME", dialect=dialect),
+            *(exp.DataType.build(f"DATETIME({p})", dialect="doris") for p in range(1, 7)),
+        },
+        **{
+            exp.DataType.build(f"DATETIME({p})", dialect="doris"): {
+                exp.DataType.build(f"DATETIME({p2})", dialect="doris") for p2 in range(p + 1, 7)
+            }
+            for p in range(1, 6)
+        },
+    }
+    if has_timestamptz:
+        compatible_types.update(
+            {
+                exp.DataType.build("TIMESTAMPTZ", dialect=dialect): {
+                    *(
+                        exp.DataType.build(f"TIMESTAMPTZ({p})", dialect="doris")
+                        for p in range(0, 7)
+                    ),
+                },
+                exp.DataType.build("TIMESTAMPTZ(0)", dialect=dialect): {
+                    exp.DataType.build("TIMESTAMPTZ", dialect=dialect),
+                    *(
+                        exp.DataType.build(f"TIMESTAMPTZ({p})", dialect="doris")
+                        for p in range(1, 7)
+                    ),
+                },
+                **{
+                    exp.DataType.build(f"TIMESTAMPTZ({p})", dialect="doris"): {
+                        exp.DataType.build(f"TIMESTAMPTZ({p2})", dialect="doris")
+                        for p2 in range(p + 1, 7)
+                    }
+                    for p in range(1, 6)
+                },
+            }
+        )
+    return {
+        "parameterized_type_defaults": parameterized_type_defaults,
+        "types_with_unlimited_length": {
+            exp.DataType.build("TEXT", dialect=dialect).this: {
+                exp.DataType.build("VARCHAR", dialect=dialect).this,
+                exp.DataType.build("CHAR", dialect=dialect).this,
+            },
+            exp.DataType.build("VARCHAR", dialect=dialect).this: {
+                exp.DataType.build("VARCHAR", dialect=dialect).this,
+                exp.DataType.build("CHAR", dialect=dialect).this,
+                exp.DataType.build("TEXT", dialect=dialect).this,
+            },
+        },
+        "compatible_types": compatible_types,
+    }
+
+
 @set_catalog()
 class DorisEngineAdapter(
     EngineAdapterWithIndexSupport,
@@ -96,111 +229,10 @@ class DorisEngineAdapter(
     RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES: t.FrozenSet[str] = frozenset(
         {"excluded_trigger_tables", "source_table"}
     )
-    SCHEMA_DIFFER_KWARGS = {
-        "parameterized_type_defaults": {
-            exp.DataType.build("DECIMAL", dialect=DIALECT).this: [(9, 0), (0,)],
-            exp.DataType.build("CHAR", dialect=DIALECT).this: [(1,), (255,)],
-            exp.DataType.build("VARCHAR", dialect=DIALECT).this: [(65533,)],
-            exp.DataType.build("DATETIME", dialect=DIALECT).this: [(0,)],
-            exp.DataType.build("TIMESTAMPTZ", dialect=DIALECT).this: [(0,)],
-            exp.DataType.build("INT", dialect=DIALECT).this: [(11,)],
-            exp.DataType.build("BIGINT", dialect=DIALECT).this: [(20,)],
-            exp.DataType.build("SMALLINT", dialect=DIALECT).this: [(6,)],
-            exp.DataType.build("TINYINT", dialect=DIALECT).this: [(4,), (1,)],
-        },
-        "types_with_unlimited_length": {
-            exp.DataType.build("TEXT", dialect=DIALECT).this: {
-                exp.DataType.build("VARCHAR", dialect=DIALECT).this,
-                exp.DataType.build("CHAR", dialect=DIALECT).this,
-            },
-            exp.DataType.build("VARCHAR", dialect=DIALECT).this: {
-                exp.DataType.build("VARCHAR", dialect=DIALECT).this,
-                exp.DataType.build("CHAR", dialect=DIALECT).this,
-                exp.DataType.build("TEXT", dialect=DIALECT).this,
-            },
-        },
-        "compatible_types": {
-            exp.DataType.build("BOOLEAN", dialect=DIALECT): {
-                exp.DataType.build("TINYINT", dialect=DIALECT),
-                exp.DataType.build("SMALLINT", dialect=DIALECT),
-                exp.DataType.build("INT", dialect=DIALECT),
-                exp.DataType.build("BIGINT", dialect=DIALECT),
-                exp.DataType.build("INT128", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("TINYINT", dialect=DIALECT): {
-                exp.DataType.build("SMALLINT", dialect=DIALECT),
-                exp.DataType.build("INT", dialect=DIALECT),
-                exp.DataType.build("BIGINT", dialect=DIALECT),
-                exp.DataType.build("INT128", dialect=DIALECT),
-                exp.DataType.build("DOUBLE", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("SMALLINT", dialect=DIALECT): {
-                exp.DataType.build("INT", dialect=DIALECT),
-                exp.DataType.build("BIGINT", dialect=DIALECT),
-                exp.DataType.build("INT128", dialect=DIALECT),
-                exp.DataType.build("DOUBLE", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("INT", dialect=DIALECT): {
-                exp.DataType.build("BIGINT", dialect=DIALECT),
-                exp.DataType.build("INT128", dialect=DIALECT),
-                exp.DataType.build("DOUBLE", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("BIGINT", dialect=DIALECT): {
-                exp.DataType.build("INT128", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("INT128", dialect=DIALECT): {
-                exp.DataType.build("LARGEINT", dialect=DIALECT, udt=True),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("LARGEINT", dialect=DIALECT, udt=True): {
-                exp.DataType.build("INT128", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("FLOAT", dialect=DIALECT): {
-                exp.DataType.build("DOUBLE", dialect=DIALECT),
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("DOUBLE", dialect=DIALECT): {
-                exp.DataType.build("TEXT", dialect=DIALECT),
-            },
-            exp.DataType.build("DATE", dialect=DIALECT): {
-                exp.DataType.build("DATETIME", dialect=DIALECT),
-                *(exp.DataType.build(f"DATETIME({p})", dialect="doris") for p in range(0, 7)),
-            },
-            exp.DataType.build("DATETIME", dialect=DIALECT): {
-                *(exp.DataType.build(f"DATETIME({p})", dialect="doris") for p in range(0, 7)),
-            },
-            exp.DataType.build("DATETIME(0)", dialect=DIALECT): {
-                exp.DataType.build("DATETIME", dialect=DIALECT),
-                *(exp.DataType.build(f"DATETIME({p})", dialect="doris") for p in range(1, 7)),
-            },
-            exp.DataType.build("TIMESTAMPTZ", dialect=DIALECT): {
-                *(exp.DataType.build(f"TIMESTAMPTZ({p})", dialect="doris") for p in range(0, 7)),
-            },
-            exp.DataType.build("TIMESTAMPTZ(0)", dialect=DIALECT): {
-                exp.DataType.build("TIMESTAMPTZ", dialect=DIALECT),
-                *(exp.DataType.build(f"TIMESTAMPTZ({p})", dialect="doris") for p in range(1, 7)),
-            },
-            **{
-                exp.DataType.build(f"DATETIME({p})", dialect="doris"): {
-                    exp.DataType.build(f"DATETIME({p2})", dialect="doris") for p2 in range(p + 1, 7)
-                }
-                for p in range(1, 6)
-            },
-            **{
-                exp.DataType.build(f"TIMESTAMPTZ({p})", dialect="doris"): {
-                    exp.DataType.build(f"TIMESTAMPTZ({p2})", dialect="doris")
-                    for p2 in range(p + 1, 7)
-                }
-                for p in range(1, 6)
-            },
-        },
-    }
+    TIMESTAMPTZ_MIN_VERSION: t.ClassVar[t.Tuple[int, int, int]] = DORIS_TIMESTAMPTZ_MIN_VERSION
+    SCHEMA_DIFFER_KWARGS = _build_doris_schema_differ_kwargs(
+        DORIS_TIMESTAMPTZ_MIN_VERSION, dialect=DIALECT
+    )
 
     INVALID_KEY_TYPES = {
         "FLOAT",
@@ -1938,6 +1970,47 @@ class DorisEngineAdapter(
         except Exception:
             pass
         return None
+
+    def _default_schema_from_config(self) -> t.Optional[str]:
+        for key in ("database", "schema"):
+            val = self._extra_config.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
+
+    def _resolve_session_database(self) -> t.Optional[str]:
+        active_db = getattr(self, "_active_database", None)
+        if isinstance(active_db, str) and active_db.strip():
+            return active_db.strip()
+        return super()._resolve_session_database()
+
+    def _resolve_session_catalog(self) -> t.Optional[str]:
+        if self._active_catalog:
+            return self._active_catalog
+        return super()._resolve_session_catalog()
+
+    def _get_table_partition_names(self, table: exp.Table) -> t.Set[str]:
+        names: t.Set[str] = set()
+        try:
+            rows = self.fetchall(f"SHOW PARTITIONS FROM {self._to_sql(table)}")
+            if isinstance(rows, (list, tuple)):
+                for row in rows:
+                    if (
+                        isinstance(row, (list, tuple))
+                        and len(row) > 1
+                        and isinstance(row[1], str)
+                        and row[1].strip()
+                    ):
+                        names.add(row[1].strip().lower())
+        except Exception:
+            pass
+        return names
+
+    def _supports_timestamptz(self) -> bool:
+        cached_version = getattr(self, "_doris_version", None)
+        if cached_version is None:
+            return doris_supports_timestamptz(self.TIMESTAMPTZ_MIN_VERSION)
+        return doris_supports_timestamptz(cached_version)
 
     def _resolve_sync_mv_source_from_metadata(
         self,
@@ -7164,10 +7237,11 @@ class DorisEngineAdapter(
                     and ts_node.this.is_string
                     and "." in ts_node.this.this
                 ):
+                    ts_type_name = "TIMESTAMPTZ" if self._supports_timestamptz() else "DATETIME"
                     cast_node = exp.cast(
                         ts_node.this.copy(),
                         exp.DataType.build(
-                            "TIMESTAMPTZ",
+                            ts_type_name,
                             expressions=[exp.DataTypeParam(this=exp.Literal.number(6))],
                         ),
                     )
@@ -7180,6 +7254,16 @@ class DorisEngineAdapter(
             for dtype in reversed(list(expression.find_all(exp.DataType))):
                 if dtype.is_type("int128"):
                     replacement = exp.DataType.build("LARGEINT", udt=True)
+                    if dtype is expression:
+                        expression = replacement
+                    else:
+                        dtype.replace(replacement)
+                elif dtype.is_type("timestamptz") and not self._supports_timestamptz():
+                    replacement = exp.DataType.build(
+                        "DATETIME",
+                        expressions=list(dtype.expressions),
+                        dialect=self.dialect,
+                    )
                     if dtype is expression:
                         expression = replacement
                     else:

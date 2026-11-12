@@ -1657,6 +1657,20 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
 
     assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
     assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"
+    assert (
+        exp.DataType.build("TIMESTAMPTZ", dialect="doris, version=4.1.0").sql(
+            "doris, version=4.1.0"
+        )
+        == "TIMESTAMPTZ"
+    )
+    assert (
+        exp.DataType.build("TIMESTAMPTZ", dialect="doris, version=2.1").sql("doris, version=2.1")
+        == "DATETIME"
+    )
+    assert (
+        exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris, version=2.1")
+        == "DATETIME(6)"
+    )
 
     negated_match_ast = d.parse_one(
         "SELECT * FROM docs WHERE body NOT MATCH_ANY 'error warning'",

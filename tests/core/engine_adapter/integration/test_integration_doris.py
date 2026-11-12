@@ -837,13 +837,13 @@ def test_doris_4_1_native_merge_segment_v3_and_ann_index(ctx: TestContext):
     )
     doris_adapter.execute(
         f"INSERT INTO {doris_adapter._to_sql(fts_tbl)} (`id`, `msg`) VALUES "
-        f"(1, 'apache doris vector search'), (2, 'iceberg table compaction')"
+        f"(1, 'apache doris search'), (2, 'iceberg table compaction'), (3, 'fast vector index')"
     )
     fts_query = parse_one(
         f"SELECT id FROM {doris_adapter._to_sql(fts_tbl)} WHERE msg MATCH_ANY 'doris vector' ORDER BY id",
         read="doris",
     )
-    assert [r[0] for r in doris_adapter.fetchall(fts_query)] == [1]
+    assert [r[0] for r in doris_adapter.fetchall(fts_query)] == [1, 3]
 
     # 6. UNIQUE KEY table with function_column.sequence_col and _replace_by_key sequence protection
     seq_tbl = ctx.table("test_doris_41_seq")
@@ -1241,6 +1241,19 @@ def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
     )
     assert list(dyn_rows) == [(10, 2), (20, 1)]
 
+    # Verify both synchronous MV rollup jobs reached FINISHED before restatement
+    rollup_jobs = ctx.engine_adapter.fetchall(
+        f"SHOW ALTER TABLE MATERIALIZED VIEW FROM `{schema_name}` WHERE TableName = 'user_events'",
+        quote_identifiers=False,
+    )
+    rollup_job_states = {
+        str(row[5]).strip(): str(row[8]).strip().upper()
+        for row in rollup_jobs
+        if len(row) > 8 and row[5] is not None and row[8] is not None
+    }
+    assert rollup_job_states.get("user_events_sync_mv1") == "FINISHED"
+    assert rollup_job_states.get("user_events_sync_mv2") == "FINISHED"
+
     # Insert an additional source row in d1 and restate `user_events` to verify DELETE + INSERT works with active sync MVs
     ctx.engine_adapter.execute(
         f"INSERT INTO {raw_tbl_sql} VALUES (10, 'checkout', '{d1}', '{d1} 10:00:00')"
@@ -1255,3 +1268,13 @@ def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
         quote_identifiers=False,
     )
     assert list(restated_rows) == [(10, 3), (20, 1)]
+    desc_all_rows = ctx.engine_adapter.fetchall(
+        f"DESC `{schema_name}`.`user_events` ALL",
+        quote_identifiers=False,
+    )
+    rollup_index_names = {
+        str(row[0]).strip()
+        for row in desc_all_rows
+        if len(row) >= 1 and row[0] is not None and str(row[0]).strip()
+    }
+    assert {"user_events_sync_mv1", "user_events_sync_mv2"}.issubset(rollup_index_names)

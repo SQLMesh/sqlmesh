@@ -148,7 +148,7 @@ Apache Doris supports three native OLAP table data models: **DUPLICATE KEY**, **
 
 ### DUPLICATE KEY model (default)
 
-By default, OLAP tables use the `DUPLICATE KEY` model. If no key is specified, Doris uses the first column as the duplicate key and hash distribution column.
+By default, OLAP tables use the `DUPLICATE KEY` model. If no key or distribution is specified, Doris selects a prefix of leading columns as the duplicate key and uses random distribution (`DISTRIBUTED BY RANDOM BUCKETS AUTO`) on supported versions.
 
 ```sql
 MODEL (
@@ -1004,7 +1004,7 @@ WHERE order_date BETWEEN @start_ds AND @end_ds;
 | SQLMesh Model Kind | Doris Internal OLAP Catalog (`internal` on Local Disk or S3/GCS Storage Vault) | External Iceberg Catalog (`table_format iceberg` on S3/GCS/HDFS) | External Hive Catalog (`table_format hive` on S3/GCS/HDFS) | External Read-Only Lakehouse Catalogs (`paimon`, `lance`, `hudi`, `deltalake`, `lakesoul`) |
 | --- | :---: | :---: | :---: | :---: |
 | Source / Upstream `SELECT` | Supported | Supported (incl. `FOR TIME/VERSION AS OF`, `@branch`, `@tag`) | Supported (Doris 2.1+) | Supported (Read-Only via corresponding External Catalog; Lance also supports `s3()` / `local()` TVFs) |
-| `FULL` | Supported (`CREATE TABLE ... AS SELECT` / `DELETE` + `INSERT`) | Supported (`CREATE TABLE ... ENGINE=iceberg` / `DELETE` + `INSERT`; requires Doris 4.1.0+ & Iceberg v2 for existing-table `DELETE`) | Supported on unpartitioned Hive tables (`CREATE TABLE ... ENGINE=hive` / `INSERT OVERWRITE TABLE`, requires Doris 2.1.6+ for writes; partitioned Hive `FULL` refreshes are not supported until full-table replacement is available) | Paimon: Read-Only in Doris 2.1–4.1.5 (write support tracked in `apache/doris#65086`); Lance/Hudi/Delta/LakeSoul: Read-Only (Write Guarded) |
+| `FULL` | Supported (`CREATE TABLE ... AS SELECT` / `TRUNCATE TABLE` + `INSERT`; non-atomic, so a failed `INSERT` leaves the table empty) | Supported (`CREATE TABLE ... ENGINE=iceberg` / `DELETE` + `INSERT`; requires Doris 4.1.0+ & Iceberg v2 for existing-table `DELETE`) | Supported on unpartitioned Hive tables (`CREATE TABLE ... ENGINE=hive` / `INSERT OVERWRITE TABLE`, requires Doris 2.1.6+ for writes; partitioned Hive `FULL` refreshes are not supported until full-table replacement is available) | Paimon: Read-Only in Doris 2.1–4.1.5 (write support tracked in `apache/doris#65086`); Lance/Hudi/Delta/LakeSoul: Read-Only (Write Guarded) |
 | `INCREMENTAL_BY_TIME_RANGE` | Supported (`DELETE WHERE time_col >= low AND time_col <= high` + `INSERT`) | Supported (`DELETE` + `INSERT`; requires Doris 4.1.0+ & Iceberg v2) | Not supported by Hive in Doris (No row-level `DELETE`) | Not supported in Doris 2.1–4.1.5 (No GA row-level `DELETE`) |
 | `INCREMENTAL_BY_UNIQUE_KEY` | Supported (Auto-promotes `unique_key` to `UNIQUE KEY`, `DELETE ... USING` + `INSERT` or native `MERGE INTO` on Doris 4.1+ `UNIQUE KEY` tables when `when_matched` / `merge_filter` is specified) | Supported (Batched key `DELETE` + `INSERT` when `when_matched` and `merge_filter` are omitted; native `MERGE INTO` is not supported on Iceberg targets; requires Doris 4.1.0+ & Iceberg v2) | Not supported by Hive in Doris (No `DELETE` / `MERGE INTO`) | Not supported in Doris 2.1–4.1.5 (No GA `DELETE` / `MERGE INTO`) |
 | `INCREMENTAL_BY_PARTITION` | Supported (Column & time-truncation range `DELETE` + `INSERT`) | Supported (Partition `DELETE` + `INSERT`; requires Doris 4.1.0+ & Iceberg v2) | Not supported by Hive in Doris (No `DELETE`) | Not supported in Doris 2.1–4.1.5 (No GA `DELETE`) |
@@ -1013,6 +1013,9 @@ WHERE order_date BETWEEN @start_ds AND @end_ds;
 | `VIEW (materialized true)` | Supported (Asynchronous MTMVs; synchronous MVs are base-table rollup indexes created separately on the base table) | Not supported by Doris inside external catalogs | Not supported by Doris inside external catalogs | Not supported by Doris inside external catalogs |
 | `SEED` / Python DataFrame Models | Supported (Automatic `VARCHAR(255)` OLAP key coercion) | Supported | Supported (Requires Doris 2.1.6+ for writes) | Paimon: Read-Only in Doris 2.1–4.1.5; Lance/Hudi/Delta/LakeSoul: Write Guarded |
 | `CUSTOM ('doris_ddl_only')` | Supported (DDL + `ALTER TABLE` schema evolution only) | Supported | Supported (Requires Doris 2.1.6+ for writes) | Not supported (Read-Only) |
+
+!!! note "Recovering from a Failed In-Place OLAP `FULL` Refresh"
+    Because Doris does not execute `TRUNCATE TABLE` and `INSERT INTO` inside a multi-statement transaction, an in-place OLAP `FULL` refresh that fails during `INSERT INTO` leaves the target table empty. To recover after fixing the failure, re-run the model (for example via `sqlmesh plan --restate-model <model>` or by re-applying the failed `sqlmesh plan`), since each `FULL` run rebuilds the table from its query.
 
 ---
 

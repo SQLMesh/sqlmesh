@@ -108,6 +108,15 @@ class TrinoEngineAdapter(
         """Sets the catalog name of the current connection."""
         self.execute(exp.Use(this=schema_(db="information_schema", catalog=catalog)))
 
+    def _resolve_session_catalog(self) -> t.Optional[str]:
+        try:
+            current_cat = self.get_current_catalog()
+            if isinstance(current_cat, str) and current_cat:
+                return current_cat
+        except Exception:
+            pass
+        return super()._resolve_session_catalog()
+
     @lru_cache()
     def get_catalog_type(self, catalog: t.Optional[str]) -> str:
         row: t.Tuple = tuple()
