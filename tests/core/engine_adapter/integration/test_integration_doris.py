@@ -659,7 +659,7 @@ def test_doris_complex_types_and_alter_table_schema_evolution(ctx: TestContext):
     assert evolved_cols["notes"] == exp.DataType.build("TEXT", dialect="doris")
     assert evolved_cols["cnt"] == exp.DataType.build("BIGINT", dialect="doris")
     assert evolved_cols["dt"] == exp.DataType.build("DATETIME(6)", dialect="doris")
-    assert evolved_cols["tz"] == exp.DataType.build("DATETIME(6)", dialect="doris")
+    assert evolved_cols["tz"] == exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris")
 
     # 3. Direct time-transform inequality delete on OLAP table
     ev_tbl = ctx.table("test_time_ineq_del")

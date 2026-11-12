@@ -14,8 +14,8 @@ services:
         echo "force_olap_table_replication_num = 1" >> /opt/apache-doris/fe/conf/fe.conf
         exec bash /opt/apache-doris/fe/bin/start_fe.sh --console
     ports:
-      - "8030:8030"
-      - "9030:9030"
+      - "${DORIS_BIND_ADDRESS:-127.0.0.1}:8030:8030"
+      - "${DORIS_BIND_ADDRESS:-127.0.0.1}:9030:9030"
     volumes:
       - iceberg-warehouse:/tmp/doris_iceberg_warehouse
     networks:
@@ -42,8 +42,8 @@ services:
         echo "storage_flood_stage_left_capacity_bytes = 104857600" >> /opt/apache-doris/be/conf/be.conf
         exec bash /opt/apache-doris/be/bin/start_be.sh --console
     ports:
-      - "8040:8040"
-      - "9050:9050"
+      - "${DORIS_BIND_ADDRESS:-127.0.0.1}:8040:8040"
+      - "${DORIS_BIND_ADDRESS:-127.0.0.1}:9050:9050"
     volumes:
       - iceberg-warehouse:/tmp/doris_iceberg_warehouse
     networks:

@@ -2666,6 +2666,16 @@ def test_doris(make_config):
     with pytest.raises(ConfigError, match="ssl_disabled=True` or `ssl=False` cannot be combined"):
         _ = ssl_false_verify_cert._static_connection_kwargs
 
+    ssl_dict_check_hostname_no_ca = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"check_hostname": True},
+        check_import=False,
+    )
+    with pytest.raises(ConfigError, match="requires `ssl_ca`"):
+        _ = ssl_dict_check_hostname_no_ca._static_connection_kwargs
+
     from sqlmesh.utils.connection_pool import SingletonConnectionPool, ThreadLocalConnectionPool
 
     for pool_cls in (SingletonConnectionPool, ThreadLocalConnectionPool):

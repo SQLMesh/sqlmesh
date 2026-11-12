@@ -5077,12 +5077,12 @@ def test_doris_4_1_native_merge_into_and_timestamptz(
         == "CAST(DATE_FORMAT(CONVERT_TZ(`ts`, @@time_zone, '+00:00'), '%Y-%m-%d %T.%f') AS VARCHAR)"
     )
 
-    # 4. TIMESTAMPTZ maps to DATETIME (for Doris 2.1+ compatibility and MySQL protocol datetime return),
-    #    defaults to precision 0, and supports same-type precision widening (TIMESTAMPTZ -> TIMESTAMPTZ(0)
-    #    -> TIMESTAMPTZ(6), DATETIME(2) -> DATETIME(6)), while cross-type TIMESTAMPTZ <-> DATETIME is
+    # 4. TIMESTAMPTZ renders natively as TIMESTAMPTZ, defaults to precision 0, and supports
+    #    same-type precision widening (TIMESTAMPTZ -> TIMESTAMPTZ(0) -> TIMESTAMPTZ(6),
+    #    DATETIME(2) -> DATETIME(6)), while cross-type TIMESTAMPTZ <-> DATETIME is
     #    treated as destructive.
-    assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "DATETIME"
-    assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "DATETIME(6)"
+    assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
+    assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"
     from sqlmesh.core.schema_diff import TableAlterChangeColumnTypeOperation
 
     ops_default = adapter.schema_differ.compare_columns(

@@ -592,12 +592,19 @@ class EngineAdapter:
             if not default_catalog_loaded:
                 default_catalog_loaded = True
                 default_catalog = getattr(self, "_active_catalog", None)
+                if not default_catalog and self.dialect == "trino":
+                    try:
+                        current_cat = self.get_current_catalog()
+                        if isinstance(current_cat, str) and current_cat:
+                            default_catalog = current_cat
+                    except Exception:
+                        pass
                 if not default_catalog:
                     try:
                         default_catalog = self.default_catalog
                     except MissingDefaultCatalogError:
                         default_catalog = None
-                if not default_catalog:
+                if not default_catalog and self.dialect != "trino":
                     try:
                         current_cat = self.get_current_catalog()
                         if isinstance(current_cat, str) and current_cat:

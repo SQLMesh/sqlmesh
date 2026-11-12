@@ -1629,3 +1629,31 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
     assert (
         alter_ast.sql("doris") == "ALTER TABLE @this_model MODIFY COLUMN msg VARCHAR(128) NOT NULL"
     )
+
+    # Doris `ALTER TABLE ... DROP` preserves base `_parse_alter_table_drop` support for
+    # `DROP PARTITION` and comma-separated drop actions while keeping raw action parsing for
+    # `BRANCH` and `TAG`.
+    drop_part_ast = d.parse_one(
+        "ALTER TABLE @this_model DROP IF EXISTS PARTITION (p202401)",
+        dialect="doris",
+    )
+    assert isinstance(drop_part_ast, exp.Alter)
+    assert isinstance(drop_part_ast.args["actions"][0], exp.DropPartition)
+
+    multi_drop_ast = d.parse_one(
+        "ALTER TABLE @this_model DROP COLUMN a, DROP COLUMN b",
+        dialect="doris",
+    )
+    assert isinstance(multi_drop_ast, exp.Alter)
+    assert len(multi_drop_ast.args["actions"]) == 2
+    assert multi_drop_ast.sql("doris") == "ALTER TABLE @this_model DROP COLUMN a, DROP COLUMN b"
+
+    drop_branch_ast = d.parse_one(
+        "ALTER TABLE @this_model DROP BRANCH IF EXISTS b1",
+        dialect="doris",
+    )
+    assert isinstance(drop_branch_ast, exp.Alter)
+    assert drop_branch_ast.sql("doris") == "ALTER TABLE @this_model DROP BRANCH IF EXISTS b1"
+
+    assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
+    assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"

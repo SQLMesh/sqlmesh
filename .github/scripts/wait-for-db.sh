@@ -105,6 +105,11 @@ db2_ready() {
 }
 
 doris_ready() {
+    local timeout_secs="${DORIS_STARTUP_TIMEOUT_SECS:-300}"
+    local deadline=$((SECONDS + timeout_secs))
+    local backend_registered=0
+    local reg_out=""
+
     probe_port 9030
 
     echo "Waiting for Doris FE to accept SQL connections..."
@@ -113,13 +118,25 @@ doris_ready() {
             echo "Doris FE is alive"
             break
         fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris FE to become alive" >&2
+            exit 1
+        fi
         sleep 2
     done
 
-    docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "ALTER SYSTEM ADD BACKEND '172.30.80.3:9050';" 2>/dev/null || true
-
     echo "Checking for 1 alive Doris backends..."
     while true; do
+        if [ "$backend_registered" -eq 0 ]; then
+            if reg_out=$(docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "ALTER SYSTEM ADD BACKEND '172.30.80.3:9050';" 2>&1); then
+                backend_registered=1
+            elif echo "$reg_out" | grep -Eqi "already exists|already registered"; then
+                backend_registered=1
+            else
+                echo "WARN: Failed to register Doris backend (will retry): $reg_out" >&2
+            fi
+        fi
+
         echo "Checking Doris backends..."
         ALIVE_BACKENDS=$(docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "show backends \G" 2>/dev/null | grep -c "^ *Alive: true *$" || true)
 
@@ -134,6 +151,15 @@ doris_ready() {
         if [ "$ALIVE_BACKENDS" -ge 1 ]; then
             echo "Doris has 1 or more alive backends"
             break
+        fi
+
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            if [ "$backend_registered" -eq 0 ] && [ -n "$reg_out" ]; then
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend registration: $reg_out" >&2
+            else
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend to become alive" >&2
+            fi
+            exit 1
         fi
 
         echo "Waiting for more backends to become alive..."

@@ -186,7 +186,7 @@ Some connections use default values if not specified:
 - The state connection defaults to `connection` if omitted.
 - The test connection defaults to `connection` if omitted.
 
-NOTE: Spark and Trino engines may not be used for the state connection.
+NOTE: Doris, Spark, and Trino engines may not be used for the state connection.
 
 | Option             | Description                                                                                                                                                                     | Type                                                         | Required                                                               |
 |--------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:------------------------------------------------------------:|:----------------------------------------------------------------------:|

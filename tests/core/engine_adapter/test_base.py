@@ -3409,6 +3409,36 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         )
     assert to_sql_calls(adapter) == []
 
+    # Trino resolves the session catalog (get_current_catalog) before _default_catalog
+    adapter.dialect = "trino"
+    adapter._default_catalog = "dev"
+    mocker.patch.object(adapter, "get_current_catalog", return_value="prod")
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM dev.db.test"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+    assert to_sql_calls(adapter) == [
+        'DELETE FROM "db"."test" WHERE TRUE',
+        'INSERT INTO "db"."test" ("a") SELECT "a" FROM "dev"."db"."test"',
+    ]
+
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM prod.db.test"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "db"."test" ("a" INTEGER)',
+        'CREATE SCHEMA IF NOT EXISTS "dev"."db"',
+        'CREATE TABLE IF NOT EXISTS "dev"."db"."__temp_test_abcdefgh" AS SELECT CAST("a" AS INTEGER) AS "a" FROM (SELECT "a" FROM "db"."test") AS "_subquery"',
+        'DELETE FROM "db"."test" WHERE TRUE',
+        'INSERT INTO "db"."test" ("a") SELECT "a" FROM "dev"."db"."__temp_test_abcdefgh"',
+        'DROP TABLE IF EXISTS "dev"."db"."__temp_test_abcdefgh"',
+    ]
+
 
 def test_create_table_like(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(EngineAdapter)

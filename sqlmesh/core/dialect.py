@@ -925,10 +925,10 @@ def _doris_parse_alter_add(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr], 
     return self._parse_alter_table_add()
 
 
-def _doris_parse_alter_drop(self: Parser) -> t.Optional[exp.Expr]:
+def _doris_parse_alter_drop(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr], None]:
     if self._match_texts(("BRANCH", "TAG"), advance=False):
         return _doris_parse_alter_raw_action(self)
-    return self._parse_drop()
+    return self._parse_alter_table_drop()
 
 
 def _doris_alter_sql(self: Generator, expression: exp.Alter) -> str:
@@ -1796,6 +1796,7 @@ def extend_sqlglot() -> None:
             exp.DataType.Type.IPV4: "IPV4",
             exp.DataType.Type.IPV6: "IPV6",
             exp.DataType.Type.JSONB: "JSONB",
+            exp.DataType.Type.TIMESTAMPTZ: "TIMESTAMPTZ",
             exp.DataType.Type.VARIANT: "VARIANT",
         }
     )

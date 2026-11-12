@@ -2835,14 +2835,16 @@ class DorisConnectionConfig(ConnectionConfig):
                     and "check_hostname" not in ssl_config
                 ):
                     ssl_config["check_hostname"] = False
+            hostname_requested = self.ssl_verify_identity is True or (
+                self.ssl_verify_identity is None and bool(ssl_config.get("check_hostname"))
+            )
+            if hostname_requested and not (ssl_config.get("ca") or ssl_config.get("capath")):
+                raise ConfigError(
+                    "Doris hostname verification (`ssl_verify_identity` or `ssl.check_hostname`) "
+                    "requires `ssl_ca` (or `ssl.ca` / `ssl.capath`). "
+                    "PyMySQL disables hostname verification when no CA is configured."
+                )
             if self.ssl_verify_identity is not None:
-                if self.ssl_verify_identity and not (
-                    ssl_config.get("ca") or ssl_config.get("capath")
-                ):
-                    raise ConfigError(
-                        "Doris `ssl_verify_identity` requires `ssl_ca` (or `ssl.ca` / `ssl.capath`). "
-                        "PyMySQL disables hostname verification when no CA is configured."
-                    )
                 ssl_config["check_hostname"] = bool(self.ssl_verify_identity)
             verify_mode = ssl_config.get("verify_mode")
             if verify_mode is False or (
