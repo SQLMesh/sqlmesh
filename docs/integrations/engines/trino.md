@@ -19,7 +19,7 @@ pip install "trino[external-authentication-token-cache]"
 
 The trino engine adapter has been tested against the [Hive Connector](https://trino.io/docs/current/connector/hive.html), [Iceberg Connector](https://trino.io/docs/current/connector/iceberg.html), and [Delta Lake Connector](https://trino.io/docs/current/connector/delta-lake.html).
 
-Please let us know on [Slack](https://tobikodata.com/slack) if you are wanting to use another connector or have tried another connector.
+Please let us know on [Slack](https://tobiko-data.slack.com/) if you are wanting to use another connector or have tried another connector.
 
 #### Hive Connector Configuration
 

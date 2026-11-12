@@ -41,7 +41,7 @@ Therefore, we try to not create managed tables unnecessarily. For example, in [f
 !!! warning
     Due to the use of normal tables for dev previews, it is possible to write a query that uses features that are available to normal tables in the target engine but not managed tables. This could result in a scenario where a plan works in a dev environment but fails when deployed to production.
 
-    We believe the cost savings are worth it, however please [reach out](https://tobikodata.com/slack) if this causes problems for you.
+    We believe the cost savings are worth it, however please [reach out](https://tobiko-data.slack.com/) if this causes problems for you.
 
 ## Supported Engines
 SQLMesh supports managed models in the following database engines:
