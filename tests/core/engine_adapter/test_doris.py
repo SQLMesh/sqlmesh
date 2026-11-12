@@ -6086,3 +6086,20 @@ def test_doris_audit_fixes_and_docs_models(
         v41_adapter._to_sql(parse_one("SELECT CAST(ts AS TIMESTAMPTZ(6))", read="doris"))
         == "SELECT CAST(`ts` AS TIMESTAMPTZ(6))"
     )
+
+    # 10. Bare self-referencing replace_query on a non-existent table (`internal.db.test` with `SELECT a FROM test`)
+    #     precreates the table and populates it via INSERT INTO instead of a no-op CTAS.
+    self_ref_adapter = make_mocked_engine_adapter(DorisEngineAdapter, database="db")
+    mocker.patch.object(self_ref_adapter, "table_exists", return_value=False)
+    self_ref_adapter.cursor.execute.reset_mock()
+    self_ref_adapter.replace_query(
+        "internal.db.test",
+        parse_one("SELECT 1 AS a UNION ALL SELECT a FROM test", read="doris"),
+        target_columns_to_types={"a": exp.DataType.build("INT", dialect="doris")},
+    )
+    assert to_sql_calls(self_ref_adapter) == [
+        "SELECT DATABASE()",
+        "SELECT CURRENT_CATALOG",
+        "CREATE TABLE IF NOT EXISTS `internal`.`db`.`test` (`a` INT)",
+        "INSERT INTO `internal`.`db`.`test` (`a`) SELECT CAST(`a` AS INT) AS `a` FROM (SELECT 1 AS `a` UNION ALL SELECT `a` FROM `test`) AS `_subquery`",
+    ]

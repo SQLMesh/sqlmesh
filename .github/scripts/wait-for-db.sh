@@ -112,6 +112,10 @@ db2_ready() {
 }
 
 doris_ready() {
+    if ! command -v timeout > /dev/null 2>&1; then
+        echo "ERROR: 'timeout' is required by wait-for-db.sh (GNU coreutils; on macOS install coreutils and add it to PATH)" >&2
+        exit 1
+    fi
     local timeout_secs="${DORIS_STARTUP_TIMEOUT_SECS:-300}"
     local deadline=$((SECONDS + timeout_secs))
     local remaining=0

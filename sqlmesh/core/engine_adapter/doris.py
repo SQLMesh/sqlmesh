@@ -4427,6 +4427,12 @@ class DorisEngineAdapter(
             column_descriptions=column_descriptions,
             **kwargs,
         )
+        thread_state = self._get_thread_state()
+        replace_query_target = getattr(thread_state, "replace_query_target", None)
+        if isinstance(replace_query_target, exp.Table) and quote_identifiers(
+            exp.to_table(table_name).copy()
+        ) == quote_identifiers(replace_query_target.copy()):
+            thread_state.replace_query_precreated = True
 
     def replace_query(
         self,
@@ -4458,7 +4464,9 @@ class DorisEngineAdapter(
                 ]
         thread_state = self._get_thread_state()
         prev_replace_query_target = getattr(thread_state, "replace_query_target", None)
+        prev_replace_query_precreated = getattr(thread_state, "replace_query_precreated", False)
         thread_state.replace_query_target = target_table
+        thread_state.replace_query_precreated = False
         try:
             super().replace_query(
                 table_name,
@@ -4472,6 +4480,7 @@ class DorisEngineAdapter(
             )
         finally:
             thread_state.replace_query_target = prev_replace_query_target
+            thread_state.replace_query_precreated = prev_replace_query_precreated
 
     def _get_doris_version(self) -> t.Optional[t.Tuple[int, int]]:
         cached = getattr(self, "_doris_version", None)
@@ -4946,8 +4955,40 @@ class DorisEngineAdapter(
             target_columns_to_types = self._reorder_olap_columns(target_columns_to_types, kwargs)
         first_query = source_queries[0].query_factory() if source_queries else None
 
+        default_db_loaded = False
+        default_db: t.Optional[str] = None
+        default_catalog_loaded = False
+        default_catalog: t.Optional[str] = None
+
+        def _is_cte_reference(node: exp.Table, quoted_table: exp.Table) -> bool:
+            if quoted_table.args.get("db") or quoted_table.args.get("catalog"):
+                return False
+            curr: t.Optional[exp.Expr] = node
+            child_cte: t.Optional[exp.CTE] = None
+            while curr is not None:
+                if isinstance(curr, exp.CTE):
+                    child_cte = curr
+                with_clause = curr.args.get("with_")
+                if isinstance(with_clause, exp.With):
+                    recursive = bool(with_clause.args.get("recursive"))
+                    for cte in with_clause.expressions:
+                        if cte is child_cte and not recursive:
+                            break
+                        if (
+                            isinstance(cte, exp.CTE)
+                            and cte.alias
+                            and quote_identifiers(exp.to_identifier(cte.alias)) == quoted_table.this
+                        ):
+                            return True
+                    child_cte = None
+                curr = curr.parent
+            return False
+
         def _matches_target_table(t_node: exp.Table) -> bool:
+            nonlocal default_db_loaded, default_db, default_catalog_loaded, default_catalog
             q_node = quote_identifiers(t_node.copy())
+            if _is_cte_reference(t_node, q_node):
+                return False
             q_target = quote_identifiers(table.copy())
             if (q_node.args.get("catalog"), q_node.args.get("db"), q_node.this) == (
                 q_target.args.get("catalog"),
@@ -4955,29 +4996,58 @@ class DorisEngineAdapter(
                 q_target.this,
             ):
                 return True
-            default_cat = self.default_catalog or "internal"
-            norm_node = t_node.copy()
-            if not norm_node.catalog and norm_node.db:
-                norm_node.set("catalog", exp.parse_identifier(default_cat))
-            norm_target = table.copy()
-            if not norm_target.catalog and norm_target.db:
-                norm_target.set("catalog", exp.parse_identifier(default_cat))
-            q_norm_node = quote_identifiers(norm_node)
-            q_norm_target = quote_identifiers(norm_target)
+            if q_node.this != q_target.this or q_node.args.get("version") != q_target.args.get(
+                "version"
+            ):
+                return False
+            if bool(q_node.args.get("db")) != bool(q_target.args.get("db")):
+                if (not q_node.args.get("db") and q_node.args.get("catalog")) or (
+                    not q_target.args.get("db") and q_target.args.get("catalog")
+                ):
+                    return False
+                if not default_db_loaded:
+                    default_db_loaded = True
+                    default_db = self._resolve_session_database()
+                if not default_db:
+                    return False
+                quoted_default_db = quote_identifiers(exp.parse_identifier(default_db))
+                if not q_node.args.get("db"):
+                    q_node.set("db", quoted_default_db)
+                else:
+                    q_target = q_target.copy()
+                    q_target.set("db", quoted_default_db)
+                if (q_node.args.get("catalog"), q_node.args.get("db"), q_node.this) == (
+                    q_target.args.get("catalog"),
+                    q_target.args.get("db"),
+                    q_target.this,
+                ):
+                    return True
+            if (
+                q_node.args.get("db") != q_target.args.get("db")
+                or not q_node.args.get("db")
+                or (q_node.args.get("catalog") and q_target.args.get("catalog"))
+            ):
+                return False
+            if not default_catalog_loaded:
+                default_catalog_loaded = True
+                default_catalog = self._resolve_session_catalog()
+            if not default_catalog:
+                return False
+            quoted_default_cat = quote_identifiers(exp.parse_identifier(default_catalog))
+            if not q_node.args.get("catalog"):
+                q_node.set("catalog", quoted_default_cat)
+            if not q_target.args.get("catalog"):
+                q_target = q_target.copy()
+                q_target.set("catalog", quoted_default_cat)
             return (
-                q_norm_node.args.get("catalog"),
-                q_norm_node.args.get("db"),
-                q_norm_node.this,
+                q_node.args.get("catalog"),
+                q_node.args.get("db"),
+                q_node.this,
             ) == (
-                q_norm_target.args.get("catalog"),
-                q_norm_target.args.get("db"),
-                q_norm_target.this,
+                q_target.args.get("catalog"),
+                q_target.args.get("db"),
+                q_target.this,
             )
-
-        self_referencing = bool(
-            first_query
-            and any(_matches_target_table(t_node) for t_node in first_query.find_all(exp.Table))
-        )
 
         # 1. Doris's CTAS grammar forbids `ENGINE=iceberg`, so internal/2-part Iceberg tables with known
         #    column types must be created via schema DDL (`_create_table_from_columns`) + `INSERT INTO`.
@@ -4992,12 +5062,23 @@ class DorisEngineAdapter(
                 "(`<iceberg_catalog>.<db>.<table>`) or specify explicit column types."
             )
 
-        replace_query_target = getattr(self._get_thread_state(), "replace_query_target", None)
+        thread_state = self._get_thread_state()
+        replace_query_target = getattr(thread_state, "replace_query_target", None)
         from_replace_query = bool(
             isinstance(replace_query_target, exp.Table)
             and _matches_target_table(replace_query_target)
         )
-        precreated_by_replace_query = bool(self_referencing and from_replace_query and not replace)
+        precreated_by_replace_query = bool(
+            getattr(thread_state, "replace_query_precreated", False)
+            and from_replace_query
+            and not replace
+        )
+        self_referencing = precreated_by_replace_query or bool(
+            first_query
+            and any(_matches_target_table(t_node) for t_node in first_query.find_all(exp.Table))
+        )
+        if self_referencing and from_replace_query and not replace:
+            precreated_by_replace_query = True
 
         table_props = self._get_table_properties(kwargs) or {}
         raw_not_null_cols = kwargs.get("not_null_columns") or table_props.get("not_null_columns")
