@@ -309,6 +309,157 @@ FROM "memory"."sushi"."marketing" AS "marketing"
     )
 
 
+def test_columns_to_types_union_by_name():
+    # BY NAME matches the branches' columns by name, so a column that only a later branch
+    # has is still one of the query's columns, after the columns of the branches before it
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect duckdb,
+        );
+
+        SELECT 1::INT AS a
+        UNION ALL BY NAME
+        SELECT
+          'x'::TEXT AS b, -- only in the second branch
+          2::INT AS a
+        UNION ALL BY NAME
+        SELECT 3::BIGINT AS c
+        """
+    )
+    model = load_sql_based_model(expressions)
+
+    assert list(model.columns_to_types or {}) == ["a", "b", "c"]
+    assert model.columns_to_types == {
+        "a": exp.DataType.build("int"),
+        "b": exp.DataType.build("text"),
+        "c": exp.DataType.build("bigint"),
+    }
+    assert model.column_descriptions == {"b": "only in the second branch"}
+
+
+def test_columns_to_types_union_by_position_of_union_by_name():
+    # Without BY NAME, the leftmost branch names the columns, even when that branch is
+    # itself a union BY NAME
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect duckdb,
+        );
+
+        (SELECT 1::INT AS a UNION ALL BY NAME SELECT 2::INT AS a, 'x'::TEXT AS b)
+        UNION ALL
+        SELECT 3::INT AS c, 'y'::TEXT AS d
+        """
+    )
+    model = load_sql_based_model(expressions)
+
+    assert model.columns_to_types == {
+        "a": exp.DataType.build("int"),
+        "b": exp.DataType.build("text"),
+    }
+
+
+@pytest.mark.parametrize(
+    "set_operation, expected_columns",
+    [
+        ("FULL UNION ALL BY NAME", ["a", "z", "b"]),
+        ("LEFT UNION ALL BY NAME", ["a", "z"]),
+        ("INNER UNION ALL BY NAME", ["a"]),
+        ("FULL UNION ALL BY NAME ON (z, b)", ["z", "b"]),
+    ],
+)
+def test_columns_to_types_union_by_name_modifiers(
+    set_operation: str, expected_columns: t.List[str]
+):
+    expressions = d.parse(
+        f"""
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect bigquery,
+        );
+
+        SELECT 1 AS a, 0 AS z
+        {set_operation}
+        SELECT 2 AS a, 3 AS b
+        """
+    )
+    model = load_sql_based_model(expressions)
+
+    assert list(model.columns_to_types or {}) == expected_columns
+
+
+def test_columns_to_types_union_by_name_parenthesized_right_branch():
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect duckdb,
+        );
+
+        SELECT 1::INT AS a
+        UNION ALL BY NAME
+        (SELECT 2::INT AS a, 'x'::TEXT AS b UNION ALL BY NAME SELECT 'y'::TEXT AS c)
+        """
+    )
+    model = load_sql_based_model(expressions)
+
+    assert list(model.columns_to_types or {}) == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize(
+    "set_operation",
+    [
+        "UNION ALL BY NAME",
+        "INNER UNION ALL BY NAME",
+        "FULL UNION ALL BY NAME ON (a, b)",
+    ],
+)
+def test_columns_to_types_union_by_name_unexpanded_star(set_operation: str):
+    # A star that can't be expanded hides some of a branch's columns, so the columns are unknown
+    expressions = d.parse(
+        f"""
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect bigquery,
+        );
+
+        SELECT * FROM db.unknown_source
+        {set_operation}
+        SELECT 1 AS a
+        """
+    )
+    model = load_sql_based_model(expressions)
+
+    assert model.columns_to_types is None
+
+
+@pytest.mark.parametrize("set_operation", ["UNION ALL", "UNION ALL BY NAME"])
+def test_columns_to_types_long_union_chain(set_operation: str):
+    branches = f" {set_operation} ".join(f"SELECT {i}::INT AS a" for i in range(1000))
+    expressions = d.parse(
+        f"""
+        MODEL (
+            name db.table,
+            kind FULL,
+            dialect duckdb,
+        );
+
+        {branches}
+        """
+    )
+    model = load_sql_based_model(expressions)
+
+    assert model.columns_to_types == {"a": exp.DataType.build("int")}
+
+
 @time_machine.travel("1996-02-10 00:00:00 UTC")
 @pytest.mark.parametrize(
     "test_id, condition, union_type, table_count, expected_result",
