@@ -2545,7 +2545,8 @@ def test_doris(make_config):
     assert advanced_config.get_catalog() == "iceberg_cat"
     assert advanced_config.concurrent_tasks == 10
     assert "database" not in advanced_config._connection_kwargs_keys
-    assert "database" not in advanced_config._connection_factory_with_kwargs.keywords
+    with patch.dict("sys.modules", {"pymysql": MagicMock()}):
+        assert "database" not in advanced_config._connection_factory_with_kwargs.keywords
     assert advanced_config._static_connection_kwargs["ssl"] == {
         "ca": "/path/to/ca.pem",
         "verify_mode": True,

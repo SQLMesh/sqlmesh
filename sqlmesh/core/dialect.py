@@ -721,8 +721,12 @@ def _doris_parse_table_parts(
             ref_kind = m.group(2).upper()
             ref_arg = table.this.expressions[0]
             if isinstance(ref_arg, exp.Column) and not ref_arg.table:
-                ref_arg = exp.var(ref_arg.name)
-            ver = exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg)
+                ref_arg = (
+                    ref_arg.this
+                    if isinstance(ref_arg.this, exp.Identifier) and ref_arg.this.quoted
+                    else exp.var(ref_arg.name)
+                )
+            ver = self.expression(exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg))
             table.set("this", exp.Identifier(this=real_name, quoted=False))
             table.set("version", ver)
             table.meta["doris_version"] = ver
@@ -736,13 +740,14 @@ def _doris_parse_table_parts(
                 ref_arg = ref_args[0]
                 if isinstance(ref_arg, exp.Identifier) and not ref_arg.quoted:
                     ref_arg = exp.var(ref_arg.name)
-                ver = exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg)
+                ver = self.expression(exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg))
                 table.set("this", exp.Identifier(this=real_name, quoted=table.this.quoted))
                 table.set("version", ver)
                 table.meta["doris_version"] = ver
-        elif schema and (
-            self._match_pair(TokenType.PARAMETER, TokenType.VAR, advance=False)
-            and self._next
+        elif (
+            self._curr is not None
+            and self._curr.token_type == TokenType.PARAMETER
+            and self._next is not None
             and self._next.text.upper() in ("BRANCH", "TAG")
         ):
             parsed_ver = _doris_parse_version(self)
@@ -760,8 +765,9 @@ def _doris_parse_version(self: Parser) -> t.Optional[exp.Version]:
     if ver is not None:
         return ver
     if (
-        self._match_pair(TokenType.PARAMETER, TokenType.VAR, advance=False)
-        and self._next
+        self._curr is not None
+        and self._curr.token_type == TokenType.PARAMETER
+        and self._next is not None
         and self._next.text.upper() in ("BRANCH", "TAG")
     ):
         saved_idx = self._index

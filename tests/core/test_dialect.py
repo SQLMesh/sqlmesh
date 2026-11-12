@@ -1824,6 +1824,18 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         d.parse_one(insert_branch_cols_ast.sql("doris"), dialect="doris") == insert_branch_cols_ast
     )
 
+    for quoted_ref_sql, expected_ref_sql in (
+        ("SELECT * FROM tbl@branch(`release-2026`)", "SELECT * FROM tbl @branch(`release-2026`)"),
+        ("SELECT * FROM tbl@tag(`v1.0.0`)", "SELECT * FROM tbl @tag(`v1.0.0`)"),
+        (
+            "INSERT INTO tbl@branch(`release-2026`) VALUES (1)",
+            "INSERT INTO tbl @branch(`release-2026`) VALUES (1)",
+        ),
+    ):
+        quoted_ref_ast = d.parse_one(quoted_ref_sql, dialect="doris")
+        assert quoted_ref_ast.sql("doris") == expected_ref_sql
+        assert d.parse_one(quoted_ref_ast.sql("doris"), dialect="doris") == quoted_ref_ast
+
     k_arr = exp.column("k_arr")
     k_arr.type = exp.DataType.build("ARRAY<INT>", dialect="doris")
     v_arr = exp.column("v_arr")
