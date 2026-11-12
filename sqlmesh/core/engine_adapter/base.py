@@ -311,7 +311,7 @@ class EngineAdapter:
             if isinstance(current_db, str):
                 return current_db.strip() or None
         except Exception:
-            pass
+            return None
         return self._default_schema_from_config()
 
     def _resolve_session_catalog(self) -> t.Optional[str]:

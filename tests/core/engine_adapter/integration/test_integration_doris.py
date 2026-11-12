@@ -1242,8 +1242,13 @@ def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
     assert list(dyn_rows) == [(10, 2), (20, 1)]
 
     # Verify both synchronous MV rollup jobs reached FINISHED before restatement
+    user_events_snapshot = sm_ctx.get_snapshot(f"{schema_name}.user_events")
+    assert user_events_snapshot is not None
+    user_events_phys_table = exp.to_table(user_events_snapshot.table_name(), dialect="doris")
+    phys_db = user_events_phys_table.db
+    phys_name = user_events_phys_table.name
     rollup_jobs = ctx.engine_adapter.fetchall(
-        f"SHOW ALTER TABLE MATERIALIZED VIEW FROM `{schema_name}` WHERE TableName = 'user_events'",
+        f"SHOW ALTER TABLE MATERIALIZED VIEW FROM `{phys_db}` WHERE TableName = '{phys_name}'",
         quote_identifiers=False,
     )
     rollup_job_states = {
@@ -1269,7 +1274,7 @@ def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
     )
     assert list(restated_rows) == [(10, 3), (20, 1)]
     desc_all_rows = ctx.engine_adapter.fetchall(
-        f"DESC `{schema_name}`.`user_events` ALL",
+        f"DESC `{phys_db}`.`{phys_name}` ALL",
         quote_identifiers=False,
     )
     rollup_index_names = {

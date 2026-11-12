@@ -3446,6 +3446,18 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         'DROP TABLE IF EXISTS "dev"."db"."__temp_test_abcdefgh"',
     ]
 
+    # When Trino get_current_catalog fails, do not fall back to _default_catalog
+    mocker.patch.object(adapter, "get_current_catalog", side_effect=RuntimeError("catalog error"))
+    adapter.cursor.execute.reset_mock()
+    with pytest.raises(SQLMeshError, match="Cannot disambiguate unqualified catalog reference"):
+        adapter.replace_query(
+            "prod.db.test",
+            parse_one("SELECT a FROM db.test"),
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+        )
+    assert to_sql_calls(adapter) == []
+    mocker.patch.object(adapter, "get_current_catalog", return_value="prod")
+
     # Database-less table reference that matches target table name raises when no default database is known
     with pytest.raises(SQLMeshError, match="Cannot disambiguate unqualified schema reference"):
         adapter.replace_query(
@@ -3484,6 +3496,16 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         'DELETE FROM "db"."test" WHERE TRUE',
         'INSERT INTO "db"."test" ("a") SELECT "a" FROM "test"',
     ]
+    # When get_current_database fails, do not fall back to configured schema/database
+    mocker.patch.object(adapter, "get_current_database", side_effect=RuntimeError("db error"))
+    adapter.cursor.execute.reset_mock()
+    with pytest.raises(SQLMeshError, match="Cannot disambiguate unqualified schema reference"):
+        adapter.replace_query(
+            "db.test",
+            parse_one("SELECT a FROM test"),
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+        )
+    assert to_sql_calls(adapter) == []
     mocker.patch.object(adapter, "get_current_database", return_value=None)
 
     # Partition selection on self-referencing table is preserved when temp table exposes matching partitions

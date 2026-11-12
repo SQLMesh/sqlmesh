@@ -2851,9 +2851,9 @@ class DorisConnectionConfig(ConnectionConfig):
                 isinstance(verify_mode, str)
                 and verify_mode.strip().lower() in ("false", "0", "no", "none")
             ):
-                if self.ssl_verify_identity is True:
+                if hostname_requested:
                     raise ConfigError(
-                        "Doris `ssl_verify_identity=True` cannot be combined with "
+                        "Doris `ssl.check_hostname=True` or `ssl_verify_identity=True` cannot be combined with "
                         "`ssl_verify_cert=False` or disabled `ssl.verify_mode`."
                     )
                 ssl_config["check_hostname"] = False

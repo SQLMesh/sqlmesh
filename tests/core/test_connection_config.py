@@ -2602,14 +2602,24 @@ def test_doris(make_config):
         ssl_verify_identity=True,
         check_import=False,
     )
-    with pytest.raises(ConfigError, match="ssl_verify_identity=True` cannot be combined"):
+    with pytest.raises(ConfigError, match="cannot be combined with"):
         _ = ssl_verify_cert_false_identity_true._static_connection_kwargs
+
+    ssl_dict_verify_mode_false_check_hostname_true = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"ca": "/path/to/ca.pem", "verify_mode": False, "check_hostname": True},
+        check_import=False,
+    )
+    with pytest.raises(ConfigError, match="cannot be combined with"):
+        _ = ssl_dict_verify_mode_false_check_hostname_true._static_connection_kwargs
 
     ssl_dict_verify_mode_false = make_config(
         type="doris",
         host="doris-fe",
         user="admin",
-        ssl={"ca": "/path/to/ca.pem", "verify_mode": False, "check_hostname": True},
+        ssl={"ca": "/path/to/ca.pem", "verify_mode": False},
         check_import=False,
     )
     assert ssl_dict_verify_mode_false._static_connection_kwargs["ssl"] == {
@@ -2629,11 +2639,21 @@ def test_doris(make_config):
     with pytest.raises(ConfigError, match="ssl_verify_identity=True` cannot be combined"):
         _ = ssl_dict_verify_mode_none_str._static_connection_kwargs
 
-    ssl_dict_verify_mode_none_str_no_identity = make_config(
+    ssl_dict_verify_mode_none_str_check_hostname_true = make_config(
         type="doris",
         host="doris-fe",
         user="admin",
         ssl={"ca": "/path/to/ca.pem", "verify_mode": "none", "check_hostname": True},
+        check_import=False,
+    )
+    with pytest.raises(ConfigError, match="cannot be combined with"):
+        _ = ssl_dict_verify_mode_none_str_check_hostname_true._static_connection_kwargs
+
+    ssl_dict_verify_mode_none_str_no_identity = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"ca": "/path/to/ca.pem", "verify_mode": "none"},
         check_import=False,
     )
     assert ssl_dict_verify_mode_none_str_no_identity._static_connection_kwargs["ssl"] == {

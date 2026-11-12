@@ -114,8 +114,8 @@ class TrinoEngineAdapter(
             if isinstance(current_cat, str) and current_cat:
                 return current_cat
         except Exception:
-            pass
-        return super()._resolve_session_catalog()
+            return None
+        return None
 
     @lru_cache()
     def get_catalog_type(self, catalog: t.Optional[str]) -> str:

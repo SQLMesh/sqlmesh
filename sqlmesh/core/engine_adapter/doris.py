@@ -1968,7 +1968,7 @@ class DorisEngineAdapter(
                     return db_row[0].strip()
                 return ""
         except Exception:
-            pass
+            return ""
         return None
 
     def _default_schema_from_config(self) -> t.Optional[str]:
