@@ -2544,7 +2544,8 @@ def test_doris(make_config):
     assert advanced_config.catalog == "iceberg_cat"
     assert advanced_config.get_catalog() == "iceberg_cat"
     assert advanced_config.concurrent_tasks == 10
-    assert "database" not in advanced_config._static_connection_kwargs
+    assert "database" not in advanced_config._connection_kwargs_keys
+    assert "database" not in advanced_config._connection_factory_with_kwargs.keywords
     assert advanced_config._static_connection_kwargs["ssl"] == {
         "ca": "/path/to/ca.pem",
         "verify_mode": True,
@@ -2601,11 +2602,8 @@ def test_doris(make_config):
         ssl_verify_identity=True,
         check_import=False,
     )
-    assert ssl_verify_cert_false_identity_true._static_connection_kwargs["ssl"] == {
-        "ca": "/path/to/ca.pem",
-        "verify_mode": False,
-        "check_hostname": False,
-    }
+    with pytest.raises(ConfigError, match="ssl_verify_identity=True` cannot be combined"):
+        _ = ssl_verify_cert_false_identity_true._static_connection_kwargs
 
     ssl_dict_verify_mode_false = make_config(
         type="doris",
@@ -2628,11 +2626,48 @@ def test_doris(make_config):
         ssl_verify_identity=True,
         check_import=False,
     )
-    assert ssl_dict_verify_mode_none_str._static_connection_kwargs["ssl"] == {
+    with pytest.raises(ConfigError, match="ssl_verify_identity=True` cannot be combined"):
+        _ = ssl_dict_verify_mode_none_str._static_connection_kwargs
+
+    ssl_dict_verify_mode_none_str_no_identity = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"ca": "/path/to/ca.pem", "verify_mode": "none", "check_hostname": True},
+        check_import=False,
+    )
+    assert ssl_dict_verify_mode_none_str_no_identity._static_connection_kwargs["ssl"] == {
         "ca": "/path/to/ca.pem",
         "verify_mode": "none",
         "check_hostname": False,
     }
+
+    from sqlmesh.utils.connection_pool import SingletonConnectionPool, ThreadLocalConnectionPool
+
+    for pool_cls in (SingletonConnectionPool, ThreadLocalConnectionPool):
+        failing_cursor = MagicMock()
+        failing_cursor.execute.side_effect = [
+            None,
+            None,
+            RuntimeError("SWITCH failed"),
+        ]
+        healthy_cursor = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.cursor.side_effect = [failing_cursor, healthy_cursor]
+        pool = pool_cls(lambda: mock_conn, cursor_init=advanced_config._cursor_init)
+
+        with pytest.raises(RuntimeError, match="SWITCH failed"):
+            pool.get_cursor()
+        failing_cursor.close.assert_called()
+
+        recovered_cursor = pool.get_cursor()
+        assert recovered_cursor is healthy_cursor
+        assert [call.args[0] for call in healthy_cursor.execute.call_args_list] == [
+            "SET `query_timeout` = 300",
+            "SET `workload_group` = 'etl_group'",
+            "SWITCH `iceberg_cat`",
+            "USE `analytics`",
+        ]
 
     with pytest.raises(ConfigError, match="Invalid Doris session variable name"):
         make_config(

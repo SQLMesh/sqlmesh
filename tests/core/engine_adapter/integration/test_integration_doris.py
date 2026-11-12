@@ -957,7 +957,7 @@ def test_doris_sqlmesh_plan_ann_inverted_not_null_and_widen(
 
     schema_name = ctx.schema("ann_e2e")
     ctx.engine_adapter.create_schema(schema_name)
-    raw_tbl = exp.table_("raw_logs", db=schema_name)
+    raw_tbl = exp.to_table(f"{schema_name}.raw_logs", dialect="doris")
     raw_tbl_sql = ctx.engine_adapter._to_sql(raw_tbl)
     ctx.engine_adapter.execute(
         f"""
@@ -1123,7 +1123,7 @@ def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
     d1 = (today_utc - dt.timedelta(days=2)).isoformat()
     d2 = (today_utc - dt.timedelta(days=1)).isoformat()
 
-    raw_tbl = exp.table_("raw_user_events", db=schema_name)
+    raw_tbl = exp.to_table(f"{schema_name}.raw_user_events", dialect="doris")
     raw_tbl_sql = ctx.engine_adapter._to_sql(raw_tbl)
     ctx.engine_adapter.execute(
         f"""

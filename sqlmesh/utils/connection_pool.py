@@ -140,9 +140,14 @@ class _ThreadLocalBase(_TransactionManagementMixin):
         thread_id = get_ident()
         with self._thread_cursors_lock:
             if thread_id not in self._thread_cursors:
-                self._thread_cursors[thread_id] = self.get().cursor()
+                cursor = self.get().cursor()
                 if self._cursor_init:
-                    self._cursor_init(self._thread_cursors[thread_id])
+                    try:
+                        self._cursor_init(cursor)
+                    except Exception:
+                        _try_close(cursor, "cursor")
+                        raise
+                self._thread_cursors[thread_id] = cursor
             return self._thread_cursors[thread_id]
 
     def get_attribute(self, key: str) -> t.Optional[t.Any]:
@@ -286,9 +291,14 @@ class SingletonConnectionPool(_TransactionManagementMixin):
 
     def get_cursor(self) -> t.Any:
         if not self._cursor:
-            self._cursor = self.get().cursor()
+            cursor = self.get().cursor()
             if self._cursor_init:
-                self._cursor_init(self._cursor)
+                try:
+                    self._cursor_init(cursor)
+                except Exception:
+                    _try_close(cursor, "cursor")
+                    raise
+            self._cursor = cursor
         return self._cursor
 
     def get(self) -> t.Any:

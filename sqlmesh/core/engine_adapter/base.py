@@ -533,8 +533,13 @@ class EngineAdapter:
 
         def _table_parts(
             table: exp.Table,
-        ) -> t.Tuple[t.Optional[exp.Expr], t.Optional[exp.Expr], t.Optional[exp.Expr]]:
-            return (table.args.get("catalog"), table.args.get("db"), table.this)
+        ) -> t.Tuple[t.Optional[exp.Expr], ...]:
+            return (
+                table.args.get("catalog"),
+                table.args.get("db"),
+                table.this,
+                table.args.get("version"),
+            )
 
         def _qualified(table: exp.Table, catalog: str) -> exp.Table:
             table = table.copy()
@@ -542,11 +547,37 @@ class EngineAdapter:
                 table.set("catalog", exp.parse_identifier(catalog))
             return quote_identifiers(table)
 
+        def _is_cte_reference(table: exp.Table, quoted_table: exp.Table) -> bool:
+            if quoted_table.args.get("db") or quoted_table.args.get("catalog"):
+                return False
+            curr: t.Optional[exp.Expr] = table
+            child_cte: t.Optional[exp.CTE] = None
+            while curr is not None:
+                if isinstance(curr, exp.CTE):
+                    child_cte = curr
+                with_clause = curr.args.get("with_")
+                if isinstance(with_clause, exp.With):
+                    is_recursive = bool(with_clause.args.get("recursive"))
+                    for cte in with_clause.expressions:
+                        if not is_recursive and cte is child_cte:
+                            break
+                        if (
+                            isinstance(cte, exp.CTE)
+                            and cte.alias
+                            and quote_identifiers(exp.to_identifier(cte.alias)) == quoted_table.this
+                        ):
+                            return True
+                    child_cte = None
+                curr = curr.parent
+            return False
+
         def _is_target_table(node: exp.Expr) -> bool:
             nonlocal default_catalog, default_catalog_loaded, qualified_target
             if not isinstance(node, exp.Table):
                 return False
             quoted_node = quote_identifiers(node.copy())
+            if _is_cte_reference(node, quoted_node):
+                return False
             if _table_parts(quoted_node) == _table_parts(quoted_target):
                 return True
             if quoted_node.this != quoted_target.this or quoted_node.args.get(

@@ -3325,6 +3325,59 @@ def test_replace_query_self_referencing_two_part_and_aliased(
     ]
 
 
+def test_replace_query_cte_and_versioned_table_not_self_referencing(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    adapter.SUPPORTS_REPLACE_TABLE = False
+    adapter.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+
+    mocker.patch.object(
+        adapter,
+        "get_data_object",
+        return_value=DataObject(schema="db", name="test", type="table"),
+    )
+    mocker.patch("sqlmesh.core.engine_adapter.base.random_id", return_value="abcdefgh")
+
+    adapter.replace_query(
+        "test",
+        parse_one("WITH test AS (SELECT 2 AS a) SELECT t.a FROM test AS t"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+
+    assert to_sql_calls(adapter) == [
+        'DELETE FROM "test" WHERE TRUE',
+        'INSERT INTO "test" ("a") WITH "test" AS (SELECT 2 AS "a") SELECT "t"."a" FROM "test" AS "t"',
+    ]
+
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "test",
+        parse_one("WITH test AS (SELECT a FROM test) SELECT t.a FROM test AS t"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "test" ("a" INT)',
+        'CREATE TABLE IF NOT EXISTS "__temp_test_abcdefgh" AS SELECT CAST("a" AS INT) AS "a" FROM (SELECT "a" FROM "test") AS "_subquery"',
+        'DELETE FROM "test" WHERE TRUE',
+        'INSERT INTO "test" ("a") WITH "test" AS (SELECT "a" FROM "__temp_test_abcdefgh") SELECT "t"."a" FROM "test" AS "t"',
+        'DROP TABLE IF EXISTS "__temp_test_abcdefgh"',
+    ]
+
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM db.test FOR VERSION AS OF 1", read="doris"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+
+    assert to_sql_calls(adapter) == [
+        'DELETE FROM "db"."test" WHERE TRUE',
+        'INSERT INTO "db"."test" ("a") SELECT "a" FROM "db"."test" FOR VERSION AS OF 1',
+    ]
+
+
 def test_create_table_like(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(EngineAdapter)
 

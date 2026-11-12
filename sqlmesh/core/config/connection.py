@@ -2827,6 +2827,11 @@ class DorisConnectionConfig(ConnectionConfig):
                 isinstance(verify_mode, str)
                 and verify_mode.strip().lower() in ("false", "0", "no", "none")
             ):
+                if self.ssl_verify_identity is True:
+                    raise ConfigError(
+                        "Doris `ssl_verify_identity=True` cannot be combined with "
+                        "`ssl_verify_cert=False` or disabled `ssl.verify_mode`."
+                    )
                 ssl_config["check_hostname"] = False
             if ssl_config:
                 kwargs["ssl"] = ssl_config
@@ -2893,17 +2898,24 @@ class DorisConnectionConfig(ConnectionConfig):
             return None
 
         def init(cursor: t.Any) -> None:
-            if self.session_variables:
-                self._validate_session_variables(self.session_variables)
-                for k, v in self.session_variables.items():
-                    val_sql = exp.convert(v).sql("doris", comments=False)
-                    cursor.execute(f"SET `{k}` = {val_sql}")
-            if self.catalog:
-                catalog_sql = exp.to_identifier(self.catalog, quoted=True).sql("doris")
-                cursor.execute(f"SWITCH {catalog_sql}")
-                if self.database:
-                    db_sql = exp.to_identifier(self.database, quoted=True).sql("doris")
-                    cursor.execute(f"USE {db_sql}")
+            try:
+                if self.session_variables:
+                    self._validate_session_variables(self.session_variables)
+                    for k, v in self.session_variables.items():
+                        val_sql = exp.convert(v).sql("doris", comments=False)
+                        cursor.execute(f"SET `{k}` = {val_sql}")
+                if self.catalog:
+                    catalog_sql = exp.to_identifier(self.catalog, quoted=True).sql("doris")
+                    cursor.execute(f"SWITCH {catalog_sql}")
+                    if self.database:
+                        db_sql = exp.to_identifier(self.database, quoted=True).sql("doris")
+                        cursor.execute(f"USE {db_sql}")
+            except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+                raise
 
         return init
 
