@@ -2866,15 +2866,18 @@ def _resolve_model_refs_to_physical_tables(
     def resolve(ref: str) -> str:
         table = exp.to_table(ref.strip(), dialect=dialect)
         physical = table_mapping.get(exp.table_name(table, identify=True))
+        strip_catalog = False
         if not physical and default_catalog and not table.catalog:
             normalized_name = d.normalize_model_name(
                 table, default_catalog=default_catalog, dialect=dialect
             )
             physical = table_mapping.get(normalized_name)
+            strip_catalog = bool(physical)
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
-        return exp.table_name(
-            exp.to_table(physical, dialect=dialect) if physical else table, identify=False
-        )
+        resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
+        if strip_catalog:
+            resolved_table.set("catalog", None)
+        return exp.table_name(resolved_table, identify=False)
 
     return exp.Literal.string(",".join(resolve(ref) for ref in refs if ref.strip()))
 

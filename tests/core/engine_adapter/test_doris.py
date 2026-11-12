@@ -6103,3 +6103,64 @@ def test_doris_audit_fixes_and_docs_models(
         "CREATE TABLE IF NOT EXISTS `internal`.`db`.`test` (`a` INT)",
         "INSERT INTO `internal`.`db`.`test` (`a`) SELECT CAST(`a` AS INT) AS `a` FROM (SELECT 1 AS `a` UNION ALL SELECT `a` FROM `test`) AS `_subquery`",
     ]
+
+    # 11. Self-referencing replace_query on an existing Doris table handles CTE shadowing,
+    #     FOR VERSION AS OF, PARTITION(...) staging, and session database/catalog failure closed.
+    existing_ref_adapter = make_mocked_engine_adapter(
+        DorisEngineAdapter, default_catalog="internal", database="db"
+    )
+    mocker.patch.object(
+        existing_ref_adapter,
+        "get_data_object",
+        return_value=DataObject(catalog="internal", schema="db", name="test", type="table"),
+    )
+    mocker.patch("sqlmesh.core.engine_adapter.doris.random_id", return_value="abcdefgh")
+    existing_ref_adapter.cursor.execute.reset_mock()
+    existing_ref_adapter.replace_query(
+        "test",
+        parse_one("WITH test AS (SELECT 2 AS a) SELECT t.a FROM test AS t", read="doris"),
+        target_columns_to_types={"a": exp.DataType.build("INT", dialect="doris")},
+    )
+    assert to_sql_calls(existing_ref_adapter) == [
+        "TRUNCATE TABLE `test`",
+        "INSERT INTO `test` (`a`) WITH `test` AS (SELECT 2 AS `a`) SELECT `t`.`a` FROM `test` AS `t`",
+    ]
+
+    existing_ref_adapter.cursor.execute.reset_mock()
+    existing_ref_adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM db.test FOR VERSION AS OF 1", read="doris"),
+        target_columns_to_types={"a": exp.DataType.build("INT", dialect="doris")},
+    )
+    assert to_sql_calls(existing_ref_adapter) == [
+        "TRUNCATE TABLE `db`.`test`",
+        "INSERT INTO `db`.`test` (`a`) SELECT `a` FROM `db`.`test` FOR VERSION AS OF 1",
+    ]
+
+    mocker.patch.object(existing_ref_adapter, "_get_table_partition_names", return_value={"p1"})
+    existing_ref_adapter.cursor.execute.reset_mock()
+    existing_ref_adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM db.test PARTITION (p1)", read="doris"),
+        target_columns_to_types={"a": exp.DataType.build("INT", dialect="doris")},
+    )
+    assert to_sql_calls(existing_ref_adapter) == [
+        "CREATE TABLE IF NOT EXISTS `db`.`test` (`a` INT)",
+        "CREATE DATABASE IF NOT EXISTS `internal`.`db`",
+        "CREATE TABLE IF NOT EXISTS `internal`.`db`.`__temp_test_abcdefgh` AS SELECT CAST(`a` AS INT) AS `a` FROM (SELECT `a` FROM `db`.`test` PARTITION(`p1`)) AS `_subquery`",
+        "TRUNCATE TABLE `db`.`test`",
+        "INSERT INTO `db`.`test` (`a`) SELECT `a` FROM `internal`.`db`.`__temp_test_abcdefgh` PARTITION(`p1`)",
+        "DROP TABLE IF EXISTS `internal`.`db`.`__temp_test_abcdefgh`",
+    ]
+
+    mocker.patch.object(
+        existing_ref_adapter, "get_current_database", side_effect=RuntimeError("db error")
+    )
+    existing_ref_adapter.cursor.execute.reset_mock()
+    with pytest.raises(SQLMeshError, match="Cannot disambiguate unqualified schema reference"):
+        existing_ref_adapter.replace_query(
+            "db.test",
+            parse_one("SELECT a FROM test", read="doris"),
+            target_columns_to_types={"a": exp.DataType.build("INT", dialect="doris")},
+        )
+    assert to_sql_calls(existing_ref_adapter) == []

@@ -136,6 +136,15 @@ def test_doris_iceberg_local_catalog(ctx: TestContext):
             paimon_cols = adapter.columns(paimon_tbl)
             assert "id" in paimon_cols
             assert "ds" in paimon_cols
+            adapter.execute(
+                f"INSERT INTO {paimon_tbl} VALUES (1, DATE '2024-01-01')",
+                quote_identifiers=False,
+            )
+            paimon_rows = adapter.fetchall(
+                f"SELECT id, CAST(ds AS VARCHAR(16)) FROM {paimon_tbl}",
+                quote_identifiers=False,
+            )
+            assert list(paimon_rows) == [(1, "2024-01-01")]
         finally:
             try:
                 adapter.drop_schema(

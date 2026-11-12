@@ -18,6 +18,7 @@ services:
       - "${DORIS_BIND_ADDRESS:-127.0.0.1}:9030:9030"
     volumes:
       - iceberg-warehouse:/tmp/doris_iceberg_warehouse
+      - paimon-warehouse:/tmp/doris_paimon_warehouse
     networks:
       doris_net:
         ipv4_address: 172.30.80.2
@@ -46,12 +47,14 @@ services:
       - "${DORIS_BIND_ADDRESS:-127.0.0.1}:9050:9050"
     volumes:
       - iceberg-warehouse:/tmp/doris_iceberg_warehouse
+      - paimon-warehouse:/tmp/doris_paimon_warehouse
     networks:
       doris_net:
         ipv4_address: 172.30.80.3
 
 volumes:
   iceberg-warehouse:
+  paimon-warehouse:
 
 networks:
   doris_net:

@@ -189,7 +189,7 @@ SELECT
   order_id::BIGINT AS order_id,
   customer_id::BIGINT AS customer_id,
   status::VARCHAR(32) AS status,
-  updated_at::DATETIME AS updated_at
+  updated_at::DATETIME(6) AS updated_at
 FROM raw.orders
 WHERE CAST(updated_at AS DATE) BETWEEN @start_ds AND @end_ds;
 ```
@@ -214,14 +214,14 @@ MODEL (
 );
 
 SELECT
-  order_id,
-  status,
-  updated_at
+  order_id::BIGINT AS order_id,
+  status::VARCHAR(32) AS status,
+  updated_at::DATETIME(6) AS updated_at
 FROM (
   SELECT
     order_id::BIGINT AS order_id,
     status::VARCHAR(32) AS status,
-    updated_at::DATETIME AS updated_at,
+    updated_at::DATETIME(6) AS updated_at,
     ROW_NUMBER() OVER (
       PARTITION BY order_id
       ORDER BY updated_at DESC, changelog_id DESC

@@ -2550,7 +2550,7 @@ class TestExcludedTablesResolution:
         )
         catalog_base_snapshot = self._make_snapshot(catalog_base_model)
         catalog_physical_name = exp.to_table(catalog_base_snapshot.table_name())
-        expected_catalog_physical = f"{catalog_physical_name.catalog}.{catalog_physical_name.db}.{catalog_physical_name.name}"
+        expected_catalog_physical = f"{catalog_physical_name.db}.{catalog_physical_name.name}"
 
         catalog_mv_model = _load_sql_model(
             """

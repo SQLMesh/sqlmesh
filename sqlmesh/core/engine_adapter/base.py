@@ -295,42 +295,6 @@ class EngineAdapter:
             )
         return default_catalog
 
-    def get_current_database(self) -> t.Optional[str]:
-        """Returns the database/schema name of the current session, if supported."""
-        return None
-
-    def _default_schema_from_config(self) -> t.Optional[str]:
-        val = self._extra_config.get("schema")
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-        return None
-
-    def _resolve_session_database(self) -> t.Optional[str]:
-        try:
-            current_db = self.get_current_database()
-            if isinstance(current_db, str):
-                return current_db.strip() or None
-        except Exception:
-            return None
-        return self._default_schema_from_config()
-
-    def _resolve_session_catalog(self) -> t.Optional[str]:
-        try:
-            if self.default_catalog:
-                return self.default_catalog
-        except MissingDefaultCatalogError:
-            pass
-        try:
-            current_cat = self.get_current_catalog()
-            if isinstance(current_cat, str) and current_cat:
-                return current_cat
-        except Exception:
-            pass
-        return None
-
-    def _get_table_partition_names(self, table: exp.Table) -> t.Set[str]:
-        return set()
-
     @property
     def engine_run_mode(self) -> EngineRunMode:
         return EngineRunMode.SINGLE_MODE_ENGINE
@@ -561,160 +525,10 @@ class EngineAdapter:
         if not target_columns_to_types and table_exists:
             target_columns_to_types = self.columns(target_table)
         query = source_queries[0].query_factory()
-
-        quoted_target = quote_identifiers(target_table.copy())
-        default_catalog: t.Optional[str] = None
-        default_catalog_loaded = False
-        default_db: t.Optional[str] = None
-        default_db_loaded = False
-
-        def _table_parts(
-            table: exp.Table,
-        ) -> t.Tuple[t.Optional[exp.Expr], ...]:
-            return (
-                table.args.get("catalog"),
-                table.args.get("db"),
-                table.this,
-                table.args.get("version"),
-            )
-
-        def _qualified(table: exp.Table, catalog: str) -> exp.Table:
-            table = table.copy()
-            if not table.catalog and table.db:
-                table.set("catalog", exp.parse_identifier(catalog))
-            return quote_identifiers(table)
-
-        def _is_cte_reference(table: exp.Table, quoted_table: exp.Table) -> bool:
-            if quoted_table.args.get("db") or quoted_table.args.get("catalog"):
-                return False
-            curr: t.Optional[exp.Expr] = table
-            child_cte: t.Optional[exp.CTE] = None
-            while curr is not None:
-                if isinstance(curr, exp.CTE):
-                    child_cte = curr
-                with_clause = curr.args.get("with_")
-                if isinstance(with_clause, exp.With):
-                    is_recursive = bool(with_clause.args.get("recursive"))
-                    for cte in with_clause.expressions:
-                        if not is_recursive and cte is child_cte:
-                            break
-                        if (
-                            isinstance(cte, exp.CTE)
-                            and cte.alias
-                            and quote_identifiers(exp.to_identifier(cte.alias)) == quoted_table.this
-                        ):
-                            return True
-                    child_cte = None
-                curr = curr.parent
-            return False
-
-        def _is_target_table(node: exp.Expr) -> bool:
-            nonlocal default_catalog, default_catalog_loaded, default_db, default_db_loaded
-            if not isinstance(node, exp.Table):
-                return False
-            quoted_node = quote_identifiers(node.copy())
-            if _is_cte_reference(node, quoted_node):
-                return False
-            target_to_check = quoted_target
-            if _table_parts(quoted_node) == _table_parts(target_to_check):
-                return True
-            if quoted_node.this != target_to_check.this or quoted_node.args.get(
-                "version"
-            ) != target_to_check.args.get("version"):
-                return False
-            if bool(quoted_node.args.get("db")) != bool(target_to_check.args.get("db")):
-                if (not quoted_node.args.get("db") and quoted_node.args.get("catalog")) or (
-                    not target_to_check.args.get("db") and target_to_check.args.get("catalog")
-                ):
-                    return False
-                if not default_db_loaded:
-                    default_db_loaded = True
-                    default_db = self._resolve_session_database()
-                if not default_db:
-                    raise SQLMeshError(
-                        f"Cannot disambiguate unqualified schema reference '{node.sql(dialect=self.dialect)}' "
-                        f"against target '{target_table.sql(dialect=self.dialect)}' without an active or default database."
-                    )
-                quoted_default_db = quote_identifiers(exp.parse_identifier(default_db))
-                if not quoted_node.args.get("db"):
-                    quoted_node.set("db", quoted_default_db)
-                else:
-                    target_to_check = target_to_check.copy()
-                    target_to_check.set("db", quoted_default_db.copy())
-                if _table_parts(quoted_node) == _table_parts(target_to_check):
-                    return True
-            if (
-                quoted_node.args.get("db") != target_to_check.args.get("db")
-                or not quoted_node.args.get("db")
-                or (quoted_node.args.get("catalog") and target_to_check.args.get("catalog"))
-                or self.catalog_support.is_unsupported
-            ):
-                return False
-            if not default_catalog_loaded:
-                default_catalog_loaded = True
-                default_catalog = self._resolve_session_catalog()
-            if default_catalog is None:
-                raise SQLMeshError(
-                    f"Cannot disambiguate unqualified catalog reference '{node.sql(dialect=self.dialect)}' "
-                    f"against target '{target_table.sql(dialect=self.dialect)}' without an active or default catalog."
-                )
-            return _table_parts(_qualified(quoted_node, default_catalog)) == _table_parts(
-                _qualified(target_to_check, default_catalog)
-            )
-
-        temp_table_partitions: t.Optional[t.Set[str]] = None
-        staged_partition_sql: t.Optional[str] = None
-
-        def _partition_names(partition_exp: exp.Expr) -> t.Set[str]:
-            names: t.Set[str] = set()
-            for expr in partition_exp.expressions:
-                name = expr.name if isinstance(expr, (exp.Identifier, exp.Var, exp.Column)) else ""
-                if not name and isinstance(expr, exp.Partition):
-                    for sub in expr.expressions:
-                        if sub.name:
-                            names.add(sub.name.lower())
-                elif name:
-                    names.add(name.lower())
-            return names
-
-        def _get_temp_table_partitions(temp_table: exp.Table) -> t.Set[str]:
-            nonlocal temp_table_partitions
-            if temp_table_partitions is not None:
-                return temp_table_partitions
-            names: t.Set[str] = set()
-            try:
-                for part_name in self._get_table_partition_names(temp_table):
-                    if part_name:
-                        names.add(str(part_name).lower())
-            except Exception:
-                pass
-            temp_table_partitions = names
-            return names
-
-        def _replace_target_table(node: exp.Expr, replacement_table: exp.Table) -> exp.Expr:
-            if not _is_target_table(node):
-                return node
-            replacement = replacement_table.copy()
-            if isinstance(node, exp.Table):
-                if node.args.get("alias") is not None:
-                    replacement.set("alias", node.args["alias"].copy())
-                if node.args.get("sample") is not None:
-                    replacement.set("sample", node.args["sample"].copy())
-                partition_arg = node.args.get("partition")
-                if partition_arg is not None:
-                    req_names = _partition_names(partition_arg)
-                    avail_names = _get_temp_table_partitions(replacement_table)
-                    if req_names and req_names.issubset(avail_names):
-                        replacement.set("partition", partition_arg.copy())
-                    elif staged_partition_sql != partition_arg.sql(dialect=self.dialect):
-                        raise SQLMeshError(
-                            f"Cannot apply partition selection '{partition_arg.sql(dialect=self.dialect)}' "
-                            f"to temporary staging table '{replacement_table.sql(dialect=self.dialect)}' "
-                            "because the staging table does not expose matching partitions."
-                        )
-            return replacement
-
-        self_referencing = any(_is_target_table(table) for table in query.find_all(exp.Table))
+        self_referencing = any(
+            quote_identifiers(table) == quote_identifiers(target_table)
+            for table in query.find_all(exp.Table)
+        )
         # If a query references itself then it must have a table created regardless of approach used.
         if self_referencing:
             if not target_columns_to_types:
@@ -749,31 +563,20 @@ class EngineAdapter:
             )
         if self_referencing:
             assert target_columns_to_types is not None
-            self_ref_partition_clauses: t.Dict[str, t.Optional[exp.Expr]] = {}
-            for sq in source_queries:
-                sq_ast = sq.query_factory()
-                for tbl in sq_ast.find_all(exp.Table):
-                    if _is_target_table(tbl):
-                        part_expr = tbl.args.get("partition")
-                        part_key = (
-                            part_expr.sql(dialect=self.dialect) if part_expr is not None else ""
-                        )
-                        self_ref_partition_clauses[part_key] = part_expr
-            staging_target = target_table.copy()
-            if len(self_ref_partition_clauses) == 1:
-                only_key, only_part = next(iter(self_ref_partition_clauses.items()))
-                if only_key and only_part is not None:
-                    staging_target.set("partition", only_part.copy())
-                    staged_partition_sql = only_key
             with self.temp_table(
-                self._select_columns(target_columns_to_types).from_(staging_target),
+                self._select_columns(target_columns_to_types).from_(target_table),
                 name=target_table,
                 target_columns_to_types=target_columns_to_types,
                 **kwargs,
             ) as temp_table:
                 for source_query in source_queries:
                     source_query.add_transform(
-                        lambda node: _replace_target_table(node, temp_table)  # type: ignore
+                        lambda node: (  # type: ignore
+                            temp_table  # type: ignore
+                            if isinstance(node, exp.Table)
+                            and quote_identifiers(node) == quote_identifiers(target_table)
+                            else node
+                        )
                     )
                 return self._insert_overwrite_by_condition(
                     target_table,
@@ -2920,7 +2723,7 @@ class EngineAdapter:
         Yields:
             The table expression
         """
-        name = exp.to_table(name).copy()
+        name = exp.to_table(name)
         # ensure that we use default catalog if none is not specified
         if isinstance(name, exp.Table) and not name.catalog and name.db and self.default_catalog:
             name.set("catalog", exp.parse_identifier(self.default_catalog))
