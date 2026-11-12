@@ -19,6 +19,7 @@ from sqlglot.optimizer.qualify_columns import quote_identifiers
 
 from sqlmesh.core.dialect import (
     DORIS_TIMESTAMPTZ_MIN_VERSION,
+    doris_supports_qualified_excluded_trigger_tables,
     doris_supports_timestamptz,
     to_schema,
 )
@@ -2039,6 +2040,10 @@ class DorisEngineAdapter(
         if cached_version is None:
             return doris_supports_timestamptz(self.TIMESTAMPTZ_MIN_VERSION)
         return doris_supports_timestamptz(cached_version)
+
+    def _supports_qualified_excluded_trigger_tables(self) -> bool:
+        cached_version = getattr(self, "_doris_version", None)
+        return doris_supports_qualified_excluded_trigger_tables(cached_version)
 
     def _resolve_sync_mv_source_from_metadata(
         self,
@@ -4743,7 +4748,7 @@ class DorisEngineAdapter(
             thread_state.replace_query_target = prev_replace_query_target
             thread_state.replace_query_precreated = prev_replace_query_precreated
 
-    def _get_doris_version(self) -> t.Optional[t.Tuple[int, int]]:
+    def _get_doris_version(self) -> t.Optional[t.Tuple[int, ...]]:
         cached = getattr(self, "_doris_version", None)
         if cached is not None:
             return cached
@@ -4760,23 +4765,28 @@ class DorisEngineAdapter(
         texts = [_decoded_str(v) for v in row if v is not None]
         for text in texts:
             m = re.search(
-                r"doris[-_\s]*(?:version\s*)?(?:doris[-_\s]*)?(\d+)\.(\d+)",
+                r"doris[-_\s]*(?:version\s*)?(?:doris[-_\s]*)?(\d+)\.(\d+)(?:\.(\d+))?",
                 text,
                 re.IGNORECASE,
             )
             if m:
-                self._doris_version: t.Optional[t.Tuple[int, int]] = (
-                    int(m.group(1)),
-                    int(m.group(2)),
+                self._doris_version: t.Optional[t.Tuple[int, ...]] = (
+                    (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    if m.group(3) is not None
+                    else (int(m.group(1)), int(m.group(2)))
                 )
                 return self._doris_version
         for text in texts:
             if text.strip() == "5.7.99" and len(texts) > 1:
                 continue
-            m = re.search(r"(\d+)\.(\d+)", text)
+            m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
             if m:
-                ver = (int(m.group(1)), int(m.group(2)))
-                if ver != (5, 7):
+                ver: t.Tuple[int, ...] = (
+                    (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    if m.group(3) is not None
+                    else (int(m.group(1)), int(m.group(2)))
+                )
+                if ver[:2] != (5, 7):
                     self._doris_version = ver
                     return self._doris_version
         return None
@@ -7948,11 +7958,24 @@ class DorisEngineAdapter(
             raw_str = self._extract_str_value(value)
             val_str = raw_str if raw_str is not None else str(value)
             if key == "excluded_trigger_tables" and val_str:
-                val_str = ",".join(
-                    re.sub(r"(?i)^`?internal`?\.", "", part.strip())
-                    for part in val_str.split(",")
-                    if part.strip()
-                )
+                supports_qualified = self._supports_qualified_excluded_trigger_tables()
+                cleaned_parts: t.List[str] = []
+                for part in val_str.split(","):
+                    stripped = part.strip()
+                    if not stripped:
+                        continue
+                    without_internal = re.sub(r"(?i)^`?internal`?\.", "", stripped)
+                    if not supports_qualified:
+                        tbl = exp.to_table(stripped, dialect=self.dialect)
+                        if tbl.catalog and tbl.catalog.lower() != "internal":
+                            raise SQLMeshError(
+                                f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
+                                f"got '{stripped}'."
+                            )
+                        cleaned_parts.append(tbl.name or without_internal)
+                    else:
+                        cleaned_parts.append(without_internal)
+                val_str = ",".join(cleaned_parts)
             str_literal = exp.Literal.string(val_str)
             expressions.append(exp.Property(this=exp.Literal.string(str(key)), value=str_literal))
         return expressions

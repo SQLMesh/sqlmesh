@@ -3300,7 +3300,10 @@ def test_union_time_transform_delete_agg_ctas_mv_df_order_and_limit_fold(
     ]
 
     # 11. `DorisConnectionConfig` with `ssl=True` populates a non-empty `ssl` dict so PyMySQL enables TLS.
-    mocker.patch("sqlmesh.core.config.connection.importlib.import_module")
+    mocker.patch(
+        "sqlmesh.core.config.connection.importlib.import_module",
+        return_value=mocker.MagicMock(VERSION_STRING="1.2.0"),
+    )
     ssl_conn_cfg = DorisConnectionConfig(host="fe.internal", user="root", ssl=True)
     assert ssl_conn_cfg._static_connection_kwargs["ssl"] == {"check_hostname": False}
     assert bool(ssl_conn_cfg._static_connection_kwargs["ssl"]) is True
@@ -3423,7 +3426,10 @@ def test_doris_connection_config_tls_matrix(mocker: MockerFixture):
     from sqlmesh.core.config.connection import DorisConnectionConfig
     from sqlmesh.utils.errors import ConfigError
 
-    mocker.patch("sqlmesh.core.config.connection.importlib.import_module")
+    mocker.patch(
+        "sqlmesh.core.config.connection.importlib.import_module",
+        return_value=mocker.MagicMock(VERSION_STRING="1.2.0"),
+    )
 
     # 1. `ssl_verify_identity=True` requires `ssl_ca` (or `ssl.ca` / `ssl.capath`) because PyMySQL
     #    disables hostname verification when no CA is configured; with `ssl_ca`, it populates `check_hostname=True`.
@@ -4297,6 +4303,7 @@ def test_doris_sync_mv_source_tables_persistence_and_isolation(
 
     # 4. `DorisConnectionConfig._connection_factory` enforces TLS when SSL options are configured
     pymysql = pytest.importorskip("pymysql")
+    mocker.patch.object(pymysql, "VERSION_STRING", "1.2.0", create=True)
 
     tls_cfg = DorisConnectionConfig(
         host="fe.doris.cluster",
@@ -6235,4 +6242,39 @@ def test_doris_audit_fixes_and_docs_models(
         dialect="doris",
         default_catalog="lake_a",
     ) == exp.Literal.string("lake_a.sqlmesh__db.db__upstream_model__999")
+    assert _resolve_model_refs_to_physical_tables(
+        exp.Literal.string("db.upstream_model"),
+        table_mapping={
+            '"internal"."db"."upstream_model"': "internal.sqlmesh__db.db__upstream_model__999",
+        },
+        dialect="doris",
+        default_catalog="internal",
+        doris_version=(2, 1, 9),
+        property_name="excluded_trigger_tables",
+    ) == exp.Literal.string("db__upstream_model__999")
+    with pytest.raises(SQLMeshError, match="Doris 2.1.10\\+"):
+        _resolve_model_refs_to_physical_tables(
+            exp.Literal.string("db.upstream_model"),
+            table_mapping={
+                '"lake_a"."db"."upstream_model"': "lake_a.sqlmesh__db.db__upstream_model__999",
+            },
+            dialect="doris",
+            default_catalog="lake_a",
+            doris_version=(2, 1, 9),
+            property_name="excluded_trigger_tables",
+        )
+    v219_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    v219_adapter._doris_version = (2, 1, 9)
+    assert v219_adapter._properties_to_expressions(
+        {"excluded_trigger_tables": exp.Literal.string("internal.db.t1,db.t2")}
+    ) == [
+        exp.Property(
+            this=exp.Literal.string("excluded_trigger_tables"),
+            value=exp.Literal.string("t1,t2"),
+        )
+    ]
+    with pytest.raises(SQLMeshError, match="Doris 2.1.10\\+"):
+        v219_adapter._properties_to_expressions(
+            {"excluded_trigger_tables": exp.Literal.string("lake_a.db.t1")}
+        )
     assert to_sql_calls(existing_ref_adapter) == []

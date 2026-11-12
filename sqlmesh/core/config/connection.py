@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 import re
+import types
 import typing as t
 from enum import Enum
 from functools import partial
@@ -2770,8 +2771,64 @@ class DorisConnectionConfig(ConnectionConfig):
     DIALECT: t.ClassVar[t.Literal["doris"]] = "doris"
     DISPLAY_NAME: t.ClassVar[t.Literal["Apache Doris"]] = "Apache Doris"
     DISPLAY_ORDER: t.ClassVar[t.Literal[20]] = 20
+    MIN_PYMYSQL_VERSION: t.ClassVar[t.Tuple[int, int, int]] = (1, 2, 0)
+    _base_engine_import_validator: t.ClassVar[t.Callable] = staticmethod(
+        _get_engine_import_validator("pymysql", "doris", decorate=False)
+    )
 
-    _engine_import_validator = _get_engine_import_validator("pymysql", "doris")
+    @classmethod
+    def _validate_pymysql_version(cls, pymysql_module: t.Any = None) -> None:
+        if pymysql_module is None:
+            pymysql_module = importlib.import_module("pymysql")
+        raw_version: t.Optional[str] = None
+        version_parts: t.Optional[t.Tuple[int, ...]] = None
+
+        version_string = getattr(pymysql_module, "VERSION_STRING", None)
+        version_tuple = getattr(pymysql_module, "VERSION", None)
+        if isinstance(version_string, str) and version_string.strip():
+            raw_version = version_string.strip()
+        elif isinstance(version_tuple, tuple):
+            numeric_prefix: t.List[int] = []
+            for part in version_tuple:
+                if isinstance(part, int) and not isinstance(part, bool):
+                    numeric_prefix.append(part)
+                else:
+                    break
+            if numeric_prefix:
+                version_parts = tuple(numeric_prefix)
+                raw_version = ".".join(str(p) for p in numeric_prefix)
+        elif isinstance(pymysql_module, types.ModuleType):
+            from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+            try:
+                raw_version = pkg_version("PyMySQL")
+            except PackageNotFoundError:
+                raw_version = None
+
+        if version_parts is None and raw_version:
+            matched_nums = [int(m) for m in re.findall(r"\d+", raw_version)[:3]]
+            if matched_nums:
+                version_parts = tuple(matched_nums)
+
+        if version_parts is not None and (*version_parts, 0, 0)[:3] < cls.MIN_PYMYSQL_VERSION:
+            min_ver_str = ".".join(str(p) for p in cls.MIN_PYMYSQL_VERSION)
+            raise ConfigError(
+                f"The 'doris' engine requires 'pymysql>={min_ver_str}', but found '{raw_version or version_parts}'. "
+                'Please upgrade by running: `pip install --upgrade "sqlmesh[doris]"`. '
+                "Older PyMySQL releases can transmit authentication packets before aborting when TLS is requested "
+                "and the server does not advertise TLS."
+            )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _engine_import_validator(cls, data: t.Any) -> t.Any:
+        check_import = (
+            str_to_bool(str(data.get("check_import", True))) if isinstance(data, dict) else True
+        )
+        data = cls._base_engine_import_validator(cls, data)
+        if check_import:
+            cls._validate_pymysql_version()
+        return data
 
     @field_validator("session_variables", mode="after")
     @classmethod
@@ -2963,6 +3020,7 @@ class DorisConnectionConfig(ConnectionConfig):
             return connect
 
         def connect_with_required_tls(**kwargs: t.Any) -> t.Any:
+            self._validate_pymysql_version()
             conn = connect(**kwargs)
             if not getattr(conn, "_secure", False):
                 try:

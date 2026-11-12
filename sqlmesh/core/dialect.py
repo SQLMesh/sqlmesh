@@ -977,12 +977,24 @@ def _doris_parse_alter_drop(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr],
 
 
 DORIS_TIMESTAMPTZ_MIN_VERSION: t.Tuple[int, int, int] = (4, 1, 0)
+DORIS_QUALIFIED_EXCLUDED_TRIGGER_TABLES_MIN_VERSION: t.Tuple[int, int, int] = (2, 1, 10)
 
 
 def doris_supports_timestamptz(version: t.Optional[t.Tuple[int, ...]] = None) -> bool:
     if version is None:
         return True
     return (*version, 0, 0)[:3] >= DORIS_TIMESTAMPTZ_MIN_VERSION
+
+
+def doris_supports_qualified_excluded_trigger_tables(
+    version: t.Optional[t.Tuple[int, ...]] = None,
+) -> bool:
+    if version is None:
+        return True
+    padded = (*version, 0, 0)[:3]
+    if padded[:2] == (3, 0):
+        return padded >= (3, 0, 6)
+    return padded >= DORIS_QUALIFIED_EXCLUDED_TRIGGER_TABLES_MIN_VERSION
 
 
 def _doris_datatype_sql(self: Generator, expression: exp.DataType) -> str:

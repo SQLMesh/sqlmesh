@@ -735,12 +735,15 @@ class _Model(ModelMeta, frozen=True):
                 (render_kwargs.get("snapshots") or {}).values(),
                 render_kwargs.get("deployability_index"),
             )
+            doris_version = getattr(engine_adapter, "_doris_version", None)
             for key in keys_to_resolve:
                 rendered[key] = _resolve_model_refs_to_physical_tables(
                     rendered[key],
                     table_mapping,
                     self.dialect,
                     default_catalog=self.default_catalog,
+                    doris_version=doris_version,
+                    property_name=key,
                 )
 
         return rendered
@@ -2837,6 +2840,8 @@ def _resolve_model_refs_to_physical_tables(
     table_mapping: t.Dict[str, str],
     dialect: DialectType,
     default_catalog: t.Optional[str] = None,
+    doris_version: t.Optional[t.Tuple[int, ...]] = None,
+    property_name: t.Optional[str] = None,
 ) -> exp.Literal:
     """Resolve managed-model references in a property value to their physical table names.
 
@@ -2877,7 +2882,19 @@ def _resolve_model_refs_to_physical_tables(
             physical = table_mapping.get(exp.table_name(table, identify=True))
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
-        if strip_catalog and (dialect != "doris" or resolved_table.catalog.lower() == "internal"):
+        if (
+            dialect == "doris"
+            and property_name in (None, "excluded_trigger_tables")
+            and not d.doris_supports_qualified_excluded_trigger_tables(doris_version)
+        ):
+            if resolved_table.catalog and resolved_table.catalog.lower() != "internal":
+                raise SQLMeshError(
+                    f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
+                    f"got '{exp.table_name(resolved_table, identify=False)}'."
+                )
+            resolved_table.set("catalog", None)
+            resolved_table.set("db", None)
+        elif strip_catalog and (dialect != "doris" or resolved_table.catalog.lower() == "internal"):
             resolved_table.set("catalog", None)
         return exp.table_name(resolved_table, identify=False)
 

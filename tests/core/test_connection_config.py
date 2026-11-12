@@ -2791,3 +2791,23 @@ def test_doris(make_config):
             session_variables={"timeout": float("nan")},
             check_import=False,
         )
+
+    import pymysql
+
+    with patch.object(pymysql, "VERSION_STRING", "1.1.1", create=True):
+        with pytest.raises(ConfigError, match="requires 'pymysql>=1.2.0', but found '1.1.1'"):
+            make_config(
+                type="doris",
+                host="doris-fe",
+                user="admin",
+                check_import=True,
+            )
+
+    with patch.object(pymysql, "VERSION_STRING", "1.2.0", create=True):
+        valid_ver_cfg = make_config(
+            type="doris",
+            host="doris-fe",
+            user="admin",
+            check_import=True,
+        )
+        assert isinstance(valid_ver_cfg, DorisConnectionConfig)
