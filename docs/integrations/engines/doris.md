@@ -897,7 +897,8 @@ MODEL (
     storage_format = 'V3',
     -- Use 'size_based' on Merge-on-Write UNIQUE KEY tables ('time_series' is supported on DUPLICATE KEY append/log tables)
     compaction_policy = 'size_based',
-    -- Sequence column prevents out-of-order updates with lower sequence values from overwriting newer rows
+    -- Sequence column prevents out-of-order updates with lower sequence values from overwriting newer rows;
+    -- use DATETIME(6) (or a strictly ordered monotonic integer sequence) to preserve subsecond ordering
     'function_column.sequence_col' = 'updated_at'
   )
 );
@@ -906,7 +907,7 @@ SELECT
   log_id::BIGINT AS log_id,
   message::STRING AS message,
   embedding::ARRAY<FLOAT> AS embedding,
-  updated_at::DATETIME AS updated_at,
+  updated_at::DATETIME(6) AS updated_at,
   created_at::DATETIME(6) AS created_at
 FROM raw.logs;
 

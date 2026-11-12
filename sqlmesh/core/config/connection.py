@@ -2792,20 +2792,61 @@ class DorisConnectionConfig(ConnectionConfig):
 
     @property
     def _static_connection_kwargs(self) -> t.Dict[str, t.Any]:
+        import ssl as ssl_lib
+
         kwargs: t.Dict[str, t.Any] = {
             "autocommit": True,
             "charset": self.charset or "utf8mb4",
             "local_infile": False,
         }
+        raw_verify_mode = self.ssl.get("verify_mode") if isinstance(self.ssl, dict) else None
+        if raw_verify_mode is not None:
+            is_valid_raw_verify_mode = (
+                isinstance(raw_verify_mode, bool)
+                or (
+                    isinstance(raw_verify_mode, int)
+                    and raw_verify_mode
+                    in (
+                        ssl_lib.CERT_NONE,
+                        ssl_lib.CERT_OPTIONAL,
+                        ssl_lib.CERT_REQUIRED,
+                    )
+                )
+                or (
+                    isinstance(raw_verify_mode, str)
+                    and raw_verify_mode.strip().lower()
+                    in (
+                        "false",
+                        "0",
+                        "no",
+                        "none",
+                        "optional",
+                        "cert_optional",
+                        "required",
+                        "cert_required",
+                        "true",
+                        "1",
+                        "yes",
+                    )
+                )
+            )
+            if not is_valid_raw_verify_mode:
+                raise ConfigError(
+                    f"Invalid Doris `ssl.verify_mode` value: {raw_verify_mode!r}. "
+                    "Expected a boolean, `ssl.VerifyMode`, or one of "
+                    "'none', 'optional', 'required', 'true', 'false'."
+                )
         ssl_dict_requests_verification = isinstance(self.ssl, dict) and (
             bool(self.ssl.get("check_hostname"))
             or (
-                self.ssl.get("verify_mode") is not None
-                and self.ssl.get("verify_mode") is not False
+                raw_verify_mode is not None
+                and raw_verify_mode is not False
                 and not (
-                    isinstance(self.ssl.get("verify_mode"), str)
-                    and str(self.ssl.get("verify_mode")).strip().lower()
-                    in ("false", "0", "no", "none")
+                    not isinstance(raw_verify_mode, bool) and raw_verify_mode == ssl_lib.CERT_NONE
+                )
+                and not (
+                    isinstance(raw_verify_mode, str)
+                    and raw_verify_mode.strip().lower() in ("false", "0", "no", "none")
                 )
             )
         )
@@ -2847,9 +2888,16 @@ class DorisConnectionConfig(ConnectionConfig):
             if self.ssl_verify_identity is not None:
                 ssl_config["check_hostname"] = bool(self.ssl_verify_identity)
             verify_mode = ssl_config.get("verify_mode")
-            if verify_mode is False or (
-                isinstance(verify_mode, str)
-                and verify_mode.strip().lower() in ("false", "0", "no", "none")
+            if isinstance(verify_mode, str):
+                verify_mode = verify_mode.strip()
+                ssl_config["verify_mode"] = verify_mode
+            if (
+                verify_mode is False
+                or (not isinstance(verify_mode, bool) and verify_mode == ssl_lib.CERT_NONE)
+                or (
+                    isinstance(verify_mode, str)
+                    and verify_mode.lower() in ("false", "0", "no", "none")
+                )
             ):
                 if hostname_requested:
                     raise ConfigError(

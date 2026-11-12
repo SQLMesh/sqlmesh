@@ -2875,7 +2875,7 @@ def _resolve_model_refs_to_physical_tables(
             strip_catalog = bool(physical)
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
-        if strip_catalog:
+        if strip_catalog and (dialect != "doris" or resolved_table.catalog.lower() == "internal"):
             resolved_table.set("catalog", None)
         return exp.table_name(resolved_table, identify=False)
 

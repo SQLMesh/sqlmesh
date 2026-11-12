@@ -6163,4 +6163,74 @@ def test_doris_audit_fixes_and_docs_models(
             parse_one("SELECT a FROM test", read="doris"),
             target_columns_to_types={"a": exp.DataType.build("INT", dialect="doris")},
         )
+
+    # 12. With `pre_ping=True`, if `ping()` closes the cursor and `_cursor_init` switches the new cursor back
+    #     to the configured catalog (`internal`), both `_execute` and `_fetch_native_df` restore `_active_catalog`.
+    pre_ping_cursors: t.List[t.Any] = []
+
+    def _pre_ping_conn_factory() -> t.Any:
+        conn = mocker.MagicMock()
+
+        def _make_cursor() -> t.Any:
+            cur = mocker.MagicMock()
+            pre_ping_cursors.append(cur)
+            return cur
+
+        conn.cursor.side_effect = _make_cursor
+        return conn
+
+    def _cursor_init_internal(cur: t.Any) -> None:
+        cur.execute("SWITCH `internal`")
+
+    pre_ping_adapter = DorisEngineAdapter(
+        _pre_ping_conn_factory,
+        multithreaded=False,
+        cursor_init=_cursor_init_internal,
+        pre_ping=True,
+        catalog="internal",
+    )
+    mocker.patch.object(
+        pre_ping_adapter,
+        "ping",
+        side_effect=lambda: pre_ping_adapter._connection_pool.close_cursor(),
+    )
+    pre_ping_adapter.set_current_catalog("iceberg_cat")
+    pre_ping_adapter.execute("SELECT 1")
+    assert [c[0][0] for c in pre_ping_cursors[-1].execute.call_args_list] == [
+        "SWITCH `internal`",
+        "SWITCH `iceberg_cat`",
+        "SELECT 1",
+    ]
+
+    super_fetch_pre_ping = mocker.patch(
+        "sqlmesh.core.engine_adapter.mixins.PandasNativeFetchDFSupportMixin._fetch_native_df",
+        return_value=pd.DataFrame({"id": [1]}),
+    )
+    pre_ping_adapter._fetch_native_df("SELECT 1 AS id")
+    assert super_fetch_pre_ping.call_count == 1
+    assert [c[0][0] for c in pre_ping_cursors[-1].execute.call_args_list] == [
+        "SWITCH `internal`",
+        "SWITCH `iceberg_cat`",
+    ]
+
+    # 13. `_resolve_model_refs_to_physical_tables` strips `internal` for Doris warehouse-local references
+    #     but preserves external catalog qualification when `default_catalog` is an external Doris catalog.
+    from sqlmesh.core.model.definition import _resolve_model_refs_to_physical_tables
+
+    assert _resolve_model_refs_to_physical_tables(
+        exp.Literal.string("db.upstream_model"),
+        table_mapping={
+            '"internal"."db"."upstream_model"': "internal.sqlmesh__db.db__upstream_model__999"
+        },
+        dialect="doris",
+        default_catalog="internal",
+    ) == exp.Literal.string("sqlmesh__db.db__upstream_model__999")
+    assert _resolve_model_refs_to_physical_tables(
+        exp.Literal.string("db.upstream_model"),
+        table_mapping={
+            '"lake_a"."db"."upstream_model"': "lake_a.sqlmesh__db.db__upstream_model__999"
+        },
+        dialect="doris",
+        default_catalog="lake_a",
+    ) == exp.Literal.string("lake_a.sqlmesh__db.db__upstream_model__999")
     assert to_sql_calls(existing_ref_adapter) == []

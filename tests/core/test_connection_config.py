@@ -2662,6 +2662,27 @@ def test_doris(make_config):
         "check_hostname": False,
     }
 
+    ssl_dict_invalid_verify_mode = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"verify_mode": "requried"},
+        check_import=False,
+    )
+    with pytest.raises(ConfigError, match="Invalid Doris `ssl.verify_mode` value"):
+        _ = ssl_dict_invalid_verify_mode._static_connection_kwargs
+
+    ssl_dict_valid_verify_mode = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"verify_mode": " required "},
+        check_import=False,
+    )
+    assert ssl_dict_valid_verify_mode._static_connection_kwargs["ssl"] == {
+        "verify_mode": "required",
+    }
+
     ssl_disabled_verify_identity = make_config(
         type="doris",
         host="doris-fe",

@@ -288,11 +288,11 @@ class DorisEngineAdapter(
         self._get_thread_state().active_catalog = value
 
     @property
-    def _active_catalog_conn_token(self) -> t.Optional[t.Tuple[int, int]]:
+    def _active_catalog_conn_token(self) -> t.Optional[t.Tuple[int, int, int]]:
         return getattr(self._get_thread_state(), "active_catalog_conn_token", None)
 
     @_active_catalog_conn_token.setter
-    def _active_catalog_conn_token(self, value: t.Optional[t.Tuple[int, int]]) -> None:
+    def _active_catalog_conn_token(self, value: t.Optional[t.Tuple[int, int, int]]) -> None:
         self._get_thread_state().active_catalog_conn_token = value
 
     @property
@@ -353,8 +353,12 @@ class DorisEngineAdapter(
         except Exception:
             pass
 
-    def _current_conn_token(self) -> t.Tuple[int, int]:
-        return (self._pool_generation, id(self._connection_pool.get()))
+    def _current_conn_token(self) -> t.Tuple[int, int, int]:
+        return (
+            self._pool_generation,
+            id(self._connection_pool.get()),
+            id(self._connection_pool.get_cursor()),
+        )
 
     def _mark_catalog_synced(self, catalog: t.Optional[str] = None) -> None:
         if catalog is not None:
@@ -391,7 +395,7 @@ class DorisEngineAdapter(
         new_gen = self._pool_generation + 1
         self._pool_generation = new_gen
         if calling_token is not None and self._active_catalog is not None:
-            updated_token = (new_gen, calling_token[1])
+            updated_token = (new_gen, calling_token[1], calling_token[2])
             self._active_catalog_conn_token = updated_token
             if isinstance(self._connection_pool, ConnectionPool):
                 self._connection_pool.set_attribute("_doris_catalog_token", updated_token)
@@ -723,6 +727,7 @@ class DorisEngineAdapter(
         if not self._should_restore_catalog():
             return
         try:
+            self._connection_pool.get_cursor()
             self._restore_active_catalog_on_reconnect(sql)
         except Exception as e:
             is_disconnect, is_timeout, err_name, err_code = self._extract_disconnect_info(e)
@@ -774,6 +779,9 @@ class DorisEngineAdapter(
                 logger.info("Connection to the database was lost. Reconnecting...")
                 self._connection_pool.close()
                 self._needs_catalog_restore = True
+            else:
+                if self._active_catalog:
+                    self._needs_catalog_restore = True
         try:
             self._connection_pool.get_cursor()
             self._ensure_catalog_restored(sql_str)
@@ -1054,6 +1062,9 @@ class DorisEngineAdapter(
                 logger.info("Connection to the database was lost. Reconnecting...")
                 self._connection_pool.close()
                 self._needs_catalog_restore = True
+            else:
+                if self._active_catalog:
+                    self._needs_catalog_restore = True
         self._ensure_catalog_restored(sql)
         try:
             super()._execute(sql, track_rows_processed=track_rows_processed, **kwargs)

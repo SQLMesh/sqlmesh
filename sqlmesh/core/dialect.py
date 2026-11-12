@@ -734,7 +734,13 @@ def _doris_parse_version(self: Parser) -> t.Optional[exp.Version]:
                 ref_arg = ref_args[0]
                 if isinstance(ref_arg, exp.Identifier) and not ref_arg.quoted:
                     ref_arg = exp.var(ref_arg.name)
-                return self.expression(exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg))
+                branch_ver = self.expression(
+                    exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg)
+                )
+                trailing_ver = self.__parse_version()  # type: ignore
+                if trailing_ver is not None:
+                    branch_ver.set("version", trailing_ver)
+                return branch_ver
         self._retreat(saved_idx)
     return None
 
@@ -761,12 +767,12 @@ def _doris_parse_table(
         parse_partition=parse_partition,
         consume_pipe=consume_pipe,
     )
-    if (
-        isinstance(table, exp.Table)
-        and not table.args.get("version")
-        and table.meta.get("doris_version")
-    ):
-        table.set("version", table.meta.pop("doris_version"))
+    if isinstance(table, exp.Table) and table.meta.get("doris_version"):
+        branch_ver = table.meta.pop("doris_version")
+        existing_ver = table.args.get("version")
+        if isinstance(existing_ver, exp.Version) and existing_ver is not branch_ver:
+            branch_ver.set("version", existing_ver)
+        table.set("version", branch_ver)
     return table
 
 
@@ -783,7 +789,11 @@ def _doris_version_sql(self: Generator, expression: exp.Version) -> str:
             and not getattr(expr_node, "quoted", False)
             else self.sql(expr_node)
         )
-        return f"@{this_upper.lower()}({expr_sql})"
+        branch_sql = f"@{this_upper.lower()}({expr_sql})"
+        chained_ver = expression.args.get("version")
+        if isinstance(chained_ver, exp.Version):
+            return f"{branch_sql} {self.sql(chained_ver)}"
+        return branch_sql
     kind = expression.text("kind")
     this_sql = "TIME" if this_upper in ("TIMESTAMP", "TIME") else this_upper
     return f"FOR {this_sql} {kind} {self.sql(expression, 'expression')}"

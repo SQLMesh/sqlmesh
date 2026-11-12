@@ -1692,3 +1692,23 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         dialect="doris",
     )
     assert mixed_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('id', 1, 'col2', 'a')"
+
+    branch_and_version_ast = d.parse_one(
+        "SELECT * FROM lance_catalog.db.tbl@branch(dev) FOR VERSION AS OF 2",
+        dialect="doris",
+    )
+    assert (
+        branch_and_version_ast.sql("doris")
+        == "SELECT * FROM lance_catalog.db.tbl @branch(dev) FOR VERSION AS OF 2"
+    )
+    roundtrip_ast = d.parse_one(branch_and_version_ast.sql("doris"), dialect="doris")
+    assert roundtrip_ast == branch_and_version_ast
+    assert (
+        roundtrip_ast.sql("doris")
+        == "SELECT * FROM lance_catalog.db.tbl @branch(dev) FOR VERSION AS OF 2"
+    )
+    versions = list(roundtrip_ast.find_all(exp.Version))
+    assert [(v.name.upper(), v.expression.sql("doris")) for v in versions] == [
+        ("BRANCH", "dev"),
+        ("VERSION", "2"),
+    ]
