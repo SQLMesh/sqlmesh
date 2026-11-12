@@ -1657,3 +1657,24 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
 
     assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
     assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"
+
+    negated_match_ast = d.parse_one(
+        "SELECT * FROM docs WHERE body NOT MATCH_ANY 'error warning'",
+        dialect="doris",
+    )
+    assert (
+        negated_match_ast.sql("doris")
+        == "SELECT * FROM docs WHERE NOT body MATCH_ANY 'error warning'"
+    )
+
+    aliased_struct_ast = d.parse_one(
+        "SELECT STRUCT(1 AS id, 'a' AS name)",
+        dialect="doris",
+    )
+    assert aliased_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('id', 1, 'name', 'a')"
+
+    mixed_struct_ast = d.parse_one(
+        "SELECT STRUCT(1 AS id, 'a')",
+        dialect="doris",
+    )
+    assert mixed_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('id', 1, 'col2', 'a')"

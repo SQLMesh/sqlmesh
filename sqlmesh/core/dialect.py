@@ -658,7 +658,7 @@ _DORIS_MATCH_OPS = {
 
 
 def _doris_parse_range(self: Parser, this: t.Optional[exp.Expr] = None) -> t.Optional[exp.Expr]:
-    this = self.__parse_range(this)  # type: ignore
+    this = this or self._parse_bitwise()
     if this is not None:
         idx = self._index
         negated = self._match(TokenType.NOT)
@@ -666,13 +666,12 @@ def _doris_parse_range(self: Parser, this: t.Optional[exp.Expr] = None) -> t.Opt
             op_name = self._curr.text.upper()
             self._advance()
             rhs = self._parse_bitwise()
-            expr: exp.Expr = self.expression(exp.Anonymous(this=op_name, expressions=[this, rhs]))
+            this = self.expression(exp.Anonymous(this=op_name, expressions=[this, rhs]))
             if negated:
-                expr = self.expression(exp.Not(this=expr))
-            return expr
-        if negated:
+                this = self.expression(exp.Not(this=this))
+        elif negated:
             self._retreat(idx)
-    return this
+    return self.__parse_range(this)  # type: ignore
 
 
 _doris_parse_range.__name__ = "_parse_range"
@@ -962,9 +961,9 @@ def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
 
 
 def _doris_struct_sql(self: Generator, expression: exp.Struct) -> str:
-    if any(isinstance(e, exp.PropertyEQ) for e in expression.expressions):
+    if any(isinstance(e, (exp.PropertyEQ, exp.Alias)) for e in expression.expressions):
         args: t.List[str] = []
-        for e in expression.expressions:
+        for idx, e in enumerate(expression.expressions):
             if isinstance(e, exp.PropertyEQ):
                 key_sql = (
                     self.sql(exp.Literal.string(e.this.name))
@@ -973,11 +972,14 @@ def _doris_struct_sql(self: Generator, expression: exp.Struct) -> str:
                 )
                 args.append(key_sql)
                 args.append(self.sql(e.expression))
+            elif isinstance(e, exp.Alias):
+                args.append(self.sql(exp.Literal.string(e.alias)))
+                args.append(self.sql(e.this))
             else:
+                args.append(self.sql(exp.Literal.string(f"col{idx + 1}")))
                 args.append(self.sql(e))
         return self.func("NAMED_STRUCT", *args)
-    values = [e.this if isinstance(e, exp.Alias) else e for e in expression.expressions]
-    return self.func("STRUCT", *values)
+    return self.func("STRUCT", *expression.expressions)
 
 
 def _parse_if(self: Parser) -> t.Optional[exp.Expr]:

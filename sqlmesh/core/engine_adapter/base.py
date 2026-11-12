@@ -529,7 +529,8 @@ class EngineAdapter:
         quoted_target = quote_identifiers(target_table.copy())
         default_catalog: t.Optional[str] = None
         default_catalog_loaded = False
-        qualified_target: t.Optional[exp.Table] = None
+        default_db: t.Optional[str] = None
+        default_db_loaded = False
 
         def _table_parts(
             table: exp.Table,
@@ -572,20 +573,57 @@ class EngineAdapter:
             return False
 
         def _is_target_table(node: exp.Expr) -> bool:
-            nonlocal default_catalog, default_catalog_loaded, qualified_target
+            nonlocal default_catalog, default_catalog_loaded, default_db, default_db_loaded
             if not isinstance(node, exp.Table):
                 return False
             quoted_node = quote_identifiers(node.copy())
             if _is_cte_reference(node, quoted_node):
                 return False
-            if _table_parts(quoted_node) == _table_parts(quoted_target):
+            target_to_check = quoted_target
+            if _table_parts(quoted_node) == _table_parts(target_to_check):
                 return True
+            if quoted_node.this != target_to_check.this or quoted_node.args.get(
+                "version"
+            ) != target_to_check.args.get("version"):
+                return False
+            if bool(quoted_node.args.get("db")) != bool(target_to_check.args.get("db")):
+                if (not quoted_node.args.get("db") and quoted_node.args.get("catalog")) or (
+                    not target_to_check.args.get("db") and target_to_check.args.get("catalog")
+                ):
+                    return False
+                if not default_db_loaded:
+                    default_db_loaded = True
+                    default_db = getattr(self, "_active_database", None)
+                    if not default_db and callable(getattr(self, "get_current_database", None)):
+                        try:
+                            current_db = getattr(self, "get_current_database")()
+                            if isinstance(current_db, str) and current_db:
+                                default_db = current_db
+                        except Exception:
+                            pass
+                    if not default_db:
+                        for key in ("database", "schema"):
+                            val = self._extra_config.get(key)
+                            if isinstance(val, str) and val:
+                                default_db = val
+                                break
+                if not default_db:
+                    raise SQLMeshError(
+                        f"Cannot disambiguate unqualified schema reference '{node.sql(dialect=self.dialect)}' "
+                        f"against target '{target_table.sql(dialect=self.dialect)}' without an active or default database."
+                    )
+                quoted_default_db = quote_identifiers(exp.parse_identifier(default_db))
+                if not quoted_node.args.get("db"):
+                    quoted_node.set("db", quoted_default_db)
+                else:
+                    target_to_check = target_to_check.copy()
+                    target_to_check.set("db", quoted_default_db.copy())
+                if _table_parts(quoted_node) == _table_parts(target_to_check):
+                    return True
             if (
-                quoted_node.this != quoted_target.this
-                or quoted_node.args.get("db") != quoted_target.args.get("db")
-                or quoted_node.args.get("version") != quoted_target.args.get("version")
+                quoted_node.args.get("db") != target_to_check.args.get("db")
                 or not quoted_node.args.get("db")
-                or (quoted_node.args.get("catalog") and quoted_target.args.get("catalog"))
+                or (quoted_node.args.get("catalog") and target_to_check.args.get("catalog"))
                 or self.catalog_support.is_unsupported
             ):
                 return False
@@ -611,21 +649,24 @@ class EngineAdapter:
                             default_catalog = current_cat
                     except Exception:
                         pass
-                if default_catalog:
-                    qualified_target = _qualified(target_table, default_catalog)
-            if default_catalog is None or qualified_target is None:
+            if default_catalog is None:
                 raise SQLMeshError(
                     f"Cannot disambiguate unqualified catalog reference '{node.sql(dialect=self.dialect)}' "
                     f"against target '{target_table.sql(dialect=self.dialect)}' without an active or default catalog."
                 )
-            return _table_parts(_qualified(node, default_catalog)) == _table_parts(qualified_target)
+            return _table_parts(_qualified(quoted_node, default_catalog)) == _table_parts(
+                _qualified(target_to_check, default_catalog)
+            )
 
         def _replace_target_table(node: exp.Expr, replacement_table: exp.Table) -> exp.Expr:
             if not _is_target_table(node):
                 return node
             replacement = replacement_table.copy()
-            if isinstance(node, exp.Table) and node.args.get("alias") is not None:
-                replacement.set("alias", node.args["alias"].copy())
+            if isinstance(node, exp.Table):
+                if node.args.get("alias") is not None:
+                    replacement.set("alias", node.args["alias"].copy())
+                if node.args.get("sample") is not None:
+                    replacement.set("sample", node.args["sample"].copy())
             return replacement
 
         self_referencing = any(_is_target_table(table) for table in query.find_all(exp.Table))

@@ -750,7 +750,7 @@ GROUP BY user_id, CAST(event_time AS DATE);
 
 !!! note "Automatic Physical Table Resolution & Non-Destructive Evaluation"
     - Doris materialized views are only created on initial deployment or when a rebuild is required (`RECREATE_MATERIALIZED_VIEW_ON_EVALUATION = False`), preserving MTMV refresh state across routine `sqlmesh run` invocations.
-    - When `build = 'DEFERRED'` is used on an asynchronous MTMV that also defines `audits (...)`, SQLMesh automatically submits `REFRESH MATERIALIZED VIEW <mv> AUTO` after creation. Because Doris executes MTMV refresh tasks asynchronously without blocking `REFRESH MATERIALIZED VIEW`, audits may run before the background refresh task finishes or fails; use `build = 'IMMEDIATE'` when audits require the initial refresh to complete before auditing.
+    - When `build = 'DEFERRED'` is used on an asynchronous MTMV that also defines `audits (...)`, SQLMesh automatically submits `REFRESH MATERIALIZED VIEW <mv> AUTO` after creation. Because Doris schedules and executes initial MTMV refresh tasks asynchronously for both `BUILD IMMEDIATE` and `REFRESH MATERIALIZED VIEW`, SQLMesh does not wait for the background refresh task to finish; audits that depend on populated MTMV data can therefore run against an empty view unless a refresh-status check (via `mv_infos()` or `tasks("type" = "mv")`) confirms completion before auditing.
     - When `excluded_trigger_tables` (supports a single string, comma-separated string, or tuple `('db.t1', 'db.t2')` on async MTMVs) references a SQLMesh-managed model, SQLMesh automatically resolves the model name to its underlying physical snapshot table name.
 
 ### Synchronous Materialized Views (Base-Table Rollup Indexes)

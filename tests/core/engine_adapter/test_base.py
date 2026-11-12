@@ -3439,6 +3439,31 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         'DROP TABLE IF EXISTS "dev"."db"."__temp_test_abcdefgh"',
     ]
 
+    # Database-less table reference that matches target table name raises when no default database is known
+    with pytest.raises(SQLMeshError, match="Cannot disambiguate unqualified schema reference"):
+        adapter.replace_query(
+            "db.test",
+            parse_one("SELECT a FROM test"),
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+        )
+
+    # Database-less table reference is detected as self-referencing when active/default database matches target_table.db
+    adapter._extra_config["schema"] = "db"
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM test TABLESAMPLE BERNOULLI (10)", read="trino"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "db"."test" ("a" INTEGER)',
+        'CREATE SCHEMA IF NOT EXISTS "dev"."db"',
+        'CREATE TABLE IF NOT EXISTS "dev"."db"."__temp_test_abcdefgh" AS SELECT CAST("a" AS INTEGER) AS "a" FROM (SELECT "a" FROM "db"."test") AS "_subquery"',
+        'DELETE FROM "db"."test" WHERE TRUE',
+        'INSERT INTO "db"."test" ("a") SELECT "a" FROM "dev"."db"."__temp_test_abcdefgh" TABLESAMPLE BERNOULLI (10)',
+        'DROP TABLE IF EXISTS "dev"."db"."__temp_test_abcdefgh"',
+    ]
+
 
 def test_create_table_like(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(EngineAdapter)
