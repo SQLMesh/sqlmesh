@@ -196,6 +196,12 @@ def test_materialized_view_sync(ctx: TestContext):
         },
     )
 
+    def rollup_present() -> bool:
+        rows = ctx.engine_adapter.fetchall(f"DESC {ctx.engine_adapter._to_sql(source_table)} ALL")
+        return any(bool(row and str(row[0]).strip().lower() == view.name.lower()) for row in rows)
+
+    wait_until(rollup_present, attempts=30, wait=1)
+
     def drop_view_success() -> bool:
         try:
             ctx.engine_adapter.drop_view(
@@ -212,6 +218,7 @@ def test_materialized_view_sync(ctx: TestContext):
             return False
 
     wait_until(drop_view_success, attempts=30, wait=1)
+    wait_until(lambda: not rollup_present(), attempts=30, wait=1)
 
 
 def test_materialized_view_async_mtmv(ctx: TestContext):
@@ -739,6 +746,7 @@ def test_doris_4_1_native_merge_segment_v3_and_ann_index(ctx: TestContext):
         f"INSERT INTO {ctx.engine_adapter._to_sql(merge_tbl)} (`id`, `name`, `val`) VALUES (1, 'orig_a', 10), (2, 'orig_b', 20)"
     )
     src_query = parse_one(
+        "SELECT 0 AS id, 'filtered_zero' AS name, 99 AS val UNION ALL "
         "SELECT 1 AS id, 'new_a' AS name, 15 AS val UNION ALL "
         "SELECT 2 AS id, 'new_b' AS name, 5 AS val UNION ALL "
         "SELECT 3 AS id, 'new_c' AS name, 30 AS val",

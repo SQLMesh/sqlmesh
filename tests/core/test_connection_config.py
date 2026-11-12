@@ -2792,7 +2792,7 @@ def test_doris(make_config):
             check_import=False,
         )
 
-    import pymysql
+    pymysql = pytest.importorskip("pymysql")
 
     with patch.object(pymysql, "VERSION_STRING", "1.1.1", create=True):
         with pytest.raises(ConfigError, match="requires 'pymysql>=1.2.0', but found '1.1.1'"):

@@ -444,7 +444,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_TIME_RANGE` kind a
 | Redshift   | DELETE by time range, then INSERT         |
 | Postgres   | DELETE by time range, then INSERT         |
 | DuckDB     | DELETE by time range, then INSERT         |
-| Doris      | DELETE by time range, then INSERT         |
+| Doris      | DELETE by time range, then INSERT (internal OLAP & Doris 4.1+ Iceberg v2; not supported on Hive — non-atomic: concurrent readers may observe a gap and failed inserts leave the deleted interval missing; see [Doris catalog matrix & recovery](../../integrations/engines/doris.md#supported-model-kinds-catalog-matrix)) |
 
 ## INCREMENTAL_BY_UNIQUE_KEY
 
@@ -670,7 +670,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_UNIQUE_KEY` kind a
 | Redshift   | MERGE ON unique key                 |
 | Postgres   | MERGE ON unique key                 |
 | DuckDB     | DELETE ON matched + INSERT new rows |
-| Doris      | DELETE ON matched + INSERT new rows (or native MERGE when `when_matched` / `merge_filter` is set on Doris 4.1+ internal OLAP `UNIQUE KEY` tables — external catalogs and `DUPLICATE KEY` / `AGGREGATE KEY` tables are not supported for native MERGE; direct INSERT when a sequence column is configured) |
+| Doris      | DELETE ON matched + INSERT new rows (internal OLAP & Doris 4.1+ Iceberg v2; not supported on Hive — non-atomic: concurrent readers may observe a gap and failed inserts leave deleted keys missing; see [Doris catalog matrix & recovery](../../integrations/engines/doris.md#supported-model-kinds-catalog-matrix); or single-statement native MERGE when `when_matched` / `merge_filter` is set on Doris 4.1+ internal OLAP `UNIQUE KEY` tables — external catalogs and `DUPLICATE KEY` / `AGGREGATE KEY` tables are not supported for native MERGE; direct INSERT when a sequence column is configured) |
 
 ## FULL
 Models of the `FULL` kind cause the dataset associated with a model to be fully refreshed (rewritten) upon each model evaluation.
@@ -763,7 +763,7 @@ Depending on the target engine, models of the `FULL` kind are materialized using
 | Redshift   | DROP TABLE, CREATE TABLE, INSERT |
 | Postgres   | DROP TABLE, CREATE TABLE, INSERT |
 | DuckDB     | CREATE OR REPLACE TABLE          |
-| Doris      | CREATE TABLE ... AS SELECT (new OLAP), DELETE + INSERT (existing OLAP & Iceberg), INSERT OVERWRITE (unpartitioned Hive) |
+| Doris      | CREATE TABLE ... AS SELECT (new OLAP), TRUNCATE / DELETE + INSERT (existing OLAP & Doris 4.1+ Iceberg v2 — non-atomic: concurrent readers may observe a gap and failed inserts leave the table empty; see [Doris catalog matrix & recovery](../../integrations/engines/doris.md#supported-model-kinds-catalog-matrix)), INSERT OVERWRITE (unpartitioned Hive on Doris 2.1.6+) |
 
 ## VIEW
 The model kinds described so far cause the output of a model query to be materialized and stored in a physical table.
@@ -1633,7 +1633,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_PARTITION` kind ar
 | Redshift   | DELETE by partitioning key, then INSERT |
 | Postgres   | DELETE by partitioning key, then INSERT |
 | DuckDB     | DELETE by partitioning key, then INSERT |
-| Doris      | DELETE by partitioning key, then INSERT |
+| Doris      | DELETE by partitioning key, then INSERT (internal OLAP & Doris 4.1+ Iceberg v2; not supported on Hive — non-atomic: concurrent readers may observe a gap and failed inserts leave deleted partitions missing; see [Doris catalog matrix & recovery](../../integrations/engines/doris.md#supported-model-kinds-catalog-matrix)) |
 
 ## INCREMENTAL_UNMANAGED
 
