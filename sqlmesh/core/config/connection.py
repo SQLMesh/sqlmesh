@@ -2797,6 +2797,28 @@ class DorisConnectionConfig(ConnectionConfig):
             "charset": self.charset or "utf8mb4",
             "local_infile": False,
         }
+        ssl_dict_requests_verification = isinstance(self.ssl, dict) and (
+            bool(self.ssl.get("check_hostname"))
+            or (
+                self.ssl.get("verify_mode") is not None
+                and self.ssl.get("verify_mode") is not False
+                and not (
+                    isinstance(self.ssl.get("verify_mode"), str)
+                    and str(self.ssl.get("verify_mode")).strip().lower()
+                    in ("false", "0", "no", "none")
+                )
+            )
+        )
+        if (self.ssl_disabled or self.ssl is False) and (
+            self.ssl_verify_cert is True
+            or self.ssl_verify_identity is True
+            or ssl_dict_requests_verification
+        ):
+            raise ConfigError(
+                "Doris `ssl_disabled=True` or `ssl=False` cannot be combined with "
+                "certificate or hostname verification (`ssl_verify_cert=True`, "
+                "`ssl_verify_identity=True`, or `ssl` verification settings)."
+            )
         if not self.ssl_disabled and self.ssl is not False:
             ssl_config: t.Dict[str, t.Any] = (
                 dict(self.ssl) if isinstance(self.ssl, dict) else {}  # type: ignore[arg-type]

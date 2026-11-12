@@ -3377,6 +3377,38 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         'INSERT INTO "db"."test" ("a") SELECT "a" FROM "db"."test" FOR VERSION AS OF 1',
     ]
 
+    mocker.patch.object(
+        EngineAdapter,
+        "catalog_support",
+        new_callable=mocker.PropertyMock,
+        return_value=CatalogSupport.FULL_SUPPORT,
+    )
+    adapter.cursor.execute.reset_mock()
+    mocker.patch.object(adapter, "get_current_catalog", return_value="internal")
+    adapter.replace_query(
+        "internal.db.test",
+        parse_one("SELECT a FROM db.test"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+    assert to_sql_calls(adapter) == [
+        'CREATE TABLE IF NOT EXISTS "internal"."db"."test" ("a" INT)',
+        'CREATE SCHEMA IF NOT EXISTS "internal"."db"',
+        'CREATE TABLE IF NOT EXISTS "internal"."db"."__temp_test_abcdefgh" AS SELECT CAST("a" AS INT) AS "a" FROM (SELECT "a" FROM "internal"."db"."test") AS "_subquery"',
+        'DELETE FROM "internal"."db"."test" WHERE TRUE',
+        'INSERT INTO "internal"."db"."test" ("a") SELECT "a" FROM "internal"."db"."__temp_test_abcdefgh"',
+        'DROP TABLE IF EXISTS "internal"."db"."__temp_test_abcdefgh"',
+    ]
+
+    adapter.cursor.execute.reset_mock()
+    mocker.patch.object(adapter, "get_current_catalog", return_value=None)
+    with pytest.raises(SQLMeshError, match="Cannot disambiguate unqualified catalog reference"):
+        adapter.replace_query(
+            "internal.db.test",
+            parse_one("SELECT a FROM db.test"),
+            target_columns_to_types={"a": exp.DataType.build("INT")},
+        )
+    assert to_sql_calls(adapter) == []
+
 
 def test_create_table_like(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(EngineAdapter)

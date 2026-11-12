@@ -580,21 +580,38 @@ class EngineAdapter:
                 return False
             if _table_parts(quoted_node) == _table_parts(quoted_target):
                 return True
-            if quoted_node.this != quoted_target.this or quoted_node.args.get(
-                "db"
-            ) != quoted_target.args.get("db"):
+            if (
+                quoted_node.this != quoted_target.this
+                or quoted_node.args.get("db") != quoted_target.args.get("db")
+                or quoted_node.args.get("version") != quoted_target.args.get("version")
+                or not quoted_node.args.get("db")
+                or (quoted_node.args.get("catalog") and quoted_target.args.get("catalog"))
+                or self.catalog_support.is_unsupported
+            ):
                 return False
             if not default_catalog_loaded:
-                default_catalog = self.default_catalog
                 default_catalog_loaded = True
+                default_catalog = getattr(self, "_active_catalog", None)
+                if not default_catalog:
+                    try:
+                        default_catalog = self.default_catalog
+                    except MissingDefaultCatalogError:
+                        default_catalog = None
+                if not default_catalog:
+                    try:
+                        current_cat = self.get_current_catalog()
+                        if isinstance(current_cat, str) and current_cat:
+                            default_catalog = current_cat
+                    except Exception:
+                        pass
                 if default_catalog:
                     qualified_target = _qualified(target_table, default_catalog)
-            return (
-                default_catalog is not None
-                and qualified_target is not None
-                and _table_parts(_qualified(node, default_catalog))
-                == _table_parts(qualified_target)
-            )
+            if default_catalog is None or qualified_target is None:
+                raise SQLMeshError(
+                    f"Cannot disambiguate unqualified catalog reference '{node.sql(dialect=self.dialect)}' "
+                    f"against target '{target_table.sql(dialect=self.dialect)}' without an active or default catalog."
+                )
+            return _table_parts(_qualified(node, default_catalog)) == _table_parts(qualified_target)
 
         def _replace_target_table(node: exp.Expr, replacement_table: exp.Table) -> exp.Expr:
             if not _is_target_table(node):
