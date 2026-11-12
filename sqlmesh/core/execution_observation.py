@@ -119,14 +119,33 @@ def execution_context_factory() -> t.Optional[t.Callable[[], contextvars.Context
 
 
 @contextlib.contextmanager
-def console_observer_scope(console: t.Any) -> t.Iterator[None]:
+def console_observer_scope(
+    console: t.Any, *, query_execution_context: bool = False
+) -> t.Iterator[None]:
     """Resolve once at the outer boundary; an explicit None scope disables hooks."""
     if _scoped.get():
+        observer = _observer.get()
+        if query_execution_context and observer is not None:
+            from sqlmesh.core.query_execution_context_observer import (
+                with_automatic_query_execution_observer,
+            )
+
+            automatic_observer = with_automatic_query_execution_observer(observer)
+            if automatic_observer is not observer:
+                with observer_scope(automatic_observer):
+                    yield
+                return
         yield
         return
     try:
         observer = console.get_execution_observer()
     except Exception:
         observer = None
+    if query_execution_context:
+        from sqlmesh.core.query_execution_context_observer import (
+            with_automatic_query_execution_observer,
+        )
+
+        observer = with_automatic_query_execution_observer(observer)
     with observer_scope(observer):
         yield
