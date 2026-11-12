@@ -1712,3 +1712,31 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         ("BRANCH", "dev"),
         ("VERSION", "2"),
     ]
+
+    match_analyzer_ast = d.parse_one(
+        "SELECT * FROM docs WHERE content MATCH 'hello' USING ANALYZER kw_analyzer",
+        dialect="doris",
+    )
+    assert (
+        match_analyzer_ast.sql("doris")
+        == "SELECT * FROM docs WHERE content MATCH 'hello' USING ANALYZER kw_analyzer"
+    )
+
+    insert_branch_ast = d.parse_one(
+        "INSERT INTO iceberg_tbl@branch(b1) VALUES (1, 2)",
+        dialect="doris",
+    )
+    assert insert_branch_ast.sql("doris") == "INSERT INTO iceberg_tbl @branch(b1) VALUES (1, 2)"
+    assert d.parse_one(insert_branch_ast.sql("doris"), dialect="doris") == insert_branch_ast
+
+    insert_branch_cols_ast = d.parse_one(
+        "INSERT INTO iceberg_tbl@branch(b1) (c1, c2) VALUES (1, 2)",
+        dialect="doris",
+    )
+    assert (
+        insert_branch_cols_ast.sql("doris")
+        == "INSERT INTO iceberg_tbl @branch(b1) (c1, c2) VALUES (1, 2)"
+    )
+    assert (
+        d.parse_one(insert_branch_cols_ast.sql("doris"), dialect="doris") == insert_branch_cols_ast
+    )

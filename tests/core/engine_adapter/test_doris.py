@@ -6213,14 +6213,15 @@ def test_doris_audit_fixes_and_docs_models(
         "SWITCH `iceberg_cat`",
     ]
 
-    # 13. `_resolve_model_refs_to_physical_tables` strips `internal` for Doris warehouse-local references
-    #     but preserves external catalog qualification when `default_catalog` is an external Doris catalog.
+    # 13. `_resolve_model_refs_to_physical_tables` prefers the `default_catalog` match over an unqualified
+    #     match, strips `internal` for Doris warehouse-local references, and preserves external catalog qualification.
     from sqlmesh.core.model.definition import _resolve_model_refs_to_physical_tables
 
     assert _resolve_model_refs_to_physical_tables(
         exp.Literal.string("db.upstream_model"),
         table_mapping={
-            '"internal"."db"."upstream_model"': "internal.sqlmesh__db.db__upstream_model__999"
+            '"db"."upstream_model"': "wrong_unqualified.db__upstream_model__111",
+            '"internal"."db"."upstream_model"': "internal.sqlmesh__db.db__upstream_model__999",
         },
         dialect="doris",
         default_catalog="internal",
@@ -6228,7 +6229,8 @@ def test_doris_audit_fixes_and_docs_models(
     assert _resolve_model_refs_to_physical_tables(
         exp.Literal.string("db.upstream_model"),
         table_mapping={
-            '"lake_a"."db"."upstream_model"': "lake_a.sqlmesh__db.db__upstream_model__999"
+            '"db"."upstream_model"': "wrong_unqualified.db__upstream_model__111",
+            '"lake_a"."db"."upstream_model"': "lake_a.sqlmesh__db.db__upstream_model__999",
         },
         dialect="doris",
         default_catalog="lake_a",

@@ -2865,14 +2865,16 @@ def _resolve_model_refs_to_physical_tables(
 
     def resolve(ref: str) -> str:
         table = exp.to_table(ref.strip(), dialect=dialect)
-        physical = table_mapping.get(exp.table_name(table, identify=True))
+        physical: t.Optional[str] = None
         strip_catalog = False
-        if not physical and default_catalog and not table.catalog:
+        if default_catalog and not table.catalog:
             normalized_name = d.normalize_model_name(
                 table, default_catalog=default_catalog, dialect=dialect
             )
             physical = table_mapping.get(normalized_name)
             strip_catalog = bool(physical)
+        if not physical:
+            physical = table_mapping.get(exp.table_name(table, identify=True))
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
         if strip_catalog and (dialect != "doris" or resolved_table.catalog.lower() == "internal"):

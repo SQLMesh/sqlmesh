@@ -666,7 +666,14 @@ def _doris_parse_range(self: Parser, this: t.Optional[exp.Expr] = None) -> t.Opt
             op_name = self._curr.text.upper()
             self._advance()
             rhs = self._parse_bitwise()
-            this = self.expression(exp.Anonymous(this=op_name, expressions=[this, rhs]))
+            match_exprs: t.List[t.Optional[exp.Expr]] = [this, rhs]
+            if self._match_text_seq("USING", "ANALYZER"):
+                analyzer = self._parse_string() or self._parse_id_var(any_token=True)
+                if isinstance(analyzer, exp.Identifier) and not analyzer.quoted:
+                    analyzer = exp.var(analyzer.name)
+                if analyzer is not None:
+                    match_exprs.append(analyzer)
+            this = self.expression(exp.Anonymous(this=op_name, expressions=match_exprs))
             if negated:
                 this = self.expression(exp.Not(this=this))
         elif negated:
@@ -678,10 +685,15 @@ _doris_parse_range.__name__ = "_parse_range"
 
 
 def _doris_anonymous_sql(self: Generator, expression: exp.Anonymous) -> str:
-    if expression.name.upper() in _DORIS_MATCH_OPS and len(expression.expressions) == 2:
+    if expression.name.upper() in _DORIS_MATCH_OPS and len(expression.expressions) in (2, 3):
         left = self.sql(expression.expressions[0])
         right = self.sql(expression.expressions[1])
-        return f"{left} {expression.name.upper()} {right}"
+        analyzer_sql = (
+            f" USING ANALYZER {self.sql(expression.expressions[2])}"
+            if len(expression.expressions) == 3
+            else ""
+        )
+        return f"{left} {expression.name.upper()} {right}{analyzer_sql}"
     return self.anonymous_sql(expression)
 
 
@@ -709,6 +721,29 @@ def _doris_parse_table_parts(
             table.set("this", exp.Identifier(this=real_name, quoted=False))
             table.set("version", ver)
             table.meta["doris_version"] = ver
+    elif isinstance(table.this, exp.Identifier):
+        m = re.match(r"^(.+)@(branch|tag)$", table.this.name, flags=re.IGNORECASE)
+        if m and self._match(TokenType.L_PAREN, advance=False):
+            ref_args = self._parse_wrapped_csv(lambda: self._parse_id_var(any_token=True))
+            if ref_args:
+                real_name = m.group(1)
+                ref_kind = m.group(2).upper()
+                ref_arg = ref_args[0]
+                if isinstance(ref_arg, exp.Identifier) and not ref_arg.quoted:
+                    ref_arg = exp.var(ref_arg.name)
+                ver = exp.Version(this=ref_kind, kind="AS OF", expression=ref_arg)
+                table.set("this", exp.Identifier(this=real_name, quoted=table.this.quoted))
+                table.set("version", ver)
+                table.meta["doris_version"] = ver
+        elif schema and (
+            self._match_pair(TokenType.PARAMETER, TokenType.VAR, advance=False)
+            and self._next
+            and self._next.text.upper() in ("BRANCH", "TAG")
+        ):
+            parsed_ver = _doris_parse_version(self)
+            if parsed_ver is not None:
+                table.set("version", parsed_ver)
+                table.meta["doris_version"] = parsed_ver
     return table
 
 
@@ -767,12 +802,13 @@ def _doris_parse_table(
         parse_partition=parse_partition,
         consume_pipe=consume_pipe,
     )
-    if isinstance(table, exp.Table) and table.meta.get("doris_version"):
-        branch_ver = table.meta.pop("doris_version")
-        existing_ver = table.args.get("version")
+    target_table = table.this if isinstance(table, exp.Schema) else table
+    if isinstance(target_table, exp.Table) and target_table.meta.get("doris_version"):
+        branch_ver = target_table.meta.pop("doris_version")
+        existing_ver = target_table.args.get("version")
         if isinstance(existing_ver, exp.Version) and existing_ver is not branch_ver:
             branch_ver.set("version", existing_ver)
-        table.set("version", branch_ver)
+        target_table.set("version", branch_ver)
     return table
 
 

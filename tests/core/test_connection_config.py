@@ -2583,6 +2583,7 @@ def test_doris(make_config):
         check_import=False,
     )
     assert "ssl" not in ssl_false_config._static_connection_kwargs
+    assert ssl_false_config._static_connection_kwargs["ssl_disabled"] is True
 
     ssl_empty_dict_config = make_config(
         type="doris",

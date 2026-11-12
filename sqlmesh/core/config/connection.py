@@ -2860,6 +2860,8 @@ class DorisConnectionConfig(ConnectionConfig):
                 "certificate or hostname verification (`ssl_verify_cert=True`, "
                 "`ssl_verify_identity=True`, or `ssl` verification settings)."
             )
+        if self.ssl is False and self.ssl_disabled is None:
+            kwargs["ssl_disabled"] = True
         if not self.ssl_disabled and self.ssl is not False:
             ssl_config: t.Dict[str, t.Any] = (
                 dict(self.ssl) if isinstance(self.ssl, dict) else {}  # type: ignore[arg-type]
