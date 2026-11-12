@@ -273,7 +273,7 @@ Next steps:
 
 Need help?
 • Docs:   https://sqlmesh.readthedocs.io
-• Slack:  https://www.tobikodata.com/slack
+• Slack:  https://tobiko-data.slack.com/
 • GitHub: https://github.com/SQLMesh/sqlmesh/issues
 """)
 
