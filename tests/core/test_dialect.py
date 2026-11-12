@@ -1672,6 +1672,68 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         == "DATETIME(6)"
     )
 
+    from unittest.mock import MagicMock
+    from sqlmesh.core.engine_adapter.doris import DorisEngineAdapter
+
+    def _make_fresh_doris_adapter(version_row: tuple[str, str]) -> DorisEngineAdapter:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.return_value = version_row
+        conn.cursor.return_value = cur
+        return DorisEngineAdapter(lambda: conn)
+
+    fresh_v21_adapter = _make_fresh_doris_adapter(("Doris version doris-2.1.7-rc03", "5.7.99"))
+    v21_create_exp = fresh_v21_adapter._build_create_table_exp(
+        exp.Schema(
+            this=exp.to_table("db.events", dialect="doris"),
+            expressions=[
+                exp.ColumnDef(
+                    this=exp.to_identifier("id"),
+                    kind=exp.DataType.build("INT", dialect="doris"),
+                ),
+                exp.ColumnDef(
+                    this=exp.to_identifier("ts"),
+                    kind=exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+                ),
+            ],
+        ),
+        None,
+        target_columns_to_types={
+            "id": exp.DataType.build("INT", dialect="doris"),
+            "ts": exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+        },
+    )
+    assert (
+        fresh_v21_adapter._to_sql(v21_create_exp)
+        == "CREATE TABLE IF NOT EXISTS `db`.`events` (`id` INT, `ts` DATETIME(6))"
+    )
+
+    fresh_v41_adapter = _make_fresh_doris_adapter(("Doris version doris-4.1.0-rc01", "5.7.99"))
+    v41_create_exp = fresh_v41_adapter._build_create_table_exp(
+        exp.Schema(
+            this=exp.to_table("db.events", dialect="doris"),
+            expressions=[
+                exp.ColumnDef(
+                    this=exp.to_identifier("id"),
+                    kind=exp.DataType.build("INT", dialect="doris"),
+                ),
+                exp.ColumnDef(
+                    this=exp.to_identifier("ts"),
+                    kind=exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+                ),
+            ],
+        ),
+        None,
+        target_columns_to_types={
+            "id": exp.DataType.build("INT", dialect="doris"),
+            "ts": exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+        },
+    )
+    assert (
+        fresh_v41_adapter._to_sql(v41_create_exp)
+        == "CREATE TABLE IF NOT EXISTS `db`.`events` (`id` INT, `ts` TIMESTAMPTZ(6))"
+    )
+
     negated_match_ast = d.parse_one(
         "SELECT * FROM docs WHERE body NOT MATCH_ANY 'error warning'",
         dialect="doris",

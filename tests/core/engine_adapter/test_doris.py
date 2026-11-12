@@ -6084,13 +6084,24 @@ def test_doris_audit_fixes_and_docs_models(
     assert exp.DataType.Type.TIMESTAMPTZ in v41_kwargs["parameterized_type_defaults"]
 
     v21_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
-    v21_adapter._doris_version = (2, 1)
+    v21_adapter.cursor.fetchone.return_value = ("Doris version doris-2.1.7-rc03", "5.7.99")
+    v21_adapter.create_table(
+        "db.ts_tbl",
+        {
+            "id": exp.DataType.build("INT", dialect="doris"),
+            "ts": exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+        },
+    )
+    assert to_sql_calls(v21_adapter) == [
+        "SELECT @@version_comment, VERSION()",
+        "CREATE TABLE IF NOT EXISTS `db`.`ts_tbl` (`id` INT, `ts` DATETIME(6))",
+    ]
     assert (
         v21_adapter._to_sql(parse_one("SELECT CAST(ts AS TIMESTAMPTZ(6))", read="doris"))
         == "SELECT CAST(`ts` AS DATETIME(6))"
     )
     v41_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
-    v41_adapter._doris_version = (4, 1)
+    v41_adapter.cursor.fetchone.return_value = ("Doris version doris-4.1.0-rc01", "5.7.99")
     assert (
         v41_adapter._to_sql(parse_one("SELECT CAST(ts AS TIMESTAMPTZ(6))", read="doris"))
         == "SELECT CAST(`ts` AS TIMESTAMPTZ(6))"

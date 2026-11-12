@@ -763,7 +763,7 @@ Depending on the target engine, models of the `FULL` kind are materialized using
 | Redshift   | DROP TABLE, CREATE TABLE, INSERT |
 | Postgres   | DROP TABLE, CREATE TABLE, INSERT |
 | DuckDB     | CREATE OR REPLACE TABLE          |
-| Doris      | CREATE TABLE ... AS SELECT (new OLAP), TRUNCATE / DELETE + INSERT (existing OLAP & Doris 4.1+ Iceberg v2 — non-atomic: concurrent readers may observe a gap and failed inserts leave the table empty; see [Doris catalog matrix & recovery](../../integrations/engines/doris.md#supported-model-kinds-catalog-matrix)), INSERT OVERWRITE (unpartitioned Hive on Doris 2.1.6+) |
+| Doris      | CREATE TABLE ... AS SELECT (new OLAP), TRUNCATE / DELETE + INSERT (existing OLAP & Doris 4.1+ Iceberg v2 — non-atomic: concurrent readers may observe a gap and failed inserts leave the table empty or partially populated; see [Doris catalog matrix & recovery](../../integrations/engines/doris.md#supported-model-kinds-catalog-matrix)), INSERT OVERWRITE (unpartitioned Hive on Doris 2.1.6+) |
 
 ## VIEW
 The model kinds described so far cause the output of a model query to be materialized and stored in a physical table.

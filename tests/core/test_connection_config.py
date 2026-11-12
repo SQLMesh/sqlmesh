@@ -2792,6 +2792,16 @@ def test_doris(make_config):
             check_import=False,
         )
 
+    for forbidden_mode in ("NO_BACKSLASH_ESCAPES", "STRICT_TRANS_TABLES, no_backslash_escapes"):
+        with pytest.raises(ConfigError, match="NO_BACKSLASH_ESCAPES"):
+            make_config(
+                type="doris",
+                host="doris-fe",
+                user="admin",
+                session_variables={"SQL_MODE": forbidden_mode},
+                check_import=False,
+            )
+
     pymysql = pytest.importorskip("pymysql")
 
     with patch.object(pymysql, "VERSION_STRING", "1.1.1", create=True):

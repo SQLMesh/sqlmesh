@@ -2039,6 +2039,8 @@ class DorisEngineAdapter(
     def _supports_timestamptz(self) -> bool:
         cached_version = getattr(self, "_doris_version", None)
         if cached_version is None:
+            cached_version = self._get_doris_version()
+        if cached_version is None:
             return doris_supports_timestamptz(self.TIMESTAMPTZ_MIN_VERSION)
         return doris_supports_timestamptz(cached_version)
 
@@ -5894,7 +5896,7 @@ class DorisEngineAdapter(
                         new_select_exprs.append(proj)
                     branch.set("expressions", new_select_exprs)
 
-        return super()._build_create_table_exp(
+        create_exp = super()._build_create_table_exp(
             table_name_or_schema,
             expression=expression,
             exists=exists,
@@ -5904,6 +5906,19 @@ class DorisEngineAdapter(
             table_kind=table_kind,
             **kwargs,
         )
+        if any(dtype.is_type("timestamptz") for dtype in create_exp.find_all(exp.DataType)):
+            if not self._supports_timestamptz():
+                create_exp = create_exp.copy()
+                for dtype in reversed(list(create_exp.find_all(exp.DataType))):
+                    if dtype.is_type("timestamptz"):
+                        dtype.replace(
+                            exp.DataType.build(
+                                "DATETIME",
+                                expressions=list(dtype.expressions),
+                                dialect=self.dialect,
+                            )
+                        )
+        return create_exp
 
     @staticmethod
     def _is_integer_indicator_projection(proj: exp.Expr) -> bool:

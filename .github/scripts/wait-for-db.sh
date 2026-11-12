@@ -201,7 +201,23 @@ doris_ready() {
     done
 
     # set default replication num to 1 (there is only one be in the docker compose file)
-    docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "ADMIN SET FRONTEND CONFIG ('force_olap_table_replication_num' = '1');"
+    cfg_out=""
+    while true; do
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s configuring Doris frontend: $cfg_out" >&2
+            exit 1
+        fi
+        if cfg_out=$(timeout "${remaining}s" docker exec -i doris-fe mysql -h127.0.0.1 -P9030 -uroot -e "ADMIN SET FRONTEND CONFIG ('force_olap_table_replication_num' = '1');" 2>&1); then
+            break
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s configuring Doris frontend: $cfg_out" >&2
+            exit 1
+        fi
+        echo "WARN: Failed to configure Doris frontend (will retry): $cfg_out" >&2
+        sleep 2
+    done
 }
 
 echo "Waiting for $ENGINE to be ready..."

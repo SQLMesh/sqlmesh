@@ -2853,6 +2853,15 @@ class DorisConnectionConfig(ConnectionConfig):
                     isinstance(val, float) and (math.isnan(val) or math.isinf(val))
                 ):
                     raise ConfigError(f"Invalid Doris session variable value for '{k}': {val!r}")
+                if (
+                    k.lower() == "sql_mode"
+                    and isinstance(val, str)
+                    and "no_backslash_escapes" in val.lower()
+                ):
+                    raise ConfigError(
+                        "Doris session variable 'sql_mode' cannot enable 'NO_BACKSLASH_ESCAPES' "
+                        "because SQLGlot string literal escaping assumes standard backslash escaping."
+                    )
         return v
 
     @property
