@@ -158,4 +158,4 @@ With **Virtual Data Environments**, SQLMesh is able to provide fully **isolated*
 
 To streamline deploying changes to production, our team is about to release the SQLMesh [CI/CD bot](https://github.com/SQLMesh/sqlmesh/blob/main/docs/integrations/github.md), which will help automate this process.
 
-Don't miss out - join our [Slack channel](https://tobikodata.com/slack) and stay tuned!
+Don't miss out - join our [Slack channel](https://tobiko-data.slack.com/) and stay tuned!
