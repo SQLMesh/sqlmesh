@@ -65,9 +65,8 @@ class SchedulerConfig(abc.ABC):
 
 class _EngineAdapterStateSyncSchedulerConfig(SchedulerConfig):
     def create_state_sync(self, context: GenericContext) -> StateSync:
-        state_connection = (
-            context.config.get_state_connection(context.gateway) or context.connection_config
-        )
+        configured_state_connection = context.config.get_state_connection(context.gateway)
+        state_connection = configured_state_connection or context.connection_config
 
         warehouse_connection = context.config.get_connection(context.gateway)
 
@@ -86,6 +85,19 @@ class _EngineAdapterStateSyncSchedulerConfig(SchedulerConfig):
                 state_connection.concurrent_tasks = warehouse_connection.concurrent_tasks
 
         engine_adapter = state_connection.create_engine_adapter()
+        state_query_execution_context = (
+            configured_state_connection.query_execution_context
+            if configured_state_connection is not None
+            else False
+        )
+        if (
+            engine_adapter.query_execution_context != state_query_execution_context
+            or engine_adapter.query_execution_context_provider is not None
+        ):
+            engine_adapter = engine_adapter.with_settings(
+                query_execution_context=state_query_execution_context,
+                query_execution_context_provider=None,
+            )
         if state_connection.is_forbidden_for_state_sync:
             raise ConfigError(
                 f"The {engine_adapter.DIALECT.upper()} engine cannot be used to store SQLMesh state - please specify a different `state_connection` engine."
