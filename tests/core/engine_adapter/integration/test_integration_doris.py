@@ -440,6 +440,8 @@ def test_duplicate_key_delete_with_subquery_and_between(ctx: TestContext):
         [
             {"id": 1, "ds": "2022-01-01"},
             {"id": 2, "ds": "2022-01-02"},
+            {"id": 2, "ds": "2022-01-03"},
+            {"id": 3, "ds": "2022-01-02"},
             {"id": 3, "ds": "2022-01-03"},
             {"id": 4, "ds": "2022-01-04"},
         ]
@@ -464,6 +466,8 @@ def test_duplicate_key_delete_with_subquery_and_between(ctx: TestContext):
         target_table,
         pd.DataFrame(
             [
+                {"id": 2, "ds": "2022-01-03"},
+                {"id": 3, "ds": "2022-01-02"},
                 {"id": 3, "ds": "2022-01-03"},
                 {"id": 4, "ds": "2022-01-04"},
             ]

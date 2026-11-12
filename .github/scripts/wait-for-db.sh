@@ -24,8 +24,15 @@ function_exists() {
 
 probe_port() {
     HOSTNAME=${DOCKER_HOSTNAME:-localhost}
-    echo "Probing '$HOSTNAME' on port $1"
-    while ! nc -z $HOSTNAME $1; do
+    local port="$1"
+    local deadline="$2"
+    local timeout_secs="$3"
+    echo "Probing '$HOSTNAME' on port $port"
+    while ! nc -z "$HOSTNAME" "$port"; do
+        if [ -n "$deadline" ] && [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: Timed out after ${timeout_secs:-0}s waiting for '$HOSTNAME' on port $port" >&2
+            return 1
+        fi
         sleep 1
     done
 }
@@ -110,7 +117,10 @@ doris_ready() {
     local backend_registered=0
     local reg_out=""
 
-    probe_port 9030
+    if ! probe_port 9030 "$deadline" "$timeout_secs"; then
+        echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris FE port 9030 to open" >&2
+        exit 1
+    fi
 
     echo "Waiting for Doris FE to accept SQL connections..."
     while true; do

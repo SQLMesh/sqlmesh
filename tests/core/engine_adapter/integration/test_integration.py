@@ -2694,7 +2694,7 @@ def test_dialects(ctx: TestContext):
                 "spark": pd.Timestamp("2020-01-01 00:00:00"),
                 "databricks": pd.Timestamp("2020-01-01 00:00:00"),
                 "starrocks": pd.Timestamp("2020-01-01 00:00:00"),
-                "doris": pd.Timestamp("2020-01-01 00:00:00"),
+                "doris": pd.Timestamp("2020-01-01 00:00:00+00:00"),
             },
         ),
         (
@@ -2746,10 +2746,17 @@ def test_to_time_column(
     expected = result.get(ctx.dialect, result.get("default"))
     # Db2 (UPPERCASE strategy) returns column names in uppercase, same as Snowflake
     col_name = "THE_COL" if ctx.dialect in ("snowflake", "db2") else "the_col"
+    actual = df[col_name][0]
+    if (
+        ctx.dialect == "doris"
+        and time_column_type.is_type(exp.DataType.Type.TIMESTAMPTZ)
+        and isinstance(actual, str)
+    ):
+        actual = pd.Timestamp(actual).tz_convert("UTC")
     if expected is pd.NaT or expected is None:
-        assert df[col_name][0] is expected
+        assert actual is expected
     else:
-        assert df[col_name][0] == expected
+        assert actual == expected
 
 
 def test_batch_size_on_incremental_by_unique_key_model(ctx: TestContext):

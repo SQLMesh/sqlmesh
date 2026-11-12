@@ -214,11 +214,22 @@ MODEL (
 );
 
 SELECT
-  order_id::BIGINT AS order_id,
-  status::VARCHAR(32) AS status,
-  updated_at::DATETIME AS updated_at
-FROM raw.orders_changelog
-WHERE updated_at BETWEEN @start_ts AND @end_ts;
+  order_id,
+  status,
+  updated_at
+FROM (
+  SELECT
+    order_id::BIGINT AS order_id,
+    status::VARCHAR(32) AS status,
+    updated_at::DATETIME AS updated_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY order_id
+      ORDER BY updated_at DESC, changelog_id DESC
+    ) AS _rn
+  FROM raw.orders_changelog
+  WHERE updated_at BETWEEN @start_ts AND @end_ts
+) AS latest_changes
+WHERE _rn = 1;
 ```
 
 ### AGGREGATE KEY model
@@ -432,10 +443,24 @@ SQLMesh can also create, partition, and overwrite Apache Iceberg tables directly
     - **Concurrent reader visibility**: Readers querying the Iceberg table between the `DELETE` snapshot(s) and the `INSERT INTO` snapshot may see an empty or partially cleared table.
     - **Insert failure risk**: If the `INSERT INTO` statement fails after the `DELETE` statements commit, the production table remains empty until recovered.
     - **Verified recovery procedures** (quiesce concurrent writers before starting recovery):
-      1. **Replace or roll back to the prior Iceberg snapshot (`FOR VERSION AS OF`)**: Because `DorisEngineAdapter` clears Iceberg tables using two separate `DELETE` statements (`IS NOT NULL` and `IS NULL`), a failure after the first `DELETE` can leave residual rows in the table. Do not blindly `INSERT` the prior snapshot on top of a partially cleared table (which would duplicate surviving rows), and do not select the recovery snapshot by `committed_at` timestamp order alone (since `$snapshots` includes commits from other branches). Instead, quiesce writers, trace the `parent_id` chain from the production `main` branch head in `$refs` back through the failed refresh's `delete` snapshot(s) in `$snapshots` to find the first failed-refresh `delete` snapshot's `parent_id` (`<pre_delete_snapshot_id>`), verify that `<pre_delete_snapshot_id>` belongs to the production table's lineage, and either roll back the table metadata to `<pre_delete_snapshot_id>` in your Iceberg catalog or clear any remaining rows before restoring that snapshot:
+      1. **Replace or roll back to the prior Iceberg snapshot (`FOR VERSION AS OF`)**: Because `DorisEngineAdapter` clears Iceberg tables using two separate `DELETE` statements (`IS NOT NULL` and `IS NULL`), a failure after the first `DELETE` can leave residual rows in the table. Do not blindly `INSERT` the prior snapshot on top of a partially cleared table (which would duplicate surviving rows), and do not select the recovery snapshot by `committed_at` timestamp order alone (since `$snapshots` / `iceberg_meta(..., "query_type" = "snapshots")` includes commits from other branches). Instead, quiesce writers, trace the `parent_id` chain from the production `main` branch head in `refs` back through the failed refresh's `delete` snapshot(s) in `snapshots` to find the first failed-refresh `delete` snapshot's `parent_id` (`<pre_delete_snapshot_id>`), verify that `<pre_delete_snapshot_id>` belongs to the production table's lineage, and either roll back the table metadata to `<pre_delete_snapshot_id>` in your Iceberg catalog or clear any remaining rows before restoring that snapshot:
          ```sql
-         -- 1. Inspect the production 'main' branch head and follow parent_id through the failed refresh's
-         --    'delete' snapshot(s) to identify the first failed-refresh delete snapshot's parent_id (<pre_delete_snapshot_id>):
+         -- 1a. On Doris 4.1.0–4.1.3, inspect the 'main' branch head and snapshot parent_id chain
+         --     using the iceberg_meta() table-valued function:
+         SELECT name, type, snapshot_id
+         FROM iceberg_meta(
+           "table" = "iceberg_catalog.silver.curated_events",
+           "query_type" = "refs"
+         )
+         WHERE name = 'main';
+
+         SELECT snapshot_id, parent_id, committed_at, operation
+         FROM iceberg_meta(
+           "table" = "iceberg_catalog.silver.curated_events",
+           "query_type" = "snapshots"
+         );
+
+         -- 1b. On Doris 4.1.4+, you can also query the $refs and $snapshots metadata tables directly:
          SELECT name, type, snapshot_id
          FROM iceberg_catalog.silver.curated_events$refs
          WHERE name = 'main';

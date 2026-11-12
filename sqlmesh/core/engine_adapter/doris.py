@@ -1928,27 +1928,28 @@ class DorisEngineAdapter(
             tbl.set("catalog", None)
         return tbl
 
+    def get_current_database(self) -> t.Optional[str]:
+        try:
+            db_row = self.fetchone("SELECT DATABASE()")
+            if isinstance(db_row, (list, tuple)) and db_row:
+                if isinstance(db_row[0], str) and db_row[0].strip():
+                    return db_row[0].strip()
+                return ""
+        except Exception:
+            pass
+        return None
+
     def _resolve_sync_mv_source_from_metadata(
         self,
         target_table: exp.Table,
         is_explicit_sync: bool = False,
         skip_full_desc_scan: bool = False,
     ) -> t.Tuple[t.Optional[exp.Table], bool, bool]:
-        db_name: t.Optional[str] = target_table.db or (
-            str(self._extra_config["database"]) if self._extra_config.get("database") else None
+        db_name: t.Optional[str] = (
+            target_table.db
+            or self.get_current_database()
+            or (str(self._extra_config["database"]) if self._extra_config.get("database") else None)
         )
-        if not db_name:
-            try:
-                db_row = self.fetchone("SELECT DATABASE()")
-                if (
-                    isinstance(db_row, (list, tuple))
-                    and db_row
-                    and isinstance(db_row[0], str)
-                    and db_row[0].strip()
-                ):
-                    db_name = db_row[0].strip()
-            except Exception:
-                db_name = None
         if not db_name:
             return None, bool(is_explicit_sync), False
 

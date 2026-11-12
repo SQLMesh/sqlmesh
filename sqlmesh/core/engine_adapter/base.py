@@ -593,19 +593,37 @@ class EngineAdapter:
                     return False
                 if not default_db_loaded:
                     default_db_loaded = True
+                    session_db_resolved = False
                     default_db = getattr(self, "_active_database", None)
-                    if not default_db and callable(getattr(self, "get_current_database", None)):
+                    if isinstance(default_db, str) and default_db.strip():
+                        default_db = default_db.strip()
+                        session_db_resolved = True
+                    else:
+                        default_db = None
+                    if not session_db_resolved and callable(
+                        getattr(self, "get_current_database", None)
+                    ):
                         try:
                             current_db = getattr(self, "get_current_database")()
-                            if isinstance(current_db, str) and current_db:
-                                default_db = current_db
+                            if isinstance(current_db, str):
+                                session_db_resolved = True
+                                default_db = current_db.strip() or None
                         except Exception:
                             pass
-                    if not default_db:
+                    if not session_db_resolved and self.dialect in ("doris", "mysql", "starrocks"):
+                        try:
+                            db_row = self.fetchone("SELECT DATABASE()")
+                            if isinstance(db_row, (list, tuple)) and db_row:
+                                session_db_resolved = True
+                                if isinstance(db_row[0], str) and db_row[0].strip():
+                                    default_db = db_row[0].strip()
+                        except Exception:
+                            pass
+                    if not session_db_resolved and not default_db:
                         for key in ("database", "schema"):
                             val = self._extra_config.get(key)
-                            if isinstance(val, str) and val:
-                                default_db = val
+                            if isinstance(val, str) and val.strip():
+                                default_db = val.strip()
                                 break
                 if not default_db:
                     raise SQLMeshError(
@@ -658,6 +676,50 @@ class EngineAdapter:
                 _qualified(target_to_check, default_catalog)
             )
 
+        temp_table_partitions: t.Optional[t.Set[str]] = None
+        staged_partition_sql: t.Optional[str] = None
+
+        def _partition_names(partition_exp: exp.Expr) -> t.Set[str]:
+            names: t.Set[str] = set()
+            for expr in partition_exp.expressions:
+                name = expr.name if isinstance(expr, (exp.Identifier, exp.Var, exp.Column)) else ""
+                if not name and isinstance(expr, exp.Partition):
+                    for sub in expr.expressions:
+                        if sub.name:
+                            names.add(sub.name.lower())
+                elif name:
+                    names.add(name.lower())
+            return names
+
+        def _get_temp_table_partitions(temp_table: exp.Table) -> t.Set[str]:
+            nonlocal temp_table_partitions
+            if temp_table_partitions is not None:
+                return temp_table_partitions
+            names: t.Set[str] = set()
+            getter = getattr(self, "_get_table_partition_names", None)
+            if callable(getter):
+                try:
+                    res = getter(temp_table)
+                    if isinstance(res, (set, list, tuple)):
+                        names.update(str(x).lower() for x in res if x)
+                except Exception:
+                    pass
+            if not names and self.dialect in ("doris", "starrocks"):
+                try:
+                    rows = self.fetchall(f"SHOW PARTITIONS FROM {self._to_sql(temp_table)}")
+                    if isinstance(rows, (list, tuple)):
+                        for row in rows:
+                            if (
+                                isinstance(row, (list, tuple))
+                                and len(row) > 1
+                                and isinstance(row[1], str)
+                            ):
+                                names.add(row[1].strip().lower())
+                except Exception:
+                    pass
+            temp_table_partitions = names
+            return names
+
         def _replace_target_table(node: exp.Expr, replacement_table: exp.Table) -> exp.Expr:
             if not _is_target_table(node):
                 return node
@@ -667,6 +729,18 @@ class EngineAdapter:
                     replacement.set("alias", node.args["alias"].copy())
                 if node.args.get("sample") is not None:
                     replacement.set("sample", node.args["sample"].copy())
+                partition_arg = node.args.get("partition")
+                if partition_arg is not None:
+                    req_names = _partition_names(partition_arg)
+                    avail_names = _get_temp_table_partitions(replacement_table)
+                    if req_names and req_names.issubset(avail_names):
+                        replacement.set("partition", partition_arg.copy())
+                    elif staged_partition_sql != partition_arg.sql(dialect=self.dialect):
+                        raise SQLMeshError(
+                            f"Cannot apply partition selection '{partition_arg.sql(dialect=self.dialect)}' "
+                            f"to temporary staging table '{replacement_table.sql(dialect=self.dialect)}' "
+                            "because the staging table does not expose matching partitions."
+                        )
             return replacement
 
         self_referencing = any(_is_target_table(table) for table in query.find_all(exp.Table))
@@ -704,8 +778,24 @@ class EngineAdapter:
             )
         if self_referencing:
             assert target_columns_to_types is not None
+            self_ref_partition_clauses: t.Dict[str, t.Optional[exp.Expr]] = {}
+            for sq in source_queries:
+                sq_ast = sq.query_factory()
+                for tbl in sq_ast.find_all(exp.Table):
+                    if _is_target_table(tbl):
+                        part_expr = tbl.args.get("partition")
+                        part_key = (
+                            part_expr.sql(dialect=self.dialect) if part_expr is not None else ""
+                        )
+                        self_ref_partition_clauses[part_key] = part_expr
+            staging_target = target_table.copy()
+            if len(self_ref_partition_clauses) == 1:
+                only_key, only_part = next(iter(self_ref_partition_clauses.items()))
+                if only_key and only_part is not None:
+                    staging_target.set("partition", only_part.copy())
+                    staged_partition_sql = only_key
             with self.temp_table(
-                self._select_columns(target_columns_to_types).from_(target_table),
+                self._select_columns(target_columns_to_types).from_(staging_target),
                 name=target_table,
                 target_columns_to_types=target_columns_to_types,
                 **kwargs,

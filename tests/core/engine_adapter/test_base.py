@@ -3464,6 +3464,40 @@ def test_replace_query_cte_and_versioned_table_not_self_referencing(
         'DROP TABLE IF EXISTS "dev"."db"."__temp_test_abcdefgh"',
     ]
 
+    # When an active session database (e.g., via get_current_database / SELECT DATABASE()) differs from
+    # configured schema/database, bare table reference is not misclassified as target_table
+    adapter.get_current_database = lambda: "otherdb"  # type: ignore[attr-defined]
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM test"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+    assert to_sql_calls(adapter) == [
+        'DELETE FROM "db"."test" WHERE TRUE',
+        'INSERT INTO "db"."test" ("a") SELECT "a" FROM "test"',
+    ]
+    delattr(adapter, "get_current_database")
+
+    # Partition selection on self-referencing table is preserved when temp table exposes matching partitions
+    adapter.dialect = "doris"
+    adapter._get_table_partition_names = lambda _tbl: {"p1"}  # type: ignore[attr-defined]
+    adapter.cursor.execute.reset_mock()
+    adapter.replace_query(
+        "db.test",
+        parse_one("SELECT a FROM db.test PARTITION (p1)", read="doris"),
+        target_columns_to_types={"a": exp.DataType.build("INT")},
+    )
+    assert to_sql_calls(adapter) == [
+        "CREATE TABLE IF NOT EXISTS `db`.`test` (`a` INT)",
+        "CREATE SCHEMA IF NOT EXISTS `dev`.`db`",
+        "CREATE TABLE IF NOT EXISTS `dev`.`db`.`__temp_test_abcdefgh` AS SELECT CAST(`a` AS INT) AS `a` FROM (SELECT `a` FROM `db`.`test` PARTITION(`p1`)) AS `_subquery`",
+        "DELETE FROM `db`.`test` WHERE TRUE",
+        "INSERT INTO `db`.`test` (`a`) SELECT `a` FROM `dev`.`db`.`__temp_test_abcdefgh` PARTITION(`p1`)",
+        "DROP TABLE IF EXISTS `dev`.`db`.`__temp_test_abcdefgh`",
+    ]
+    delattr(adapter, "_get_table_partition_names")
+
 
 def test_create_table_like(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(EngineAdapter)
