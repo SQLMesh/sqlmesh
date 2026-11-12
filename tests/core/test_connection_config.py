@@ -2683,6 +2683,35 @@ def test_doris(make_config):
         "verify_mode": "required",
     }
 
+    import ssl as ssl_lib
+
+    for raw_mode, expected_mode in [
+        (ssl_lib.CERT_REQUIRED, "required"),
+        (ssl_lib.CERT_OPTIONAL, "optional"),
+        ("CERT_REQUIRED", "required"),
+        ("cert_optional", "optional"),
+    ]:
+        cfg = make_config(
+            type="doris",
+            host="doris-fe",
+            user="admin",
+            ssl={"verify_mode": raw_mode},
+            check_import=False,
+        )
+        assert cfg._static_connection_kwargs["ssl"] == {"verify_mode": expected_mode}
+
+    cfg_cert_none = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl={"verify_mode": ssl_lib.CERT_NONE},
+        check_import=False,
+    )
+    assert cfg_cert_none._static_connection_kwargs["ssl"] == {
+        "verify_mode": "none",
+        "check_hostname": False,
+    }
+
     ssl_disabled_verify_identity = make_config(
         type="doris",
         host="doris-fe",

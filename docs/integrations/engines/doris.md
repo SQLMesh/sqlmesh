@@ -207,21 +207,27 @@ MODEL (
   name analytics.orders_upsert,
   kind INCREMENTAL_BY_UNIQUE_KEY (
     unique_key order_id,
-    when_matched WHEN MATCHED AND source.updated_at > target.updated_at THEN UPDATE SET
+    when_matched WHEN MATCHED AND (
+      source.updated_at > target.updated_at
+      OR (source.updated_at = target.updated_at AND source.changelog_id > target.changelog_id)
+    ) THEN UPDATE SET
       target.status = source.status,
-      target.updated_at = source.updated_at
+      target.updated_at = source.updated_at,
+      target.changelog_id = source.changelog_id
   )
 );
 
 SELECT
   order_id::BIGINT AS order_id,
   status::VARCHAR(32) AS status,
-  updated_at::DATETIME(6) AS updated_at
+  updated_at::DATETIME(6) AS updated_at,
+  changelog_id::BIGINT AS changelog_id
 FROM (
   SELECT
     order_id::BIGINT AS order_id,
     status::VARCHAR(32) AS status,
     updated_at::DATETIME(6) AS updated_at,
+    changelog_id::BIGINT AS changelog_id,
     ROW_NUMBER() OVER (
       PARTITION BY order_id
       ORDER BY updated_at DESC, changelog_id DESC

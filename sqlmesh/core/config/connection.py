@@ -2888,8 +2888,18 @@ class DorisConnectionConfig(ConnectionConfig):
             if self.ssl_verify_identity is not None:
                 ssl_config["check_hostname"] = bool(self.ssl_verify_identity)
             verify_mode = ssl_config.get("verify_mode")
+            if isinstance(verify_mode, int) and not isinstance(verify_mode, bool):
+                verify_mode = {
+                    int(ssl_lib.CERT_NONE): "none",
+                    int(ssl_lib.CERT_OPTIONAL): "optional",
+                    int(ssl_lib.CERT_REQUIRED): "required",
+                }[verify_mode]
+                ssl_config["verify_mode"] = verify_mode
             if isinstance(verify_mode, str):
                 verify_mode = verify_mode.strip()
+                verify_mode = {"cert_required": "required", "cert_optional": "optional"}.get(
+                    verify_mode.lower(), verify_mode
+                )
                 ssl_config["verify_mode"] = verify_mode
             if (
                 verify_mode is False
