@@ -95,6 +95,18 @@ def test_doris_iceberg_local_catalog(ctx: TestContext):
         )
         adapter.execute(create_branch_expr, quote_identifiers=False)
 
+        insert_main_expr = parse_one(
+            f"INSERT INTO {table_fqn} VALUES (1, DATE '2024-01-01', 'us-east')",
+            read="doris",
+        )
+        adapter.execute(insert_main_expr, quote_identifiers=False)
+
+        main_read_expr = parse_one(
+            f"SELECT id FROM {table_fqn}",
+            read="doris",
+        )
+        assert list(adapter.fetchall(main_read_expr, quote_identifiers=False)) == [(1,)]
+
         branch_read_expr = parse_one(
             f"SELECT id FROM {table_fqn}@branch(audit_branch)",
             read="doris",

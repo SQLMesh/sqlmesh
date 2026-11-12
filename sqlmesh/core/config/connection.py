@@ -2940,6 +2940,12 @@ class DorisConnectionConfig(ConnectionConfig):
                 )
             )
         )
+        if (self.ssl_disabled is True and (self.ssl is True or isinstance(self.ssl, dict))) or (
+            self.ssl is False and self.ssl_disabled is False
+        ):
+            raise ConfigError(
+                "Doris `ssl_disabled` and `ssl` have conflicting values (`ssl_disabled=True` with `ssl=True`/dict or `ssl=False` with `ssl_disabled=False`)."
+            )
         if (self.ssl_disabled or self.ssl is False) and (
             self.ssl_verify_cert is True
             or self.ssl_verify_identity is True
@@ -3022,7 +3028,7 @@ class DorisConnectionConfig(ConnectionConfig):
 
     @property
     def _connection_kwargs_keys(self) -> t.Set[str]:
-        is_external_catalog = bool(self.catalog and self.catalog.lower() != "internal")
+        has_catalog = bool(self.catalog)
         return {
             k
             for k in (
@@ -3038,7 +3044,7 @@ class DorisConnectionConfig(ConnectionConfig):
                 "write_timeout",
                 "ssl_disabled",
             )
-            if getattr(self, k) is not None and not (k == "database" and is_external_catalog)
+            if getattr(self, k) is not None and not (k == "database" and has_catalog)
         }
 
     @property

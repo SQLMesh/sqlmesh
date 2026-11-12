@@ -1835,6 +1835,11 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         map_from_arr_expr.sql("doris, version=4.1.5")
     assert map_from_arr_expr.sql("doris, version=4.2.0") == "MAP_FROM_ARRAYS(k_arr, v_arr)"
 
+    unannotated_map_from_arr = exp.Map(keys=exp.column("k_arr"), values=exp.column("v_arr"))
+    with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        unannotated_map_from_arr.sql("doris")
+    assert unannotated_map_from_arr.sql("doris, version=4.2.0") == "MAP_FROM_ARRAYS(k_arr, v_arr)"
+
     alter_idx_if_not_exists_sql = "ALTER TABLE t ADD INDEX IF NOT EXISTS idx_body (body) USING INVERTED PROPERTIES ('parser'='english') COMMENT 'fts'"
     alter_idx_if_not_exists_ast = d.parse_one(alter_idx_if_not_exists_sql, dialect="doris")
     assert isinstance(alter_idx_if_not_exists_ast, exp.Alter)

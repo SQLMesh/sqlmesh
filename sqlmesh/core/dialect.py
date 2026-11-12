@@ -1085,19 +1085,13 @@ def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
     if isinstance(keys, exp.Array) and isinstance(values, exp.Array):
         return var_map_sql(self, expression)
     if keys is not None or values is not None:
-        if (
-            isinstance(keys, exp.Expr)
-            and isinstance(values, exp.Expr)
-            and keys.is_type(exp.DataType.Type.ARRAY)
-            and values.is_type(exp.DataType.Type.ARRAY)
-        ):
-            if not doris_supports_map_from_arrays(getattr(self.dialect, "version", None)):
-                raise SQLMeshError(
-                    "Doris does not support constructing a MAP from array columns prior to Doris 4.2 "
-                    "(MAP_FROM_ARRAYS requires Doris 4.2+)."
-                )
-            return self.func("MAP_FROM_ARRAYS", keys, values)
-        return self.func("MAP", keys, values)
+        # exp.Map with non-literal-array keys/values always means array-to-map construction.
+        if not doris_supports_map_from_arrays(getattr(self.dialect, "version", None)):
+            raise SQLMeshError(
+                "Doris does not support constructing a MAP from array columns prior to Doris 4.2 "
+                "(MAP_FROM_ARRAYS requires Doris 4.2+)."
+            )
+        return self.func("MAP_FROM_ARRAYS", keys, values)
     return self.func("MAP", *expression.expressions)
 
 

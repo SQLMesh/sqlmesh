@@ -2816,6 +2816,29 @@ def test_doris(make_config):
                 check_import=False,
             )
 
+    ssl_true_and_disabled = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        ssl=True,
+        ssl_disabled=True,
+        check_import=False,
+    )
+    with pytest.raises(ConfigError, match="conflicting values"):
+        _ = ssl_true_and_disabled._static_connection_kwargs
+
+    internal_catalog_cfg = make_config(
+        type="doris",
+        host="doris-fe",
+        user="admin",
+        catalog="internal",
+        database="demo",
+        check_import=False,
+    )
+    assert "database" not in internal_catalog_cfg._connection_kwargs_keys
+
+
+def test_doris_pymysql_version(make_config):
     pymysql = pytest.importorskip("pymysql")
 
     with patch.object(pymysql, "VERSION_STRING", "1.1.1", create=True):
@@ -2837,4 +2860,4 @@ def test_doris(make_config):
         )
         assert isinstance(valid_ver_cfg, DorisConnectionConfig)
         assert valid_ver_cfg.port == 9030
-        assert valid_ver_cfg._connection_factory_with_kwargs.keywords["port"] == 9030
+        assert getattr(valid_ver_cfg._connection_factory_with_kwargs, "keywords")["port"] == 9030

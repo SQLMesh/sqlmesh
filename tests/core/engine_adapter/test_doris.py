@@ -3455,11 +3455,16 @@ def test_doris_connection_config_tls_matrix(mocker: MockerFixture):
     cfg_cert = DorisConnectionConfig(host="fe.internal", user="root", ssl_verify_cert=True)
     assert cfg_cert._static_connection_kwargs["ssl"] == {"verify_mode": True}
 
-    # 3. `ssl_disabled=True` overrides `ssl=True` and omits the `ssl` dictionary.
+    # 3. `ssl_disabled=True` rejects conflicting `ssl=True`, and omits `ssl` when `ssl_ca` is set without verification.
     cfg_disabled = DorisConnectionConfig(
-        host="fe.internal", user="root", ssl=True, ssl_disabled=True
+        host="fe.internal", user="root", ssl_ca="/path/to/ca.pem", ssl_disabled=True
     )
     assert "ssl" not in cfg_disabled._static_connection_kwargs
+
+    with pytest.raises(ConfigError, match="conflicting values"):
+        _ = DorisConnectionConfig(
+            host="fe.internal", user="root", ssl=True, ssl_disabled=True
+        )._static_connection_kwargs
 
 
 def test_doris_snapshot_evaluator_end_to_end_model_kinds(
