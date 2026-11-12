@@ -2853,15 +2853,30 @@ class DorisConnectionConfig(ConnectionConfig):
                     isinstance(val, float) and (math.isnan(val) or math.isinf(val))
                 ):
                     raise ConfigError(f"Invalid Doris session variable value for '{k}': {val!r}")
-                if (
-                    k.lower() == "sql_mode"
-                    and isinstance(val, str)
-                    and "no_backslash_escapes" in val.lower()
-                ):
-                    raise ConfigError(
-                        "Doris session variable 'sql_mode' cannot enable 'NO_BACKSLASH_ESCAPES' "
-                        "because SQLGlot string literal escaping assumes standard backslash escaping."
-                    )
+                if k.lower() == "sql_mode":
+                    if not isinstance(val, str):
+                        raise ConfigError(
+                            f"Doris session variable 'sql_mode' must be a string, got {val!r}."
+                        )
+                    lowered_sql_mode = val.lower()
+                    sql_modes = {
+                        mode.strip().upper() for mode in re.split(r"[\s,]+", val) if mode.strip()
+                    }
+                    if "no_backslash_escapes" in lowered_sql_mode:
+                        raise ConfigError(
+                            "Doris session variable 'sql_mode' cannot enable 'NO_BACKSLASH_ESCAPES' "
+                            "because SQLGlot string literal escaping assumes standard backslash escaping."
+                        )
+                    if "pipes_as_concat" in lowered_sql_mode or "ANSI" in sql_modes:
+                        raise ConfigError(
+                            "Doris session variable 'sql_mode' cannot enable 'PIPES_AS_CONCAT' (or 'ANSI') "
+                            "because the Doris SQLGlot dialect parses '||' as logical OR."
+                        )
+                    if "ansi_quotes" in lowered_sql_mode:
+                        raise ConfigError(
+                            "Doris session variable 'sql_mode' cannot enable 'ANSI_QUOTES' "
+                            "because the Doris SQLGlot dialect parses double-quoted tokens as string literals."
+                        )
         return v
 
     @property

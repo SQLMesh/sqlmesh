@@ -993,7 +993,17 @@ def _doris_parse_alter_raw_action(self: Parser) -> exp.Var:
 
 def _doris_parse_alter_add(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr], None]:
     if self._match(TokenType.INDEX):
-        return _doris_parse_index_constraint(self)
+        actions: t.List[exp.Expr] = [_doris_parse_index_constraint(self)]
+        while True:
+            comma_index = self._index
+            if not self._match(TokenType.COMMA):
+                break
+            self._match_text_seq("ADD")
+            if not self._match(TokenType.INDEX):
+                self._retreat(comma_index)
+                break
+            actions.append(_doris_parse_index_constraint(self))
+        return actions
     return self._parse_alter_table_add()
 
 
@@ -1056,8 +1066,9 @@ def _doris_alter_sql(self: Generator, expression: exp.Alter) -> str:
             else ""
         )
         return f"BUILD INDEX {idx_sql} ON {tbl_sql}{parts_sql}"
-    if actions and isinstance(actions[0], exp.IndexColumnConstraint):
-        return f"ALTER TABLE {self.sql(expression, 'this')} ADD {self.expressions(expression, key='actions', flat=True)}"
+    if actions and all(isinstance(action, exp.IndexColumnConstraint) for action in actions):
+        add_actions = ", ".join(f"ADD {self.sql(action)}" for action in actions)
+        return f"ALTER TABLE {self.sql(expression, 'this')} {add_actions}"
     return self._alter_sql(expression)  # type: ignore
 
 

@@ -1655,6 +1655,21 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
     assert isinstance(drop_branch_ast, exp.Alter)
     assert drop_branch_ast.sql("doris") == "ALTER TABLE @this_model DROP BRANCH IF EXISTS b1"
 
+    multi_add_index_ast = d.parse_one(
+        "ALTER TABLE db.model ADD INDEX i1(a) USING INVERTED, ADD INDEX i2(b) USING INVERTED",
+        dialect="doris",
+    )
+    assert isinstance(multi_add_index_ast, exp.Alter)
+    assert len(multi_add_index_ast.args["actions"]) == 2
+    assert all(
+        isinstance(action, exp.IndexColumnConstraint)
+        for action in multi_add_index_ast.args["actions"]
+    )
+    assert (
+        multi_add_index_ast.sql("doris")
+        == "ALTER TABLE db.model ADD INDEX i1 (a) USING INVERTED, ADD INDEX i2 (b) USING INVERTED"
+    )
+
     assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
     assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"
     assert (

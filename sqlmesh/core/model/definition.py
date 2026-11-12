@@ -2887,10 +2887,14 @@ def _resolve_model_refs_to_physical_tables(
             physical = table_mapping.get(normalized_name)
             strip_catalog = bool(physical)
         if not physical:
-            physical = table_mapping.get(exp.table_name(table, identify=True))
+            physical = table_mapping.get(exp.table_name(table, identify=True)) or table_mapping.get(
+                d.normalize_model_name(table, default_catalog=default_catalog, dialect=dialect)
+            )
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
         effective_engine_dialect = engine_dialect if engine_dialect is not None else dialect
+        if physical and effective_engine_dialect != "doris" and resolved_table.catalog:
+            strip_catalog = True
         if (
             effective_engine_dialect == "doris"
             and property_name == "excluded_trigger_tables"

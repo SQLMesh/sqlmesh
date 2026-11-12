@@ -2802,6 +2802,20 @@ def test_doris(make_config):
                 check_import=False,
             )
 
+    for forbidden_concat_mode in (
+        "PIPES_AS_CONCAT",
+        "STRICT_TRANS_TABLES, pipes_as_concat",
+        "ANSI",
+    ):
+        with pytest.raises(ConfigError, match="PIPES_AS_CONCAT"):
+            make_config(
+                type="doris",
+                host="doris-fe",
+                user="admin",
+                session_variables={"sql_mode": forbidden_concat_mode},
+                check_import=False,
+            )
+
     pymysql = pytest.importorskip("pymysql")
 
     with patch.object(pymysql, "VERSION_STRING", "1.1.1", create=True):

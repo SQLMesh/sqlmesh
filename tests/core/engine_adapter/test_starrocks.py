@@ -2577,6 +2577,31 @@ class TestExcludedTablesResolution:
             f"{expected_catalog_physical},external_db.raw_table"
         )
 
+        # Also verify explicit 3-part reference resolution strips the catalog to a 2-part StarRocks name
+        explicit_catalog_mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv_explicit_catalog,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = (default_catalog.starrocks.managed_model, external_db.raw_table)
+                )
+            );
+            SELECT 1 AS a;
+            """,
+            default_catalog="default_catalog",
+        )
+        rendered_explicit_catalog = explicit_catalog_mv_model.render_physical_properties(
+            snapshots={catalog_base_snapshot.name: catalog_base_snapshot},
+            engine_adapter=adapter,
+        )
+        assert rendered_explicit_catalog["excluded_trigger_tables"] == exp.Literal.string(
+            f"{expected_catalog_physical},external_db.raw_table"
+        )
+
 
 class TestClusteringKeyOrdering:
     """StarRocks uses ClusteredByMixin but must KEEP the historical alter order.
