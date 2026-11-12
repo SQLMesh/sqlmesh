@@ -2808,6 +2808,9 @@ def test_doris(make_config):
             type="doris",
             host="doris-fe",
             user="admin",
+            port=None,
             check_import=True,
         )
         assert isinstance(valid_ver_cfg, DorisConnectionConfig)
+        assert valid_ver_cfg.port == 9030
+        assert valid_ver_cfg._connection_factory_with_kwargs.keywords["port"] == 9030

@@ -978,6 +978,7 @@ def _doris_parse_alter_drop(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr],
 
 DORIS_TIMESTAMPTZ_MIN_VERSION: t.Tuple[int, int, int] = (4, 1, 0)
 DORIS_QUALIFIED_EXCLUDED_TRIGGER_TABLES_MIN_VERSION: t.Tuple[int, int, int] = (2, 1, 10)
+DORIS_MAP_FROM_ARRAYS_MIN_VERSION: t.Tuple[int, int, int] = (4, 2, 0)
 
 
 def doris_supports_timestamptz(version: t.Optional[t.Tuple[int, ...]] = None) -> bool:
@@ -990,11 +991,17 @@ def doris_supports_qualified_excluded_trigger_tables(
     version: t.Optional[t.Tuple[int, ...]] = None,
 ) -> bool:
     if version is None:
-        return True
+        return False
     padded = (*version, 0, 0)[:3]
     if padded[:2] == (3, 0):
         return padded >= (3, 0, 6)
     return padded >= DORIS_QUALIFIED_EXCLUDED_TRIGGER_TABLES_MIN_VERSION
+
+
+def doris_supports_map_from_arrays(version: t.Optional[t.Tuple[int, ...]] = None) -> bool:
+    if not version or version[0] == sys.maxsize:
+        return False
+    return (*version, 0, 0)[:3] >= DORIS_MAP_FROM_ARRAYS_MIN_VERSION
 
 
 def _doris_datatype_sql(self: Generator, expression: exp.DataType) -> str:
@@ -1036,6 +1043,18 @@ def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
     if isinstance(keys, exp.Array) and isinstance(values, exp.Array):
         return var_map_sql(self, expression)
     if keys is not None or values is not None:
+        if (
+            isinstance(keys, exp.Expr)
+            and isinstance(values, exp.Expr)
+            and keys.is_type(exp.DataType.Type.ARRAY)
+            and values.is_type(exp.DataType.Type.ARRAY)
+        ):
+            if not doris_supports_map_from_arrays(getattr(self.dialect, "version", None)):
+                raise SQLMeshError(
+                    "Doris does not support constructing a MAP from array columns prior to Doris 4.2 "
+                    "(MAP_FROM_ARRAYS requires Doris 4.2+)."
+                )
+            return self.func("MAP_FROM_ARRAYS", keys, values)
         return self.func("MAP", keys, values)
     return self.func("MAP", *expression.expressions)
 

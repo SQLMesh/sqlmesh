@@ -1821,6 +1821,7 @@ def test_resolve_table_refs_in_physical_properties_for_mv_and_sync_mv(
             )
         ),
     )
+    adapter._doris_version = (2, 1, 10)
     rendered_async_props = async_mv_model.render_physical_properties(
         snapshots=snapshots, engine_adapter=adapter
     )
@@ -2726,6 +2727,7 @@ def test_table_type_keys_random_distribution_mv_exists_and_tuple_ref_resolution(
             default_catalog="internal",
         ),
     )
+    adapter._doris_version = (2, 1, 10)
     rendered_tuple_props = tuple_mv_model.render_physical_properties(
         snapshots=snapshots, engine_adapter=adapter
     )
@@ -6245,11 +6247,33 @@ def test_doris_audit_fixes_and_docs_models(
     assert _resolve_model_refs_to_physical_tables(
         exp.Literal.string("db.upstream_model"),
         table_mapping={
+            '"db"."upstream_model"': "wrong_unqualified.db__upstream_model__111",
+            '"lake_a"."db"."upstream_model"': "lake_a.sqlmesh__db.db__upstream_model__999",
+        },
+        dialect="mysql",
+        default_catalog="lake_a",
+        doris_version=(2, 1, 10),
+        property_name="excluded_trigger_tables",
+        engine_dialect="doris",
+    ) == exp.Literal.string("lake_a.sqlmesh__db.db__upstream_model__999")
+    assert _resolve_model_refs_to_physical_tables(
+        exp.Literal.string("db.upstream_model"),
+        table_mapping={
             '"internal"."db"."upstream_model"': "internal.sqlmesh__db.db__upstream_model__999",
         },
         dialect="doris",
         default_catalog="internal",
         doris_version=(2, 1, 9),
+        property_name="excluded_trigger_tables",
+    ) == exp.Literal.string("db__upstream_model__999")
+    assert _resolve_model_refs_to_physical_tables(
+        exp.Literal.string("db.upstream_model"),
+        table_mapping={
+            '"internal"."db"."upstream_model"': "internal.sqlmesh__db.db__upstream_model__999",
+        },
+        dialect="doris",
+        default_catalog="internal",
+        doris_version=None,
         property_name="excluded_trigger_tables",
     ) == exp.Literal.string("db__upstream_model__999")
     with pytest.raises(SQLMeshError, match="Doris 2.1.10\\+"):

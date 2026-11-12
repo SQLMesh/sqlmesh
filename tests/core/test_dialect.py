@@ -1740,3 +1740,14 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
     assert (
         d.parse_one(insert_branch_cols_ast.sql("doris"), dialect="doris") == insert_branch_cols_ast
     )
+
+    k_arr = exp.column("k_arr")
+    k_arr.type = exp.DataType.build("ARRAY<INT>", dialect="doris")
+    v_arr = exp.column("v_arr")
+    v_arr.type = exp.DataType.build("ARRAY<STRING>", dialect="doris")
+    map_from_arr_expr = exp.Map(keys=k_arr, values=v_arr)
+    with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        map_from_arr_expr.sql("doris")
+    with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        map_from_arr_expr.sql("doris, version=4.1.5")
+    assert map_from_arr_expr.sql("doris, version=4.2.0") == "MAP_FROM_ARRAYS(k_arr, v_arr)"

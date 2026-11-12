@@ -2830,6 +2830,11 @@ class DorisConnectionConfig(ConnectionConfig):
             cls._validate_pymysql_version()
         return data
 
+    @field_validator("port", mode="before")
+    @classmethod
+    def _default_port_when_none(cls, v: t.Any) -> t.Any:
+        return 9030 if v is None else v
+
     @field_validator("session_variables", mode="after")
     @classmethod
     def _validate_session_variables(
@@ -2855,6 +2860,7 @@ class DorisConnectionConfig(ConnectionConfig):
             "autocommit": True,
             "charset": self.charset or "utf8mb4",
             "local_infile": False,
+            "port": self.port if self.port is not None else 9030,
         }
         raw_verify_mode = self.ssl.get("verify_mode") if isinstance(self.ssl, dict) else None
         if raw_verify_mode is not None:

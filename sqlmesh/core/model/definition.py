@@ -735,7 +735,13 @@ class _Model(ModelMeta, frozen=True):
                 (render_kwargs.get("snapshots") or {}).values(),
                 render_kwargs.get("deployability_index"),
             )
-            doris_version = getattr(engine_adapter, "_doris_version", None)
+            discover_doris_version = getattr(engine_adapter, "_get_doris_version", None)
+            doris_version = (
+                discover_doris_version()
+                if discover_doris_version
+                else getattr(engine_adapter, "_doris_version", None)
+            )
+            engine_dialect = getattr(engine_adapter, "dialect", None)
             for key in keys_to_resolve:
                 rendered[key] = _resolve_model_refs_to_physical_tables(
                     rendered[key],
@@ -744,6 +750,7 @@ class _Model(ModelMeta, frozen=True):
                     default_catalog=self.default_catalog,
                     doris_version=doris_version,
                     property_name=key,
+                    engine_dialect=engine_dialect,
                 )
 
         return rendered
@@ -2842,6 +2849,7 @@ def _resolve_model_refs_to_physical_tables(
     default_catalog: t.Optional[str] = None,
     doris_version: t.Optional[t.Tuple[int, ...]] = None,
     property_name: t.Optional[str] = None,
+    engine_dialect: t.Optional[DialectType] = None,
 ) -> exp.Literal:
     """Resolve managed-model references in a property value to their physical table names.
 
@@ -2882,9 +2890,10 @@ def _resolve_model_refs_to_physical_tables(
             physical = table_mapping.get(exp.table_name(table, identify=True))
         # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
+        effective_engine_dialect = engine_dialect if engine_dialect is not None else dialect
         if (
-            dialect == "doris"
-            and property_name in (None, "excluded_trigger_tables")
+            effective_engine_dialect == "doris"
+            and property_name == "excluded_trigger_tables"
             and not d.doris_supports_qualified_excluded_trigger_tables(doris_version)
         ):
             if resolved_table.catalog and resolved_table.catalog.lower() != "internal":
@@ -2894,7 +2903,9 @@ def _resolve_model_refs_to_physical_tables(
                 )
             resolved_table.set("catalog", None)
             resolved_table.set("db", None)
-        elif strip_catalog and (dialect != "doris" or resolved_table.catalog.lower() == "internal"):
+        elif strip_catalog and (
+            effective_engine_dialect != "doris" or resolved_table.catalog.lower() == "internal"
+        ):
             resolved_table.set("catalog", None)
         return exp.table_name(resolved_table, identify=False)
 
