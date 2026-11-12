@@ -88,13 +88,16 @@ def _gen_config(
             "      # https://sqlmesh.readthedocs.io/en/stable/reference/configuration/#connection\n"
             f"      # {doc_link.format(engine_link=engine_link)}\n{connection_settings}"
         )
-        if engine_type == "doris":
-            connection_settings += (
-                "    # Doris cannot be used as a state_connection; use DuckDB for local dev or Postgres/MySQL in production:\n"
-                "    state_connection:\n"
-                "      type: duckdb\n"
-                "      database: state.db\n"
-            )
+
+    if engine_type == "doris" and template != ProjectTemplate.DBT:
+        if not connection_settings.endswith("\n"):
+            connection_settings += "\n"
+        connection_settings += (
+            "    # Doris cannot be used as a state_connection; use DuckDB for local dev or Postgres/MySQL in production:\n"
+            "    state_connection:\n"
+            "      type: duckdb\n"
+            "      database: state.db\n"
+        )
 
     default_configs = {
         ProjectTemplate.DEFAULT: f"""# --- Gateway Connection ---

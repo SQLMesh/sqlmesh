@@ -663,7 +663,11 @@ def _doris_parse_range(self: Parser, this: t.Optional[exp.Expr] = None) -> t.Opt
     if this is not None:
         idx = self._index
         negated = self._match(TokenType.NOT)
-        if self._curr and self._curr.text.upper() in _DORIS_MATCH_OPS:
+        if (
+            self._curr
+            and self._curr.token_type not in (TokenType.IDENTIFIER, TokenType.STRING)
+            and self._curr.text.upper() in _DORIS_MATCH_OPS
+        ):
             op_name = self._curr.text.upper()
             self._advance()
             rhs = self._parse_bitwise()

@@ -6313,3 +6313,15 @@ def test_doris_audit_fixes_and_docs_models(
             {"excluded_trigger_tables": exp.Literal.string("lake_a.db.t1")}
         )
     assert to_sql_calls(existing_ref_adapter) == []
+
+    # 14. `_gen_config` appends the Doris `state_connection` even when custom settings are supplied (e.g. DLT template).
+    from sqlmesh.cli.project_init import InitCliMode, ProjectTemplate, _gen_config
+
+    dlt_doris_config = _gen_config(
+        engine_type="doris",
+        settings="      type: doris\n      host: 127.0.0.1\n      user: root",
+        start="2024-01-01",
+        template=ProjectTemplate.DLT,
+        cli_mode=InitCliMode.DEFAULT,
+    )
+    assert "state_connection:\n      type: duckdb\n      database: state.db" in dlt_doris_config

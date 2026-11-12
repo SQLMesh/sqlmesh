@@ -1670,6 +1670,12 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         == "ALTER TABLE db.model ADD INDEX i1 (a) USING INVERTED, ADD INDEX i2 (b) USING INVERTED"
     )
 
+    quoted_alias_ast = d.parse_one(
+        "SELECT body `match_any` FROM docs",
+        dialect="doris",
+    )
+    assert quoted_alias_ast.sql("doris") == "SELECT body AS `match_any` FROM docs"
+
     assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
     assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"
     assert (
