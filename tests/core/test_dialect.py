@@ -1751,3 +1751,19 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
     with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
         map_from_arr_expr.sql("doris, version=4.1.5")
     assert map_from_arr_expr.sql("doris, version=4.2.0") == "MAP_FROM_ARRAYS(k_arr, v_arr)"
+
+    alter_idx_if_not_exists_sql = "ALTER TABLE t ADD INDEX IF NOT EXISTS idx_body (body) USING INVERTED PROPERTIES ('parser'='english') COMMENT 'fts'"
+    alter_idx_if_not_exists_ast = d.parse_one(alter_idx_if_not_exists_sql, dialect="doris")
+    assert isinstance(alter_idx_if_not_exists_ast, exp.Alter)
+    assert isinstance(alter_idx_if_not_exists_ast.args["actions"][0], exp.IndexColumnConstraint)
+    assert alter_idx_if_not_exists_ast.args["actions"][0].args.get("exists") is True
+    assert alter_idx_if_not_exists_ast.sql("doris") == alter_idx_if_not_exists_sql
+
+    # Verify extend_sqlglot() invalidates _DISPATCH_CACHE for Doris.Generator
+    from sqlglot.dialects import Doris
+    from sqlglot.generator import _DISPATCH_CACHE
+
+    _DISPATCH_CACHE[Doris.Generator] = {}
+    d.extend_sqlglot()
+    assert Doris.Generator not in _DISPATCH_CACHE
+    assert alter_idx_if_not_exists_ast.sql("doris") == alter_idx_if_not_exists_sql

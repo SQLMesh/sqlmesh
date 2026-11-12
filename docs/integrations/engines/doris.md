@@ -53,7 +53,7 @@ pip install "sqlmesh[doris,postgres]"
 | `password` | The password to use for authentication with Doris FE (Default: `None`) | string | N |
 | `port` | The query port number of the Doris FE server (Default: `9030`) | int | N |
 | `database` | The optional default database (schema) name | string | N |
-| `catalog` | The optional default catalog name (e.g., `internal` or an external `iceberg` catalog) | string | N |
+| `catalog` | The optional default catalog name (e.g., `internal` or an external `iceberg` catalog). Omit in Doris-only projects for 2-part (`db.table`) names; set explicitly (e.g., `catalog: internal`) in multi-gateway projects that pair Doris with a catalog-qualified gateway (such as DuckDB, Snowflake, or Databricks) so model identifier depths match across gateways | string | N |
 | `charset` | The character set used for the connection (Default: `utf8mb4`) | string | N |
 | `collation` | The collation used for the connection | string | N |
 | `connect_timeout` | Connection timeout in seconds (Default: `10`) | int | N |

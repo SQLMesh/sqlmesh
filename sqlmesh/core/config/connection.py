@@ -2725,6 +2725,9 @@ class DorisConnectionConfig(ConnectionConfig):
         port: The query port number of the Doris FE node. Default is 9030.
         database: The optional database name.
         catalog: The optional default catalog name (e.g., 'internal' or an external Iceberg catalog).
+            Defaults to None so Doris-only projects use 2-part (db.table) identifiers; in mixed-gateway
+            projects combining Doris with catalog-qualified engines (e.g., DuckDB, Snowflake, Databricks),
+            set catalog (e.g., 'internal') so model identifier depths match across gateways.
         charset: The optional character set (defaults to 'utf8mb4').
         collation: The optional collation.
         connect_timeout: Timeout in seconds for establishing a connection. Default is 10.
@@ -3068,6 +3071,14 @@ class DorisConnectionConfig(ConnectionConfig):
         return init
 
     def get_catalog(self) -> t.Optional[str]:
+        """Return the configured default catalog.
+
+        Defaults to ``None`` so single-gateway Doris projects use 2-part (``db.table``) names
+        without requiring 3-part catalog qualification in every SQL query. In mixed-gateway
+        projects that combine Doris with a catalog-qualified gateway (such as DuckDB, Snowflake,
+        or Databricks), configure ``catalog`` (for example, ``catalog: internal``) on the Doris
+        connection so model identifier depths match across gateways.
+        """
         return self.catalog
 
 

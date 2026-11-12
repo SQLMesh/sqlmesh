@@ -14,6 +14,7 @@ from sqlglot import Dialect, Generator, ParseError, Parser, Tokenizer, TokenType
 from sqlglot.dialects.dialect import DialectType, rename_func, var_map_sql
 from sqlglot.dialects import Doris, DuckDB, Snowflake, TSQL
 import sqlglot.dialects.athena as athena
+from sqlglot.generator import _DISPATCH_CACHE
 import sqlglot.generators.athena as athena_generators
 from sqlglot.parser import build_var_map
 from sqlglot.parsers.athena import AthenaTrinoParser
@@ -838,7 +839,14 @@ def _doris_version_sql(self: Generator, expression: exp.Version) -> str:
 def _doris_parse_index_constraint(
     self: Parser, kind: t.Optional[str] = None
 ) -> exp.IndexColumnConstraint:
-    constraint = self.__parse_index_constraint(kind=kind)  # type: ignore
+    if kind:
+        self._match_texts(("INDEX", "KEY"))
+    exists = self._parse_exists(not_=True)
+    constraint = self.__parse_index_constraint(kind=None)  # type: ignore
+    if kind:
+        constraint.set("kind", kind)
+    if exists:
+        constraint.set("exists", True)
     options = list(constraint.args.get("options") or [])
     updated = False
     while True:
@@ -864,6 +872,25 @@ def _doris_parse_index_constraint(
 
 
 _doris_parse_index_constraint.__name__ = "_parse_index_constraint"
+
+
+def _doris_indexcolumnconstraint_sql(self: Generator, expression: exp.IndexColumnConstraint) -> str:
+    if not expression.args.get("exists"):
+        return self._indexcolumnconstraint_sql(expression)  # type: ignore
+    kind = self.sql(expression, "kind")
+    kind = f"{kind} INDEX" if kind else "INDEX"
+    this = self.sql(expression, "this")
+    this = f" {this}" if this else ""
+    index_type = self.sql(expression, "index_type")
+    index_type = f" USING {index_type}" if index_type else ""
+    expressions = self.expressions(expression, flat=True)
+    expressions = f" ({expressions})" if expressions else ""
+    options = self.expressions(expression, key="options", sep=" ")
+    options = f" {options}" if options else ""
+    return f"{kind} IF NOT EXISTS{this}{index_type}{expressions}{options}"
+
+
+_doris_indexcolumnconstraint_sql.__name__ = "indexcolumnconstraint_sql"
 
 
 def _doris_indexconstraintoption_sql(self: Generator, expression: exp.IndexConstraintOption) -> str:
@@ -1941,6 +1968,7 @@ def extend_sqlglot() -> None:
             exp.Version: _doris_version_sql,
         }
     )
+    _DISPATCH_CACHE.pop(Doris.Generator, None)
 
     tokenizers = {Tokenizer}
     parsers = {Parser}
@@ -2041,9 +2069,11 @@ def extend_sqlglot() -> None:
     _override(Doris.Generator, altercolumn_sql)
     _override(Doris.Generator, columndef_sql)
     _override(Doris.Generator, _doris_datatype_sql)
+    _override(Doris.Generator, _doris_indexcolumnconstraint_sql)
     _override(Doris.Generator, _doris_indexconstraintoption_sql)
     _override(Doris.Generator, _doris_indexparameters_sql)
     _override(Doris.Generator, _doris_alter_sql)
+    _DISPATCH_CACHE.pop(Doris.Generator, None)
 
     # DuckDB's prefix absolute power operator `@` clashes with the macro syntax
     DuckDB.Parser.NO_PAREN_FUNCTION_PARSERS.pop("@", None)

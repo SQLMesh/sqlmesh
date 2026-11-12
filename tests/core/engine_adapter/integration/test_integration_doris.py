@@ -766,8 +766,9 @@ def test_doris_4_1_native_merge_segment_v3_and_ann_index(ctx: TestContext):
     merged_rows = ctx.engine_adapter.fetchall(
         exp.select("id", "name", "val").from_(merge_tbl).order_by("id")
     )
-    # Row 1 updated val (15 > 10) while keeping name='orig_a'; Row 2 unchanged (5 < 20); Row 3 inserted
+    # Row 0 unmatched due to merge_filter and inserted by WHEN NOT MATCHED; Row 1 updated val (15 > 10) while keeping name='orig_a'; Row 2 unchanged (5 < 20); Row 3 inserted
     assert list(merged_rows) == [
+        (0, "filtered_zero", 99),
         (1, "orig_a", 15),
         (2, "orig_b", 20),
         (3, "new_c", 30),
