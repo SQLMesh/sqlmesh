@@ -9,12 +9,13 @@ import { useApiModels } from '@/api'
 import LineageFlowProvider from '@/components/graph/context'
 import { ModelLineage } from '@/components/graph/ModelLineage'
 import { useVSCode } from '@/hooks/vscode'
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { ModelSQLMeshModel } from '@/domain/sqlmesh-model'
 import { useEventBus } from '@/hooks/eventBus'
-import type { VSCodeEvent } from '@bus/callbacks'
+import type { RPCMethods, VSCodeEvent } from '@bus/callbacks'
 import type { Model } from '@/api/client'
 import { useRpc } from '@/utils/rpc'
+import { findModelsByPath } from '@/utils/path'
 import {
   type ModelPath,
   type ModelFullPath,
@@ -33,7 +34,10 @@ export function LineagePage() {
         const payload: VSCodeEvent = event.data.payload
         switch (payload.key) {
           case 'changeFocusOnFile':
-            emit('changeFocusedFile', { fileUri: payload.payload.path })
+            emit('changeFocusedFile', {
+              fileUri: payload.payload.path,
+              isWindows: payload.payload.isWindows,
+            })
             break
           case 'savedFile':
             emit('savedFile', { fileUri: payload.payload.fileUri })
@@ -71,10 +75,12 @@ export function LineagePage() {
   )
 }
 
+/** Follow editor focus without choosing arbitrarily between ambiguous model paths. */
 function Lineage() {
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     undefined,
   )
+  const [activeFileError, setActiveFileError] = useState(false)
   const { on } = useEventBus()
   const queryClient = useQueryClient()
 
@@ -84,41 +90,43 @@ function Lineage() {
     error: modelsError,
   } = useApiModels()
   const rpc = useRpc()
+  const focusVersion = useRef(0)
   React.useEffect(() => {
-    const fetchFirstTimeModelIfNotSet = async (
-      models: Model[],
-    ): Promise<string | undefined> => {
-      if (!Array.isArray(models)) {
-        return undefined
-      }
-      const activeFile = await rpc('get_active_file', {})
-      // @ts-ignore
-      if (!activeFile.fileUri) {
-        return models[0].name
-      }
-      // @ts-ignore
-      const filePath: string = activeFile.fileUri
-      const model = models.find((m: Model) => {
-        if (!m.full_path) {
-          return false
-        }
-        return m.full_path === filePath
-      })
-      if (model) {
-        return model.name
-      }
-      return undefined
+    if (
+      selectedModel !== undefined ||
+      !Array.isArray(models) ||
+      !models.length
+    ) {
+      return
     }
-    if (selectedModel === undefined && Array.isArray(models)) {
-      fetchFirstTimeModelIfNotSet(models).then(modelName => {
-        if (modelName && selectedModel === undefined) {
-          setSelectedModel(modelName)
-        } else {
-          setSelectedModel(models[0].name)
-        }
+    let current = true
+    const version = focusVersion.current
+    // get_active_file uses a plain payload on the existing RPC wire protocol.
+    setActiveFileError(false)
+    rpc('get_active_file', {})
+      .then(response => {
+        if (!current || focusVersion.current !== version) return
+        const activeFile =
+          response as unknown as RPCMethods['get_active_file']['result']
+        const matches = findModelsByPath(
+          models,
+          activeFile.fileUri,
+          activeFile.isWindows,
+        )
+        setSelectedModel(
+          previous =>
+            previous ??
+            (matches.length > 1 ? undefined : (matches[0] ?? models[0]).name),
+        )
       })
+      .catch(() => {
+        if (!current || focusVersion.current !== version) return
+        setActiveFileError(true)
+      })
+    return () => {
+      current = false
     }
-  }, [models, selectedModel])
+  }, [models, selectedModel, rpc])
 
   const modelsRecord =
     Array.isArray(models) &&
@@ -131,12 +139,23 @@ function Lineage() {
     )
 
   React.useEffect(() => {
-    const handleChangeFocusedFile = (fileUri: { fileUri: string }) => {
-      const model = Object.values(modelsRecord).find(
-        m => m.full_path === fileUri.fileUri,
+    const handleChangeFocusedFile = (file: {
+      fileUri: string
+      isWindows?: boolean
+    }) => {
+      focusVersion.current += 1
+      const matches = findModelsByPath(
+        Object.values(modelsRecord),
+        file.fileUri,
+        file.isWindows,
       )
-      if (model) {
-        setSelectedModel(model.name)
+      if (matches.length < 2) {
+        setSelectedModel(
+          previous =>
+            matches[0]?.name ??
+            previous ??
+            (Array.isArray(models) ? models[0]?.name : undefined),
+        )
       }
     }
 
@@ -161,16 +180,46 @@ function Lineage() {
     return <div>Error: {modelsError.message}</div>
   }
 
-  if (
-    isLoadingModels ||
-    models === undefined ||
-    modelsRecord === false ||
-    selectedModel === undefined
-  ) {
+  if (isLoadingModels || models === undefined || modelsRecord === false) {
     return <div>Loading models...</div>
   }
   if (!Array.isArray(models)) {
     return <div>Error: Models data is not in the expected format</div>
+  }
+
+  if (!models.length) {
+    return <div>No models available.</div>
+  }
+  if (selectedModel === undefined) {
+    return (
+      <div>
+        <p>
+          {activeFileError
+            ? 'Unable to determine the active model. Select a model to view its lineage.'
+            : 'Select a model to view its lineage.'}
+        </p>
+        <select
+          aria-label="Select a model"
+          value=""
+          onChange={event => setSelectedModel(event.target.value)}
+        >
+          <option
+            value=""
+            disabled
+          >
+            Select a model
+          </option>
+          {models.map(model => (
+            <option
+              key={model.name}
+              value={model.name}
+            >
+              {model.name}
+            </option>
+          ))}
+        </select>
+      </div>
+    )
   }
 
   return (
