@@ -136,7 +136,7 @@ You can also use the `@model_kind_name` variable to fine-tune control over `phys
     )
     ```
 
-You can aso define `pre_statements`, `post_statements` and `on_virtual_update` statements at the project level that will be applied to all models. These default statements are merged with any model-specific statements, with default statements executing first, followed by model-specific statements.
+You can aso define `pre_statements`, `post_statements` and `on_virtual_update` statements at the project level that will be applied to all models except [external models](../concepts/models/external_models.md). These default statements are merged with any model-specific statements, with default statements executing first, followed by model-specific statements.
 
 === "YAML"
 
