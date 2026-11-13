@@ -1183,6 +1183,23 @@ def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
     return self.func("MAP", *expression.expressions)
 
 
+def _doris_parse_struct(self: Parser) -> exp.Struct:
+    args: t.List[exp.Expr] = []
+    for arg in self._parse_function_args(alias=True):
+        if isinstance(arg, exp.Alias):
+            args.append(
+                self.expression(
+                    exp.PropertyEQ(
+                        this=exp.to_identifier(arg.alias),
+                        expression=arg.this,
+                    )
+                )
+            )
+        else:
+            args.append(arg)
+    return self.expression(exp.Struct(expressions=args))
+
+
 def _doris_struct_sql(self: Generator, expression: exp.Struct) -> str:
     if any(isinstance(e, (exp.PropertyEQ, exp.Alias)) for e in expression.expressions):
         args: t.List[str] = []
@@ -2013,6 +2030,10 @@ def extend_sqlglot() -> None:
     Doris.Parser.TABLE_ALIAS_TOKENS = Doris.Parser.TABLE_ALIAS_TOKENS - {
         TokenType.ANTI,
         TokenType.SEMI,
+    }
+    Doris.Parser.FUNCTION_PARSERS = {
+        **Doris.Parser.FUNCTION_PARSERS,
+        "STRUCT": _doris_parse_struct,
     }
     Doris.Parser.FUNCTIONS.update(
         {
