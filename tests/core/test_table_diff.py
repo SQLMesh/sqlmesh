@@ -1246,3 +1246,81 @@ def test_data_diff_nulls_in_some_grain_columns():
         "null value",
         "null value modified",
     ]
+
+
+def test_data_diff_on_columns_with_non_lowercase_names():
+    # On engines whose sqlglot dialect lowercases unquoted identifiers (e.g. BigQuery, DuckDB),
+    # `on` columns are normalized to lowercase before being looked up in the schema returned by
+    # `adapter.columns()`, which preserves the original (non-lowercase) casing. This used to raise
+    # a KeyError instead of resolving case-insensitively (issue #6067).
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    columns_to_types = {
+        "KEY1": exp.DataType.build("int"),
+        "KEY2": exp.DataType.build("int"),
+        "VALUE": exp.DataType.build("varchar"),
+    }
+
+    engine_adapter.create_table("src", columns_to_types)
+    engine_adapter.create_table("target", columns_to_types)
+
+    src_records = [(1, 1, "a"), (2, 2, "source only")]
+    target_records = [(1, 1, "a"), (3, 3, "target only")]
+
+    src_df = pd.DataFrame(data=src_records, columns=columns_to_types.keys())
+    target_df = pd.DataFrame(data=target_records, columns=columns_to_types.keys())
+
+    engine_adapter.insert_append("src", src_df)
+    engine_adapter.insert_append("target", target_df)
+
+    # multiple key columns, referenced with a case that doesn't match the schema
+    multi_key_diff = TableDiff(
+        adapter=engine_adapter, source="src", target="target", on=["key1", "key2"]
+    ).row_diff()
+
+    assert multi_key_diff.full_match_count == 1
+    assert multi_key_diff.s_only_count == 1
+    assert multi_key_diff.t_only_count == 1
+
+    # single key column, referenced with a case that doesn't match the schema
+    single_key_diff = TableDiff(
+        adapter=engine_adapter, source="src", target="target", on=["KEY1"]
+    ).row_diff()
+
+    assert single_key_diff.full_match_count == 1
+    assert single_key_diff.s_only_count == 1
+    assert single_key_diff.t_only_count == 1
+
+
+def test_data_diff_skip_columns_with_non_lowercase_names():
+    # `skip_columns` goes through the same normalize-then-exact-match lookup as `on`, so it is
+    # subject to the same casing mismatch on engines that lowercase unquoted identifiers.
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+
+    columns_to_types = {
+        "KEY1": exp.DataType.build("int"),
+        "IGNORE_ME": exp.DataType.build("varchar"),
+        "VALUE": exp.DataType.build("varchar"),
+    }
+
+    engine_adapter.create_table("src", columns_to_types)
+    engine_adapter.create_table("target", columns_to_types)
+
+    # IGNORE_ME differs between source and target, but should be excluded from comparison
+    src_df = pd.DataFrame(data=[(1, "src-only-value", "a")], columns=columns_to_types.keys())
+    target_df = pd.DataFrame(data=[(1, "target-only-value", "a")], columns=columns_to_types.keys())
+
+    engine_adapter.insert_append("src", src_df)
+    engine_adapter.insert_append("target", target_df)
+
+    diff = TableDiff(
+        adapter=engine_adapter,
+        source="src",
+        target="target",
+        on=["KEY1"],
+        skip_columns=["ignore_me"],
+    ).row_diff()
+
+    assert diff.full_match_count == 1
+    assert diff.s_only_count == 0
+    assert diff.t_only_count == 0
