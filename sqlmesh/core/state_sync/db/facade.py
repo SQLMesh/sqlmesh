@@ -24,6 +24,7 @@ from datetime import datetime
 
 
 from sqlmesh.core.console import Console, get_console
+from sqlmesh.core import constants as c
 from sqlmesh.core.engine_adapter import EngineAdapter
 from sqlmesh.core.environment import Environment, EnvironmentStatements, EnvironmentSummary
 from sqlmesh.core.snapshot import (
@@ -62,6 +63,12 @@ from sqlmesh.core.state_sync.db.environment import EnvironmentState
 from sqlmesh.core.state_sync.db.snapshot import SnapshotState
 from sqlmesh.core.state_sync.db.version import VersionState
 from sqlmesh.core.state_sync.db.migrator import StateMigrator, _backup_table_name
+from sqlmesh.core.promotion import (
+    PromotionFrontier,
+    TrailingGap,
+    TrailingGapRejectionReason,
+    evaluate_trailing_gap,
+)
 from sqlmesh.utils.date import TimeLike, to_timestamp, time_like_to_str, now_timestamp
 from sqlmesh.utils.errors import ConflictingPlanError, SQLMeshError
 
@@ -149,6 +156,8 @@ class EngineAdapterStateSync(StateSync):
         environment: Environment,
         no_gaps_snapshot_names: t.Optional[t.Set[str]] = None,
         environment_statements: t.Optional[t.List[EnvironmentStatements]] = None,
+        max_trailing_gap_intervals: int = 0,
+        planned_frontiers: t.Optional[t.Dict[str, PromotionFrontier]] = None,
     ) -> PromotionResult:
         """Update the environment to reflect the current state.
 
@@ -160,6 +169,12 @@ class EngineAdapterStateSync(StateSync):
                 all snapshots will be checked. The data gap check ensures that models that are already a
                 part of the target environment have no data gaps when compared against previous
                 snapshots for same models.
+            max_trailing_gap_intervals: Maximum number of scheduler boundaries
+                of trailing incumbent coverage that may be accepted. Zero
+                preserves strict no-gap behavior.
+            planned_frontiers: The incumbent snapshot identities and coverage
+                frontiers captured while the plan was built, keyed by model
+                name.
 
         Returns:
            A tuple of (added snapshot table infos, removed snapshot table infos, and environment target suffix for the removed table infos)
@@ -174,6 +189,9 @@ class EngineAdapterStateSync(StateSync):
                 f"Missing snapshots {missing}. Make sure to push and backfill your snapshots."
             )
 
+        accepted_trailing_gaps: t.List[
+            t.Tuple[Snapshot, Snapshot, PromotionFrontier, TrailingGap]
+        ] = []
         existing_environment = self.environment_state.get_environment(
             environment.name, lock_for_update=True
         )
@@ -203,10 +221,15 @@ class EngineAdapterStateSync(StateSync):
                     )
                 if no_gaps_snapshot_names != set():
                     snapshots = self.get_snapshots(environment.snapshots).values()
-                    self._ensure_no_gaps(
+                    accepted_trailing_gaps = self._ensure_no_gaps(
                         snapshots,
                         existing_environment,
                         no_gaps_snapshot_names,
+                        max_trailing_gap_intervals=max_trailing_gap_intervals
+                        if environment.name == c.PROD
+                        else 0,
+                        planned_frontiers=planned_frontiers,
+                        candidate_plan_id=environment.plan_id,
                     )
             demoted_snapshots = set(existing_environment.snapshots) - set(environment.snapshots)
             # Update the updated_at attribute.
@@ -234,13 +257,24 @@ class EngineAdapterStateSync(StateSync):
             views_that_changed_location
         )
 
-        return PromotionResult(
+        result = PromotionResult(
             added=sorted(added_table_infos),
             removed=list(removed),
             removed_environment_naming_info=(
                 existing_environment.naming_info if removed and existing_environment else None
             ),
         )
+
+        for target_snapshot, incumbent_snapshot, frontier, gap in accepted_trailing_gaps:
+            _log_trailing_gap_acceptance(
+                environment,
+                target_snapshot,
+                incumbent_snapshot,
+                frontier,
+                gap,
+            )
+
+        return result
 
     @transactional()
     def finalize(self, environment: Environment) -> None:
@@ -585,7 +619,11 @@ class EngineAdapterStateSync(StateSync):
         target_snapshots: t.Iterable[Snapshot],
         target_environment: Environment,
         snapshot_names: t.Optional[t.Set[str]],
-    ) -> None:
+        *,
+        max_trailing_gap_intervals: int = 0,
+        planned_frontiers: t.Optional[t.Dict[str, PromotionFrontier]] = None,
+        candidate_plan_id: t.Optional[str] = None,
+    ) -> t.List[t.Tuple[Snapshot, Snapshot, PromotionFrontier, TrailingGap]]:
         target_snapshots_by_name = {s.name: s for s in target_snapshots}
 
         changed_version_prev_snapshots_by_name = {
@@ -599,6 +637,9 @@ class EngineAdapterStateSync(StateSync):
             changed_version_prev_snapshots_by_name.values()
         ).values()
         cache: t.Dict[str, datetime] = {}
+        accepted_trailing_gaps: t.List[
+            t.Tuple[Snapshot, Snapshot, PromotionFrontier, TrailingGap]
+        ] = []
 
         for prev_snapshot in prev_snapshots:
             target_snapshot = target_snapshots_by_name[prev_snapshot.name]
@@ -619,10 +660,55 @@ class EngineAdapterStateSync(StateSync):
                     )
 
                     if missing_intervals:
-                        raise SQLMeshError(
-                            f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
-                            "Please re-apply your plan to resolve this error."
+                        frontier = (planned_frontiers or {}).get(prev_snapshot.name)
+                        evaluation = evaluate_trailing_gap(
+                            target_snapshot,
+                            prev_snapshot,
+                            frontier,
+                            max_trailing_gap_intervals,
+                            start=start,
                         )
+                        if evaluation.gap is not None:
+                            accepted_trailing_gaps.append(
+                                (
+                                    target_snapshot,
+                                    prev_snapshot,
+                                    t.cast(PromotionFrontier, frontier),
+                                    evaluation.gap,
+                                )
+                            )
+                            continue
+
+                        _log_trailing_gap_rejection(
+                            target_environment,
+                            target_snapshot,
+                            evaluation.reason,
+                            candidate_plan_id=candidate_plan_id,
+                        )
+
+                        raise _missing_intervals_error(target_snapshot, evaluation.reason)
+
+        children_by_parent = (
+            _build_children_by_parent(target_snapshots_by_name) if accepted_trailing_gaps else {}
+        )
+        for target_snapshot, _, _, trailing_gap in accepted_trailing_gaps:
+            if _has_downstream_coverage(
+                target_snapshots_by_name,
+                target_snapshot.name,
+                trailing_gap,
+                children_by_parent,
+            ):
+                _log_trailing_gap_rejection(
+                    target_environment,
+                    target_snapshot,
+                    TrailingGapRejectionReason.DOWNSTREAM_COVERAGE,
+                    candidate_plan_id=candidate_plan_id,
+                )
+                raise _missing_intervals_error(
+                    target_snapshot, TrailingGapRejectionReason.DOWNSTREAM_COVERAGE
+                )
+
+        return accepted_trailing_gaps
 
     @contextlib.contextmanager
     def _transaction(self) -> t.Iterator[None]:
@@ -652,3 +738,150 @@ def _remove_partial_intervals(
                 snapshot_id,
             )
     return results
+
+
+def _missing_intervals_error(
+    target_snapshot: Snapshot,
+    reason: t.Optional[TrailingGapRejectionReason],
+) -> SQLMeshError:
+    prefix = f"Detected missing intervals for model {target_snapshot.name}, interrupting your current plan. "
+    if reason is None or reason == TrailingGapRejectionReason.DISABLED:
+        return SQLMeshError(prefix + "Please re-apply your plan to resolve this error.")
+
+    guidance = {
+        TrailingGapRejectionReason.BOUND_EXCEEDED: (
+            "Backfill the candidate's missing coverage through the incumbent frontier before retrying promotion. "
+            "Alternatively, review whether a larger allowance is appropriate and create a fresh plan; "
+            "changing the allowance does not change an existing serialized plan."
+        ),
+        TrailingGapRejectionReason.DOWNSTREAM_COVERAGE: (
+            "Backfill the candidate's upstream gap, invalidate overlapping downstream coverage, and then recompute it "
+            "before retrying promotion."
+        ),
+        TrailingGapRejectionReason.SCHEDULE_INELIGIBLE: (
+            "Resolve the incompatible schedule or interval semantics and backfill the candidate's missing "
+            "coverage before retrying promotion; increasing the allowance cannot make this gap eligible."
+        ),
+        TrailingGapRejectionReason.FRONTIER_UNAVAILABLE: (
+            "Create a fresh plan that captures the current incumbent frontier and backfills the candidate's "
+            "required coverage; re-applying this serialized plan will not refresh its frontier or bounds."
+        ),
+        TrailingGapRejectionReason.PLANNED_COVERAGE_INCOMPLETE: (
+            "Backfill the candidate's missing required coverage before retrying promotion. The allowance only "
+            "applies to a new trailing suffix."
+        ),
+        TrailingGapRejectionReason.NON_TRAILING_GAP: (
+            "Backfill the candidate's missing historical or internal coverage before retrying promotion. "
+            "The allowance only applies to a new trailing suffix."
+        ),
+    }.get(reason, "Inspect and repair the candidate's missing coverage before retrying promotion.")
+    return SQLMeshError(
+        f"{prefix}Bounded trailing-gap policy rejected ({reason.value}). {guidance}"
+    )
+
+
+def _log_trailing_gap_rejection(
+    target_environment: Environment,
+    target_snapshot: Snapshot,
+    reason: t.Optional[TrailingGapRejectionReason],
+    *,
+    candidate_plan_id: t.Optional[str],
+) -> None:
+    """Report a rejected policy decision without changing deployment behavior."""
+    try:
+        payload = {
+            "environment": target_environment.name,
+            "plan_id": candidate_plan_id,
+            "model": target_snapshot.name,
+            "candidate_snapshot_id": str(target_snapshot.snapshot_id),
+            "reason": reason.value if reason else None,
+        }
+        logger.warning(
+            "Rejected bounded trailing gap during promotion: %s",
+            payload,
+            extra={
+                "sqlmesh_event": "bounded_trailing_gap_rejected",
+                "sqlmesh_promotion": payload,
+            },
+        )
+    except Exception:
+        # Observability must not mask the policy's existing SQLMeshError.
+        pass
+
+
+def _log_trailing_gap_acceptance(
+    environment: Environment,
+    target_snapshot: Snapshot,
+    incumbent_snapshot: Snapshot,
+    frontier: PromotionFrontier,
+    gap: TrailingGap,
+) -> None:
+    """Report an accepted policy decision without affecting promotion."""
+    try:
+        payload = {
+            "environment": environment.name,
+            "plan_id": environment.plan_id,
+            "previous_plan_id": environment.previous_plan_id,
+            "model": target_snapshot.name,
+            "incumbent_snapshot_id": str(incumbent_snapshot.snapshot_id),
+            "candidate_snapshot_id": str(target_snapshot.snapshot_id),
+            "planned_frontier": frontier.end,
+            "observed_frontier": gap.end,
+            "gap_count": gap.interval_count,
+            "gap_range": gap.interval,
+            "next_scheduler_boundary": gap.next_scheduler_boundary,
+        }
+        logger.warning(
+            "Accepted bounded trailing gap during promotion: %s",
+            payload,
+            extra={
+                "sqlmesh_event": "bounded_trailing_gap_accepted",
+                "sqlmesh_promotion": payload,
+            },
+        )
+    except Exception:
+        # Observability must not roll back a successful promotion.
+        pass
+
+
+def _build_children_by_parent(
+    snapshots_by_name: t.Mapping[str, Snapshot],
+) -> t.Dict[str, t.Set[str]]:
+    """Build target snapshot adjacency for a single no-gaps evaluation."""
+    children_by_parent: t.Dict[str, t.Set[str]] = {}
+    for snapshot in snapshots_by_name.values():
+        for parent in snapshot.parents:
+            children_by_parent.setdefault(parent.name, set()).add(snapshot.name)
+    return children_by_parent
+
+
+def _has_downstream_coverage(
+    snapshots_by_name: t.Mapping[str, Snapshot],
+    model_name: str,
+    gap: TrailingGap,
+    children_by_parent: t.Mapping[str, t.Set[str]],
+) -> bool:
+    """Return whether a target descendant already covers an accepted parent tail.
+
+    A descendant interval built before its parent's accepted tail is repaired
+    can be marked complete against incomplete input.  Keeping this check
+    conservative avoids accepting that state when auto-upstream selection or
+    a later scheduler run cannot invalidate the descendant interval.
+    """
+    descendants: t.Set[str] = set()
+    pending = [model_name]
+    while pending:
+        parent_name = pending.pop()
+        for child_name in children_by_parent.get(parent_name, set()):
+            if child_name not in descendants:
+                descendants.add(child_name)
+                pending.append(child_name)
+
+    for descendant_name in descendants:
+        descendant = snapshots_by_name[descendant_name]
+        if any(
+            interval_start < gap.end and interval_end > gap.start
+            for interval_start, interval_end in descendant.intervals
+        ):
+            return True
+    return False

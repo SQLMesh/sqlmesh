@@ -1,10 +1,11 @@
 import typing as t
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from sqlmesh.core import constants as c
 from sqlmesh.core.environment import EnvironmentStatements, EnvironmentNamingInfo, Environment
 from sqlmesh.core.plan.common import should_force_rebuild
 from sqlmesh.core.plan.definition import EvaluatablePlan
+from sqlmesh.core.promotion import PromotionFrontier
 from sqlmesh.core.state_sync import StateReader
 from sqlmesh.core.scheduler import merged_missing_intervals, SnapshotToIntervals
 from sqlmesh.core.snapshot.definition import (
@@ -141,9 +142,14 @@ class EnvironmentRecordUpdateStage:
 
     Args:
         no_gaps_snapshot_names: Names of snapshots for which there should be no interval gaps.
+        max_trailing_gap_intervals: Maximum trailing scheduler intervals that may be accepted
+            during promotion.
+        planned_frontiers: Production snapshot frontiers captured when the plan was built.
     """
 
     no_gaps_snapshot_names: t.Set[str]
+    max_trailing_gap_intervals: int = 0
+    planned_frontiers: t.Dict[str, PromotionFrontier] = field(default_factory=dict)
 
 
 @dataclass
@@ -370,7 +376,11 @@ class PlanStagesBuilder:
 
         stages.append(
             EnvironmentRecordUpdateStage(
-                no_gaps_snapshot_names={s.name for s in before_promote_snapshots}
+                no_gaps_snapshot_names={s.name for s in before_promote_snapshots},
+                max_trailing_gap_intervals=(
+                    plan.max_trailing_gap_intervals if plan.is_prod and plan.no_gaps else 0
+                ),
+                planned_frontiers=(plan.planned_frontiers if plan.is_prod and plan.no_gaps else {}),
             )
         )
 
