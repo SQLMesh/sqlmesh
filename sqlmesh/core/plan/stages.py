@@ -279,10 +279,23 @@ class PlanStagesBuilder:
             ]
             # Include all upstream dependencies of snapshots that require schema migration to make sure
             # the upstream tables are created before the schema updates are applied
+            snapshot_ids_to_migrate = set(dag.subdag(*snapshot_ids_with_schema_migration))
+            # Migrating a view replaces it, and engines like Postgres drop its dependent views with CASCADE,
+            # so those are migrated too to be recreated
+            for s_id in dag:
+                snapshot = snapshots[s_id]
+                if snapshot.is_view and any(
+                    p_id in snapshot_ids_to_migrate
+                    and snapshots[p_id].is_view
+                    and snapshots[p_id].supports_schema_migration_in_prod
+                    for p_id in snapshot.parents
+                ):
+                    snapshot_ids_to_migrate.add(s_id)
             snapshots_with_schema_migration = [
                 snapshots[s_id]
-                for s_id in dag.subdag(*snapshot_ids_with_schema_migration)
-                if snapshots[s_id].supports_schema_migration_in_prod
+                for s_id in dag
+                if s_id in snapshot_ids_to_migrate
+                and snapshots[s_id].supports_schema_migration_in_prod
             ]
 
         snapshots_to_intervals = self._missing_intervals(
