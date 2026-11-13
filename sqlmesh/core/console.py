@@ -2616,6 +2616,8 @@ class TerminalConsole(Console):
                             axis=1,
                         )
                     ]
+                    if column_table.empty:
+                        continue
 
                     # Rename the column headers for readability
                     column_table = column_table.rename(
