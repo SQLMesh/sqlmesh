@@ -146,6 +146,7 @@ class _ThreadLocalBase(_TransactionManagementMixin):
                         self._cursor_init(cursor)
                     except Exception:
                         _try_close(cursor, "cursor")
+                        self._reset_connection_on_cursor_init_failure(thread_id)
                         raise
                 self._thread_cursors[thread_id] = cursor
             return self._thread_cursors[thread_id]
@@ -195,6 +196,9 @@ class _ThreadLocalBase(_TransactionManagementMixin):
         with self._thread_transactions_lock:
             self._thread_transactions.discard(thread_id)
 
+    def _reset_connection_on_cursor_init_failure(self, thread_id: t.Hashable) -> None:
+        self._discard_transaction(thread_id)
+
 
 class ThreadLocalConnectionPool(_ThreadLocalBase):
     def __init__(
@@ -205,6 +209,12 @@ class ThreadLocalConnectionPool(_ThreadLocalBase):
         super().__init__(connection_factory, cursor_init)
         self._thread_connections: t.Dict[t.Hashable, t.Any] = {}
         self._thread_connections_lock = Lock()
+
+    def _reset_connection_on_cursor_init_failure(self, thread_id: t.Hashable) -> None:
+        with self._thread_connections_lock:
+            if thread_id in self._thread_connections:
+                _try_close(self._thread_connections.pop(thread_id), "connection")
+            self._discard_transaction(thread_id)
 
     def get(self) -> t.Any:
         thread_id = get_ident()
@@ -245,6 +255,13 @@ class ThreadLocalSharedConnectionPool(_ThreadLocalBase):
         super().__init__(connection_factory, cursor_init)
         self._connection: t.Optional[t.Any] = None
         self._connection_lock = Lock()
+
+    def _reset_connection_on_cursor_init_failure(self, thread_id: t.Hashable) -> None:
+        with self._connection_lock:
+            if not self._thread_cursors and self._connection is not None:
+                _try_close(self._connection, "connection")
+                self._connection = None
+            self._discard_transaction(thread_id)
 
     def get(self) -> t.Any:
         with self._connection_lock:
@@ -297,6 +314,9 @@ class SingletonConnectionPool(_TransactionManagementMixin):
                     self._cursor_init(cursor)
                 except Exception:
                     _try_close(cursor, "cursor")
+                    _try_close(self._connection, "connection")
+                    self._connection = None
+                    self._is_transaction_active = False
                     raise
             self._cursor = cursor
         return self._cursor

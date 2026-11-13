@@ -2748,9 +2748,17 @@ def test_doris(make_config):
     with pytest.raises(ConfigError, match="requires `ssl_ca`"):
         _ = ssl_dict_check_hostname_no_ca._static_connection_kwargs
 
-    from sqlmesh.utils.connection_pool import SingletonConnectionPool, ThreadLocalConnectionPool
+    from sqlmesh.utils.connection_pool import (
+        SingletonConnectionPool,
+        ThreadLocalConnectionPool,
+        ThreadLocalSharedConnectionPool,
+    )
 
-    for pool_cls in (SingletonConnectionPool, ThreadLocalConnectionPool):
+    for pool_cls in (
+        SingletonConnectionPool,
+        ThreadLocalConnectionPool,
+        ThreadLocalSharedConnectionPool,
+    ):
         failing_cursor = MagicMock()
         failing_cursor.execute.side_effect = [
             None,
@@ -2758,13 +2766,17 @@ def test_doris(make_config):
             RuntimeError("SWITCH failed"),
         ]
         healthy_cursor = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.cursor.side_effect = [failing_cursor, healthy_cursor]
-        pool = pool_cls(lambda: mock_conn, cursor_init=advanced_config._cursor_init)
+        failing_conn = MagicMock()
+        failing_conn.cursor.return_value = failing_cursor
+        healthy_conn = MagicMock()
+        healthy_conn.cursor.return_value = healthy_cursor
+        conns = iter([failing_conn, healthy_conn])
+        pool = pool_cls(lambda: next(conns), cursor_init=advanced_config._cursor_init)
 
         with pytest.raises(RuntimeError, match="SWITCH failed"):
             pool.get_cursor()
         failing_cursor.close.assert_called()
+        failing_conn.close.assert_called_once()
 
         recovered_cursor = pool.get_cursor()
         assert recovered_cursor is healthy_cursor

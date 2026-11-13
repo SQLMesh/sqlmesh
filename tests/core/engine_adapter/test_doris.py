@@ -2426,6 +2426,7 @@ def test_unannotated_view_column_comments_and_starrocks_property_parity(
 
     # 2. Parenthesized string forms for unique_key and order_by, structured distributed_by with `columns=...`,
     #    and tuple generic properties (e.g. excluded_trigger_tables = ('db.t1', 'db.t2')).
+    adapter._doris_version = (2, 1, 10)
     adapter.create_table(
         "db.paren_keys_tbl",
         target_columns_to_types={
@@ -6315,6 +6316,20 @@ def test_doris_audit_fixes_and_docs_models(
     ]
     with pytest.raises(SQLMeshError, match="Doris 2.1.10\\+"):
         v219_adapter._properties_to_expressions(
+            {"excluded_trigger_tables": exp.Literal.string("lake_a.db.t1")}
+        )
+    unknown_ver_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    mocker.patch.object(unknown_ver_adapter, "_get_doris_version", return_value=None)
+    assert unknown_ver_adapter._properties_to_expressions(
+        {"excluded_trigger_tables": exp.Literal.string("internal.db.t1,db.t2")}
+    ) == [
+        exp.Property(
+            this=exp.Literal.string("excluded_trigger_tables"),
+            value=exp.Literal.string("t1,t2"),
+        )
+    ]
+    with pytest.raises(SQLMeshError, match="Doris 2.1.10\\+"):
+        unknown_ver_adapter._properties_to_expressions(
             {"excluded_trigger_tables": exp.Literal.string("lake_a.db.t1")}
         )
     with pytest.raises(SQLMeshError, match="cannot disambiguate"):

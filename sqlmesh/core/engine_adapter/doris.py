@@ -18,7 +18,6 @@ from sqlglot.helper import ensure_list
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 
 from sqlmesh.core.dialect import (
-    DORIS_QUALIFIED_EXCLUDED_TRIGGER_TABLES_MIN_VERSION,
     DORIS_TIMESTAMPTZ_MIN_VERSION,
     doris_supports_qualified_excluded_trigger_tables,
     doris_supports_timestamptz,
@@ -2048,9 +2047,7 @@ class DorisEngineAdapter(
     def _supports_qualified_excluded_trigger_tables(self) -> bool:
         cached_version = getattr(self, "_doris_version", None)
         if cached_version is None:
-            return doris_supports_qualified_excluded_trigger_tables(
-                DORIS_QUALIFIED_EXCLUDED_TRIGGER_TABLES_MIN_VERSION
-            )
+            cached_version = self._get_doris_version()
         return doris_supports_qualified_excluded_trigger_tables(cached_version)
 
     def _resolve_sync_mv_source_from_metadata(
