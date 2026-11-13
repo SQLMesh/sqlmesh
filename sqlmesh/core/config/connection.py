@@ -2424,7 +2424,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
         # https://clickhouse.com/docs/en/operations/settings/settings
         # - below are set to align with dbt-clickhouse
         # - https://github.com/ClickHouse/dbt-clickhouse/blob/44d26308ea6a3c8ead25c280164aa88191f05f47/dbt/adapters/clickhouse/dbclient.py#L77
-        settings = self.connection_settings or {}
+        settings = dict(self.connection_settings or {})
         #  mutations_sync = 2: "The query waits for all mutations [ALTER statements] to complete on all replicas (if they exist)"
         settings["mutations_sync"] = "2"
         #  insert_distributed_sync = 1: "INSERT operation succeeds only after all the data is saved on all shards"
@@ -2438,7 +2438,8 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             #   - "INSERT succeeds only when ClickHouse manages to correctly write data to the insert_quorum of replicas during
             #       the insert_quorum_timeout"
             #   - "use majority number (number_of_replicas / 2 + 1) as quorum number"
-            settings["insert_quorum"] = "auto"
+            #   - a value set by the user in connection_settings takes precedence
+            settings.setdefault("insert_quorum", "auto")
 
         return {
             "compress": compress,
