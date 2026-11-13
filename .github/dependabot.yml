@@ -4,6 +4,9 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
     groups:
       # Storybook add-ons declare a peer dependency on the matching `storybook`
       # release, so they have to move together. Bump them in a single PR.
@@ -32,3 +35,6 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
