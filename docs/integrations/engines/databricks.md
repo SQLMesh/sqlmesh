@@ -270,6 +270,7 @@ The only relevant SQLMesh configuration parameter is the optional `catalog` para
 | `force_databricks_connect`           | When running locally, force the use of Databricks Connect for all model operations (so don't use SQL Connector for SQL models)                                                                                                                      |  bool  |    N     |
 | `disable_databricks_connect`         | When running locally, disable the use of Databricks Connect for all model operations (so use SQL Connector for all models)                                                                                                                          |  bool  |    N     |
 | `disable_spark_session`              | Do not use SparkSession if it is available (like when running in a notebook).                                                                                                                                                                       |  bool  |    N     |
+| `force_shared_connection`            | SQL Connector Only: Run all queries over a single connection instead of one per thread. With U2M OAuth, use this if the connector opens connections on its kernel backend (Reyden / Real-Time warehouses), which runs a separate browser login for each connection.|  bool  |    N     |
 
 ### Query tags
 
