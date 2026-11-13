@@ -35,7 +35,7 @@ from sqlmesh.core.snapshot import (
     SnapshotChangeCategory,
 )
 from sqlmesh.core.snapshot.categorizer import categorize_change
-from sqlmesh.core.snapshot.definition import Interval, SnapshotId
+from sqlmesh.core.snapshot.definition import Interval, SnapshotDataVersion, SnapshotId
 from sqlmesh.utils import columns_to_types_all_known, random_id
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -788,20 +788,40 @@ class PlanBuilder:
             # Metadata updated.
             snapshot.categorize_as(SnapshotChangeCategory.METADATA, forward_only)
 
-    def _get_parent_categories_since(
+    def _get_parent_versions_since(
         self, parent: Snapshot, previous_parent_id: SnapshotId
-    ) -> t.Optional[t.Set[SnapshotChangeCategory]]:
-        """Returns the categories of all versions of the parent created after the previous parent,
-        including the current version. The previous parent itself is excluded.
+    ) -> t.Optional[t.List[SnapshotDataVersion]]:
+        """Returns all versions of the parent created after the previous parent, including the current
+        version. The previous parent itself is excluded.
 
         Returns None if the previous parent is not found in the parent's version history.
         """
-        categories: t.Set[SnapshotChangeCategory] = set()
+        versions: t.List[SnapshotDataVersion] = []
         for pv in reversed(parent.all_versions):
             if pv.snapshot_id(parent.name) == previous_parent_id:
-                return categories
-            categories.add(t.cast(SnapshotChangeCategory, pv.change_category))
+                return versions
+            versions.append(pv)
         return None
+
+    def _get_parent_categories_since(
+        self, parent: Snapshot, previous_parent_id: SnapshotId
+    ) -> t.Optional[t.Set[SnapshotChangeCategory]]:
+        """Returns the categories of the versions returned by `_get_parent_versions_since`."""
+        versions = self._get_parent_versions_since(parent, previous_parent_id)
+        if versions is None:
+            return None
+        return {t.cast(SnapshotChangeCategory, v.change_category) for v in versions}
+
+    @staticmethod
+    def _was_applied_forward_only(version: SnapshotDataVersion) -> bool:
+        """Returns True if the version reused the table of the version before it.
+
+        Past versions don't record whether they were forward-only, but a forward-only version reuses the
+        previous version, while any other breaking version gets a new one. This doesn't hold when the
+        version is not derived from the fingerprint (virtual environments that are not fully enabled),
+        so these are never considered forward-only.
+        """
+        return version.virtual_environment_mode.is_full and not version.is_new_version
 
     def _get_stored_direct_parent_changes(
         self, snapshot: Snapshot
@@ -829,21 +849,30 @@ class PlanBuilder:
                 # Not a parent of the previous version, or unchanged since then.
                 continue
 
-            parent_categories = self._get_parent_categories_since(parent, previous_parent_id)
-            if parent_categories is None:
+            parent_versions = self._get_parent_versions_since(parent, previous_parent_id)
+            if parent_versions is None:
                 # The history doesn't reach back to the previous parent (it only keeps the latest
                 # versions), so we can't rule out a breaking change. A rebuild is safer than silently
                 # reusing stale data.
                 categories.add(SnapshotChangeCategory.INDIRECT_BREAKING)
                 forward_only.add(False)
-            else:
-                categories.update(parent_categories)
-                if parent_categories.intersection(
-                    {SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.INDIRECT_BREAKING}
-                ):
-                    # The parent's history changed in a way that requires downstream history to be
-                    # recomputed, unless that change was applied forward-only.
-                    forward_only.add(parent.is_forward_only)
+                continue
+
+            categories.update(
+                t.cast(SnapshotChangeCategory, v.change_category) for v in parent_versions
+            )
+
+            # Every breaking version of the parent since the previous child requires downstream history to
+            # be recomputed, unless it was applied forward-only. The parent's latest version being
+            # forward-only is not enough, an earlier version may not have been.
+            breaking_versions = [
+                v
+                for v in parent_versions
+                if v.change_category
+                in (SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.INDIRECT_BREAKING)
+            ]
+            if breaking_versions:
+                forward_only.add(all(self._was_applied_forward_only(v) for v in breaking_versions))
         return categories, forward_only
 
     def _get_orphaned_indirect_change_category(
