@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import typing as t
+from pathlib import Path
 import pytest
 import time_machine
 from pytest_mock.plugin import MockerFixture
@@ -8,17 +9,98 @@ from pytest_mock.plugin import MockerFixture
 from sqlmesh.core import constants as c
 from sqlmesh.core import dialect as d
 from sqlmesh.core.config.categorizer import CategorizerConfig
+from sqlmesh.core.config import (
+    Config,
+    DuckDBConnectionConfig,
+    GatewayConfig,
+    ModelDefaultsConfig,
+    RunConfig,
+)
+from sqlmesh.core.context import Context
 from sqlmesh.core.model import (
     SqlModel,
     PythonModel,
     load_sql_based_model,
 )
 from sqlmesh.utils.date import to_timestamp
+from sqlmesh.utils.concurrency import NodeExecutionFailedError
+from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
     pass
 
 pytestmark = pytest.mark.slow
+
+
+def test_run_waits_for_finalization_after_failed_plan(tmp_path: Path, mocker: MockerFixture):
+    model_path = tmp_path / "models" / "example.sql"
+    model_path.parent.mkdir()
+    original_model = "MODEL (name repro.example, kind FULL); SELECT 1::INT AS id;"
+    updated_model = original_model.replace("SELECT 1", "SELECT 2")
+    model_path.write_text(original_model)
+    context = Context(
+        paths=tmp_path,
+        config=Config(
+            gateways={
+                "local": GatewayConfig(
+                    connection=DuckDBConnectionConfig(database=str(tmp_path / "repro.duckdb"))
+                )
+            },
+            default_gateway="local",
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            disable_anonymized_analytics=True,
+            run=RunConfig(environment_check_interval=1, environment_check_max_wait=2),
+        ),
+    )
+    try:
+        context.plan("prod", auto_apply=True, no_prompts=True)
+        initial_environment = context.state_sync.get_environment("prod")
+        assert initial_environment is not None and initial_environment.finalized_ts
+
+        model_path.write_text(
+            updated_model
+            + "\nON_VIRTUAL_UPDATE_BEGIN;"
+            + "\nSELECT CAST('intentional_promotion_failure' AS INTEGER);"
+            + "\nON_VIRTUAL_UPDATE_END;"
+        )
+        context.load()
+        with pytest.raises(NodeExecutionFailedError):
+            context.plan("prod", auto_apply=True, no_prompts=True)
+
+        failed_environment = context.state_sync.get_environment("prod")
+        assert failed_environment is not None
+        assert failed_environment.finalized_ts is None
+        run = mocker.spy(context, "_run")
+        warnings = mocker.spy(context.console, "log_warning")
+        with pytest.raises(SQLMeshError, match="Exceeded the maximum wait time") as exc_info:
+            context.run("prod", skip_janitor=True)
+
+        run.assert_not_called()
+        assert context.state_sync.get_environment("prod") == failed_environment
+        assert warnings.call_count == 2
+
+        model_path.write_text(updated_model)
+        context.load()
+        context.plan("prod", auto_apply=True, no_prompts=True)
+        recovered_environment = context.state_sync.get_environment("prod")
+        assert recovered_environment is not None and recovered_environment.finalized_ts
+        assert not context.run("prod", skip_janitor=True).is_failure
+        run.assert_called_once()
+
+        warning = warnings.call_args_list[0].args[0]
+        assert failed_environment.plan_id in warning
+        assert "finaliz" in warning
+        assert "1 seconds" in warning
+        assert "2 seconds" in warning
+        assert "failed" in warning
+        assert "is being updated" not in warning
+        assert "finaliz" in str(exc_info.value)
+        assert "sqlmesh plan prod" in str(exc_info.value)
+        assert "https://sqlmesh.readthedocs.io/en/stable/reference/configuration/#run" in str(
+            exc_info.value
+        )
+    finally:
+        context.close()
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
