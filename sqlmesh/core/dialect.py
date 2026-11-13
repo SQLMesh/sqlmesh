@@ -691,14 +691,36 @@ _doris_parse_range.__name__ = "_parse_range"
 
 def _doris_anonymous_sql(self: Generator, expression: exp.Anonymous) -> str:
     if expression.name.upper() in _DORIS_MATCH_OPS and len(expression.expressions) in (2, 3):
-        left = self.sql(expression.expressions[0])
-        right = self.sql(expression.expressions[1])
+        left_expr = expression.expressions[0]
+        right_expr = expression.expressions[1]
+        left = self.sql(left_expr)
+        if isinstance(left_expr, (exp.Connector, exp.Not, exp.Predicate)) or (
+            isinstance(left_expr, exp.Anonymous) and left_expr.name.upper() in _DORIS_MATCH_OPS
+        ):
+            left = f"({left})"
+        right = self.sql(right_expr)
+        if isinstance(right_expr, (exp.Connector, exp.Not, exp.Predicate)) or (
+            isinstance(right_expr, exp.Anonymous) and right_expr.name.upper() in _DORIS_MATCH_OPS
+        ):
+            right = f"({right})"
         analyzer_sql = (
             f" USING ANALYZER {self.sql(expression.expressions[2])}"
             if len(expression.expressions) == 3
             else ""
         )
-        return f"{left} {expression.name.upper()} {right}{analyzer_sql}"
+        sql = f"{left} {expression.name.upper()} {right}{analyzer_sql}"
+        if (
+            isinstance(
+                expression.parent,
+                (exp.Binary, exp.Unary, exp.Predicate, exp.Between, exp.In),
+            )
+            and not isinstance(expression.parent, (exp.Connector, exp.Not, exp.Paren))
+        ) or (
+            isinstance(expression.parent, exp.Anonymous)
+            and expression.parent.name.upper() in _DORIS_MATCH_OPS
+        ):
+            return f"({sql})"
+        return sql
     return self.anonymous_sql(expression)
 
 
@@ -1141,6 +1163,11 @@ def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
     keys = expression.args.get("keys")
     values = expression.args.get("values")
     if isinstance(keys, exp.Array) and isinstance(values, exp.Array):
+        if len(keys.expressions) != len(values.expressions):
+            raise SQLMeshError(
+                "Doris MAP requires key and value arrays to have the same number of elements "
+                f"(got {len(keys.expressions)} keys and {len(values.expressions)} values)."
+            )
         return var_map_sql(self, expression)
     if keys is not None or values is not None:
         # exp.Map with non-literal-array keys/values always means array-to-map construction.

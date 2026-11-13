@@ -1882,3 +1882,35 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
 
     drop_col_sql = "ALTER TABLE db.t DROP COLUMN c1"
     assert d.parse_one(drop_col_sql, dialect="doris").sql("doris") == drop_col_sql
+
+    with pytest.raises(
+        d.SQLMeshError,
+        match="Doris MAP requires key and value arrays to have the same number of elements",
+    ):
+        exp.Map(
+            keys=exp.Array(expressions=[exp.Literal.number(1), exp.Literal.number(2)]),
+            values=exp.Array(expressions=[exp.Literal.number(10)]),
+        ).sql("doris")
+
+    from sqlmesh.core.model import load_sql_based_model
+
+    match_arith_model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name db.match_scores,
+                kind FULL,
+                dialect doris
+            );
+            SELECT (body MATCH_ANY 'x') + 1 AS score FROM db.docs
+            """,
+            default_dialect="doris",
+        ),
+        mapping_schema={"db": {"docs": {"body": "STRING"}}},
+    )
+    rendered_match_query = match_arith_model.render_query(optimize=True)
+    assert rendered_match_query is not None
+    assert (
+        rendered_match_query.sql("doris")
+        == "SELECT (`docs`.`body` MATCH_ANY 'x') + 1 AS `score` FROM `db`.`docs` AS `docs`"
+    )
