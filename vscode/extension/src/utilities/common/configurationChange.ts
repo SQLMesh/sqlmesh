@@ -21,6 +21,18 @@ export interface ConfigurationChange {
   affectsConfiguration(section: string): boolean
 }
 
+interface Disposable {
+  dispose(): unknown
+}
+
+export interface TelemetryRestartSubscription extends Disposable {
+  runDuringInitialStart<T>(task: () => Promise<T>): Promise<T>
+}
+
+type TelemetryChangeEvent<TDisposable extends Disposable> = (
+  listener: (enabled: boolean) => unknown,
+) => TDisposable
+
 /**
  * Whether a configuration change affects a setting the language server reads.
  *
@@ -32,4 +44,35 @@ export function requiresLspRestart(event: ConfigurationChange): boolean {
   return RESTART_CONFIGURATION_SECTIONS.some(section =>
     event.affectsConfiguration(section),
   )
+}
+
+/** Restart the language server whenever VS Code's effective telemetry preference changes. */
+export function restartLspOnTelemetryChange<TDisposable extends Disposable>(
+  event: TelemetryChangeEvent<TDisposable>,
+  restartLsp: () => Promise<void>,
+): TelemetryRestartSubscription {
+  let initialStartComplete = false
+  let restartPending = false
+  const subscription = event(() => {
+    if (!initialStartComplete) {
+      restartPending = true
+      return
+    }
+    void restartLsp()
+  })
+
+  return {
+    dispose: () => subscription.dispose(),
+    runDuringInitialStart: async task => {
+      try {
+        return await task()
+      } finally {
+        initialStartComplete = true
+        if (restartPending) {
+          restartPending = false
+          await restartLsp()
+        }
+      }
+    },
+  }
 }

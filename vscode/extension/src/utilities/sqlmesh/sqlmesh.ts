@@ -9,7 +9,7 @@ import { ErrorType } from '../errors'
 import { isSignedIntoTobikoCloud } from '../../auth/auth'
 import { execAsync } from '../exec'
 import z from 'zod'
-import { ProgressLocation, window } from 'vscode'
+import { ProgressLocation, window, env as vscodeEnv } from 'vscode'
 import { IS_WINDOWS } from '../isWindows'
 import { getSqlmeshLspEntryPoint, resolveProjectPath } from '../config'
 import { isSemVerGreaterThanOrEqual } from '../semver'
@@ -19,6 +19,30 @@ export interface SqlmeshExecInfo {
   bin: string
   env: Record<string, string | undefined>
   args: string[]
+}
+
+/**
+ * Applies the VS Code telemetry preference to a copy of the given environment.
+ *
+ * When the user has disabled telemetry through VS Code,
+ * SQLMESH__DISABLE_ANONYMIZED_ANALYTICS is forced to "true" so that the
+ * language-server process cannot send analytics regardless of its own config.
+ * When telemetry is enabled the variable is left untouched, preserving any
+ * project-level SQLMesh configuration the user may have set.
+ *
+ * The function never mutates process.env or the caller's object.
+ */
+function applyTelemetryEnv(env: Record<string, string>): Record<string, string>
+function applyTelemetryEnv(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined>
+function applyTelemetryEnv(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  if (vscodeEnv.isTelemetryEnabled) {
+    return { ...env }
+  }
+  return { ...env, SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: 'true' }
 }
 
 /**
@@ -53,7 +77,7 @@ export async function getSqlmeshEnvironment(): Promise<Result<Record<string, str
     env['PATH'] = `${binPath}${path.delimiter}${process.env.PATH || ''}`
   }
 
-  return ok(env)
+  return ok(applyTelemetryEnv(env))
 }
 
 /**
@@ -326,7 +350,7 @@ export const sqlmeshLspExec = async (): Promise<
     return ok({
       bin: configuredLSPExec.entrypoint,
       workspacePath: workspacePath,
-      env: process.env,
+      env: applyTelemetryEnv(process.env),
       args: configuredLSPExec.args,
     })
   }
