@@ -1,4 +1,5 @@
 import json
+import typing as t
 import pytest
 from sqlglot import exp, parse_one
 
@@ -1368,3 +1369,143 @@ def test_audit_formatting_flag_serde():
 
     deserialized_audit = ModelAudit.parse_raw(audit_json)
     assert deserialized_audit.dict() == audit.dict()
+
+
+def _load_standalone_audit_with_macros(
+    macros: str,
+    query_body: str,
+    package_macros: t.Optional[t.Dict[str, str]] = None,
+    global_objs: t.Optional[t.Dict[str, t.Any]] = None,
+) -> StandaloneAudit:
+    expressions = parse(
+        f"""
+        AUDIT (
+            name my_audit,
+            standalone true,
+        );
+
+        JINJA_QUERY_BEGIN;
+        {query_body}
+        JINJA_END;
+    """
+    )
+    jinja_macros = JinjaMacroRegistry(global_objs=global_objs or {})
+    jinja_macros.add_macros(MacroExtractor().extract(macros))
+    for package, package_source in (package_macros or {}).items():
+        jinja_macros.add_macros(MacroExtractor().extract(package_source), package=package)
+    audit = load_audit(expressions, jinja_macros=jinja_macros)
+    assert isinstance(audit, StandaloneAudit)
+    return audit
+
+
+def test_standalone_audit_metadata_hash_includes_referenced_jinja_macros():
+    query = "SELECT * FROM db.tbl WHERE id <> {{ jone() }}"
+    unused = "{% macro unused() %}x{% endmacro %}"
+
+    audit_1 = _load_standalone_audit_with_macros(
+        "{% macro jone() %}1{% endmacro %}" + unused, query
+    )
+    audit_1_again = _load_standalone_audit_with_macros(
+        "{% macro jone() %}1{% endmacro %}" + unused, query
+    )
+    audit_2 = _load_standalone_audit_with_macros(
+        "{% macro jone() %}2{% endmacro %}" + unused, query
+    )
+
+    assert audit_1.metadata_hash == audit_1_again.metadata_hash
+    assert audit_1.metadata_hash != audit_2.metadata_hash
+
+
+def test_standalone_audit_metadata_hash_ignores_unreferenced_jinja_macros():
+    query = "SELECT * FROM db.tbl WHERE id <> {{ jone() }}"
+    jone = "{% macro jone() %}1{% endmacro %}"
+
+    audit_1 = _load_standalone_audit_with_macros(
+        jone + "{% macro unused() %}x{% endmacro %}", query
+    )
+    audit_2 = _load_standalone_audit_with_macros(
+        jone + "{% macro unused() %}y{% endmacro %}", query
+    )
+
+    assert "unused" not in audit_1.jinja_macros.root_macros
+    assert audit_1.metadata_hash == audit_2.metadata_hash
+
+
+def test_standalone_audit_metadata_hash_unchanged_without_jinja_macros():
+    audit = load_audit(
+        parse(
+            """
+            AUDIT (
+                name my_audit,
+                owner owner_name,
+                standalone true,
+            );
+
+            SELECT * FROM db.tbl WHERE id IS NULL
+            """
+        )
+    )
+    assert isinstance(audit, StandaloneAudit)
+    assert not audit.jinja_macros.root_macros and not audit.jinja_macros.packages
+
+    # This literal must match the value computed on main before Jinja macros were hashed, so that
+    # audits without Jinja macros are not rehashed (and thus not re-versioned) on upgrade.
+    assert audit.metadata_hash == "3234547564"
+
+
+def test_standalone_audit_metadata_hash_ignores_global_objs_without_macros():
+    query = "SELECT * FROM db.tbl WHERE id IS NULL"
+    no_macros = ""
+
+    empty = _load_standalone_audit_with_macros(no_macros, query)
+    with_globals = _load_standalone_audit_with_macros(
+        no_macros, query, global_objs={"refs": {"a": {"name": "a"}}, "vars": {"v": 1}}
+    )
+
+    assert with_globals.jinja_macros.global_objs
+    assert not with_globals.jinja_macros.root_macros and not with_globals.jinja_macros.packages
+    assert with_globals.metadata_hash == empty.metadata_hash
+    # Must match the value computed on main, see the test above.
+    assert empty.metadata_hash == "435209792"
+
+
+def test_standalone_audit_metadata_hash_with_date_var():
+    from datetime import date
+
+    # dbt loads an unquoted YAML date as a `date` object, which `json.dumps` can't serialize.
+    audit = _load_standalone_audit_with_macros(
+        "{% macro jone() %}1{% endmacro %}",
+        "SELECT * FROM db.tbl WHERE id <> {{ jone() }}",
+        global_objs={"vars": {"cutoff": date(2024, 1, 2)}},
+    )
+
+    assert audit.metadata_hash
+
+
+def test_standalone_audit_metadata_hash_includes_referenced_package_macros():
+    query = "SELECT * FROM db.tbl WHERE id <> {{ pkg.jone() }}"
+
+    def load(body: str) -> StandaloneAudit:
+        return _load_standalone_audit_with_macros(
+            "", query, package_macros={"pkg": "{% macro jone() %}" + body + "{% endmacro %}"}
+        )
+
+    audit_1, audit_1_again, audit_2 = load("1"), load("1"), load("2")
+
+    assert "pkg" in audit_1.jinja_macros.packages
+    assert not audit_1.jinja_macros.root_macros
+    assert audit_1.metadata_hash == audit_1_again.metadata_hash
+    assert audit_1.metadata_hash != audit_2.metadata_hash
+
+
+def test_standalone_audit_metadata_hash_ignores_attribute_only_jinja():
+    # `{{ target.name }}` reads an attribute and calls no macro, but trimming still leaves an empty
+    # `target` package in the registry. The hash must match the value computed on main before
+    # Jinja macros were hashed, so that such audits are not rehashed on upgrade.
+    audit = _load_standalone_audit_with_macros(
+        "", "SELECT * FROM db.tbl WHERE name = '{{ target.name }}'"
+    )
+    assert audit.jinja_macros.packages == {"target": {}}
+    assert not audit.jinja_macros.root_macros
+
+    assert audit.metadata_hash == "3822507146"
