@@ -813,15 +813,33 @@ class PlanBuilder:
         return {t.cast(SnapshotChangeCategory, v.change_category) for v in versions}
 
     @staticmethod
-    def _was_applied_forward_only(version: SnapshotDataVersion) -> bool:
-        """Returns True if the version reused the table of the version before it.
+    def _get_known_category(version: SnapshotDataVersion) -> SnapshotChangeCategory:
+        """Returns the category of the version, or BREAKING if it isn't one that is assigned today.
 
-        Past versions don't record whether they were forward-only, but a forward-only version reuses the
-        previous version, while any other breaking version gets a new one. This doesn't hold when the
-        version is not derived from the fingerprint (virtual environments that are not fully enabled),
-        so these are never considered forward-only.
+        A missing category or the deprecated FORWARD_ONLY category may still be found in older state. Both
+        changed data, so they are treated as breaking, and whether they were forward-only is read from the
+        stored snapshot like for any other breaking version.
         """
-        return version.virtual_environment_mode.is_full and not version.is_new_version
+        if version.change_category in (
+            SnapshotChangeCategory.BREAKING,
+            SnapshotChangeCategory.INDIRECT_BREAKING,
+            SnapshotChangeCategory.NON_BREAKING,
+            SnapshotChangeCategory.INDIRECT_NON_BREAKING,
+            SnapshotChangeCategory.METADATA,
+        ):
+            return version.change_category
+        return SnapshotChangeCategory.BREAKING
+
+    def _was_applied_forward_only(self, parent: Snapshot, version: SnapshotDataVersion) -> bool:
+        """Returns True if the given version of the parent was applied forward-only.
+
+        A past version doesn't record this, so it is read from the snapshot stored for that version.
+        If that snapshot can't be found, we can't tell, so the version is not considered forward-only.
+        """
+        version_id = version.snapshot_id(parent.name)
+        if version_id == parent.snapshot_id:
+            return parent.is_forward_only
+        return self._context_diff.stored_parent_forward_only.get(version_id, False)
 
     def _get_stored_direct_parent_changes(
         self, snapshot: Snapshot
@@ -858,21 +876,22 @@ class PlanBuilder:
                 forward_only.add(False)
                 continue
 
-            categories.update(
-                t.cast(SnapshotChangeCategory, v.change_category) for v in parent_versions
-            )
+            version_categories = [(v, self._get_known_category(v)) for v in parent_versions]
+            categories.update(category for _, category in version_categories)
 
             # Every breaking version of the parent since the previous child requires downstream history to
             # be recomputed, unless it was applied forward-only. The parent's latest version being
             # forward-only is not enough, an earlier version may not have been.
             breaking_versions = [
                 v
-                for v in parent_versions
-                if v.change_category
+                for v, category in version_categories
+                if category
                 in (SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.INDIRECT_BREAKING)
             ]
             if breaking_versions:
-                forward_only.add(all(self._was_applied_forward_only(v) for v in breaking_versions))
+                forward_only.add(
+                    all(self._was_applied_forward_only(parent, v) for v in breaking_versions)
+                )
         return categories, forward_only
 
     def _get_orphaned_indirect_change_category(

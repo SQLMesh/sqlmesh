@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import pytest
 
-from sqlmesh.core.config.common import VirtualEnvironmentMode
 from sqlmesh.core.console import TerminalConsole
 from sqlmesh.utils.metaprogramming import Executable
 from tests.core.test_table_diff import create_test_console
@@ -4636,35 +4635,42 @@ def test_indirect_change_with_stored_parent_history_and_new_parent(
 
 
 @pytest.mark.parametrize(
-    "virtual_environment_mode, latest_version_forward_only, expected_forward_only",
+    "earlier_version_flag, earlier_version_category, latest_version_forward_only, expected_forward_only",
     [
-        # The latest breaking version of the stored parent reused the previous version.
-        (VirtualEnvironmentMode.FULL, True, True),
-        # The latest breaking version of the stored parent got a new version.
-        (VirtualEnvironmentMode.FULL, False, False),
-        # The versions don't depend on the fingerprint, so they can't be told apart from forward-only ones.
-        (VirtualEnvironmentMode.DEV_ONLY, True, False),
+        # Both breaking versions of the stored parent were forward-only.
+        (True, SnapshotChangeCategory.BREAKING, True, True),
+        # The latest version was not forward-only.
+        (True, SnapshotChangeCategory.BREAKING, False, False),
+        # An earlier version was not forward-only.
+        (False, SnapshotChangeCategory.BREAKING, True, False),
+        # An earlier version can't be found in state, so we can't tell how it was applied.
+        (None, SnapshotChangeCategory.BREAKING, True, False),
+        # The deprecated FORWARD_ONLY category is a data change that is read like any other.
+        (True, SnapshotChangeCategory.FORWARD_ONLY, True, True),
+        (None, SnapshotChangeCategory.FORWARD_ONLY, True, False),
     ],
 )
 def test_indirect_change_forward_only_with_stored_parent_history(
     make_snapshot,
-    virtual_environment_mode: VirtualEnvironmentMode,
+    earlier_version_flag: t.Optional[bool],
+    earlier_version_category: SnapshotChangeCategory,
     latest_version_forward_only: bool,
     expected_forward_only: bool,
 ):
     def parent_snapshot(value: int):
-        return make_snapshot(
-            SqlModel(
-                name="a",
-                query=parse_one(f"select {value} as col_a"),
-                virtual_environment_mode=virtual_environment_mode,
-            )
-        )
+        return make_snapshot(SqlModel(name="a", query=parse_one(f"select {value} as col_a")))
 
     parent_baseline = parent_snapshot(0)
     parent_baseline.categorize_as(SnapshotChangeCategory.BREAKING)
-    stored_parent = parent_snapshot(1)
-    stored_parent.previous_versions = parent_baseline.all_versions
+
+    # An earlier version of the stored parent, between the baseline and the latest version.
+    parent_earlier = parent_snapshot(1)
+    parent_earlier.previous_versions = parent_baseline.all_versions
+    parent_earlier.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    parent_earlier.change_category = earlier_version_category
+
+    stored_parent = parent_snapshot(2)
+    stored_parent.previous_versions = parent_earlier.all_versions
     stored_parent.categorize_as(
         SnapshotChangeCategory.BREAKING, forward_only=latest_version_forward_only
     )
@@ -4718,6 +4724,11 @@ def test_indirect_change_forward_only_with_stored_parent_history(
         previous_gateway_managed_virtual_layer=False,
         gateway_managed_virtual_layer=False,
         environment_statements=[],
+        stored_parent_forward_only=(
+            {}
+            if earlier_version_flag is None
+            else {parent_earlier.snapshot_id: earlier_version_flag}
+        ),
     )
 
     PlanBuilder(context_diff, forward_only=False).build()

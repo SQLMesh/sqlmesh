@@ -24,6 +24,7 @@ from sqlmesh.core.config import (
 )
 from sqlmesh.core.context import Context
 from sqlmesh.core.config.categorizer import CategorizerConfig
+from sqlmesh.core.config.common import VirtualEnvironmentMode
 from sqlmesh.core.model import (
     FullKind,
     ModelKind,
@@ -1748,6 +1749,66 @@ def test_stored_parent_history_with_earlier_non_forward_only_change(
     plan = plan_builder.build()
 
     assert parent_a.snapshot_id not in plan.context_diff.new_snapshots
+    child_after = plan.snapshots[context.get_snapshot("sushi.order_items").snapshot_id]
+    assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+    assert not child_after.is_forward_only
+    assert child_after.version != child_before.version
+    assert any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+@pytest.mark.parametrize("with_new_parent", [False, True])
+def test_stored_pinned_parent_switched_to_full_virtual_environment_mode(
+    init_and_plan_context: t.Callable, with_new_parent: bool
+):
+    """A pinned version is not derived from the fingerprint, so it can't be used to tell whether the
+    stored parent was applied forward-only. Switching the virtual environment mode to FULL requires
+    a rebuild, adding a metadata-only parent change must not change that outcome."""
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    # Pin the version of sushi.orders in a DEV_ONLY virtual environment and deploy it to prod.
+    model = context.get_model("sushi.orders")
+    context.upsert_model(
+        model.copy(
+            update={
+                "stamp": "1",
+                "kind": model.kind.copy(update={"forward_only": True}),
+                "physical_version": "pinned",
+                "virtual_environment_mode": VirtualEnvironmentMode.DEV_ONLY,
+            }
+        )
+    )
+    plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.orders", raise_if_missing=True), SnapshotChangeCategory.BREAKING
+    )
+    context.apply(plan_builder.build())
+    child_before = context.get_snapshot("sushi.order_items", raise_if_missing=True)
+
+    # Switch the model to FULL virtual environment mode in dev only.
+    model = context.get_model("sushi.orders")
+    context.upsert_model(
+        model.copy(update={"stamp": "2", "virtual_environment_mode": VirtualEnvironmentMode.FULL})
+    )
+    plan_builder = context.plan_builder("dev", skip_tests=True, enable_preview=False)
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.orders", raise_if_missing=True), SnapshotChangeCategory.BREAKING
+    )
+    context.apply(plan_builder.build())
+    parent_a = context.get_snapshot("sushi.orders", raise_if_missing=True)
+    assert not parent_a.is_forward_only
+
+    if with_new_parent:
+        context.upsert_model("sushi.items", stamp="1")
+    plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
+    if with_new_parent:
+        plan_builder.set_choice(
+            context.get_snapshot("sushi.items", raise_if_missing=True),
+            SnapshotChangeCategory.METADATA,
+        )
+    plan = plan_builder.build()
+
     child_after = plan.snapshots[context.get_snapshot("sushi.order_items").snapshot_id]
     assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
     assert not child_after.is_forward_only
