@@ -2910,16 +2910,22 @@ def _resolve_model_refs_to_physical_tables(
         return resolved_table, physical, strip_catalog
 
     effective_engine_dialect = engine_dialect if engine_dialect is not None else dialect
-    dbs_by_table_name: t.Dict[str, t.Set[str]] = {}
+    dbs_by_table_name: t.Dict[str, t.Set[t.Tuple[str, str]]] = {}
     if (
         effective_engine_dialect == "doris"
         and property_name == "excluded_trigger_tables"
         and not d.doris_supports_qualified_excluded_trigger_tables(doris_version)
     ):
+        default_cat_lower = (default_catalog or "internal").lower()
         for candidate in [*(referenced_tables or ()), *(r for r in refs if r.strip())]:
             cand_tbl, _, _ = _to_physical_table(candidate)
-            if cand_tbl.name and (cand_tbl.db or isinstance(candidate, exp.Table)):
-                dbs_by_table_name.setdefault(cand_tbl.name.lower(), set()).add(cand_tbl.db or "")
+            if cand_tbl.name and (
+                cand_tbl.db or cand_tbl.catalog or isinstance(candidate, exp.Table)
+            ):
+                cand_cat = (cand_tbl.catalog or default_cat_lower).lower()
+                dbs_by_table_name.setdefault(cand_tbl.name.lower(), set()).add(
+                    (cand_cat, cand_tbl.db or "")
+                )
 
     def resolve(ref: str) -> str:
         resolved_table, physical, strip_catalog = _to_physical_table(ref)
@@ -2935,10 +2941,9 @@ def _resolve_model_refs_to_physical_tables(
                     f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
                     f"got '{exp.table_name(resolved_table, identify=False)}'."
                 )
-            if (
-                resolved_table.db
-                and len(dbs_by_table_name.get(resolved_table.name.lower(), set())) > 1
-            ):
+            if (resolved_table.db or resolved_table.catalog) and len(
+                dbs_by_table_name.get(resolved_table.name.lower(), set())
+            ) > 1:
                 raise SQLMeshError(
                     f"Doris 'excluded_trigger_tables' prior to 2.1.10 (and 3.0.6) matches tables by bare name only "
                     f"and cannot disambiguate '{exp.table_name(resolved_table, identify=False)}' when the view references multiple tables named '{resolved_table.name}'."

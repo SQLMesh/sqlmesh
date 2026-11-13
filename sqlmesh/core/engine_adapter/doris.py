@@ -7998,8 +7998,9 @@ class DorisEngineAdapter(
             val_str = raw_str if raw_str is not None else str(value)
             if key == "excluded_trigger_tables" and val_str:
                 supports_qualified = self._supports_qualified_excluded_trigger_tables()
-                dbs_by_table_name: t.Dict[str, t.Set[str]] = {}
+                dbs_by_table_name: t.Dict[str, t.Set[t.Tuple[str, str]]] = {}
                 if not supports_qualified:
+                    default_cat_lower = str(self._extra_config.get("catalog") or "internal").lower()
                     if isinstance(query_expression, exp.Expr):
                         cte_names = {
                             cte.alias.lower()
@@ -8010,16 +8011,18 @@ class DorisEngineAdapter(
                             if q_tbl.name and (
                                 q_tbl.db or q_tbl.catalog or q_tbl.name.lower() not in cte_names
                             ):
+                                q_cat = (q_tbl.catalog or default_cat_lower).lower()
                                 dbs_by_table_name.setdefault(q_tbl.name.lower(), set()).add(
-                                    q_tbl.db or ""
+                                    (q_cat, q_tbl.db or "")
                                 )
                     for raw_part in val_str.split(","):
                         raw_stripped = raw_part.strip()
                         if raw_stripped:
                             p_tbl = exp.to_table(raw_stripped, dialect=self.dialect)
-                            if p_tbl.name and p_tbl.db:
+                            if p_tbl.name and (p_tbl.db or p_tbl.catalog):
+                                p_cat = (p_tbl.catalog or default_cat_lower).lower()
                                 dbs_by_table_name.setdefault(p_tbl.name.lower(), set()).add(
-                                    p_tbl.db
+                                    (p_cat, p_tbl.db or "")
                                 )
                 cleaned_parts: t.List[str] = []
                 for part in val_str.split(","):
@@ -8034,7 +8037,9 @@ class DorisEngineAdapter(
                                 f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
                                 f"got '{stripped}'."
                             )
-                        if tbl.db and len(dbs_by_table_name.get(tbl.name.lower(), set())) > 1:
+                        if (tbl.db or tbl.catalog) and len(
+                            dbs_by_table_name.get(tbl.name.lower(), set())
+                        ) > 1:
                             raise SQLMeshError(
                                 f"Doris 'excluded_trigger_tables' prior to 2.1.10 (and 3.0.6) matches tables by bare name only "
                                 f"and cannot disambiguate '{exp.table_name(tbl, identify=False)}' when the view references multiple tables named '{tbl.name}'."
