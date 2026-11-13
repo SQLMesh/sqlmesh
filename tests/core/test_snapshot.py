@@ -1882,6 +1882,18 @@ def test_categorize_change_sql_additive_projection_edge_cases(make_snapshot):
             SnapshotChangeCategory.NON_BREAKING,
             id="union-order-by-ordinal-append",
         ),
+        pytest.param(
+            "SELECT a FROM x UNION ALL BY NAME SELECT a, b FROM y",
+            "SELECT a, b FROM x UNION ALL BY NAME SELECT a, b FROM y",
+            None,
+            id="union-by-name-fills-existing-column",
+        ),
+        pytest.param(
+            "SELECT a FROM x UNION ALL BY NAME SELECT a FROM y",
+            "SELECT a, b FROM x UNION ALL BY NAME SELECT a FROM y",
+            None,
+            id="union-by-name-addition-not-auto-categorized",
+        ),
     ],
 )
 def test_categorize_change_sql_nested_projection_additions(
