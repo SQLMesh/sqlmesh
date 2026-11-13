@@ -2361,7 +2361,15 @@ Learn more at https://sqlmesh.readthedocs.io/en/stable/concepts/models/overview
         **meta_fields,
     )
 
-    kind = common_kwargs.pop("kind", ModelMeta.all_field_infos()["kind"].default)
+    kind = common_kwargs.pop("kind", None)
+    if kind is None:
+        # Use the project's default kind, if any, before falling back to the ModelMeta default
+        default_kind = rendered_defaults.get("kind")
+        kind = (
+            create_model_kind(default_kind, dialect, rendered_defaults)
+            if default_kind is not None
+            else ModelMeta.all_field_infos()["kind"].default
+        )
 
     if kind.name != ModelKindName.SEED:
         return create_sql_model(
