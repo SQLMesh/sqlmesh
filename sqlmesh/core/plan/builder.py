@@ -738,18 +738,19 @@ class PlanBuilder:
                     if p_id in snapshot.parents:
                         direct_parent_categories.add(parent.change_category)
 
+            # Direct parents that already exist in state but changed relative to the previous version
+            # of this snapshot (eg. they were categorized in another plan) don't show up above.
+            stored_parent_categories: t.Set[SnapshotChangeCategory] = set()
+            if direct_parent_categories:
+                stored_parent_categories, stored_parent_forward_only = (
+                    self._get_stored_direct_parent_changes(snapshot)
+                )
+                all_upstream_forward_only |= stored_parent_forward_only
+
             if all_upstream_forward_only == {True} or (
                 snapshot.is_model and snapshot.model.forward_only
             ):
                 forward_only = True
-
-            # Direct parents that already exist in state but changed relative to the previous version
-            # of this snapshot (eg. they were categorized in another plan) don't show up above.
-            stored_parent_categories = (
-                self._get_stored_direct_parent_categories(snapshot)
-                if direct_parent_categories
-                else set()
-            )
 
             if (direct_parent_categories | stored_parent_categories).intersection(
                 {SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.INDIRECT_BREAKING}
@@ -784,11 +785,12 @@ class PlanBuilder:
             categories.add(t.cast(SnapshotChangeCategory, pv.change_category))
         return None
 
-    def _get_stored_direct_parent_categories(
+    def _get_stored_direct_parent_changes(
         self, snapshot: Snapshot
-    ) -> t.Set[SnapshotChangeCategory]:
-        """Returns the change categories of direct parents that already exist in state (they are not new
-        in this plan) but changed since the previous version of the snapshot was built.
+    ) -> t.Tuple[t.Set[SnapshotChangeCategory], t.Set[bool]]:
+        """Returns the change categories and forward-only flags of direct parents that already exist in
+        state (they are not new in this plan) but changed since the previous version of the snapshot
+        was built.
 
         For example, a parent was changed in a dev plan and is now combined with another parent
         that is changed in the current plan. The change to the first parent is not visible to the
@@ -798,6 +800,7 @@ class PlanBuilder:
         previous_parent_ids = {p.name: p for p in previous_snapshot.parents}
 
         categories: t.Set[SnapshotChangeCategory] = set()
+        forward_only: t.Set[bool] = set()
         for p_id in snapshot.parents:
             parent = self._context_diff.snapshots.get(p_id)
             previous_parent_id = previous_parent_ids.get(p_id.name)
@@ -808,6 +811,9 @@ class PlanBuilder:
                 # Not a parent of the previous version, or unchanged since then.
                 continue
 
+            # The change is applied the way the parent was categorized, so it counts toward
+            # whether the snapshot can skip a rebuild, the same as the new parents.
+            forward_only.add(parent.is_forward_only)
             parent_categories = self._get_parent_categories_since(parent, previous_parent_id)
             if parent_categories is None:
                 # The history doesn't reach back to the previous parent (it only keeps the latest
@@ -816,7 +822,7 @@ class PlanBuilder:
                 categories.add(SnapshotChangeCategory.INDIRECT_BREAKING)
             else:
                 categories.update(parent_categories)
-        return categories
+        return categories, forward_only
 
     def _get_orphaned_indirect_change_category(
         self, indirect_snapshot: Snapshot

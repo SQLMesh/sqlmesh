@@ -1654,3 +1654,41 @@ def test_stored_forward_only_parent_with_new_parent(init_and_plan_context: t.Cal
     assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
     assert not child_after.is_forward_only
     assert child_after.version != child_before.version
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_stored_breaking_parent_with_new_forward_only_parent(init_and_plan_context: t.Callable):
+    """A forward-only change to a new parent must not make the child forward-only when a stored
+    parent also changed in a non-forward-only way, otherwise the child skips the required rebuild."""
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    child_before = context.get_snapshot("sushi.order_items", raise_if_missing=True)
+
+    # Make a breaking, not forward-only, change to sushi.orders and deploy it to dev only.
+    context.upsert_model("sushi.orders", stamp="1")
+    parent_a = context.get_snapshot("sushi.orders", raise_if_missing=True)
+    plan_builder = context.plan_builder("dev", skip_tests=True, enable_preview=False)
+    plan_builder.set_choice(parent_a, SnapshotChangeCategory.BREAKING)
+    context.apply(plan_builder.build())
+    assert not context.get_snapshot("sushi.orders", raise_if_missing=True).is_forward_only
+
+    # Make a forward-only change to sushi.items, which is new in the prod plan.
+    model = context.get_model("sushi.items")
+    updated_model_kind = model.kind.copy(update={"forward_only": True})
+    context.upsert_model(model.copy(update={"stamp": "1", "kind": updated_model_kind}))
+    parent_b = context.get_snapshot("sushi.items", raise_if_missing=True)
+    plan = context.plan_builder(
+        "prod",
+        skip_tests=True,
+        enable_preview=False,
+        categorizer_config=CategorizerConfig.all_full(),
+    ).build()
+
+    assert parent_a.snapshot_id not in plan.context_diff.new_snapshots
+    assert plan.snapshots[parent_b.snapshot_id].is_forward_only
+    child_after = plan.snapshots[context.get_snapshot("sushi.order_items").snapshot_id]
+    assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+    assert not child_after.is_forward_only
+    assert child_after.version != child_before.version
+    assert any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
