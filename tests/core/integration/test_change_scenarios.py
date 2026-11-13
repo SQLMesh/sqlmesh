@@ -1624,9 +1624,22 @@ def test_unchanged_historic_breaking_parent_with_new_parent(init_and_plan_contex
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
-def test_stored_forward_only_parent_with_new_parent(init_and_plan_context: t.Callable):
-    """The forward-only flag of a stored parent doesn't make the child forward-only, the same way
-    it doesn't when both parents are new in the plan: the child is rebuilt."""
+@pytest.mark.parametrize(
+    "new_parent_category, expected_forward_only",
+    [
+        # These changes don't require downstream history to be recomputed, so they don't affect
+        # the forward-only decision.
+        (SnapshotChangeCategory.METADATA, True),
+        (SnapshotChangeCategory.NON_BREAKING, True),
+        # A breaking change that is not forward-only changes the history of the new parent.
+        (SnapshotChangeCategory.BREAKING, False),
+    ],
+)
+def test_stored_forward_only_parent_with_new_parent(
+    init_and_plan_context: t.Callable,
+    new_parent_category: SnapshotChangeCategory,
+    expected_forward_only: bool,
+):
     context, plan = init_and_plan_context("examples/sushi")
     context.apply(plan)
 
@@ -1646,14 +1659,18 @@ def test_stored_forward_only_parent_with_new_parent(init_and_plan_context: t.Cal
     context.upsert_model(initial_model_b.name, stamp="1")
     parent_b = context.get_snapshot(initial_model_b.name, raise_if_missing=True)
     plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
-    plan_builder.set_choice(parent_b, SnapshotChangeCategory.METADATA)
+    plan_builder.set_choice(parent_b, new_parent_category)
     plan = plan_builder.build()
 
     assert parent_a.snapshot_id not in plan.context_diff.new_snapshots
     child_after = plan.snapshots[context.get_snapshot("sushi.order_items").snapshot_id]
     assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
-    assert not child_after.is_forward_only
-    assert child_after.version != child_before.version
+    assert child_after.is_forward_only == expected_forward_only
+    # A forward-only child keeps its previous version, otherwise it's rebuilt.
+    assert (child_after.version == child_before.version) == expected_forward_only
+    assert any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals) == (
+        not expected_forward_only
+    )
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")

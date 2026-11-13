@@ -52,6 +52,14 @@ from sqlmesh.utils.errors import NoChangesPlanError, PlanError
 logger = logging.getLogger(__name__)
 
 
+# Changes in these categories don't require the history of downstream snapshots to be recomputed.
+DOWNSTREAM_REBUILD_NOT_REQUIRED_CATEGORIES = {
+    SnapshotChangeCategory.METADATA,
+    SnapshotChangeCategory.NON_BREAKING,
+    SnapshotChangeCategory.INDIRECT_NON_BREAKING,
+}
+
+
 class PlanBuilder:
     """Plan Builder constructs a Plan based on user choices for how they want to backfill, preview, etc. their changes.
 
@@ -726,6 +734,7 @@ class PlanBuilder:
                 return
 
             all_upstream_forward_only = set()
+            data_changing_upstream_forward_only = set()
             all_upstream_categories = set()
             direct_parent_categories = set()
 
@@ -735,6 +744,8 @@ class PlanBuilder:
                 if parent and self._is_new_snapshot(parent):
                     all_upstream_categories.add(parent.change_category)
                     all_upstream_forward_only.add(parent.is_forward_only)
+                    if parent.change_category not in DOWNSTREAM_REBUILD_NOT_REQUIRED_CATEGORIES:
+                        data_changing_upstream_forward_only.add(parent.is_forward_only)
                     if p_id in snapshot.parents:
                         direct_parent_categories.add(parent.change_category)
 
@@ -745,7 +756,14 @@ class PlanBuilder:
                 stored_parent_categories, stored_parent_forward_only = (
                     self._get_stored_direct_parent_changes(snapshot)
                 )
-                all_upstream_forward_only |= stored_parent_forward_only
+
+            if stored_parent_categories:
+                # A parent that changed in another plan is part of this change too. Whether the snapshot
+                # can skip a rebuild now depends on the changes that require downstream history to be
+                # recomputed: a metadata or non-breaking change doesn't, so it can't veto forward-only.
+                all_upstream_forward_only = (
+                    data_changing_upstream_forward_only | stored_parent_forward_only
+                )
 
             if all_upstream_forward_only == {True} or (
                 snapshot.is_model and snapshot.model.forward_only
@@ -811,17 +829,21 @@ class PlanBuilder:
                 # Not a parent of the previous version, or unchanged since then.
                 continue
 
-            # The change is applied the way the parent was categorized, so it counts toward
-            # whether the snapshot can skip a rebuild, the same as the new parents.
-            forward_only.add(parent.is_forward_only)
             parent_categories = self._get_parent_categories_since(parent, previous_parent_id)
             if parent_categories is None:
                 # The history doesn't reach back to the previous parent (it only keeps the latest
                 # versions), so we can't rule out a breaking change. A rebuild is safer than silently
                 # reusing stale data.
                 categories.add(SnapshotChangeCategory.INDIRECT_BREAKING)
+                forward_only.add(False)
             else:
                 categories.update(parent_categories)
+                if parent_categories.intersection(
+                    {SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.INDIRECT_BREAKING}
+                ):
+                    # The parent's history changed in a way that requires downstream history to be
+                    # recomputed, unless that change was applied forward-only.
+                    forward_only.add(parent.is_forward_only)
         return categories, forward_only
 
     def _get_orphaned_indirect_change_category(
