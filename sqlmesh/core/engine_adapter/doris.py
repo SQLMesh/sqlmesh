@@ -8011,7 +8011,7 @@ class DorisEngineAdapter(
                                 q_tbl.db or q_tbl.catalog or q_tbl.name.lower() not in cte_names
                             ):
                                 dbs_by_table_name.setdefault(q_tbl.name.lower(), set()).add(
-                                    (q_tbl.db or "").lower()
+                                    q_tbl.db or ""
                                 )
                     for raw_part in val_str.split(","):
                         raw_stripped = raw_part.strip()
@@ -8019,7 +8019,7 @@ class DorisEngineAdapter(
                             p_tbl = exp.to_table(raw_stripped, dialect=self.dialect)
                             if p_tbl.name and p_tbl.db:
                                 dbs_by_table_name.setdefault(p_tbl.name.lower(), set()).add(
-                                    p_tbl.db.lower()
+                                    p_tbl.db
                                 )
                 cleaned_parts: t.List[str] = []
                 for part in val_str.split(","):

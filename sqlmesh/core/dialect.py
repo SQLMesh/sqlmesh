@@ -1987,6 +1987,7 @@ def extend_sqlglot() -> None:
                 "JSONB": TokenType.JSONB,
                 "LARGEINT": TokenType.INT128,
                 "QUANTILE_STATE": TokenType.USERDEFINED,
+                "TIMESTAMP": TokenType.DATETIME,
                 "TIMESTAMPTZ": (
                     TokenType.TIMESTAMPTZ
                     if doris_supports_timestamptz(TIMESTAMPTZ_MIN_VERSION)

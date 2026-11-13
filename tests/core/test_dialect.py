@@ -1914,3 +1914,12 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
         rendered_match_query.sql("doris")
         == "SELECT (`docs`.`body` MATCH_ANY 'x') + 1 AS `score` FROM `db`.`docs` AS `docs`"
     )
+
+    assert (
+        d.parse_one("SELECT TIMESTAMP '2020-01-01 00:00:00'", dialect="doris").sql("doris")
+        == "SELECT CAST('2020-01-01 00:00:00' AS DATETIME)"
+    )
+    assert (
+        d.parse_one("SELECT TIMESTAMPTZ '2020-01-01 00:00:00+08:00'", dialect="doris").sql("doris")
+        == "SELECT CAST('2020-01-01 00:00:00+08:00' AS TIMESTAMPTZ)"
+    )

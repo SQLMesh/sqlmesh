@@ -2919,9 +2919,7 @@ def _resolve_model_refs_to_physical_tables(
         for candidate in [*(referenced_tables or ()), *(r for r in refs if r.strip())]:
             cand_tbl, _, _ = _to_physical_table(candidate)
             if cand_tbl.name and (cand_tbl.db or isinstance(candidate, exp.Table)):
-                dbs_by_table_name.setdefault(cand_tbl.name.lower(), set()).add(
-                    (cand_tbl.db or "").lower()
-                )
+                dbs_by_table_name.setdefault(cand_tbl.name.lower(), set()).add(cand_tbl.db or "")
 
     def resolve(ref: str) -> str:
         resolved_table, physical, strip_catalog = _to_physical_table(ref)

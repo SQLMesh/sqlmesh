@@ -6363,6 +6363,26 @@ def test_doris_audit_fixes_and_docs_models(
                 dialect="doris",
             ),
         )
+    with pytest.raises(SQLMeshError, match="cannot disambiguate"):
+        _resolve_model_refs_to_physical_tables(
+            exp.Literal.string("Sales.orders"),
+            table_mapping={},
+            dialect="doris",
+            doris_version=(2, 1, 9),
+            property_name="excluded_trigger_tables",
+            referenced_tables=[
+                exp.to_table("Sales.orders", dialect="doris"),
+                exp.to_table("sales.orders", dialect="doris"),
+            ],
+        )
+    with pytest.raises(SQLMeshError, match="cannot disambiguate"):
+        v219_adapter._properties_to_expressions(
+            {"excluded_trigger_tables": exp.Literal.string("Sales.orders")},
+            query_expression=parse_one(
+                "SELECT * FROM Sales.orders JOIN sales.orders ON Sales.orders.id = sales.orders.id",
+                dialect="doris",
+            ),
+        )
     v420_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
     v420_adapter.cursor.fetchone.return_value = ("Doris version doris-4.2.0-rc01", "5.7.99")
     assert (
