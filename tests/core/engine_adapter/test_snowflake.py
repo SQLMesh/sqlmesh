@@ -1210,13 +1210,24 @@ def test_drop_catalog_quoted_name(
     expected_name: str,
 ) -> None:
     adapter = snowflake_mocked_engine_adapter
+    exists_check = f"""SELECT 1 FROM "INFORMATION_SCHEMA"."DATABASES" WHERE "DATABASE_NAME" = '{expected_name}' AND "COMMENT" = 'sqlmesh_managed'"""
+
+    # the existence check finds the sqlmesh_managed database, so it is dropped
+    adapter.cursor.fetchone.return_value = (1,)
     adapter.drop_catalog(catalog_name)
 
     # the existence check must compare against the bare database name, without identifier quotes
     assert to_sql_calls(adapter) == [
-        f"""SELECT 1 FROM "INFORMATION_SCHEMA"."DATABASES" WHERE "DATABASE_NAME" = '{expected_name}' AND "COMMENT" = 'sqlmesh_managed'""",
+        exists_check,
         f'DROP DATABASE IF EXISTS "{expected_name}"',
     ]
+
+    # the existence check finds nothing, so the database is left alone
+    adapter.cursor.execute.reset_mock()
+    adapter.cursor.fetchone.return_value = None
+    adapter.drop_catalog(catalog_name)
+
+    assert to_sql_calls(adapter) == [exists_check]
 
 
 def _make_snowflake_clustering_adapter(

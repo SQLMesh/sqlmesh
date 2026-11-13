@@ -315,6 +315,33 @@ def test_create_drop_catalog(ctx: TestContext, engine_adapter: SnowflakeEngineAd
     assert fetch_database_names() == {non_sqlmesh_managed_catalog}
 
 
+def test_create_drop_catalog_quoted_name(ctx: TestContext, engine_adapter: SnowflakeEngineAdapter):
+    # a name with a hyphen has to be quoted, so it only matches the existence check in
+    # drop_catalog if the check compares against the bare name
+    sqlmesh_managed_catalog = ctx.add_test_suffix("env-dev")
+
+    initial_catalog = engine_adapter.get_current_catalog()
+    assert initial_catalog
+
+    ctx._catalogs.append(sqlmesh_managed_catalog)  # so it still gets cleaned up if the test fails
+    engine_adapter.create_catalog(sqlmesh_managed_catalog)
+
+    def fetch_database_names() -> t.Set[str]:
+        engine_adapter.set_current_catalog(initial_catalog)
+        return {
+            str(r[0])
+            for r in engine_adapter.fetchall(
+                f"select database_name from information_schema.databases where database_name like '%{ctx.test_id}'"
+            )
+        }
+
+    # the database is stored under the bare name, without identifier quotes
+    assert fetch_database_names() == {sqlmesh_managed_catalog}
+
+    engine_adapter.drop_catalog(sqlmesh_managed_catalog)
+    assert fetch_database_names() == set()
+
+
 def test_rows_tracker(
     ctx: TestContext, engine_adapter: SnowflakeEngineAdapter, mocker: MockerFixture
 ):
