@@ -432,11 +432,15 @@ Options:
 ## render
 
 ```
-Usage: sqlmesh render [OPTIONS] MODEL
+Usage: sqlmesh render [OPTIONS] [MODEL]
 
-  Render a model's query, optionally expanding referenced models.
+  Render a model's query, optionally expanding referenced models, or render
+  audit queries.
 
 Options:
+  --audit TEXT                Render all invocations of this audit on MODEL,
+                              or a standalone audit without MODEL. Cannot be
+                              used with --expand.
   -s, --start TEXT            The start datetime of the interval for which
                               this command will be applied.
   -e, --end TEXT              The end datetime of the interval for which this
@@ -463,6 +467,8 @@ Options:
                               lowercase.
   --help                      Show this message and exit.
 ```
+
+`MODEL` is required when rendering a model or an attached audit. Omit it only when rendering a standalone audit with `--audit`. Use the audit's metadata name, rather than its filename. See [Render audit SQL](../concepts/audits.md#render-audit-sql) for examples, repeated invocations, output dialect selection, and rendering behavior.
 
 ## rewrite
 

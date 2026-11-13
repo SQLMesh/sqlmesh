@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from click import ClickException
 from click.testing import CliRunner
 from sqlglot import __version__ as SQLGLOT_VERSION
+from sqlglot import exp, parse as parse_sql
 from sqlmesh import RuntimeEnv
 from sqlmesh._version import __version__ as SQLMESH_VERSION
 from sqlmesh.cli.project_init import ProjectTemplate, init_example_project
@@ -2339,6 +2340,277 @@ GROUP BY
 """
 
     assert expected in cleaned_output
+
+
+@pytest.fixture
+def render_audit_project(tmp_path: Path) -> Path:
+    create_example_project(tmp_path, template=ProjectTemplate.EMPTY)
+    (tmp_path / "models" / "orders.sql").write_text(
+        """MODEL (
+          name demo.orders,
+          kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+          columns (id INT, region TEXT, ds DATE),
+          audits (
+            minimum_id(minimum := 0, blocking := false),
+            minimum_id(minimum := 10),
+            not_null(columns := (id), condition := (region = 'us'))
+          )
+        );
+        SELECT 1 AS id, 'us' AS region, CAST('2026-11-10' AS DATE) AS ds;
+        """
+    )
+    (tmp_path / "audits").mkdir(exist_ok=True)
+    (tmp_path / "audits" / "minimum_id.sql").write_text(
+        """AUDIT (name minimum_id, defaults (minimum = -1));
+        SELECT * FROM @this_model WHERE id <= @minimum;
+        """
+    )
+    (tmp_path / "audits" / "check_orders.sql").write_text(
+        """AUDIT (name check_orders, standalone TRUE);
+        SELECT id, @execution_ds AS rendered_on FROM demo.orders WHERE id < 0;
+        """
+    )
+    return tmp_path
+
+
+@pytest.mark.parametrize("audit_name,count", [("MINIMUM_ID", 2), ("not_null", 1)])
+def test_render_audit_attached(runner: CliRunner, render_audit_project: Path, audit_name, count):
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(render_audit_project),
+            "render",
+            "demo.orders",
+            "--audit",
+            audit_name,
+            "--start",
+            "2026-11-10",
+            "--end",
+            "2026-11-10",
+            "--execution-time",
+            "2026-11-11",
+            "--dialect",
+            "postgres",
+            "--no-format",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    queries = parse_sql(result.stdout, read="postgres")
+    assert len(queries) == count
+    assert all(isinstance(query, exp.Query) for query in queries)
+    assert result.stdout.count("-- Audit:") == count
+    assert "2026-11-10" in result.stdout
+    if count == 2:
+        for query, minimum in zip(queries, (0, 10)):
+            assert query is not None
+            assert f"<= {minimum}" in query.sql()
+    else:
+        assert "'us'" in result.stdout
+        assert "IS NULL" in result.stdout
+
+
+def test_render_audit_standalone(runner: CliRunner, render_audit_project: Path):
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(render_audit_project),
+            "render",
+            "--audit",
+            "CHECK_ORDERS",
+            "--execution-time",
+            "2026-11-11",
+            "--no-format",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(parse_sql(result.stdout, read="duckdb")) == 1
+    assert "2026-11-11" in result.stdout
+
+
+@pytest.mark.parametrize("audit_option", [["--audit", "check_orders"], ["--audit=check_orders"]])
+def test_render_audit_project_without_models(
+    runner: CliRunner, render_audit_project: Path, audit_option
+):
+    (render_audit_project / "models" / "orders.sql").unlink()
+    result = runner.invoke(
+        cli,
+        ["--paths", str(render_audit_project), "render", *audit_option, "--no-format"],
+    )
+    assert result.exit_code == 0, result.output
+    (query,) = parse_sql(result.stdout, read="duckdb")
+    assert isinstance(query, exp.Query)
+
+
+def test_render_audit_unattached_custom_audit_requires_model(
+    runner: CliRunner, render_audit_project: Path
+):
+    (render_audit_project / "audits" / "unattached.sql").write_text(
+        "AUDIT (name unattached); SELECT * FROM @this_model WHERE id < 0;"
+    )
+    result = runner.invoke(
+        cli,
+        ["--paths", str(render_audit_project), "render", "--audit", "unattached", "--no-format"],
+    )
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "Model-attached audits require MODEL" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments,message",
+    [
+        ([], "Missing argument 'MODEL'"),
+        (["--audit", "minimum_id"], "requires a model"),
+        (["--audit", "missing"], "standalone audit"),
+        (["demo.orders", "--audit", "valid_http_method"], "not attached"),
+        (["missing", "--audit", "minimum_id"], "Cannot find model"),
+        (["demo.orders", "--audit", "minimum_id", "--expand", "True"], "--expand"),
+        (["demo.orders", "--audit", "minimum_id", "--expand", "demo.orders"], "--expand"),
+    ],
+)
+def test_render_audit_errors(runner: CliRunner, render_audit_project: Path, arguments, message):
+    result = runner.invoke(cli, ["--paths", str(render_audit_project), "render", *arguments])
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert message in result.stderr
+
+
+def test_render_audit_later_render_failure_has_no_output(
+    runner: CliRunner, render_audit_project: Path
+):
+    (render_audit_project / "audits" / "minimum_id.sql").write_text(
+        "AUDIT (name minimum_id); SELECT * FROM @this_model WHERE id <= @minimum;"
+    )
+    model_path = render_audit_project / "models" / "orders.sql"
+    model_path.write_text(
+        model_path.read_text().replace("minimum_id(minimum := 10)", "minimum_id()")
+    )
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(render_audit_project),
+            "render",
+            "demo.orders",
+            "--audit",
+            "minimum_id",
+            "--no-format",
+        ],
+    )
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "minimum" in result.stderr
+
+
+def test_render_audit_later_serialization_failure_has_no_output(
+    runner: CliRunner, render_audit_project: Path, mocker
+):
+    query = exp.select("1")
+    invalid_query = mocker.Mock(spec=exp.Query)
+    invalid_query.sql.side_effect = ValueError("cannot serialize second invocation")
+    mocker.patch.object(Context, "render_audit", return_value=[query, invalid_query])
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(render_audit_project),
+            "render",
+            "demo.orders",
+            "--audit",
+            "minimum_id",
+            "--no-format",
+        ],
+    )
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "second invocation" in result.stderr
+
+
+@pytest.mark.parametrize("indent", [None, 2])
+def test_render_audit_uses_owning_project_generator_options(
+    runner: CliRunner, render_audit_project: Path, indent
+):
+    other = render_audit_project.with_name(render_audit_project.name + "_other")
+    other.mkdir()
+    create_example_project(other, template=ProjectTemplate.EMPTY)
+    (other / "models" / "orders.sql").write_text(
+        (render_audit_project / "models" / "orders.sql")
+        .read_text()
+        .replace("demo.orders", "other.orders")
+    )
+    (other / "audits").mkdir(exist_ok=True)
+    (other / "audits" / "minimum_id.sql").write_text(
+        (render_audit_project / "audits" / "minimum_id.sql").read_text()
+    )
+    config = other / "config.yaml"
+    config.write_text(config.read_text() + "\nformat:\n  indent: 6\n")
+    arguments = [
+        "--paths",
+        str(render_audit_project),
+        "--paths",
+        str(other),
+        "render",
+        "other.orders",
+        "--audit",
+        "minimum_id",
+        "--no-format",
+    ]
+    if indent is not None:
+        arguments.extend(["--indent", str(indent)])
+    result = runner.invoke(cli, arguments)
+    assert result.exit_code == 0, result.output
+    assert f"FROM (\n{' ' * (indent or 6)}SELECT" in result.stdout
+    assert len(parse_sql(result.stdout, read="duckdb")) == 2
+
+
+def test_render_audit_labels_are_valid_comments(runner: CliRunner, render_audit_project: Path):
+    name = "odd\n*/ SELECT 7; --"
+    model_path = render_audit_project / "models" / "orders.sql"
+    model_path.write_text(model_path.read_text().replace("minimum_id", f'"{name}"'))
+    audit_path = render_audit_project / "audits" / "minimum_id.sql"
+    audit_path.write_text(audit_path.read_text().replace("name minimum_id", f'name "{name}"'))
+    result = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(render_audit_project),
+            "render",
+            "demo.orders",
+            "--audit",
+            name,
+            "--no-format",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(parse_sql(result.stdout, read="duckdb")) == 2
+    assert "-- Audit: odd */ select 7; --, invocation 1" in result.stdout
+
+
+@pytest.mark.parametrize("output_dialect", [None, "duckdb"])
+def test_render_audit_input_and_output_dialects(
+    runner: CliRunner, render_audit_project: Path, output_dialect
+):
+    audit_path = render_audit_project / "audits" / "check_orders.sql"
+    audit_path.write_text("""AUDIT (name check_orders, standalone TRUE, dialect spark);
+        SELECT DATE_FORMAT(CAST('2026-11-10' AS DATE), 'yyyy-MM-dd') AS rendered_on;
+    """)
+    arguments = [
+        "--paths",
+        str(render_audit_project),
+        "render",
+        "--audit",
+        "check_orders",
+        "--no-format",
+    ]
+    if output_dialect is not None:
+        arguments.extend(["--dialect", output_dialect])
+    result = runner.invoke(cli, arguments)
+    assert result.exit_code == 0, result.output
+    (query,) = parse_sql(result.stdout, read=output_dialect or "spark")
+    assert isinstance(query, exp.Query)
+    assert ("STRFTIME" if output_dialect else "DATE_FORMAT") in result.stdout
 
 
 @time_machine.travel(FREEZE_TIME)
