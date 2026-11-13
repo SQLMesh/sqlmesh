@@ -1867,3 +1867,18 @@ def test_doris_userdefined_isolation_and_modify_column_not_null():
     d.extend_sqlglot()
     assert Doris.Generator not in _DISPATCH_CACHE
     assert alter_idx_if_not_exists_ast.sql("doris") == alter_idx_if_not_exists_sql
+
+    for drop_part_sql in (
+        "ALTER TABLE db.t DROP PARTITION p1",
+        "ALTER TABLE db.t DROP PARTITION IF EXISTS p1",
+        "ALTER TABLE db.t DROP PARTITION IF EXISTS p1 FORCE",
+        "ALTER TABLE db.t DROP TEMPORARY PARTITION IF EXISTS p1 FORCE",
+        "ALTER TABLE db.t DROP PARTITION p1, DROP PARTITION p2 FORCE",
+    ):
+        drop_part_ast = d.parse_one(drop_part_sql, dialect="doris")
+        assert isinstance(drop_part_ast, exp.Alter)
+        assert isinstance(drop_part_ast.args["actions"][0], exp.DropPartition)
+        assert drop_part_ast.copy().sql("doris") == drop_part_sql
+
+    drop_col_sql = "ALTER TABLE db.t DROP COLUMN c1"
+    assert d.parse_one(drop_col_sql, dialect="doris").sql("doris") == drop_col_sql

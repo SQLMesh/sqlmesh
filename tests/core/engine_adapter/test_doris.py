@@ -6317,6 +6317,47 @@ def test_doris_audit_fixes_and_docs_models(
         v219_adapter._properties_to_expressions(
             {"excluded_trigger_tables": exp.Literal.string("lake_a.db.t1")}
         )
+    with pytest.raises(SQLMeshError, match="cannot disambiguate"):
+        _resolve_model_refs_to_physical_tables(
+            exp.Literal.string("db_a.orders"),
+            table_mapping={},
+            dialect="doris",
+            doris_version=(2, 1, 9),
+            property_name="excluded_trigger_tables",
+            referenced_tables=[
+                exp.to_table("db_a.orders", dialect="doris"),
+                exp.to_table("db_b.orders", dialect="doris"),
+            ],
+        )
+    assert _resolve_model_refs_to_physical_tables(
+        exp.Literal.string("db_a.orders"),
+        table_mapping={},
+        dialect="doris",
+        doris_version=(2, 1, 10),
+        property_name="excluded_trigger_tables",
+        referenced_tables=[
+            exp.to_table("db_a.orders", dialect="doris"),
+            exp.to_table("db_b.orders", dialect="doris"),
+        ],
+    ) == exp.Literal.string("db_a.orders")
+    with pytest.raises(SQLMeshError, match="cannot disambiguate"):
+        v219_adapter._properties_to_expressions(
+            {"excluded_trigger_tables": exp.Literal.string("db_a.orders")},
+            query_expression=parse_one(
+                "SELECT * FROM db_a.orders JOIN db_b.orders ON db_a.orders.id = db_b.orders.id",
+                dialect="doris",
+            ),
+        )
+    v420_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    v420_adapter.cursor.fetchone.return_value = ("Doris version doris-4.2.0-rc01", "5.7.99")
+    assert (
+        v420_adapter._to_sql(exp.Map(keys=exp.column("k_arr"), values=exp.column("v_arr")))
+        == "MAP_FROM_ARRAYS(`k_arr`, `v_arr`)"
+    )
+    v415_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    v415_adapter.cursor.fetchone.return_value = ("Doris version doris-4.1.5-rc02", "5.7.99")
+    with pytest.raises(SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        v415_adapter._to_sql(exp.Map(keys=exp.column("k_arr"), values=exp.column("v_arr")))
     assert to_sql_calls(existing_ref_adapter) == []
 
     # 14. `_gen_config` appends the Doris `state_connection` even when custom settings are supplied (e.g. DLT template).

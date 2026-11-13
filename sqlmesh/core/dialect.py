@@ -1017,9 +1017,48 @@ def _doris_parse_alter_add(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr], 
     return self._parse_alter_table_add()
 
 
+def _doris_parse_drop_partition_action(self: Parser) -> t.Optional[exp.DropPartition]:
+    start_index = self._index
+    temporary = bool(self._match(TokenType.TEMPORARY) or self._match_text_seq("TEMPORARY"))
+    if not (self._match(TokenType.PARTITION) or self._match_text_seq("PARTITION")):
+        self._retreat(start_index)
+        return None
+    exists = self._parse_exists()
+    if self._match(TokenType.L_PAREN, advance=False):
+        part_expr: t.Optional[exp.Expr] = self.expression(
+            exp.Partition(expressions=self._parse_wrapped_csv(self._parse_assignment))
+        )
+    else:
+        part_expr = self._parse_id_var(any_token=False)
+    if part_expr is None:
+        self._retreat(start_index)
+        return None
+    force = bool(self._match_text_seq("FORCE"))
+    drop_part = self.expression(exp.DropPartition(expressions=[part_expr], exists=exists))
+    if temporary:
+        drop_part.set("temporary", True)
+    if force:
+        drop_part.set("force", True)
+    return drop_part
+
+
 def _doris_parse_alter_drop(self: Parser) -> t.Union[exp.Expr, t.List[exp.Expr], None]:
     if self._match_texts(("BRANCH", "TAG"), advance=False):
         return _doris_parse_alter_raw_action(self)
+    drop_partition = _doris_parse_drop_partition_action(self)
+    if drop_partition is not None:
+        actions: t.List[exp.Expr] = [drop_partition]
+        while True:
+            comma_index = self._index
+            if not self._match(TokenType.COMMA):
+                break
+            self._match(TokenType.DROP)
+            next_drop = _doris_parse_drop_partition_action(self)
+            if next_drop is None:
+                self._retreat(comma_index)
+                break
+            actions.append(next_drop)
+        return actions
     return self._parse_alter_table_drop()
 
 
@@ -1085,6 +1124,19 @@ def _doris_alter_sql(self: Generator, expression: exp.Alter) -> str:
 _doris_alter_sql.__name__ = "alter_sql"
 
 
+def _doris_droppartition_sql(self: Generator, expression: exp.DropPartition) -> str:
+    if any(isinstance(e, exp.Partition) for e in expression.expressions):
+        return self._droppartition_sql(expression)  # type: ignore
+    temporary = " TEMPORARY" if expression.args.get("temporary") else ""
+    exists = " IF EXISTS" if expression.args.get("exists") else ""
+    force = " FORCE" if expression.args.get("force") else ""
+    partitions = self.expressions(expression, flat=True)
+    return f"DROP{temporary} PARTITION{exists} {partitions}{force}"
+
+
+_doris_droppartition_sql.__name__ = "droppartition_sql"
+
+
 def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
     keys = expression.args.get("keys")
     values = expression.args.get("values")
@@ -1092,7 +1144,10 @@ def _doris_map_sql(self: Generator, expression: exp.Map | exp.VarMap) -> str:
         return var_map_sql(self, expression)
     if keys is not None or values is not None:
         # exp.Map with non-literal-array keys/values always means array-to-map construction.
-        if not doris_supports_map_from_arrays(getattr(self.dialect, "version", None)):
+        doris_version = expression.meta.get("doris_version") or getattr(
+            self.dialect, "version", None
+        )
+        if not doris_supports_map_from_arrays(doris_version):
             raise SQLMeshError(
                 "Doris does not support constructing a MAP from array columns prior to Doris 4.2 "
                 "(MAP_FROM_ARRAYS requires Doris 4.2+)."
@@ -2088,6 +2143,7 @@ def extend_sqlglot() -> None:
     _override(Doris.Generator, _doris_indexconstraintoption_sql)
     _override(Doris.Generator, _doris_indexparameters_sql)
     _override(Doris.Generator, _doris_alter_sql)
+    _override(Doris.Generator, _doris_droppartition_sql)
     _DISPATCH_CACHE.pop(Doris.Generator, None)
 
     # DuckDB's prefix absolute power operator `@` clashes with the macro syntax

@@ -1783,6 +1783,7 @@ class DorisEngineAdapter(
                     else None
                 ),
                 table_kind="MATERIALIZED_VIEW",
+                query_expression=query,
             )
 
             if is_sync_mv:
@@ -7388,7 +7389,12 @@ class DorisEngineAdapter(
         # Default replication_num = 1 for single-BE dev/CI when not explicitly configured on OLAP tables
         # Note: Only emit explicit table_properties_copy entries so unit test expectations remain clean.
         if table_properties_copy:
-            properties.extend(self._properties_to_expressions(table_properties_copy))
+            properties.extend(
+                self._properties_to_expressions(
+                    table_properties_copy,
+                    query_expression=kwargs.get("query_expression"),
+                )
+            )
 
         if properties:
             return exp.Properties(expressions=properties)
@@ -7675,6 +7681,18 @@ class DorisEngineAdapter(
                         expression = struct_replacement
                     else:
                         dtype.replace(struct_replacement)
+        if any(
+            not (
+                isinstance(m.args.get("keys"), exp.Array)
+                and isinstance(m.args.get("values"), exp.Array)
+            )
+            and (m.args.get("keys") is not None or m.args.get("values") is not None)
+            for m in expression.find_all(exp.Map)
+        ):
+            self._get_doris_version()
+        doris_version = getattr(self, "_doris_version", None)
+        if doris_version and "dialect" not in kwargs:
+            kwargs["dialect"] = f"{self.dialect}, version={'.'.join(str(p) for p in doris_version)}"
         return super()._to_sql(expression, quote=quote, **kwargs)
 
     def _build_distributed_by_exp(
@@ -7945,7 +7963,11 @@ class DorisEngineAdapter(
 
         return table_copy
 
-    def _properties_to_expressions(self, properties: t.Dict[str, t.Any]) -> t.List[exp.Expr]:
+    def _properties_to_expressions(
+        self,
+        properties: t.Dict[str, t.Any],
+        query_expression: t.Optional[exp.Expr] = None,
+    ) -> t.List[exp.Expr]:
         """Convert a dictionary of properties to a list of Doris PROPERTIES ('k'='v') expressions."""
         expressions: t.List[exp.Expr] = []
         skip_keys = {
@@ -7979,6 +8001,29 @@ class DorisEngineAdapter(
             val_str = raw_str if raw_str is not None else str(value)
             if key == "excluded_trigger_tables" and val_str:
                 supports_qualified = self._supports_qualified_excluded_trigger_tables()
+                dbs_by_table_name: t.Dict[str, t.Set[str]] = {}
+                if not supports_qualified:
+                    if isinstance(query_expression, exp.Expr):
+                        cte_names = {
+                            cte.alias.lower()
+                            for cte in query_expression.find_all(exp.CTE)
+                            if cte.alias
+                        }
+                        for q_tbl in query_expression.find_all(exp.Table):
+                            if q_tbl.name and (
+                                q_tbl.db or q_tbl.catalog or q_tbl.name.lower() not in cte_names
+                            ):
+                                dbs_by_table_name.setdefault(q_tbl.name.lower(), set()).add(
+                                    (q_tbl.db or "").lower()
+                                )
+                    for raw_part in val_str.split(","):
+                        raw_stripped = raw_part.strip()
+                        if raw_stripped:
+                            p_tbl = exp.to_table(raw_stripped, dialect=self.dialect)
+                            if p_tbl.name and p_tbl.db:
+                                dbs_by_table_name.setdefault(p_tbl.name.lower(), set()).add(
+                                    p_tbl.db.lower()
+                                )
                 cleaned_parts: t.List[str] = []
                 for part in val_str.split(","):
                     stripped = part.strip()
@@ -7991,6 +8036,11 @@ class DorisEngineAdapter(
                             raise SQLMeshError(
                                 f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
                                 f"got '{stripped}'."
+                            )
+                        if tbl.db and len(dbs_by_table_name.get(tbl.name.lower(), set())) > 1:
+                            raise SQLMeshError(
+                                f"Doris 'excluded_trigger_tables' prior to 2.1.10 (and 3.0.6) matches tables by bare name only "
+                                f"and cannot disambiguate '{exp.table_name(tbl, identify=False)}' when the view references multiple tables named '{tbl.name}'."
                             )
                         cleaned_parts.append(tbl.name or without_internal)
                     else:

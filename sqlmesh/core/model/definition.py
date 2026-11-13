@@ -742,6 +742,18 @@ class _Model(ModelMeta, frozen=True):
                 else getattr(engine_adapter, "_doris_version", None)
             )
             engine_dialect = getattr(engine_adapter, "dialect", None)
+            referenced_tables: t.List[str | exp.Table] = list(self.depends_on or ())
+            model_query = getattr(self, "query", None)
+            if isinstance(model_query, exp.Expr):
+                cte_names = {
+                    cte.alias.lower() for cte in model_query.find_all(exp.CTE) if cte.alias
+                }
+                referenced_tables.extend(
+                    t_node
+                    for t_node in model_query.find_all(exp.Table)
+                    if t_node.name
+                    and (t_node.db or t_node.catalog or t_node.name.lower() not in cte_names)
+                )
             for key in keys_to_resolve:
                 rendered[key] = _resolve_model_refs_to_physical_tables(
                     rendered[key],
@@ -751,6 +763,7 @@ class _Model(ModelMeta, frozen=True):
                     doris_version=doris_version,
                     property_name=key,
                     engine_dialect=engine_dialect,
+                    referenced_tables=referenced_tables,
                 )
 
         return rendered
@@ -2850,6 +2863,7 @@ def _resolve_model_refs_to_physical_tables(
     doris_version: t.Optional[t.Tuple[int, ...]] = None,
     property_name: t.Optional[str] = None,
     engine_dialect: t.Optional[DialectType] = None,
+    referenced_tables: t.Optional[t.Iterable[str | exp.Table]] = None,
 ) -> exp.Literal:
     """Resolve managed-model references in a property value to their physical table names.
 
@@ -2876,8 +2890,10 @@ def _resolve_model_refs_to_physical_tables(
     else:
         refs = [value.sql(dialect=dialect)]
 
-    def resolve(ref: str) -> str:
-        table = exp.to_table(ref.strip(), dialect=dialect)
+    def _to_physical_table(ref: str | exp.Table) -> t.Tuple[exp.Table, t.Optional[str], bool]:
+        table = (
+            ref.copy() if isinstance(ref, exp.Table) else exp.to_table(ref.strip(), dialect=dialect)
+        )
         physical: t.Optional[str] = None
         strip_catalog = False
         if default_catalog and not table.catalog:
@@ -2890,9 +2906,25 @@ def _resolve_model_refs_to_physical_tables(
             physical = table_mapping.get(exp.table_name(table, identify=True)) or table_mapping.get(
                 d.normalize_model_name(table, default_catalog=default_catalog, dialect=dialect)
             )
-        # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
         resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
-        effective_engine_dialect = engine_dialect if engine_dialect is not None else dialect
+        return resolved_table, physical, strip_catalog
+
+    effective_engine_dialect = engine_dialect if engine_dialect is not None else dialect
+    dbs_by_table_name: t.Dict[str, t.Set[str]] = {}
+    if (
+        effective_engine_dialect == "doris"
+        and property_name == "excluded_trigger_tables"
+        and not d.doris_supports_qualified_excluded_trigger_tables(doris_version)
+    ):
+        for candidate in [*(referenced_tables or ()), *(r for r in refs if r.strip())]:
+            cand_tbl, _, _ = _to_physical_table(candidate)
+            if cand_tbl.name and (cand_tbl.db or isinstance(candidate, exp.Table)):
+                dbs_by_table_name.setdefault(cand_tbl.name.lower(), set()).add(
+                    (cand_tbl.db or "").lower()
+                )
+
+    def resolve(ref: str) -> str:
+        resolved_table, physical, strip_catalog = _to_physical_table(ref)
         if physical and effective_engine_dialect != "doris" and resolved_table.catalog:
             strip_catalog = True
         if (
@@ -2904,6 +2936,14 @@ def _resolve_model_refs_to_physical_tables(
                 raise SQLMeshError(
                     f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
                     f"got '{exp.table_name(resolved_table, identify=False)}'."
+                )
+            if (
+                resolved_table.db
+                and len(dbs_by_table_name.get(resolved_table.name.lower(), set())) > 1
+            ):
+                raise SQLMeshError(
+                    f"Doris 'excluded_trigger_tables' prior to 2.1.10 (and 3.0.6) matches tables by bare name only "
+                    f"and cannot disambiguate '{exp.table_name(resolved_table, identify=False)}' when the view references multiple tables named '{resolved_table.name}'."
                 )
             resolved_table.set("catalog", None)
             resolved_table.set("db", None)
