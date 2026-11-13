@@ -24,6 +24,7 @@ def notification_target_manager_with_spy(mocker) -> tuple[NotificationTargetMana
         notification_targets={
             NotificationEvent.APPLY_START: {console_notification_target},
             NotificationEvent.APPLY_END: {console_notification_target},
+            NotificationEvent.AUDIT_PASS: {console_notification_target},
         },
         user_notification_targets={
             "test_user": {test_user_console_notification_target},
@@ -55,6 +56,25 @@ def test_notify(notification_target_manager_with_spy):
         NotificationEvent.APPLY_FAILURE, "prod", "a-plan-id", ValueError()
     )
     spy.assert_not_called()
+
+
+def test_notify_audit_pass(notification_target_manager_with_spy):
+    notification_target_manager, spy = notification_target_manager_with_spy
+    notification_target_manager.notify(NotificationEvent.AUDIT_PASS, "not_null", "sushi.orders")
+    spy.assert_called_once_with(
+        mock.ANY,
+        NotificationStatus.SUCCESS,
+        "Audit `not_null` passed for model `sushi.orders`.",
+    )
+
+    # Without a model name the message omits the model reference
+    spy.reset_mock()
+    notification_target_manager.notify(NotificationEvent.AUDIT_PASS, "not_null")
+    spy.assert_called_once_with(
+        mock.ANY,
+        NotificationStatus.SUCCESS,
+        "Audit `not_null` passed.",
+    )
 
 
 def test_notify_user(notification_target_manager_with_spy):

@@ -588,6 +588,7 @@ def test_audit_failure_notifications(
             0,
         )
 
+    # A passing audit notifies AUDIT_PASS.
     evaluator_audit_mock.return_value = [
         AuditResult(
             audit=audit,
@@ -599,9 +600,12 @@ def test_audit_failure_notifications(
         )
     ]
     _evaluate()
-    assert notify_user_mock.call_count == 0
-    assert notify_mock.call_count == 0
+    assert notify_user_mock.call_count == 1
+    assert notify_mock.call_count == 1
+    notify_user_mock.reset_mock()
+    notify_mock.reset_mock()
 
+    # A skipped audit is neither a pass nor a failure, so nothing fires.
     evaluator_audit_mock.return_value = [
         AuditResult(
             audit=audit,
