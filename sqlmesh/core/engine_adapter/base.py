@@ -2921,9 +2921,15 @@ class EngineAdapter:
         Returns the name of the temp table that should be used for the given table name.
         """
         table = t.cast(exp.Table, exp.to_table(table).copy())
-        table.set(
-            "this", exp.to_identifier(f"__temp_{table.name}_{random_id(short=True)}", quoted=quoted)
-        )
+        prefix, suffix = "__temp_", f"_{random_id(short=True)}"
+        name = table.name
+        if self.MAX_IDENTIFIER_LENGTH is not None:
+            # Cut the middle of the name so that the temp table name is a valid identifier
+            keep = max(self.MAX_IDENTIFIER_LENGTH - len(prefix) - len(suffix), 0)
+            if len(name) > keep:
+                tail = keep // 2
+                name = name[: keep - tail] + (name[-tail:] if tail else "")
+        table.set("this", exp.to_identifier(f"{prefix}{name}{suffix}", quoted=quoted))
 
         if table_only:
             table.set("db", None)

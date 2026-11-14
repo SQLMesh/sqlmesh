@@ -6,6 +6,7 @@ import typing as t
 
 from sqlglot import exp
 
+from sqlmesh.core.engine_adapter.base import EngineAdapter
 from sqlmesh.core.engine_adapter.postgres import PostgresEngineAdapter
 from sqlmesh.core.engine_adapter.shared import (
     set_catalog,
@@ -33,6 +34,9 @@ class RisingwaveEngineAdapter(PostgresEngineAdapter):
     SUPPORTS_TRANSACTIONS = False
     MAX_IDENTIFIER_LENGTH = None
     SUPPORTS_GRANTS = False
+
+    # COPY into a staging table hasn't been verified on RisingWave, so DataFrames keep using `VALUES`
+    _df_to_source_queries = EngineAdapter._df_to_source_queries
 
     def columns(
         self, table_name: TableName, include_pseudo_columns: bool = False

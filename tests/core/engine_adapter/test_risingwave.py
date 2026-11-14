@@ -84,3 +84,18 @@ def test_drop_view(adapter: t.Callable):
             call('DROP VIEW IF EXISTS "db"."view"'),
         ]
     )
+
+
+def test_df_is_not_loaded_with_copy(adapter: t.Callable):
+    """RisingWave inherits from Postgres but must keep using the VALUES path."""
+    import pandas as pd  # noqa: TID253
+
+    risingwave = adapter
+    risingwave.insert_append(
+        "tbl", pd.DataFrame({"a": [1, 2]}), target_columns_to_types={"a": exp.DataType.build("int")}
+    )
+
+    risingwave.cursor.copy_expert.assert_not_called()
+    sql_calls = [call_[0][0] for call_ in risingwave.cursor.execute.call_args_list]
+    assert len(sql_calls) == 1
+    assert "VALUES" in str(sql_calls[0]) and "__temp_" not in str(sql_calls[0])
