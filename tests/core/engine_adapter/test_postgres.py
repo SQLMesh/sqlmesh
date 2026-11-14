@@ -1,5 +1,10 @@
+import re
 import typing as t
+from datetime import date
+from decimal import Decimal
 
+import numpy as np  # noqa: TID253
+import pandas as pd  # noqa: TID253
 import pytest
 from pytest_mock import MockFixture
 from pytest_mock.plugin import MockerFixture
@@ -282,3 +287,290 @@ def test_sync_grants_config_with_default_schema(
         "WHERE table_schema = 'public' AND table_name = 'test_table' "
         "AND grantor = current_role AND grantee <> current_role"
     )
+
+
+# --------------------------------------------------------------------------------------------
+# DataFrame bulk loading via COPY
+# --------------------------------------------------------------------------------------------
+
+_NULL_MARKER_RE = re.compile(r"NULL '([^']+)'")
+
+
+def _capture_copy_calls(adapter: PostgresEngineAdapter) -> t.List[t.Tuple[str, str]]:
+    """Records (sql, payload) for every `copy_expert` call; the payload is read at call time."""
+    calls: t.List[t.Tuple[str, str]] = []
+
+    def _copy_expert(sql: str, file: t.Any) -> None:
+        calls.append((sql, file.read()))
+
+    adapter.cursor.copy_expert.side_effect = _copy_expert
+    return calls
+
+
+@pytest.fixture
+def copy_adapter(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, make_temp_table_name: t.Callable
+) -> PostgresEngineAdapter:
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    mocker.patch.object(adapter, "table_exists", return_value=False)
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table",
+        return_value=make_temp_table_name("tbl", "abcdefgh"),
+    )
+    return adapter
+
+
+def test_df_copy_chunks_sql_and_payload(copy_adapter: PostgresEngineAdapter):
+    calls = _capture_copy_calls(copy_adapter)
+    df = pd.DataFrame(
+        {
+            "a": [1, 2, 3],
+            "b": ["x", None, 'q"uote, comma'],
+            "c": [1.5, np.nan, 0.1],
+            "d": [True, False, True],
+            "e": pd.to_datetime(
+                ["2020-01-01 00:00:00.123456", None, "1960-01-01 12:00:00"],  # type: ignore
+                format="ISO8601",
+            ),
+        }
+    )
+    types = {
+        "a": exp.DataType.build("int"),
+        "b": exp.DataType.build("text"),
+        "c": exp.DataType.build("double"),
+        "d": exp.DataType.build("boolean"),
+        "e": exp.DataType.build("timestamp"),
+    }
+
+    copy_adapter.DEFAULT_BATCH_SIZE = 2
+    copy_adapter.insert_append("tbl", df, target_columns_to_types=types)
+
+    # One COPY per chunk of `batch_size` rows
+    assert len(calls) == 2
+    marker = _NULL_MARKER_RE.search(calls[0][0]).group(1)  # type: ignore
+    assert len(marker) <= 32  # pandas truncates longer `na_rep` values in float columns
+    expected_sql = (
+        'COPY "__temp_tbl_abcdefgh" ("a", "b", "c", "d", "e") '
+        f"FROM STDIN WITH (FORMAT csv, NULL '{marker}')"
+    )
+    assert [sql for sql, _ in calls] == [expected_sql, expected_sql]
+    assert (
+        calls[0][1]
+        == f"1,x,1.5,True,2020-01-01 00:00:00.123456\n2,{marker},{marker},False,{marker}\n"
+    )
+    assert calls[1][1] == '3,"q""uote, comma",0.1,True,1960-01-01 12:00:00\n'
+
+    assert to_sql_calls(copy_adapter) == [
+        'CREATE TABLE IF NOT EXISTS "__temp_tbl_abcdefgh" '
+        '("a" BIGINT, "b" TEXT, "c" DECIMAL, "d" BOOLEAN, "e" TIMESTAMP)',
+        'INSERT INTO "tbl" ("a", "b", "c", "d", "e") '
+        'SELECT CAST("a" AS INT) AS "a", CAST("b" AS TEXT) AS "b", CAST("c" AS DOUBLE PRECISION) AS "c", '
+        'CAST("d" AS BOOLEAN) AS "d", CAST("e" AS TIMESTAMP) AS "e" FROM "__temp_tbl_abcdefgh"',
+        'DROP TABLE IF EXISTS "__temp_tbl_abcdefgh"',
+    ]
+
+
+def test_df_copy_batch_size_zero_is_single_chunk(copy_adapter: PostgresEngineAdapter):
+    calls = _capture_copy_calls(copy_adapter)
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    copy_adapter.DEFAULT_BATCH_SIZE = 0
+    copy_adapter.insert_append("tbl", df, target_columns_to_types={"a": exp.DataType.build("int")})
+    assert len(calls) == 1
+    assert calls[0][1] == "1\n2\n3\n"
+
+
+def test_df_copy_reorders_columns_and_skips_missing_source_columns(
+    copy_adapter: PostgresEngineAdapter,
+):
+    calls = _capture_copy_calls(copy_adapter)
+    df = pd.DataFrame({"b": ["x", "y"], "a": [1, 2], "unused": [9, 9]})
+    copy_adapter.insert_append(
+        "tbl",
+        df,
+        target_columns_to_types={
+            "a": exp.DataType.build("int"),
+            "b": exp.DataType.build("text"),
+            "c": exp.DataType.build("int"),
+        },
+        source_columns=["b", "a"],
+    )
+
+    # Only the source columns are copied, in the source order
+    assert len(calls) == 1
+    assert calls[0][0].startswith('COPY "__temp_tbl_abcdefgh" ("b", "a") FROM STDIN')
+    assert calls[0][1] == "x,1\ny,2\n"
+    assert to_sql_calls(copy_adapter)[1] == (
+        'INSERT INTO "tbl" ("a", "b", "c") SELECT CAST("a" AS INT) AS "a", CAST("b" AS TEXT) AS "b", '
+        'CAST(NULL AS INT) AS "c" FROM "__temp_tbl_abcdefgh"'
+    )
+
+
+def test_df_copy_staging_table_is_created_once(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    calls = _capture_copy_calls(copy_adapter)
+    df = pd.DataFrame({"a": [1, 2]})
+    source_queries = copy_adapter._df_to_source_queries(
+        df, {"a": exp.DataType.build("int")}, 10000, "tbl"
+    )
+    assert len(source_queries) == 1
+
+    # Once the staging table exists, calling the factory again must not reload the data
+    with source_queries[0]:
+        pass
+    copy_adapter.table_exists.return_value = True  # type: ignore
+    with source_queries[0]:
+        pass
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "df, remove_copy_expert",
+    [
+        (pd.DataFrame({"a": [1, 2]}), True),  # driver without copy_expert (e.g. pg8000)
+        (pd.DataFrame({"a": [{"k": 1}, {"k": 2}]}), False),  # dict values
+        (pd.DataFrame({"a": [[1], [2]]}), False),  # list values
+        (pd.DataFrame({"a": ["x", 1]}), False),  # mixed str / int
+        (pd.DataFrame({"a": [b"x", b"y"]}), False),  # bytes
+        (pd.DataFrame({"a": [Decimal("1.5"), Decimal("2")]}), False),  # Decimal
+        (pd.DataFrame({"a": [date(2020, 1, 1), date(2020, 1, 2)]}), False),  # date objects
+        (pd.DataFrame({"a": pd.Categorical(["x", "y"])}), False),  # unsupported dtype
+        (pd.DataFrame({"a": pd.to_timedelta([1, 2], unit="s")}), False),  # unsupported dtype
+        (pd.DataFrame({"a": np.array([1, 2], dtype="uint64")}), False),  # may exceed BIGINT
+        (
+            pd.DataFrame({"a": np.array([1, 2], dtype="float32")}),
+            False,
+        ),  # repr differs from float64
+        (pd.DataFrame({"a": ["x", "\\."]}), False),  # `\.` can end COPY data in CSV format
+    ],
+)
+def test_df_copy_falls_back_to_values(
+    copy_adapter: PostgresEngineAdapter, df: pd.DataFrame, remove_copy_expert: bool
+):
+    if remove_copy_expert:
+        del copy_adapter.cursor.copy_expert
+
+    copy_adapter.insert_append("tbl", df, target_columns_to_types={"a": exp.DataType.build("text")})
+
+    if not remove_copy_expert:
+        copy_adapter.cursor.copy_expert.assert_not_called()
+    sql_calls = to_sql_calls(copy_adapter)
+    assert len(sql_calls) == 1
+    assert "VALUES" in sql_calls[0]
+    assert "__temp_" not in sql_calls[0]
+
+
+def test_df_copy_falls_back_on_null_marker_collision(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    mocker.patch("sqlmesh.core.engine_adapter.postgres.random_id", return_value="collide")
+    marker = "__sqlmesh_null_collide__"
+    df = pd.DataFrame({"a": ["x", marker]})
+
+    copy_adapter.insert_append("tbl", df, target_columns_to_types={"a": exp.DataType.build("text")})
+
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    sql_calls = to_sql_calls(copy_adapter)
+    assert len(sql_calls) == 1
+    assert "VALUES" in sql_calls[0]
+
+
+def test_df_copy_not_used_for_empty_dataframe(copy_adapter: PostgresEngineAdapter):
+    # The adapter itself must not create a staging table for an empty DataFrame
+    df = pd.DataFrame({"a": pd.Series([], dtype="int64")})
+    source_queries = copy_adapter._df_to_source_queries(
+        df, {"a": exp.DataType.build("int")}, 10000, "tbl"
+    )
+    assert source_queries == []
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert to_sql_calls(copy_adapter) == []
+
+
+def test_df_copy_driver_call_is_isolated_in_copy_df(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    """Only `_copy_df` may touch the driver's COPY API (keeps a psycopg3 migration small)."""
+    copy_df = mocker.patch.object(copy_adapter, "_copy_df")
+    df = pd.DataFrame({"a": [1, 2]})
+    copy_adapter.insert_append("tbl", df, target_columns_to_types={"a": exp.DataType.build("int")})
+    copy_df.assert_called_once()
+    copy_adapter.cursor.copy_expert.assert_not_called()
+
+
+def test_temp_table_name_respects_max_identifier_length(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    table = f"sqlmesh__schema.{'x' * 30}__{'y' * 28}"  # 60 character table name
+    assert len(exp.to_table(table).name) == 60
+
+    first = adapter._get_temp_table(table)
+    second = adapter._get_temp_table(table)
+
+    assert first.db == "sqlmesh__schema"
+    for temp in (first, second):
+        assert len(temp.name) <= 63
+        assert temp.name.startswith("__temp_xxxxxx")  # head of the name is kept
+        assert temp.name.rsplit("_", 1)[0].endswith("yyyyyy")  # tail of the name is kept
+    assert first.name != second.name  # random suffix keeps names unique
+    # Identifier-length validation on DDL must accept the staging name
+    adapter._check_identifier_length(exp.Create(this=first, kind="TABLE"))
+
+
+def test_temp_table_name_unchanged_when_short(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    name = "z" * 47  # 7 prefix + 47 + 1 + 8 suffix == 63
+    temp = adapter._get_temp_table(f"s.{name}")
+    assert temp.name.startswith(f"__temp_{name}_")
+    assert len(temp.name) == 63
+
+
+class _FakeDbError(Exception):
+    def __init__(self, pgcode: t.Optional[str]) -> None:
+        super().__init__("boom")
+        self.pgcode = pgcode
+
+
+@pytest.mark.parametrize(
+    "pgcode, in_transaction, raises",
+    [
+        ("25P02", True, False),  # aborted transaction: its rollback removes the staging table
+        ("25P02", False, True),
+        ("42501", True, True),
+        (None, True, True),
+    ],
+)
+def test_drop_copy_staging_table_error_handling(
+    copy_adapter: PostgresEngineAdapter,
+    mocker: MockerFixture,
+    pgcode: t.Optional[str],
+    in_transaction: bool,
+    raises: bool,
+):
+    mocker.patch.object(copy_adapter, "drop_table", side_effect=_FakeDbError(pgcode))
+    mocker.patch.object(
+        type(copy_adapter._connection_pool),
+        "is_transaction_active",
+        new_callable=mocker.PropertyMock,
+        return_value=in_transaction,
+    )
+    table = exp.to_table("tbl")
+    if raises:
+        with pytest.raises(_FakeDbError):
+            copy_adapter._drop_copy_staging_table(table)
+    else:
+        copy_adapter._drop_copy_staging_table(table)
+
+
+def test_df_copy_failure_drops_staging_table_and_reraises(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    mocker.patch.object(copy_adapter, "_copy_df", side_effect=ValueError("copy failed"))
+    df = pd.DataFrame({"a": [1, 2]})
+    source_queries = copy_adapter._df_to_source_queries(
+        df, {"a": exp.DataType.build("int")}, 10000, "tbl"
+    )
+    # `replace_query` calls the factory outside of `with source_query`, so the factory must clean up
+    with pytest.raises(ValueError, match="copy failed"):
+        source_queries[0].query_factory()
+    assert to_sql_calls(copy_adapter)[-1] == 'DROP TABLE IF EXISTS "__temp_tbl_abcdefgh"'

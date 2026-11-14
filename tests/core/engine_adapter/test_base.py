@@ -3489,6 +3489,40 @@ def test_get_temp_table(mocker: MockerFixture, make_mocked_engine_adapter: t.Cal
     assert value.sql() == '"catalog"."db"."__temp_test_table_abcdefgh"'
 
 
+@pytest.mark.parametrize(
+    "max_length, table_name, expected",
+    [
+        # The limit is only enforced when the engine defines one
+        (
+            None,
+            "a_very_long_table_name_" + "x" * 40,
+            "__temp_a_very_long_table_name_" + "x" * 40 + "_abcdefgh",
+        ),
+        # Exactly at the limit: unchanged
+        (30, "t" * 14, "__temp_" + "t" * 14 + "_abcdefgh"),
+        # Over the limit: prefix and random suffix are kept, the middle of the name is cut
+        (30, "aaaaaaaa_bbbbbbbb", "__temp_aaaaaaa" + "bbbbbbb" + "_abcdefgh"),
+        # The limit is so small that nothing of the name fits
+        (10, "name", "__temp__abcdefgh"),
+    ],
+)
+def test_get_temp_table_respects_max_identifier_length(
+    mocker: MockerFixture,
+    make_mocked_engine_adapter: t.Callable,
+    max_length: t.Optional[int],
+    table_name: str,
+    expected: str,
+):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    adapter.MAX_IDENTIFIER_LENGTH = max_length
+    mocker.patch("sqlmesh.core.engine_adapter.base.random_id", return_value="abcdefgh")
+
+    value = adapter._get_temp_table(f"catalog.db.{table_name}")
+
+    assert value.name == expected
+    assert (value.catalog, value.db) == ("catalog", "db")
+
+
 def test_get_data_objects_batching(mocker: MockerFixture, make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(EngineAdapter)
     adapter._get_data_objects = mocker.Mock(return_value=[])
