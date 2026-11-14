@@ -2064,11 +2064,30 @@ class TerminalConsole(Console):
                 # We are computing dev previews, do not confuse the user by printing out something to do
                 # with restatements. Dev previews are already highlighted in the backfill step
                 pass
-        else:
+
+        if not plan.restatements or (
+            plan.start_extension_restatements and not plan.selected_models_to_restate
+        ):
             self.show_environment_difference_summary(
                 plan.context_diff,
                 no_diff=no_diff,
             )
+
+        if plan.start_extension_restatements:
+            model_fqn_to_snapshot = {s.name: s for s in plan.snapshots.values()}
+            tree = Tree(
+                "[bold]Models restated because the start of an upstream model moved earlier:[/bold]\n"
+                "Their existing intervals for the added date range were computed without the new upstream data"
+            )
+            for s_id in sorted(plan.start_extension_restatements):
+                tree.add(
+                    model_fqn_to_snapshot[s_id.name].display_name(
+                        plan.environment_naming_info,
+                        default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None,
+                        dialect=self.dialect,
+                    )
+                )
+            self._print(tree)
 
         if plan.context_diff.has_changes:
             self.show_model_difference_summary(

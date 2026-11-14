@@ -961,3 +961,27 @@ def test_chunk_up_api_message_preserves_multibyte_chars(
     assert "".join(chunks) == message
     # Each chunk still respects the GitHub API byte limit.
     assert all(len(chunk.encode("utf-8")) <= max_bytes for chunk in chunks)
+
+
+@time_machine.travel("2025-07-07 00:00:00 UTC", tick=False)
+def test_get_plan_summary_for_start_extension_restatements_shows_differences(
+    github_client, make_controller: t.Callable[..., GithubController]
+):
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json",
+        github_client,
+        mock_out_context=False,
+    )
+    plan = controller.prod_plan
+    s_id = next(iter(plan.snapshots))
+
+    explicit = plan.copy(update={"restatements": {s_id: (0, 1)}})
+    assert "Restating models" in controller.get_plan_summary(explicit)
+
+    # Restatements that only exist because a start moved earlier don't replace the diff summary.
+    extension = plan.copy(
+        update={"restatements": {s_id: (0, 1)}, "start_extension_restatements": {s_id}}
+    )
+    summary = controller.get_plan_summary(extension)
+    assert "Restating models" not in summary
+    assert "**Added Models:**" in summary

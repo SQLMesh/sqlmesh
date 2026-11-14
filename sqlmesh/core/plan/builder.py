@@ -8,6 +8,7 @@ from functools import cached_property
 from datetime import datetime
 
 
+from sqlmesh.core import constants as c
 from sqlmesh.core.console import PlanBuilderConsole, get_console
 from sqlmesh.core.config import (
     AutoCategorizationMode,
@@ -35,7 +36,7 @@ from sqlmesh.core.snapshot import (
     SnapshotChangeCategory,
 )
 from sqlmesh.core.snapshot.categorizer import categorize_change
-from sqlmesh.core.snapshot.definition import Interval, SnapshotId
+from sqlmesh.core.snapshot.definition import Interval, SnapshotId, start_date
 from sqlmesh.utils import columns_to_types_all_known, random_id
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -43,6 +44,8 @@ from sqlmesh.utils.date import (
     now,
     to_datetime,
     yesterday_ds,
+    to_ds,
+    to_ts,
     to_timestamp,
     time_like_to_str,
     is_relative,
@@ -50,6 +53,8 @@ from sqlmesh.utils.date import (
 from sqlmesh.utils.errors import NoChangesPlanError, PlanError
 
 logger = logging.getLogger(__name__)
+
+MS_PER_DAY = 24 * 60 * 60 * 1000
 
 
 class PlanBuilder:
@@ -324,9 +329,10 @@ class PlanBuilder:
             else DeployabilityIndex.all_deployable()
         )
 
-        restatements = self._build_restatements(
+        restatements, start_extension_restatements = self._build_restatements(
             dag,
             earliest_interval_start(self._context_diff.snapshots.values(), self.execution_time),
+            deployability_index,
         )
         models_to_backfill = self._build_models_to_backfill(dag, restatements)
 
@@ -363,7 +369,9 @@ class PlanBuilder:
             deployability_index=deployability_index,
             selected_models_to_restate=self._restate_models,
             restatements=restatements,
-            restate_all_snapshots=self._restate_all_snapshots,
+            start_extension_restatements=start_extension_restatements,
+            restate_all_snapshots=self._restate_all_snapshots
+            or self._restates_start_extension_in_prod(start_extension_restatements),
             start_override_per_model=self._start_override_per_model,
             end_override_per_model=end_override_per_model,
             selected_models_to_backfill=self._backfill_models,
@@ -386,15 +394,27 @@ class PlanBuilder:
         return dag
 
     def _build_restatements(
-        self, dag: DAG[SnapshotId], earliest_interval_start: TimeLike
-    ) -> t.Dict[SnapshotId, Interval]:
+        self,
+        dag: DAG[SnapshotId],
+        earliest_interval_start: TimeLike,
+        deployability_index: DeployabilityIndex,
+    ) -> t.Tuple[t.Dict[SnapshotId, Interval], t.Set[SnapshotId]]:
+        """Builds the intervals to restate.
+
+        Besides the models that were requested by a user (and their downstream models), this also covers
+        downstream models whose existing intervals are stale because the start of an upstream model moved earlier.
+
+        Returns:
+            The restatements and the subset of the restated snapshots that are only restated because
+            of an upstream start extension.
+        """
         restate_models = self._restate_models
         if restate_models == set():
             # This is a warning but we print this as error since the Console is lacking API for warnings.
             self._console.log_error(
                 "Provided restated models do not match any models. No models will be included in plan."
             )
-            return {}
+            return {}, set()
 
         restatements: t.Dict[SnapshotId, Interval] = {}
         forward_only_preview_needed = self._forward_only_preview_needed
@@ -417,8 +437,12 @@ class PlanBuilder:
             }
             is_preview = True
 
-        if not restate_models:
-            return {}
+        start_extensions, cut_extensions = self._find_start_extensions()
+        if cut_extensions and not self._is_dev:
+            self._warn_about_cut_start_extensions(dag, cut_extensions, deployability_index)
+        if not restate_models and not start_extensions:
+            return {}, set()
+        restate_models = restate_models or set()
 
         start = self._start or earliest_interval_start
         end = self._end or now()
@@ -428,24 +452,82 @@ class PlanBuilder:
             if model_fqn not in self._model_fqn_to_snapshot:
                 raise PlanError(f"Cannot restate model '{model_fqn}'. Model does not exist.")
 
+        backfill_scope = (
+            self._build_models_to_backfill(dag, ()) if self._backfill_models is not None else None
+        )
+        explicit_restatements: t.Set[SnapshotId] = set()
+        start_extension_restatements: t.Set[SnapshotId] = set()
+        # The range of an upstream start extension that reached each snapshot (restated or not).
+        start_extension_flow: t.Dict[SnapshotId, Interval] = {}
+        # Snapshots with stale intervals that are not restated, grouped by the reason.
+        outside_backfill_scope: t.List[Snapshot] = []
+        shared_with_prod: t.List[Snapshot] = []
+        full_history_only: t.List[Snapshot] = []
+        stale_ranges: t.Dict[SnapshotId, Interval] = {}
+        start_cache: t.Dict[str, datetime] = {}
+
         # Get restatement intervals for all restated snapshots and make sure that if an incremental snapshot expands it's
         # restatement range that it's downstream dependencies all expand their restatement ranges as well.
         for s_id in dag:
             snapshot = self._context_diff.snapshots[s_id]
-
-            if is_preview and snapshot.is_no_preview:
-                continue
 
             # Since we are traversing the graph in topological order and the largest interval range is pushed down
             # the graph we just have to check our immediate parents in the graph and not the whole upstream graph.
             restating_parents = [
                 self._context_diff.snapshots[s] for s in snapshot.parents if s in restatements
             ]
+            extension_ranges = [
+                r
+                for p in snapshot.parents
+                for r in (start_extensions.get(p), start_extension_flow.get(p))
+                if r is not None
+            ]
 
-            if not restating_parents and snapshot.name not in restate_models:
+            is_explicit = not (is_preview and snapshot.is_no_preview) and (
+                snapshot.name in restate_models
+                or any(p.snapshot_id in explicit_restatements for p in restating_parents)
+            )
+            if not is_explicit and not extension_ranges:
                 continue
 
-            if not forward_only_preview_needed:
+            extension_start = min((r[0] for r in extension_ranges), default=0)
+            extension_end = max((r[1] for r in extension_ranges), default=0)
+            if extension_ranges and (
+                is_explicit
+                or to_timestamp(
+                    start_date(
+                        snapshot,
+                        self._context_diff.snapshots,
+                        start_cache,
+                        relative_to=self.execution_time,
+                    )
+                )
+                < extension_end
+            ):
+                # The extended range flows to the downstream models even if this snapshot isn't restated
+                # itself, as long as it holds (or will hold) data for that range.
+                start_extension_flow[s_id] = _align_to_interval_unit(
+                    snapshot, extension_start, extension_end
+                )
+
+            if not is_explicit:
+                if self._is_dev and (
+                    not snapshot.is_paused or deployability_index.is_deployable(snapshot)
+                ):
+                    # The physical table of this version is the one used in production.
+                    if _has_intervals_in_range(
+                        snapshot, extension_start, extension_end, deployability_index
+                    ):
+                        shared_with_prod.append(snapshot)
+                        start_extension_flow.pop(s_id, None)
+                    continue
+                # Only existing intervals can be stale. Anything else is backfilled as usual.
+                if not _has_intervals_in_range(
+                    snapshot, extension_start, extension_end, deployability_index
+                ):
+                    continue
+
+            if not (forward_only_preview_needed and is_explicit):
                 if self._is_dev and not snapshot.is_paused:
                     self._console.log_warning(
                         f"Cannot restate model '{snapshot.name}' because the current version is used in production. "
@@ -457,44 +539,204 @@ class PlanBuilder:
                         f"Cannot restate model '{snapshot.name}'. "
                         "Restatement is disabled for this model to prevent possible data loss. "
                         "If you want to restate this model, change the model's `disable_restatement` setting to `false`."
+                        + (
+                            ""
+                            if is_explicit
+                            else " Models downstream of it are not restated through it, since its data doesn't change."
+                        )
                     )
+                    if not is_explicit:
+                        start_extension_flow.pop(s_id, None)
                     continue
                 elif snapshot.is_seed:
                     logger.info("Skipping restatement for model '%s'", snapshot.name)
                     continue
 
+            if not is_explicit:
+                if snapshot.full_history_restatement_only and snapshot.is_incremental:
+                    # Restating these models rebuilds their whole history, which is too expensive
+                    # to do just because the start of an upstream model moved by a few intervals.
+                    full_history_only.append(snapshot)
+                    stale_ranges[s_id] = start_extension_flow.pop(s_id)
+                    continue
+                if (
+                    self._skip_backfill
+                    or self._empty_backfill
+                    or (backfill_scope is not None and snapshot.name not in backfill_scope)
+                ):
+                    outside_backfill_scope.append(snapshot)
+                    stale_ranges[s_id] = start_extension_flow[s_id]
+                    continue
+
             possible_intervals = {
                 restatements[p.snapshot_id] for p in restating_parents if p.is_incremental
             }
-            removal_start = (
-                self._forward_only_preview_start(snapshot, start, end) if is_preview else start
-            )
-            possible_intervals.add(
-                snapshot.get_removal_interval(
-                    removal_start,
-                    end,
-                    self._execution_time,
-                    strict=False,
-                    is_preview=is_preview,
+            if is_explicit:
+                removal_start = (
+                    self._forward_only_preview_start(snapshot, start, end) if is_preview else start
                 )
-            )
-            snapshot_start = min(i[0] for i in possible_intervals)
-            snapshot_end = max(i[1] for i in possible_intervals)
+                possible_intervals.add(
+                    snapshot.get_removal_interval(
+                        removal_start,
+                        end,
+                        self._execution_time,
+                        strict=False,
+                        is_preview=is_preview,
+                    )
+                )
+            if extension_ranges:
+                possible_intervals.add(
+                    snapshot.get_removal_interval(
+                        extension_start, extension_end, self._execution_time, strict=False
+                    )
+                )
 
             # We may be tasked with restating a time range smaller than the target snapshot interval unit
             # For example, restating an hour of Hourly Model A, which has a downstream dependency of Daily Model B
             # we need to ensure the whole affected day in Model B is restated
-            floored_snapshot_start = snapshot.node.interval_unit.cron_floor(snapshot_start)
-            floored_snapshot_end = snapshot.node.interval_unit.cron_floor(snapshot_end)
-            if to_timestamp(floored_snapshot_end) < snapshot_end:
-                snapshot_start = to_timestamp(floored_snapshot_start)
-                snapshot_end = to_timestamp(
-                    snapshot.node.interval_unit.cron_next(floored_snapshot_end)
-                )
+            restatements[s_id] = _align_to_interval_unit(
+                snapshot,
+                min(i[0] for i in possible_intervals),
+                max(i[1] for i in possible_intervals),
+            )
+            if is_explicit:
+                explicit_restatements.add(s_id)
+            else:
+                start_extension_restatements.add(s_id)
 
-            restatements[s_id] = (snapshot_start, snapshot_end)
+        self._warn_about_stale_start_extensions(
+            outside_backfill_scope,
+            shared_with_prod,
+            full_history_only,
+            stale_ranges,
+        )
 
-        return restatements
+        return restatements, start_extension_restatements
+
+    def _find_start_extensions(
+        self,
+    ) -> t.Tuple[t.Dict[SnapshotId, Interval], t.Dict[SnapshotId, Interval]]:
+        """Finds the incremental models whose start moved earlier in this plan.
+
+        Returns:
+            A mapping from the new snapshot ID to the [new start, old start) range that was added to its history,
+            and a mapping to the part of that range that was cut off because it's before the plan start.
+            Downstream models that already have intervals within this range computed them from incomplete data.
+            Whether those intervals are still around after the plan is applied (as opposed to being
+            rebuilt because of a breaking change) is decided when walking the downstream models.
+        """
+        modified = self._context_diff.modified_snapshots
+        snapshots = self._context_diff.snapshots
+        # Unmodified snapshots are the same before and after the plan; this lets inferred starts
+        # be resolved through the parents that were in place before the plan.
+        previous_snapshots = {s_id: s for s_id, s in snapshots.items() if s.name not in modified}
+        previous_snapshots.update({old.snapshot_id: old for _, old in modified.values()})
+        new_cache: t.Dict[str, datetime] = {}
+        old_cache: t.Dict[str, datetime] = {}
+        # Skip changes that don't move the start by a whole interval, e.g. an adjustment of the time of day.
+        plan_start = to_timestamp(self.start) if self.start else None
+
+        extensions: t.Dict[SnapshotId, Interval] = {}
+        cut: t.Dict[SnapshotId, Interval] = {}
+        for new, old in modified.values():
+            if not (new.is_model and old.is_model and new.is_incremental):
+                continue
+            if not _is_start_resolvable(old, previous_snapshots):
+                # The previous start would be guessed wrongly if some of its parents are unknown.
+                continue
+            interval_unit = new.node.interval_unit
+            new_start = start_date(new, snapshots, new_cache, relative_to=self.execution_time)
+            old_start = start_date(
+                old, previous_snapshots, old_cache, relative_to=self.execution_time
+            )
+            start_ts = to_timestamp(interval_unit.cron_floor(new_start))
+            end_ts = to_timestamp(interval_unit.cron_floor(old_start))
+            if plan_start is not None and start_ts < min(plan_start, end_ts):
+                cut[new.snapshot_id] = (start_ts, min(plan_start, end_ts))
+            if plan_start is not None:
+                start_ts = max(start_ts, plan_start)
+            if start_ts < end_ts:
+                extensions[new.snapshot_id] = (start_ts, end_ts)
+        return extensions, cut
+
+    def _restates_start_extension_in_prod(self, snapshot_ids: t.Set[SnapshotId]) -> bool:
+        """Whether intervals of other versions of the snapshots also need to be cleared from state.
+
+        This mirrors what is done for user requested production restatements.
+        """
+        return not self._is_dev and any(
+            self._context_diff.snapshots[s_id].virtual_environment_mode.is_full
+            for s_id in snapshot_ids
+        )
+
+    def _warn_about_cut_start_extensions(
+        self,
+        dag: DAG[SnapshotId],
+        cut_extensions: t.Dict[SnapshotId, Interval],
+        deployability_index: DeployabilityIndex,
+    ) -> None:
+        """Warns about the part of an extension before the plan start, which is never detected again."""
+        affected: t.Dict[SnapshotId, Snapshot] = {}
+        for s_id, (start, end) in cut_extensions.items():
+            for downstream_id in dag.downstream(s_id):
+                downstream = self._context_diff.snapshots[downstream_id]
+                if _has_intervals_in_range(downstream, start, end, deployability_index):
+                    affected[downstream_id] = downstream
+        if not affected:
+            return
+        start = min(r[0] for r in cut_extensions.values())
+        end = max(r[1] for r in cut_extensions.values())
+        restate_args = " ".join(f"--restate-model '{s.name}'" for s in affected.values())
+        self._console.log_warning(
+            "The start of an upstream model moved earlier, but the plan start is after the beginning "
+            "of the added range, so downstream models with intervals in the cut off part were not "
+            f"restated: {', '.join(s.name for s in affected.values())}. "
+            f"To refresh them, run: sqlmesh plan {restate_args} {_range_args(start, end)}"
+        )
+
+    def _warn_about_stale_start_extensions(
+        self,
+        outside_backfill_scope: t.List[Snapshot],
+        shared_with_prod: t.List[Snapshot],
+        full_history_only: t.List[Snapshot],
+        flow: t.Dict[SnapshotId, Interval],
+    ) -> None:
+        intro = (
+            "The start of an upstream model moved earlier, so some existing intervals of these "
+            "downstream models were computed without the added data"
+        )
+        if shared_with_prod:
+            names = ", ".join(s.name for s in shared_with_prod)
+            self._console.log_warning(
+                f"{intro}: {names}. They use tables that production uses or will use, so this development "
+                "plan doesn't restate them. They are restated, along with their downstream models, when this change is applied to production."
+            )
+        for snapshots, reason in (
+            (
+                outside_backfill_scope,
+                "they were not restated since the plan doesn't backfill them",
+            ),
+            (
+                full_history_only,
+                "they only support restating their full history, so they were not restated automatically "
+                "(models downstream of them are not restated through them)",
+            ),
+        ):
+            if not snapshots:
+                continue
+            start = min(flow[s.snapshot_id][0] for s in snapshots)
+            end = max(flow[s.snapshot_id][1] for s in snapshots)
+            range_args = _range_args(start, end)
+            restate_args = " ".join(f"--restate-model '{s.name}'" for s in snapshots)
+            environment = (
+                f" {self._context_diff.environment}"
+                if self._context_diff.environment != c.PROD
+                else ""
+            )
+            self._console.log_warning(
+                f"{intro}, but {reason}: {', '.join(s.name for s in snapshots)}. "
+                f"To refresh them, run: sqlmesh plan{environment} {restate_args} {range_args}"
+            )
 
     def _forward_only_preview_start(
         self, snapshot: Snapshot, default_start: TimeLike, end: TimeLike
@@ -959,3 +1201,42 @@ class PlanBuilder:
             if snapshot.name in self._context_diff.modified_snapshots
             or snapshot.snapshot_id in self._context_diff.added
         ]
+
+
+def _range_args(start: int, end: int) -> str:
+    """Formats the [start, end) range as command line arguments, where dates are inclusive."""
+    if start % MS_PER_DAY == 0 and end % MS_PER_DAY == 0:
+        return f"--start {to_ds(start)} --end {to_ds(end - 1)}"
+    return f"--start '{to_ts(start)}' --end '{to_ts(end)}'"
+
+
+def _has_intervals_in_range(
+    snapshot: Snapshot, start: int, end: int, deployability_index: DeployabilityIndex
+) -> bool:
+    intervals = (
+        snapshot.intervals
+        if deployability_index.is_deployable(snapshot)
+        else snapshot.dev_intervals
+    )
+    return any(i_start < end and start < i_end for i_start, i_end in intervals)
+
+
+def _is_start_resolvable(snapshot: Snapshot, snapshots: t.Dict[SnapshotId, Snapshot]) -> bool:
+    """Whether the effective start can be derived from the given snapshots (it may be inferred from parents)."""
+    if snapshot.node.start or not snapshot.parents:
+        return True
+    return all(
+        p in snapshots and _is_start_resolvable(snapshots[p], snapshots) for p in snapshot.parents
+    )
+
+
+def _align_to_interval_unit(snapshot: Snapshot, start: int, end: int) -> Interval:
+    """Widens the range if it ends in the middle of one of the snapshot's intervals."""
+    interval_unit = snapshot.node.interval_unit
+    floored_end = interval_unit.cron_floor(end)
+    if to_timestamp(floored_end) < end:
+        return (
+            to_timestamp(interval_unit.cron_floor(start)),
+            to_timestamp(interval_unit.cron_next(floored_end)),
+        )
+    return start, end
