@@ -24,8 +24,15 @@ function_exists() {
 
 probe_port() {
     HOSTNAME=${DOCKER_HOSTNAME:-localhost}
-    echo "Probing '$HOSTNAME' on port $1"
-    while ! nc -z $HOSTNAME $1; do
+    local port="$1"
+    local deadline="$2"
+    local timeout_secs="$3"
+    echo "Probing '$HOSTNAME' on port $port"
+    while ! nc -z "$HOSTNAME" "$port"; do
+        if [ -n "$deadline" ] && [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: Timed out after ${timeout_secs:-0}s waiting for '$HOSTNAME' on port $port" >&2
+            return 1
+        fi
         sleep 1
     done
 }
@@ -101,6 +108,120 @@ db2_ready() {
         fi
         echo "Db2 not yet ready; sleeping 15s..."
         sleep 15
+    done
+}
+
+doris_ready() {
+    if ! command -v timeout > /dev/null 2>&1; then
+        echo "ERROR: 'timeout' is required by wait-for-db.sh (GNU coreutils; on macOS install coreutils and add it to PATH)" >&2
+        exit 1
+    fi
+    local timeout_secs="${DORIS_STARTUP_TIMEOUT_SECS:-300}"
+    local deadline=$((SECONDS + timeout_secs))
+    local remaining=0
+    local probe_timeout=0
+    local backend_registered=0
+    local reg_out=""
+
+    if ! probe_port 9030 "$deadline" "$timeout_secs"; then
+        echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris FE port 9030 to open" >&2
+        exit 1
+    fi
+
+    echo "Waiting for Doris FE to accept SQL connections..."
+    while true; do
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris FE to become alive" >&2
+            exit 1
+        fi
+        probe_timeout=$((remaining < 10 ? remaining : 10))
+        if timeout "$probe_timeout" docker exec doris-fe mysql --connect-timeout=5 -h127.0.0.1 -P9030 -uroot -e "SHOW FRONTENDS\G" 2>/dev/null | grep -q "Alive: true"; then
+            echo "Doris FE is alive"
+            break
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris FE to become alive" >&2
+            exit 1
+        fi
+        sleep 2
+    done
+
+    echo "Checking for 1 alive Doris backends..."
+    while true; do
+        if [ "$backend_registered" -eq 0 ]; then
+            remaining=$((deadline - SECONDS))
+            if [ "$remaining" -le 0 ]; then
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend registration: $reg_out" >&2
+                exit 1
+            fi
+            probe_timeout=$((remaining < 10 ? remaining : 10))
+            if reg_out=$(timeout "$probe_timeout" docker exec doris-fe mysql --connect-timeout=5 -h127.0.0.1 -P9030 -uroot -e "ALTER SYSTEM ADD BACKEND '172.30.80.3:9050';" 2>&1); then
+                backend_registered=1
+            elif echo "$reg_out" | grep -Eqi "already exists|already registered"; then
+                backend_registered=1
+            else
+                echo "WARN: Failed to register Doris backend (will retry): $reg_out" >&2
+            fi
+        fi
+
+        echo "Checking Doris backends..."
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            if [ "$backend_registered" -eq 0 ] && [ -n "$reg_out" ]; then
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend registration: $reg_out" >&2
+            else
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend to become alive" >&2
+            fi
+            exit 1
+        fi
+        probe_timeout=$((remaining < 10 ? remaining : 10))
+        ALIVE_BACKENDS=$(timeout "$probe_timeout" docker exec doris-fe mysql --connect-timeout=5 -h127.0.0.1 -P9030 -uroot -e "show backends \G" 2>/dev/null | grep -c "^ *Alive: true *$" || true)
+
+        # fallback value if failed to get number
+        if ! [[ "$ALIVE_BACKENDS" =~ ^[0-9]+$ ]]; then
+            echo "WARN: Unable to parse number of alive backends, got: '$ALIVE_BACKENDS'"
+            ALIVE_BACKENDS=0
+        fi
+
+        echo "Found $ALIVE_BACKENDS alive backends"
+
+        if [ "$ALIVE_BACKENDS" -ge 1 ]; then
+            echo "Doris has 1 or more alive backends"
+            break
+        fi
+
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            if [ "$backend_registered" -eq 0 ] && [ -n "$reg_out" ]; then
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend registration: $reg_out" >&2
+            else
+                echo "ERROR: Timed out after ${timeout_secs}s waiting for Doris backend to become alive" >&2
+            fi
+            exit 1
+        fi
+
+        echo "Waiting for more backends to become alive..."
+        sleep 3
+    done
+
+    # set default replication num to 1 (there is only one be in the docker compose file)
+    cfg_out=""
+    while true; do
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s configuring Doris frontend: $cfg_out" >&2
+            exit 1
+        fi
+        probe_timeout=$((remaining < 10 ? remaining : 10))
+        if cfg_out=$(timeout "$probe_timeout" docker exec doris-fe mysql --connect-timeout=5 -h127.0.0.1 -P9030 -uroot -e "ADMIN SET FRONTEND CONFIG ('force_olap_table_replication_num' = '1');" 2>&1); then
+            break
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "ERROR: Timed out after ${timeout_secs}s configuring Doris frontend: $cfg_out" >&2
+            exit 1
+        fi
+        echo "WARN: Failed to configure Doris frontend (will retry): $cfg_out" >&2
+        sleep 2
     done
 }
 

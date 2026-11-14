@@ -186,7 +186,7 @@ Some connections use default values if not specified:
 - The state connection defaults to `connection` if omitted.
 - The test connection defaults to `connection` if omitted.
 
-NOTE: Spark and Trino engines may not be used for the state connection.
+NOTE: Doris, Spark, and Trino engines may not be used for the state connection.
 
 | Option             | Description                                                                                                                                                                     | Type                                                         | Required                                                               |
 |--------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:------------------------------------------------------------:|:----------------------------------------------------------------------:|
@@ -222,6 +222,7 @@ These pages describe the connection configuration options for each execution eng
 * [BigQuery](../integrations/engines/bigquery.md)
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
+* [Doris](../integrations/engines/doris.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)

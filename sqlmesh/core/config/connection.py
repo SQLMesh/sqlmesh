@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 import re
+import types
 import typing as t
 from enum import Enum
 from functools import partial
@@ -31,7 +32,7 @@ from sqlmesh.core.engine_adapter import EngineAdapter
 from sqlmesh.core.engine_adapter.shared import CatalogSupport
 from sqlmesh.utils import debug_mode_enabled, str_to_bool
 from sqlmesh.utils.aws import validate_s3_uri
-from sqlmesh.utils.errors import ConfigError
+from sqlmesh.utils.errors import ConfigError, SQLMeshError
 from sqlmesh.utils.pydantic import (
     ValidationInfo,
     field_validator,
@@ -63,6 +64,8 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Db2 rejects table names starting with underscore (_versions, _snapshots,
     # _environments, _intervals). Use a separate state_connection (e.g., DuckDB).
     "db2",
+    # OLAP primary keys and lack of transactional DDL make Doris unsuitable for state sync
+    "doris",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
@@ -2740,6 +2743,406 @@ class Db2ConnectionConfig(ConnectionConfig):
             return ibm_db_dbi.connect(conn_str, "", "")
 
         return connect_db2
+
+
+_doris_engine_import_validator = _get_engine_import_validator("pymysql", "doris", decorate=False)
+
+
+class DorisConnectionConfig(ConnectionConfig):
+    """Configuration for the Apache Doris connection.
+
+    Apache Doris uses the MySQL network protocol and supports both internal OLAP tables
+    and external Multi-Catalog lakehouse catalogs (e.g., Apache Iceberg).
+
+    Args:
+        host: The hostname of the Doris FE (Frontend) node.
+        user: The Doris username.
+        password: The optional Doris password.
+        port: The query port number of the Doris FE node. Default is 9030.
+        database: The optional database name.
+        catalog: The optional default catalog name (e.g., 'internal' or an external Iceberg catalog).
+            Defaults to None so Doris-only projects use 2-part (db.table) identifiers; in mixed-gateway
+            projects combining Doris with catalog-qualified engines (e.g., DuckDB, Snowflake, Databricks),
+            set catalog (e.g., 'internal') so model identifier depths match across gateways.
+        charset: The optional character set (defaults to 'utf8mb4').
+        collation: The optional collation.
+        connect_timeout: Timeout in seconds for establishing a connection. Default is 10.
+        read_timeout: Timeout in seconds for reading from the connection.
+        write_timeout: Timeout in seconds for writing to the connection.
+        ssl: Optional dictionary of SSL arguments passed to PyMySQL.
+        ssl_ca: Path to the file that contains a PEM-formatted CA certificate.
+        ssl_cert: Path to the file that contains a PEM-formatted client certificate.
+        ssl_key: Path to the file that contains a PEM-formatted private key for the client certificate.
+        ssl_verify_cert: Whether to verify the server certificate against the CA certificate.
+        ssl_verify_identity: Whether to verify the server hostname against the certificate.
+        ssl_disabled: Whether to disable SSL connection.
+        session_variables: Optional dictionary of Doris session variables to set on each connection.
+        concurrent_tasks: The maximum number of tasks that can use this connection concurrently.
+        register_comments: Whether or not to register model comments with the SQL engine.
+        pre_ping: Whether or not to pre-ping the connection before starting a new statement.
+    """
+
+    host: str
+    user: str
+    password: t.Optional[str] = None
+    port: t.Optional[int] = 9030
+    database: t.Optional[str] = None
+    catalog: t.Optional[str] = None
+    charset: t.Optional[str] = None
+    collation: t.Optional[str] = None
+    connect_timeout: t.Optional[int] = 10
+    read_timeout: t.Optional[int] = None
+    write_timeout: t.Optional[int] = None
+    ssl: t.Optional[t.Union[bool, t.Dict[str, t.Any]]] = None
+    ssl_ca: t.Optional[str] = None
+    ssl_cert: t.Optional[str] = None
+    ssl_key: t.Optional[str] = None
+    ssl_verify_cert: t.Optional[bool] = None
+    ssl_verify_identity: t.Optional[bool] = None
+    ssl_disabled: t.Optional[bool] = None
+    session_variables: t.Optional[t.Dict[str, t.Any]] = None
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    pre_ping: bool = False
+
+    type_: t.Literal["doris"] = Field(alias="type", default="doris")
+    DIALECT: t.ClassVar[t.Literal["doris"]] = "doris"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Apache Doris"]] = "Apache Doris"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[20]] = 20
+    MIN_PYMYSQL_VERSION: t.ClassVar[t.Tuple[int, int, int]] = (1, 2, 0)
+
+    @classmethod
+    def _validate_pymysql_version(cls, pymysql_module: t.Any = None) -> None:
+        if pymysql_module is None:
+            pymysql_module = importlib.import_module("pymysql")
+        raw_version: t.Optional[str] = None
+        version_parts: t.Optional[t.Tuple[int, ...]] = None
+
+        version_string = getattr(pymysql_module, "VERSION_STRING", None)
+        version_tuple = getattr(pymysql_module, "VERSION", None)
+        if isinstance(version_string, str) and version_string.strip():
+            raw_version = version_string.strip()
+        elif isinstance(version_tuple, tuple):
+            numeric_prefix: t.List[int] = []
+            for part in version_tuple:
+                if isinstance(part, int) and not isinstance(part, bool):
+                    numeric_prefix.append(part)
+                else:
+                    break
+            if numeric_prefix:
+                version_parts = tuple(numeric_prefix)
+                raw_version = ".".join(str(p) for p in numeric_prefix)
+        elif isinstance(pymysql_module, types.ModuleType):
+            from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+            try:
+                raw_version = pkg_version("PyMySQL")
+            except PackageNotFoundError:
+                raw_version = None
+
+        if version_parts is None and raw_version:
+            matched_nums = [int(m) for m in re.findall(r"\d+", raw_version)[:3]]
+            if matched_nums:
+                version_parts = tuple(matched_nums)
+
+        if version_parts is not None and (*version_parts, 0, 0)[:3] < cls.MIN_PYMYSQL_VERSION:
+            min_ver_str = ".".join(str(p) for p in cls.MIN_PYMYSQL_VERSION)
+            raise ConfigError(
+                f"The 'doris' engine requires 'pymysql>={min_ver_str}', but found '{raw_version or version_parts}'. "
+                'Please upgrade by running: `pip install --upgrade "sqlmesh[doris]"`. '
+                "Older PyMySQL releases can transmit authentication packets before aborting when TLS is requested "
+                "and the server does not advertise TLS."
+            )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _engine_import_validator(cls, data: t.Any) -> t.Any:
+        check_import = (
+            str_to_bool(str(data.get("check_import", True))) if isinstance(data, dict) else True
+        )
+        data = _doris_engine_import_validator(cls, data)
+        if check_import:
+            cls._validate_pymysql_version()
+        return data
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _default_port_when_none(cls, v: t.Any) -> t.Any:
+        return 9030 if v is None else v
+
+    @field_validator("session_variables", mode="after")
+    @classmethod
+    def _validate_session_variables(
+        cls, v: t.Optional[t.Dict[str, t.Any]]
+    ) -> t.Optional[t.Dict[str, t.Any]]:
+        if v:
+            import math
+
+            for k, val in v.items():
+                if not isinstance(k, str) or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*\Z", k):
+                    raise ConfigError(f"Invalid Doris session variable name: '{k}'")
+                if not isinstance(val, (str, int, float, bool)) or (
+                    isinstance(val, float) and (math.isnan(val) or math.isinf(val))
+                ):
+                    raise ConfigError(f"Invalid Doris session variable value for '{k}': {val!r}")
+                if k.lower() == "sql_mode":
+                    if not isinstance(val, str):
+                        raise ConfigError(
+                            f"Doris session variable 'sql_mode' must be a string, got {val!r}."
+                        )
+                    lowered_sql_mode = val.lower()
+                    sql_modes = {
+                        mode.strip().upper() for mode in re.split(r"[\s,]+", val) if mode.strip()
+                    }
+                    if "no_backslash_escapes" in lowered_sql_mode:
+                        raise ConfigError(
+                            "Doris session variable 'sql_mode' cannot enable 'NO_BACKSLASH_ESCAPES' "
+                            "because SQLGlot string literal escaping assumes standard backslash escaping."
+                        )
+                    if "pipes_as_concat" in lowered_sql_mode or "ANSI" in sql_modes:
+                        raise ConfigError(
+                            "Doris session variable 'sql_mode' cannot enable 'PIPES_AS_CONCAT' (or 'ANSI') "
+                            "because the Doris SQLGlot dialect parses '||' as logical OR."
+                        )
+                    if "ansi_quotes" in lowered_sql_mode:
+                        raise ConfigError(
+                            "Doris session variable 'sql_mode' cannot enable 'ANSI_QUOTES' "
+                            "because the Doris SQLGlot dialect parses double-quoted tokens as string literals."
+                        )
+        return v
+
+    @property
+    def _static_connection_kwargs(self) -> t.Dict[str, t.Any]:
+        import ssl as ssl_lib
+
+        kwargs: t.Dict[str, t.Any] = {
+            "autocommit": True,
+            "charset": self.charset or "utf8mb4",
+            "local_infile": False,
+            "port": self.port if self.port is not None else 9030,
+        }
+        raw_verify_mode = self.ssl.get("verify_mode") if isinstance(self.ssl, dict) else None
+        if raw_verify_mode is not None:
+            is_valid_raw_verify_mode = (
+                isinstance(raw_verify_mode, bool)
+                or (
+                    isinstance(raw_verify_mode, int)
+                    and raw_verify_mode
+                    in (
+                        ssl_lib.CERT_NONE,
+                        ssl_lib.CERT_OPTIONAL,
+                        ssl_lib.CERT_REQUIRED,
+                    )
+                )
+                or (
+                    isinstance(raw_verify_mode, str)
+                    and raw_verify_mode.strip().lower()
+                    in (
+                        "false",
+                        "0",
+                        "no",
+                        "none",
+                        "optional",
+                        "cert_optional",
+                        "required",
+                        "cert_required",
+                        "true",
+                        "1",
+                        "yes",
+                    )
+                )
+            )
+            if not is_valid_raw_verify_mode:
+                raise ConfigError(
+                    f"Invalid Doris `ssl.verify_mode` value: {raw_verify_mode!r}. "
+                    "Expected a boolean, `ssl.VerifyMode`, or one of "
+                    "'none', 'optional', 'required', 'true', 'false'."
+                )
+        ssl_dict_requests_verification = isinstance(self.ssl, dict) and (
+            bool(self.ssl.get("check_hostname"))
+            or (
+                raw_verify_mode is not None
+                and raw_verify_mode is not False
+                and not (
+                    not isinstance(raw_verify_mode, bool) and raw_verify_mode == ssl_lib.CERT_NONE
+                )
+                and not (
+                    isinstance(raw_verify_mode, str)
+                    and raw_verify_mode.strip().lower() in ("false", "0", "no", "none")
+                )
+            )
+        )
+        if (self.ssl_disabled is True and (self.ssl is True or isinstance(self.ssl, dict))) or (
+            self.ssl is False and self.ssl_disabled is False
+        ):
+            raise ConfigError(
+                "Doris `ssl_disabled` and `ssl` have conflicting values (`ssl_disabled=True` with `ssl=True`/dict or `ssl=False` with `ssl_disabled=False`)."
+            )
+        if (self.ssl_disabled or self.ssl is False) and (
+            self.ssl_verify_cert is True
+            or self.ssl_verify_identity is True
+            or ssl_dict_requests_verification
+        ):
+            raise ConfigError(
+                "Doris `ssl_disabled=True` or `ssl=False` cannot be combined with "
+                "certificate or hostname verification (`ssl_verify_cert=True`, "
+                "`ssl_verify_identity=True`, or `ssl` verification settings)."
+            )
+        if self.ssl is False and self.ssl_disabled is None:
+            kwargs["ssl_disabled"] = True
+        if not self.ssl_disabled and self.ssl is not False:
+            ssl_config: t.Dict[str, t.Any] = (
+                dict(self.ssl) if isinstance(self.ssl, dict) else {}  # type: ignore[arg-type]
+            )
+            for key in ("ca", "cert", "key"):
+                val = getattr(self, f"ssl_{key}", None)
+                if val is not None:
+                    ssl_config[key] = val
+            if self.ssl_verify_cert is not None:
+                ssl_config["verify_mode"] = self.ssl_verify_cert
+                if (
+                    self.ssl_verify_cert is False
+                    and self.ssl_verify_identity is None
+                    and "check_hostname" not in ssl_config
+                ):
+                    ssl_config["check_hostname"] = False
+            hostname_requested = self.ssl_verify_identity is True or (
+                self.ssl_verify_identity is None and bool(ssl_config.get("check_hostname"))
+            )
+            if hostname_requested and not (ssl_config.get("ca") or ssl_config.get("capath")):
+                raise ConfigError(
+                    "Doris hostname verification (`ssl_verify_identity` or `ssl.check_hostname`) "
+                    "requires `ssl_ca` (or `ssl.ca` / `ssl.capath`). "
+                    "PyMySQL disables hostname verification when no CA is configured."
+                )
+            if self.ssl_verify_identity is not None:
+                ssl_config["check_hostname"] = bool(self.ssl_verify_identity)
+            verify_mode = ssl_config.get("verify_mode")
+            if isinstance(verify_mode, int) and not isinstance(verify_mode, bool):
+                verify_mode = {
+                    int(ssl_lib.CERT_NONE): "none",
+                    int(ssl_lib.CERT_OPTIONAL): "optional",
+                    int(ssl_lib.CERT_REQUIRED): "required",
+                }[verify_mode]
+                ssl_config["verify_mode"] = verify_mode
+            if isinstance(verify_mode, str):
+                verify_mode = verify_mode.strip()
+                verify_mode = {"cert_required": "required", "cert_optional": "optional"}.get(
+                    verify_mode.lower(), verify_mode
+                )
+                ssl_config["verify_mode"] = verify_mode
+            if (
+                verify_mode is False
+                or (not isinstance(verify_mode, bool) and verify_mode == ssl_lib.CERT_NONE)
+                or (
+                    isinstance(verify_mode, str)
+                    and verify_mode.lower() in ("false", "0", "no", "none")
+                )
+            ):
+                if hostname_requested:
+                    raise ConfigError(
+                        "Doris `ssl.check_hostname=True` or `ssl_verify_identity=True` cannot be combined with "
+                        "`ssl_verify_cert=False` or disabled `ssl.verify_mode`."
+                    )
+                ssl_config["check_hostname"] = False
+            if ssl_config:
+                kwargs["ssl"] = ssl_config
+            elif self.ssl is True or (isinstance(self.ssl, dict) and len(self.ssl) == 0):
+                kwargs["ssl"] = {"check_hostname": False}
+        return kwargs
+
+    @property
+    def _extra_engine_config(self) -> t.Dict[str, t.Any]:
+        return {
+            "database": self.database,
+            "catalog": self.catalog,
+        }
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        has_catalog = bool(self.catalog)
+        return {
+            k
+            for k in (
+                "host",
+                "user",
+                "password",
+                "port",
+                "database",
+                "charset",
+                "collation",
+                "connect_timeout",
+                "read_timeout",
+                "write_timeout",
+                "ssl_disabled",
+            )
+            if getattr(self, k) is not None and not (k == "database" and has_catalog)
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        return engine_adapter.DorisEngineAdapter
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        from pymysql import connect
+
+        if "ssl" not in self._static_connection_kwargs:
+            return connect
+
+        def connect_with_required_tls(**kwargs: t.Any) -> t.Any:
+            self._validate_pymysql_version()
+            conn = connect(**kwargs)
+            if not getattr(conn, "_secure", False):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise SQLMeshError(
+                    "TLS connection to Doris was requested, but the server did not negotiate TLS."
+                )
+            return conn
+
+        return connect_with_required_tls
+
+    @property
+    def _cursor_init(self) -> t.Optional[t.Callable[[t.Any], None]]:
+        if not self.catalog and not self.session_variables:
+            return None
+
+        def init(cursor: t.Any) -> None:
+            try:
+                if self.session_variables:
+                    self._validate_session_variables(self.session_variables)
+                    for k, v in self.session_variables.items():
+                        val_sql = exp.convert(v).sql("doris", comments=False)
+                        cursor.execute(f"SET `{k}` = {val_sql}")
+                if self.catalog:
+                    catalog_sql = exp.to_identifier(self.catalog, quoted=True).sql("doris")
+                    cursor.execute(f"SWITCH {catalog_sql}")
+                    if self.database:
+                        db_sql = exp.to_identifier(self.database, quoted=True).sql("doris")
+                        cursor.execute(f"USE {db_sql}")
+            except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+                raise
+
+        return init
+
+    def get_catalog(self) -> t.Optional[str]:
+        """Return the configured default catalog.
+
+        Defaults to ``None`` so single-gateway Doris projects use 2-part (``db.table``) names
+        without requiring 3-part catalog qualification in every SQL query. In mixed-gateway
+        projects that combine Doris with a catalog-qualified gateway (such as DuckDB, Snowflake,
+        or Databricks), configure ``catalog`` (for example, ``catalog: internal``) on the Doris
+        connection so model identifier depths match across gateways.
+        """
+        return self.catalog
 
 
 CONNECTION_CONFIG_TO_TYPE = {
