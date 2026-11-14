@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import typing as t
+from functools import cached_property, partial
 from sqlglot import exp
 from pathlib import Path
+from packaging import version
 
+from sqlmesh.core.engine_adapter.base import MERGE_TARGET_ALIAS
 from sqlmesh.core.engine_adapter.mixins import (
     GetCurrentCatalogFromFunctionMixin,
-    LogicalMergeMixin,
     RowDiffMixin,
+    logical_merge,
 )
 from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
@@ -21,11 +24,11 @@ from sqlmesh.core.engine_adapter.shared import (
 
 if t.TYPE_CHECKING:
     from sqlmesh.core._typing import SchemaName, TableName
-    from sqlmesh.core.engine_adapter._typing import DF
+    from sqlmesh.core.engine_adapter._typing import DF, Query, QueryOrDF
 
 
 @set_catalog(override_mapping={"_get_data_objects": CatalogSupport.REQUIRES_SET_CATALOG})
-class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
+class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
     DIALECT = "duckdb"
     SUPPORTS_TRANSACTIONS = False
     SCHEMA_DIFFER_KWARGS = {
@@ -37,6 +40,11 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_CREATE_DROP_CATALOG = True
     SUPPORTED_DROP_CASCADE_OBJECT_KINDS = ["SCHEMA", "TABLE", "VIEW"]
+    # MERGE INTO was added in DuckDB 1.4.0
+    MIN_NATIVE_MERGE_VERSION = version.parse("1.4.0")
+    # Catalog types whose storage extension supports MERGE INTO. Other attached catalogs
+    # (postgres, sqlite, mysql, ...) fall back to DELETE + INSERT.
+    NATIVE_MERGE_CATALOG_TYPES = {"duckdb", "ducklake"}
 
     @property
     def catalog_support(self) -> CatalogSupport:
@@ -71,6 +79,76 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
                     this=exp.Table(this=catalog_name), kind="DATABASE", cascade=True, exists=True
                 )
             )
+
+    @cached_property
+    def _duckdb_supports_merge(self) -> bool:
+        import duckdb
+
+        return version.parse(duckdb.__version__) >= self.MIN_NATIVE_MERGE_VERSION
+
+    def _supports_native_merge(self, target_table: TableName) -> bool:
+        if not self._duckdb_supports_merge:
+            return False
+        if self._is_motherduck:
+            return True
+        catalog = exp.to_table(target_table).catalog or self.get_current_catalog()
+        # Errors from the catalog lookup propagate on purpose; only a None/unknown type falls back.
+        return self._get_catalog_type(catalog) in self.NATIVE_MERGE_CATALOG_TYPES
+
+    def merge(
+        self,
+        target_table: TableName,
+        source_table: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
+        unique_key: t.Sequence[exp.Expr],
+        when_matched: t.Optional[exp.Whens] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        merge_impl = (
+            super().merge
+            if self._supports_native_merge(target_table)
+            else partial(logical_merge, self)
+        )
+        merge_impl(  # type: ignore
+            target_table,
+            source_table,
+            target_columns_to_types,
+            unique_key,
+            when_matched=when_matched,
+            merge_filter=merge_filter,
+            source_columns=source_columns,
+        )
+
+    def _prepare_merge_source_query(self, query: Query, unique_key: t.Sequence[exp.Expr]) -> Query:
+        # A native MERGE inserts every unmatched source row, so duplicate keys in the source would
+        # produce duplicate keys in the target. Keep one row per key, like the DELETE + INSERT path.
+        return exp.select("*").distinct(*unique_key).from_(query.subquery("_src"))  # type: ignore
+
+    def _merge(
+        self,
+        target_table: TableName,
+        query: Query,
+        on: exp.Expr,
+        whens: exp.Whens,
+    ) -> None:
+        # DuckDB rejects a qualified column on the left-hand side of UPDATE SET and in the INSERT
+        # column list. Conditions and right-hand sides may keep the qualifier.
+        # TODO: sqlglot's DuckDB generator doesn't apply `merge_without_target_sql` yet. Remove this
+        # once the pinned sqlglot version does.
+        whens = whens.copy()
+        for when in whens.expressions:
+            then = when.args.get("then")
+            targets: t.List[exp.Expr] = []
+            if isinstance(then, exp.Update):
+                targets = [e.this for e in then.expressions if isinstance(e, exp.EQ)]
+            elif isinstance(then, exp.Insert) and isinstance(then.this, exp.Tuple):
+                targets = then.this.expressions
+            for column in targets:
+                if isinstance(column, exp.Column) and column.table.upper() == MERGE_TARGET_ALIAS:
+                    column.set("table", None)
+        super()._merge(target_table, query, on, whens)
 
     def _df_to_source_queries(
         self,

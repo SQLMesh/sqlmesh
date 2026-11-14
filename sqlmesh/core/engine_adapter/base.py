@@ -1771,6 +1771,10 @@ class EngineAdapter:
     ) -> None:
         self.execute(exp.update(table_name, properties, where=where))
 
+    def _prepare_merge_source_query(self, query: Query, unique_key: t.Sequence[exp.Expr]) -> Query:
+        """Hook that lets an engine adjust the MERGE source query. By default it is used as is."""
+        return query
+
     def _merge(
         self,
         target_table: TableName,
@@ -2316,7 +2320,7 @@ class EngineAdapter:
             with source_query as query:
                 self._merge(
                     target_table=target_table,
-                    query=query,
+                    query=self._prepare_merge_source_query(query, unique_key),
                     on=on,
                     whens=exp.Whens(expressions=match_expressions),
                 )
