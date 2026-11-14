@@ -1771,7 +1771,17 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         expanded_restate_models = None
         if restate_models is not None:
-            expanded_restate_models = model_selector.expand_model_selections(restate_models)
+            # Restatements operate entirely against state, so the selector must be
+            # able to find models that exist only in the target environment (for
+            # example when local model files are absent).
+            env_models_for_restate = model_selector._load_env_models(
+                environment,
+                fallback_env_name=create_from or c.PROD,
+                ensure_finalized_snapshots=self.config.plan.use_finalized_state,
+            )
+            expanded_restate_models = model_selector.expand_model_selections(
+                restate_models, models={**env_models_for_restate, **self._models}
+            )
 
         if (restate_models is not None and not expanded_restate_models) or (
             backfill_models is not None and not backfill_models and not selected_deletion_fqns
