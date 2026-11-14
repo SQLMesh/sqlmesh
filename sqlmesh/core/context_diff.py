@@ -88,6 +88,9 @@ class ContextDiff(PydanticModel):
     """Environment statements."""
     diff_rendered: bool = False
     """Whether the diff should compare raw vs rendered models"""
+    stored_parent_forward_only: t.Dict[SnapshotId, bool] = {}
+    """Whether the earlier versions of the stored parents of modified snapshots were forward-only.
+    A past version doesn't record this, so it is read from the snapshot stored for that version."""
 
     @classmethod
     def create(
@@ -233,6 +236,9 @@ class ContextDiff(PydanticModel):
 
         return ContextDiff(
             environment=environment,
+            stored_parent_forward_only=_get_stored_parent_forward_only(
+                state_reader, merged_snapshots, new_snapshots, modified_snapshots
+            ),
             is_new_environment=is_new_environment,
             is_unfinalized_environment=bool(env and not env.finalized_ts),
             normalize_environment_name=is_new_environment or bool(env and env.normalize_name),
@@ -489,6 +495,47 @@ class ContextDiff(PydanticModel):
         except SQLMeshError as e:
             get_console().log_warning(f"Failed to diff model '{name}': {str(e)}.")
             return ""
+
+
+def _get_stored_parent_forward_only(
+    state_reader: StateReader,
+    snapshots: t.Dict[SnapshotId, Snapshot],
+    new_snapshots: t.Dict[SnapshotId, Snapshot],
+    modified_snapshots: t.Dict[str, t.Tuple[Snapshot, Snapshot]],
+) -> t.Dict[SnapshotId, bool]:
+    """Returns whether the past versions of stored parents were forward-only.
+
+    A stored parent already exists in state and is a parent of a new modified snapshot, but it has changed
+    since that snapshot's previous version. Only the versions created after that change are returned,
+    and those that can't be found in state are left out.
+    """
+    version_ids: t.Set[SnapshotId] = set()
+    for snapshot, previous_snapshot in modified_snapshots.values():
+        if snapshot.snapshot_id not in new_snapshots:
+            continue
+        previous_parent_ids = {p.name: p for p in previous_snapshot.parents}
+        for parent_id in snapshot.parents:
+            parent = snapshots.get(parent_id)
+            previous_parent_id = previous_parent_ids.get(parent_id.name)
+            if (
+                not parent
+                or parent_id in new_snapshots
+                or previous_parent_id is None
+                or previous_parent_id == parent_id
+            ):
+                continue
+            for version in reversed(parent.previous_versions):
+                version_id = version.snapshot_id(parent.name)
+                if version_id == previous_parent_id:
+                    break
+                version_ids.add(version_id)
+
+    if not version_ids:
+        return {}
+    return {
+        snapshot_id: snapshot.is_forward_only
+        for snapshot_id, snapshot in state_reader.get_snapshots(version_ids).items()
+    }
 
 
 def _build_requirements(

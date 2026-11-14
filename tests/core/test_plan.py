@@ -4510,3 +4510,228 @@ def test_forward_only_indirect_change_to_materialized_view(make_snapshot):
     # Forward-only indirect changes to MVs should not always be classified as indirect breaking.
     # Instead, we want to preserve the standard categorization.
     assert snapshot_b_new.change_category == SnapshotChangeCategory.INDIRECT_NON_BREAKING
+
+
+@pytest.mark.parametrize(
+    "stored_parent_categories, parent_baseline_in_history, expected_child_category",
+    [
+        # The stored parent became breaking after the baseline, and its latest version is metadata.
+        (
+            [
+                SnapshotChangeCategory.NON_BREAKING,
+                SnapshotChangeCategory.BREAKING,
+                SnapshotChangeCategory.METADATA,
+            ],
+            True,
+            SnapshotChangeCategory.INDIRECT_BREAKING,
+        ),
+        # The baseline itself was breaking, but the previous child already includes that change.
+        (
+            [SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.METADATA],
+            True,
+            SnapshotChangeCategory.METADATA,
+        ),
+        # Breaking changes at or before the baseline are already part of the previous child.
+        (
+            [SnapshotChangeCategory.BREAKING, SnapshotChangeCategory.NON_BREAKING],
+            True,
+            SnapshotChangeCategory.INDIRECT_NON_BREAKING,
+        ),
+        # A breaking change followed by a non-breaking one is still breaking after the baseline.
+        (
+            [
+                SnapshotChangeCategory.NON_BREAKING,
+                SnapshotChangeCategory.BREAKING,
+                SnapshotChangeCategory.NON_BREAKING,
+            ],
+            True,
+            SnapshotChangeCategory.INDIRECT_BREAKING,
+        ),
+        # The baseline can't be found in the parent's history, so the change can't be ruled out.
+        (
+            [SnapshotChangeCategory.NON_BREAKING, SnapshotChangeCategory.METADATA],
+            False,
+            SnapshotChangeCategory.INDIRECT_BREAKING,
+        ),
+    ],
+)
+def test_indirect_change_with_stored_parent_history_and_new_parent(
+    make_snapshot,
+    stored_parent_categories: t.List[SnapshotChangeCategory],
+    parent_baseline_in_history: bool,
+    expected_child_category: SnapshotChangeCategory,
+):
+    # The first category is assigned to the stored parent version that the previous child is built from
+    # (the baseline). The rest are assigned to versions stored after it.
+    def parent_snapshot(value: int, category: SnapshotChangeCategory):
+        snapshot = make_snapshot(SqlModel(name="a", query=parse_one(f"select {value} as col_a")))
+        snapshot.categorize_as(category)
+        return snapshot
+
+    parent_versions = [
+        parent_snapshot(i, category) for i, category in enumerate(stored_parent_categories)
+    ]
+    for i, current in enumerate(parent_versions[1:], start=1):
+        if i == 1 and not parent_baseline_in_history:
+            continue
+        current.previous_versions = parent_versions[i - 1].all_versions
+    baseline_parent, stored_parent = parent_versions[0], parent_versions[-1]
+
+    parent_b_old = make_snapshot(SqlModel(name="b", query=parse_one("select 1 as col_b")))
+    parent_b_old.categorize_as(SnapshotChangeCategory.BREAKING)
+    parent_b_new = make_snapshot(
+        SqlModel(name="b", query=parse_one("select 1 as col_b"), owner="new_owner")
+    )
+    parent_b_new.previous_versions = parent_b_old.all_versions
+
+    child_model = SqlModel(name="c", query=parse_one("select col_a, col_b from a, b"))
+    child_old = make_snapshot(
+        child_model,
+        nodes={'"a"': baseline_parent.model, '"b"': parent_b_old.model},
+    )
+    child_old.categorize_as(SnapshotChangeCategory.BREAKING)
+    child_new = make_snapshot(
+        child_model,
+        nodes={'"a"': stored_parent.model, '"b"': parent_b_new.model},
+    )
+    child_new.previous_versions = child_old.all_versions
+
+    context_diff = ContextDiff(
+        environment="test_environment",
+        is_new_environment=True,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        modified_snapshots={
+            stored_parent.name: (stored_parent, baseline_parent),
+            parent_b_new.name: (parent_b_new, parent_b_old),
+            child_new.name: (child_new, child_old),
+        },
+        snapshots={
+            stored_parent.snapshot_id: stored_parent,
+            parent_b_new.snapshot_id: parent_b_new,
+            child_new.snapshot_id: child_new,
+        },
+        # The stored parent was categorized in an earlier plan, so it's not new in this one.
+        new_snapshots={
+            parent_b_new.snapshot_id: parent_b_new,
+            child_new.snapshot_id: child_new,
+        },
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+
+    PlanBuilder(context_diff, forward_only=False).build()
+
+    assert parent_b_new.change_category == SnapshotChangeCategory.METADATA
+    assert child_new.change_category == expected_child_category
+
+
+@pytest.mark.parametrize(
+    "earlier_version_flag, earlier_version_category, latest_version_forward_only, expected_forward_only",
+    [
+        # Both breaking versions of the stored parent were forward-only.
+        (True, SnapshotChangeCategory.BREAKING, True, True),
+        # The latest version was not forward-only.
+        (True, SnapshotChangeCategory.BREAKING, False, False),
+        # An earlier version was not forward-only.
+        (False, SnapshotChangeCategory.BREAKING, True, False),
+        # An earlier version can't be found in state, so we can't tell how it was applied.
+        (None, SnapshotChangeCategory.BREAKING, True, False),
+        # The deprecated FORWARD_ONLY category is a data change that is read like any other.
+        (True, SnapshotChangeCategory.FORWARD_ONLY, True, True),
+        (None, SnapshotChangeCategory.FORWARD_ONLY, True, False),
+    ],
+)
+def test_indirect_change_forward_only_with_stored_parent_history(
+    make_snapshot,
+    earlier_version_flag: t.Optional[bool],
+    earlier_version_category: SnapshotChangeCategory,
+    latest_version_forward_only: bool,
+    expected_forward_only: bool,
+):
+    def parent_snapshot(value: int):
+        return make_snapshot(SqlModel(name="a", query=parse_one(f"select {value} as col_a")))
+
+    parent_baseline = parent_snapshot(0)
+    parent_baseline.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    # An earlier version of the stored parent, between the baseline and the latest version.
+    parent_earlier = parent_snapshot(1)
+    parent_earlier.previous_versions = parent_baseline.all_versions
+    parent_earlier.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    parent_earlier.change_category = earlier_version_category
+
+    stored_parent = parent_snapshot(2)
+    stored_parent.previous_versions = parent_earlier.all_versions
+    stored_parent.categorize_as(
+        SnapshotChangeCategory.BREAKING, forward_only=latest_version_forward_only
+    )
+
+    parent_b_old = make_snapshot(SqlModel(name="b", query=parse_one("select 1 as col_b")))
+    parent_b_old.categorize_as(SnapshotChangeCategory.BREAKING)
+    parent_b_new = make_snapshot(
+        SqlModel(name="b", query=parse_one("select 1 as col_b"), owner="new_owner")
+    )
+    parent_b_new.previous_versions = parent_b_old.all_versions
+
+    child_model = SqlModel(name="c", query=parse_one("select col_a, col_b from a, b"))
+    child_old = make_snapshot(
+        child_model,
+        nodes={'"a"': parent_baseline.model, '"b"': parent_b_old.model},
+    )
+    child_old.categorize_as(SnapshotChangeCategory.BREAKING)
+    child_new = make_snapshot(
+        child_model,
+        nodes={'"a"': stored_parent.model, '"b"': parent_b_new.model},
+    )
+    child_new.previous_versions = child_old.all_versions
+
+    context_diff = ContextDiff(
+        environment="test_environment",
+        is_new_environment=True,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        modified_snapshots={
+            stored_parent.name: (stored_parent, parent_baseline),
+            parent_b_new.name: (parent_b_new, parent_b_old),
+            child_new.name: (child_new, child_old),
+        },
+        snapshots={
+            stored_parent.snapshot_id: stored_parent,
+            parent_b_new.snapshot_id: parent_b_new,
+            child_new.snapshot_id: child_new,
+        },
+        # The stored parent was categorized in an earlier plan, so it's not new in this one.
+        new_snapshots={
+            parent_b_new.snapshot_id: parent_b_new,
+            child_new.snapshot_id: child_new,
+        },
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+        stored_parent_forward_only=(
+            {}
+            if earlier_version_flag is None
+            else {parent_earlier.snapshot_id: earlier_version_flag}
+        ),
+    )
+
+    PlanBuilder(context_diff, forward_only=False).build()
+
+    assert child_new.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+    assert child_new.is_forward_only == expected_forward_only
