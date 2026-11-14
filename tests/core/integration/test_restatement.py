@@ -39,7 +39,8 @@ from sqlmesh.utils.date import to_timestamp
 from sqlmesh.utils.errors import (
     ConflictingPlanError,
 )
-from tests.core.integration.utils import add_projection_to_model
+from sqlmesh.core.snapshot import SnapshotChangeCategory
+from tests.core.integration.utils import add_projection_to_model, plan_choice
 
 pytestmark = pytest.mark.slow
 
@@ -1970,3 +1971,341 @@ def test_restatement_plan_outside_parent_date_range(init_and_plan_context: t.Cal
     ]
 
     context.apply(plan)
+
+
+# --- Start extension (#4837): moving a model's `start` earlier must refresh downstream intervals ---
+
+
+_EXTENSION_NOW = "2023-01-04 12:00:00 UTC"
+
+
+def _extension_model(
+    name: str,
+    source: str,
+    start: str,
+    *,
+    kind: str = "INCREMENTAL_BY_TIME_RANGE (time_column ds)",
+    cron: str = "@daily",
+    extra_columns: str = "",
+    query: t.Optional[str] = None,
+) -> str:
+    query = query or f"SELECT ds::DATE AS ds{extra_columns} FROM {source}"
+    if "FULL" not in kind:
+        query += " WHERE ds BETWEEN @start_ds AND @end_ds"
+    return f"MODEL (name s.{name}, kind {kind}, start '{start}', cron '{cron}');\n{query}"
+
+
+class _ExtensionProject:
+    """A scratch project of models reading from `s.src` that can be rewritten between plans."""
+
+    def __init__(self, tmp_path: Path, models: t.Dict[str, str]) -> None:
+        self.models_dir = tmp_path / "models"
+        self.models_dir.mkdir()
+        self.write(models)
+        config = Config(
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            default_connection=DuckDBConnectionConfig(),
+        )
+        self.context = Context(paths=[tmp_path], config=config)
+        adapter = self.context.engine_adapter
+        adapter.create_schema("s")
+        adapter.execute(
+            "CREATE TABLE s.src AS SELECT range::DATE AS ds FROM "
+            "range(DATE '2022-12-25', DATE '2023-01-06', INTERVAL 1 DAY)"
+        )
+
+    def write(self, models: t.Dict[str, str]) -> None:
+        for name, definition in models.items():
+            (self.models_dir / f"{name}.sql").write_text(definition)
+
+    def update(self, models: t.Dict[str, str]) -> None:
+        self.write(models)
+        self.context.load()
+
+    def ds(self, table: str) -> t.List[str]:
+        rows = self.context.engine_adapter.fetchall(f"SELECT ds FROM {table} ORDER BY ds")
+        return [str(r[0]) for r in rows]
+
+
+@pytest.fixture
+def capture_console() -> t.Iterator[CaptureTerminalConsole]:
+    original = get_console()
+    console = CaptureTerminalConsole()
+    set_console(console)
+    yield console
+    set_console(original)
+
+
+def _chain(a_start: str, b_start: str = "2020-01-01", c_start: str = "2023-01-02", **b_kwargs):
+    return {
+        "a": _extension_model("a", "s.src", a_start),
+        "b": _extension_model("b", "s.a", b_start, **b_kwargs),
+        "c": _extension_model("c", "s.b", c_start),
+    }
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+@pytest.mark.parametrize(
+    "c_start_before, c_start_after", [("2023-01-02", "2023-01-01"), ("2020-01-01", "2020-01-01")]
+)
+def test_start_extension_refreshes_downstream_intervals(
+    tmp_path: Path, c_start_before: str, c_start_after: str
+):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start=c_start_before))
+    project.context.plan(auto_apply=True, no_prompts=True)
+    for table in ("a", "b", "c"):
+        assert project.ds(f"s.{table}") == ["2023-01-02", "2023-01-03"]
+
+    project.update(_chain("2023-01-01", c_start=c_start_after))
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+
+    # b (and c, if its history already covers the range) are restated for the added range only.
+    restated = {s_id.name: interval for s_id, interval in plan.restatements.items()}
+    day = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    assert restated['"memory"."s"."b"'] == day
+    for table in ("a", "b", "c"):
+        assert project.ds(f"s.{table}") == ["2023-01-01", "2023-01-02", "2023-01-03"], table
+
+    # Nothing is left to do.
+    assert not project.context.plan_builder().build().requires_backfill
+
+
+@time_machine.travel("2023-01-02 12:00:00 UTC", tick=False)
+def test_start_extension_restates_whole_coarser_downstream_interval(tmp_path: Path):
+    hourly_a = (
+        "MODEL (name s.a, kind INCREMENTAL_BY_TIME_RANGE (time_column ts), start '{start}', "
+        "cron '@hourly');\nSELECT ts FROM s.hours WHERE ts BETWEEN @start_ts AND @end_ts"
+    )
+    daily_b = (
+        "MODEL (name s.b, kind INCREMENTAL_BY_TIME_RANGE (time_column ds), start '2023-01-01', "
+        "cron '@daily');\nSELECT ts::DATE AS ds, count(*) AS n FROM s.a "
+        "WHERE ts BETWEEN @start_ts AND @end_ts GROUP BY 1"
+    )
+    project = _ExtensionProject(
+        tmp_path, {"a": hourly_a.format(start="2023-01-01 06:00:00"), "b": daily_b}
+    )
+    project.context.engine_adapter.execute(
+        "CREATE TABLE s.hours AS SELECT range AS ts FROM "
+        "range(TIMESTAMP '2023-01-01 00:00:00', TIMESTAMP '2023-01-02 12:00:00', INTERVAL 1 HOUR)"
+    )
+    project.context.plan(auto_apply=True, no_prompts=True)
+    count = "SELECT n FROM s.b WHERE ds = '2023-01-01'"
+    assert project.context.engine_adapter.fetchone(count) == (18,)
+
+    project.update({"a": hourly_a.format(start="2023-01-01 00:00:00")})
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+
+    assert list(plan.restatements.values()) == [
+        (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    ]
+    assert project.context.engine_adapter.fetchone(count) == (24,)
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_rebuilds_full_downstream_model(tmp_path: Path):
+    models = {
+        "a": _extension_model("a", "s.src", "2023-01-02"),
+        "b": _extension_model("b", "s.a", "2023-01-01", kind="FULL"),
+    }
+    project = _ExtensionProject(tmp_path, models)
+    project.context.plan(auto_apply=True, no_prompts=True)
+    assert project.ds("s.b") == ["2023-01-02", "2023-01-03"]
+
+    project.update({"a": _extension_model("a", "s.src", "2023-01-01")})
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+
+    assert len(plan.restatements) == 1
+    assert project.ds("s.b") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_skips_downstream_with_disabled_restatement(
+    tmp_path: Path, capture_console: CaptureTerminalConsole
+):
+    kind = "INCREMENTAL_BY_TIME_RANGE (time_column ds, disable_restatement true)"
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", kind=kind))
+    project.context.plan(auto_apply=True, no_prompts=True)
+
+    project.update(_chain("2023-01-01", kind=kind))
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+
+    assert not plan.restatements
+    assert "Restatement is disabled for this model" in capture_console.captured_warnings
+    assert project.ds("s.a") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+    assert project.ds("s.b") == ["2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_with_non_breaking_change_restates_extension_only(tmp_path: Path):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True)
+
+    # Add a column to `a` (non-breaking) and move its start earlier.
+    project.update({"a": _extension_model("a", "s.src", "2023-01-01", extra_columns=", 1 AS one")})
+    plan_builder = project.context.plan_builder(no_auto_categorization=True)
+    plan_choice(plan_builder, SnapshotChangeCategory.NON_BREAKING)
+    plan = plan_builder.build()
+    project.context.apply(plan)
+
+    day = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    assert {s_id.name: i for s_id, i in plan.restatements.items()} == {
+        '"memory"."s"."b"': day,
+        '"memory"."s"."c"': day,
+    }
+    for table in ("a", "b", "c"):
+        assert project.ds(f"s.{table}") == ["2023-01-01", "2023-01-02", "2023-01-03"], table
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_with_breaking_change_needs_no_restatement(tmp_path: Path):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True)
+
+    project.update({"a": _extension_model("a", "s.src", "2023-01-01", extra_columns=", 1 AS one")})
+    plan_builder = project.context.plan_builder(no_auto_categorization=True)
+    plan_choice(plan_builder, SnapshotChangeCategory.BREAKING)
+    plan = plan_builder.build()
+    project.context.apply(plan)
+
+    assert not plan.restatements
+    for table in ("a", "b", "c"):
+        assert project.ds(f"s.{table}") == ["2023-01-01", "2023-01-02", "2023-01-03"], table
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_moved_later_does_not_restate(tmp_path: Path):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True)
+
+    project.update(_chain("2023-01-02"))
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+    assert not plan.restatements
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_with_select_model_warns_about_stale_models(
+    tmp_path: Path, capture_console: CaptureTerminalConsole
+):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True)
+
+    project.update(_chain("2023-01-01", c_start="2020-01-01"))
+    plan = project.context.plan(select_models=["s.a"], auto_apply=True, no_prompts=True)
+
+    assert not plan.restatements
+    warnings = capture_console.captured_warnings
+    assert '"memory"."s"."b"' in warnings and "--restate-model" in warnings
+    assert project.ds("s.b") == ["2023-01-02", "2023-01-03"]
+
+    # Following the advice from the warning fixes the downstream data.
+    project.context.plan(
+        restate_models=["s.b"],
+        start="2023-01-01",
+        end="2023-01-01",
+        auto_apply=True,
+        no_prompts=True,
+    )
+    assert project.ds("s.b") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_clears_intervals_of_derived_dev_versions(tmp_path: Path):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    context = project.context
+    context.plan(auto_apply=True, no_prompts=True)
+
+    # dev gets its own version of b, which has the (soon to be stale) intervals of its own.
+    project.update(_chain("2023-01-02", c_start="2020-01-01", extra_columns=", 1 AS one"))
+    context.plan("dev", auto_apply=True, no_prompts=True)
+    dev_b = context.get_snapshot("s.b")
+    assert dev_b is not None
+    assert dev_b.intervals
+
+    # Back to prod's version of b, with the extended start of a.
+    project.update(_chain("2023-01-01", c_start="2020-01-01"))
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    day = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    state_b = context.state_sync.get_snapshots([dev_b.snapshot_id])[dev_b.snapshot_id]
+    assert not any(start <= day[0] and day[1] <= end for start, end in state_b.intervals)
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_is_explained_in_plan_output(
+    tmp_path: Path, capture_console: CaptureTerminalConsole
+):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True)
+    capture_console.consume_captured_output()
+
+    project.update(_chain("2023-01-01", c_start="2020-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True, skip_tests=True)
+    output = capture_console.consume_captured_output()
+
+    assert "Differences from the `prod` environment" in output
+    assert "restated because the start of an upstream model moved earlier" in output
+    assert "s.b" in output and "s.c" in output
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_in_dev_does_not_rewrite_prod_tables(tmp_path: Path):
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    context = project.context
+    context.plan(auto_apply=True, no_prompts=True)
+
+    project.update(_chain("2023-01-01", c_start="2020-01-01"))
+    dev_plan = context.plan("dev", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    # b and c share their tables with prod, so the dev plan leaves them alone.
+    assert not dev_plan.restatements
+    assert project.ds("s.a") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+    assert project.ds("s.b") == ["2023-01-02", "2023-01-03"]
+    assert project.ds("s.c") == ["2023-01-02", "2023-01-03"]
+
+    # They are restated when the change is deployed to prod.
+    prod_plan = context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert {s_id.name for s_id in prod_plan.restatements} == {
+        '"memory"."s"."b"',
+        '"memory"."s"."c"',
+    }
+    assert project.ds("s.b") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+    assert project.ds("s.c") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_flows_through_view(tmp_path: Path):
+    models = {
+        "a": _extension_model("a", "s.src", "2023-01-02"),
+        "b": "MODEL (name s.b, kind VIEW);\nSELECT ds FROM s.a",
+        "c": _extension_model("c", "s.b", "2020-01-01"),
+    }
+    project = _ExtensionProject(tmp_path, models)
+    project.context.plan(auto_apply=True, no_prompts=True)
+    assert project.ds("s.c") == ["2023-01-02", "2023-01-03"]
+
+    project.update({"a": _extension_model("a", "s.src", "2023-01-01")})
+    project.context.plan(auto_apply=True, no_prompts=True)
+    assert project.ds("s.c") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_does_not_run_plan_as_restatement(tmp_path: Path, mocker):
+    from sqlmesh.core.scheduler import Scheduler
+
+    spy = mocker.spy(Scheduler, "run_merged_intervals")
+    project = _ExtensionProject(tmp_path, _chain("2023-01-02", c_start="2020-01-01"))
+    project.context.plan(auto_apply=True, no_prompts=True)
+
+    project.update(_chain("2023-01-01", c_start="2020-01-01"))
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+    assert plan.restatements
+    assert spy.call_args.kwargs["is_restatement"] is False
+
+    project.context.plan(
+        restate_models=["s.b"],
+        start="2023-01-01",
+        end="2023-01-01",
+        auto_apply=True,
+        no_prompts=True,
+    )
+    assert spy.call_args.kwargs["is_restatement"] is True

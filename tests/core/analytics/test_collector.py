@@ -375,3 +375,25 @@ def test_on_migration(collector: AnalyticsCollector, mocker: MockerFixture):
             ),
         ]
     )
+
+
+def test_on_plan_apply_start_ignores_start_extension_restatements(
+    collector: AnalyticsCollector, init_and_plan_context: t.Callable
+):
+    _, plan = init_and_plan_context("examples/sushi")
+    evaluatable = plan.to_evaluatable()
+
+    def has_restatements(restatements: t.Dict, extensions: t.Set[str]) -> str:
+        updated = evaluatable.copy(
+            update={"restatements": restatements, "start_extension_restatements": extensions}
+        )
+        collector._dispatcher.add_event.reset_mock()  # type: ignore
+        collector.on_plan_apply_start(
+            plan=updated, engine_type="duckdb", state_sync_type="duckdb", scheduler_type="builtin"
+        )
+        collector.flush()
+        event = collector._dispatcher.add_event.call_args.args[0]["event"]  # type: ignore
+        return json.loads(event)["has_restatements"]
+
+    assert has_restatements({"a": (0, 1)}, set()) is True
+    assert has_restatements({"a": (0, 1)}, {"a"}) is False

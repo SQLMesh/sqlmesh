@@ -171,7 +171,7 @@ class AnalyticsCollector:
                 "no_gaps": plan.no_gaps,
                 "forward_only": plan.forward_only,
                 "ensure_finalized_snapshots": plan.ensure_finalized_snapshots,
-                "has_restatements": bool(plan.restatements),
+                "has_restatements": plan.is_restatement,
                 "directly_modified_count": len(plan.directly_modified_snapshots),
                 "indirectly_modified_count": len(
                     {
