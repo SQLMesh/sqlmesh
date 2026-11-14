@@ -31,6 +31,7 @@ import sqlmesh.core.dialect as d
 from sqlmesh.core.environment import EnvironmentSuffixTarget
 from sqlmesh.core.dialect import select_from_values
 from sqlmesh.core.model import Model, load_sql_based_model
+from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 from sqlmesh.core.engine_adapter.mixins import RowDiffMixin, LogicalMergeMixin
 from sqlmesh.core.model.definition import create_sql_model
@@ -2857,11 +2858,16 @@ def test_incremental_by_unique_key_model_when_matched(ctx: TestContext):
     if not ctx.supports_merge:
         pytest.skip(f"{ctx.dialect} on {ctx.gateway} doesnt support merge")
 
-    # DuckDB and some other engines use logical_merge which doesn't support when_matched
+    # Engines that use logical_merge (e.g. MySQL) don't support when_matched
     if isinstance(ctx.engine_adapter, LogicalMergeMixin):
         pytest.skip(
             f"{ctx.dialect} on {ctx.gateway} uses logical merge which doesn't support when_matched"
         )
+    # DuckDB only merges natively from 1.4.0; older versions fall back to logical_merge
+    if isinstance(ctx.engine_adapter, DuckDBEngineAdapter) and not (
+        ctx.engine_adapter._duckdb_supports_merge
+    ):
+        pytest.skip("The installed duckdb doesn't support MERGE (requires >= 1.4.0)")
 
     def _mutate_config(current_gateway_name: str, config: Config):
         connection = config.gateways[current_gateway_name].connection
