@@ -178,7 +178,7 @@ class SnowflakeEngineAdapter(
             .from_(exp.to_table("information_schema.databases"))
             .where(
                 exp.and_(
-                    exp.column("database_name").eq(exp.Literal.string(catalog_name)),
+                    exp.column("database_name").eq(exp.Literal.string(catalog_name.name)),
                     exp.column("comment").eq(exp.Literal.string(c.SQLMESH_MANAGED)),
                 )
             )
