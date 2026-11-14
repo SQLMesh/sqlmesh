@@ -618,10 +618,13 @@ MODEL (
 
 * BigQuery
 * Databricks
+* DuckDB (version 1.4 or later, see below)
 * Postgres
 * Redshift
 * Snowflake
 * Spark
+
+In DuckDB's case, the native `MERGE` statement is used on version 1.4 or later when the target table is in a DuckDB, DuckLake or MotherDuck catalog. Older DuckDB versions, and target tables in other attached catalogs (such as PostgreSQL, SQLite or MySQL), use `DELETE` + `INSERT` instead, and `when_matched` and `merge_filter` raise an error there. Source rows are de-duplicated by `unique_key` before the merge so there is one row per key. Which of several duplicate rows is kept is unspecified.
 
 In Redshift's case, to enable the use of the native `MERGE` statement, you need to pass the `enable_merge` flag in the connection and set it to `true`. It is disabled by default.
 
@@ -668,7 +671,7 @@ Depending on the target engine, models of the `INCREMENTAL_BY_UNIQUE_KEY` kind a
 | BigQuery   | MERGE ON unique key                 |
 | Redshift   | MERGE ON unique key                 |
 | Postgres   | MERGE ON unique key                 |
-| DuckDB     | DELETE ON matched + INSERT new rows |
+| DuckDB     | MERGE ON unique key (version 1.4 or later, DuckDB, DuckLake and MotherDuck catalogs); otherwise DELETE ON matched + INSERT new rows |
 
 ## FULL
 Models of the `FULL` kind cause the dataset associated with a model to be fully refreshed (rewritten) upon each model evaluation.
