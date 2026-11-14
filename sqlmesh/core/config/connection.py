@@ -2712,6 +2712,9 @@ class Db2ConnectionConfig(ConnectionConfig):
         return connect_db2
 
 
+_doris_engine_import_validator = _get_engine_import_validator("pymysql", "doris", decorate=False)
+
+
 class DorisConnectionConfig(ConnectionConfig):
     """Configuration for the Apache Doris connection.
 
@@ -2775,9 +2778,6 @@ class DorisConnectionConfig(ConnectionConfig):
     DISPLAY_NAME: t.ClassVar[t.Literal["Apache Doris"]] = "Apache Doris"
     DISPLAY_ORDER: t.ClassVar[t.Literal[20]] = 20
     MIN_PYMYSQL_VERSION: t.ClassVar[t.Tuple[int, int, int]] = (1, 2, 0)
-    _base_engine_import_validator: t.ClassVar[t.Callable] = staticmethod(
-        _get_engine_import_validator("pymysql", "doris", decorate=False)
-    )
 
     @classmethod
     def _validate_pymysql_version(cls, pymysql_module: t.Any = None) -> None:
@@ -2828,7 +2828,7 @@ class DorisConnectionConfig(ConnectionConfig):
         check_import = (
             str_to_bool(str(data.get("check_import", True))) if isinstance(data, dict) else True
         )
-        data = cls._base_engine_import_validator(cls, data)
+        data = _doris_engine_import_validator(cls, data)
         if check_import:
             cls._validate_pymysql_version()
         return data

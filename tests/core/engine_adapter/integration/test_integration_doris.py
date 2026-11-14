@@ -49,7 +49,12 @@ def test_doris_iceberg_local_catalog(ctx: TestContext):
             CREATE CATALOG IF NOT EXISTS `{catalog_name}` PROPERTIES (
                 'type' = 'iceberg',
                 'iceberg.catalog.type' = 'hadoop',
-                'warehouse' = 'file:///tmp/doris_iceberg_warehouse/{catalog_name}'
+                'warehouse' = 's3://warehouse/iceberg/{catalog_name}',
+                's3.endpoint' = 'http://172.30.80.4:9000',
+                's3.access_key' = 'minio',
+                's3.secret_key' = 'minio123',
+                's3.region' = 'us-east-1',
+                'use_path_style' = 'true'
             )
             """,
             quote_identifiers=False,

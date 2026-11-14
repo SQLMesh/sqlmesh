@@ -7208,6 +7208,12 @@ class DorisEngineAdapter(
                         "Doris table property 'order_by' is only supported on UNIQUE KEY tables. "
                         "For DUPLICATE KEY or AGGREGATE KEY tables, sort order is determined by the key columns."
                     )
+                doris_ver = self._get_doris_version()
+                if doris_ver is not None and doris_ver < (4, 1):
+                    raise SQLMeshError(
+                        f"Doris table property 'order_by' / 'cluster_by' (custom sort key on UNIQUE KEY tables) "
+                        f"requires Apache Doris 4.1+ (detected Doris {doris_ver[0]}.{doris_ver[1]})."
+                    )
                 mow_val = self._extract_str_value(
                     table_properties_copy.get("enable_unique_key_merge_on_write")
                 )
@@ -7624,6 +7630,18 @@ class DorisEngineAdapter(
                         expression = cast_node
                     else:
                         ts_node.replace(cast_node)
+        if any(
+            not (
+                isinstance(m.args.get("keys"), exp.Array)
+                and isinstance(m.args.get("values"), exp.Array)
+            )
+            and (m.args.get("keys") is not None or m.args.get("values") is not None)
+            for m in expression.find_all(exp.Map)
+        ):
+            self._get_doris_version()
+        doris_version = getattr(self, "_doris_version", None)
+        if doris_version and "dialect" not in kwargs:
+            kwargs["dialect"] = f"{self.dialect}, version={'.'.join(str(p) for p in doris_version)}"
         if expression.find(exp.DataType):
             expression = expression.copy()
             for dtype in reversed(list(expression.find_all(exp.DataType))):
@@ -7654,9 +7672,13 @@ class DorisEngineAdapter(
                     dtype.set("expressions", [exp.DataTypeParam(this=exp.Literal.number(6))])
                 elif dtype.is_type("struct"):
                     new_field_sqls: t.List[str] = []
-                    for field in dtype.expressions:
+                    for idx, field in enumerate(dtype.expressions, start=1):
                         if isinstance(field, exp.ColumnDef) and field.args.get("kind"):
-                            field_id = field.this.copy()
+                            field_id = (
+                                field.this.copy()
+                                if isinstance(field.this, exp.Expr)
+                                else exp.to_identifier(f"col{idx}")
+                            )
                             if quote and isinstance(field_id, exp.Identifier):
                                 field_id.set("quoted", True)
                             field_name_sql = super()._to_sql(
@@ -7664,6 +7686,19 @@ class DorisEngineAdapter(
                             )
                             field_kind_sql = super()._to_sql(
                                 field.args["kind"], quote=quote, pretty=False, **kwargs
+                            )
+                            new_field_sqls.append(f"{field_name_sql}: {field_kind_sql}")
+                        elif isinstance(field, exp.DataType) or (
+                            isinstance(field, exp.DataTypeParam)
+                            and isinstance(field.this, exp.DataType)
+                        ):
+                            raw_kind = field.this if isinstance(field, exp.DataTypeParam) else field
+                            field_id = exp.to_identifier(f"col{idx}", quoted=quote)
+                            field_name_sql = super()._to_sql(
+                                field_id, quote=False, pretty=False, **kwargs
+                            )
+                            field_kind_sql = super()._to_sql(
+                                raw_kind, quote=quote, pretty=False, **kwargs
                             )
                             new_field_sqls.append(f"{field_name_sql}: {field_kind_sql}")
                         else:
@@ -7678,18 +7713,6 @@ class DorisEngineAdapter(
                         expression = struct_replacement
                     else:
                         dtype.replace(struct_replacement)
-        if any(
-            not (
-                isinstance(m.args.get("keys"), exp.Array)
-                and isinstance(m.args.get("values"), exp.Array)
-            )
-            and (m.args.get("keys") is not None or m.args.get("values") is not None)
-            for m in expression.find_all(exp.Map)
-        ):
-            self._get_doris_version()
-        doris_version = getattr(self, "_doris_version", None)
-        if doris_version and "dialect" not in kwargs:
-            kwargs["dialect"] = f"{self.dialect}, version={'.'.join(str(p) for p in doris_version)}"
         return super()._to_sql(expression, quote=quote, **kwargs)
 
     def _build_distributed_by_exp(

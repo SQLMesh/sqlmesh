@@ -1,9 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 services:
+  doris-minio:
+    image: cgr.dev/chainguard/minio@sha256:039800e64ec7247d2fde7cff3697e964f6fe20b6d7d2c46aa7d82cc63355d512
+    container_name: doris-minio
+    hostname: doris-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    tmpfs:
+      - /data:size=256m,mode=1777
+    networks:
+      doris_net:
+        ipv4_address: 172.30.80.4
+
+  doris-minio-init:
+    image: cgr.dev/chainguard/minio-client:latest-dev@sha256:fb635b967f5f32424391150dac4985cc1aea78fb0a1ce031c01952cf661a13ec
+    container_name: doris-minio-init
+    depends_on:
+      doris-minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        attempt=0
+        until mc alias set local http://172.30.80.4:9000 minio minio123 >/dev/null 2>&1 && mc ready local >/dev/null 2>&1; do
+          attempt=$$((attempt + 1))
+          if [ "$$attempt" -ge 30 ]; then
+            echo 'MinIO did not become ready after 30 attempts' >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        mc mb --ignore-existing local/warehouse
+    networks:
+      doris_net:
+        ipv4_address: 172.30.80.5
+
   doris-fe:
     image: apache/doris:fe-4.1.5
     container_name: doris-fe
     hostname: doris-fe
+    depends_on:
+      doris-minio-init:
+        condition: service_completed_successfully
     entrypoint:
       - /bin/bash
       - -c
@@ -17,7 +58,6 @@ services:
       - "${DORIS_BIND_ADDRESS:-127.0.0.1}:8030:8030"
       - "${DORIS_BIND_ADDRESS:-127.0.0.1}:9030:9030"
     volumes:
-      - iceberg-warehouse:/tmp/doris_iceberg_warehouse
       - paimon-warehouse:/tmp/doris_paimon_warehouse
     networks:
       doris_net:
@@ -46,14 +86,12 @@ services:
       - "${DORIS_BIND_ADDRESS:-127.0.0.1}:8040:8040"
       - "${DORIS_BIND_ADDRESS:-127.0.0.1}:9050:9050"
     volumes:
-      - iceberg-warehouse:/tmp/doris_iceberg_warehouse
       - paimon-warehouse:/tmp/doris_paimon_warehouse
     networks:
       doris_net:
         ipv4_address: 172.30.80.3
 
 volumes:
-  iceberg-warehouse:
   paimon-warehouse:
 
 networks:

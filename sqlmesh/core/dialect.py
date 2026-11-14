@@ -1113,6 +1113,33 @@ def doris_supports_map_from_arrays(version: t.Optional[t.Tuple[int, ...]] = None
 
 
 def _doris_datatype_sql(self: Generator, expression: exp.DataType) -> str:
+    if (
+        expression.is_type(*exp.DataType.STRUCT_TYPES)
+        and expression.expressions
+        and any(
+            isinstance(elem, (exp.DataType, exp.DataTypeParam))
+            or (isinstance(elem, exp.ColumnDef) and elem.this is None)
+            for elem in expression.expressions
+        )
+    ):
+        expression = expression.copy()
+        normalized_fields: t.List[exp.Expr] = []
+        for idx, elem in enumerate(expression.expressions, start=1):
+            if isinstance(elem, exp.DataType):
+                normalized_fields.append(
+                    exp.ColumnDef(this=exp.to_identifier(f"col{idx}"), kind=elem)
+                )
+            elif isinstance(elem, exp.DataTypeParam) and isinstance(elem.this, exp.DataType):
+                normalized_fields.append(
+                    exp.ColumnDef(this=exp.to_identifier(f"col{idx}"), kind=elem.this)
+                )
+            elif isinstance(elem, exp.ColumnDef) and elem.this is None:
+                elem_copy = elem.copy()
+                elem_copy.set("this", exp.to_identifier(f"col{idx}"))
+                normalized_fields.append(elem_copy)
+            else:
+                normalized_fields.append(elem)
+        expression.set("expressions", normalized_fields)
     if expression.is_type(exp.DataType.Type.TIMESTAMPTZ) and not doris_supports_timestamptz(
         getattr(self.dialect, "version", None)
     ):

@@ -717,6 +717,7 @@ def test_create_table_olap_key_prefix_reordering_and_order_by(
     make_mocked_engine_adapter: t.Callable[..., DorisEngineAdapter],
 ):
     adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    adapter._doris_version = (4, 1, 5)
     adapter.create_table(
         "events",
         target_columns_to_types={
@@ -2426,7 +2427,7 @@ def test_unannotated_view_column_comments_and_starrocks_property_parity(
 
     # 2. Parenthesized string forms for unique_key and order_by, structured distributed_by with `columns=...`,
     #    and tuple generic properties (e.g. excluded_trigger_tables = ('db.t1', 'db.t2')).
-    adapter._doris_version = (2, 1, 10)
+    adapter._doris_version = (4, 1, 5)
     adapter.create_table(
         "db.paren_keys_tbl",
         target_columns_to_types={
@@ -6413,6 +6414,36 @@ def test_doris_audit_fixes_and_docs_models(
     v415_adapter.cursor.fetchone.return_value = ("Doris version doris-4.1.5-rc02", "5.7.99")
     with pytest.raises(SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
         v415_adapter._to_sql(exp.Map(keys=exp.column("k_arr"), values=exp.column("v_arr")))
+    v408_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    v408_adapter.cursor.fetchone.return_value = ("Doris version doris-4.0.8-rc01", "5.7.99")
+    with pytest.raises(SQLMeshError, match="requires Apache Doris 4\\.1\\+"):
+        v408_adapter.create_table(
+            "db.uk_orderby",
+            {"id": exp.DataType.build("INT"), "val": exp.DataType.build("INT")},
+            table_properties={
+                "unique_key": exp.Tuple(expressions=[exp.column("id")]),
+                "order_by": exp.Tuple(expressions=[exp.column("val")]),
+            },
+        )
+    unnamed_struct_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    unnamed_struct_dtype = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[
+            exp.DataType.build("INT", dialect="doris"),
+            exp.ColumnDef(this=None, kind=exp.DataType.build("VARCHAR(32)", dialect="doris")),
+        ],
+        nested=True,
+    )
+    unnamed_struct_adapter.create_table(
+        "db.pos_struct_tbl",
+        {
+            "id": exp.DataType.build("INT", dialect="doris"),
+            "s_pos": unnamed_struct_dtype,
+        },
+    )
+    assert to_sql_calls(unnamed_struct_adapter) == [
+        "CREATE TABLE IF NOT EXISTS `db`.`pos_struct_tbl` (`id` INT, `s_pos` STRUCT<`col1`: INT, `col2`: VARCHAR(32)>)"
+    ]
     assert to_sql_calls(existing_ref_adapter) == []
 
     # 14. `_gen_config` appends the Doris `state_connection` even when custom settings are supplied (e.g. DLT template).

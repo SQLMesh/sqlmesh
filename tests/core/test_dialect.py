@@ -1835,6 +1835,16 @@ def test_doris_match_struct_and_map_expressions():
     )
     assert aliased_eq_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('is_eq', a = b, 'col2', c)"
 
+    unnamed_struct_dtype = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[
+            exp.DataType.build("INT", dialect="doris"),
+            exp.ColumnDef(this=None, kind=exp.DataType.build("VARCHAR(32)", dialect="doris")),
+        ],
+        nested=True,
+    )
+    assert unnamed_struct_dtype.sql("doris") == "STRUCT<col1: INT, col2: VARCHAR(32)>"
+
     k_arr = exp.column("k_arr")
     k_arr.type = exp.DataType.build("ARRAY<INT>", dialect="doris")
     v_arr = exp.column("v_arr")
