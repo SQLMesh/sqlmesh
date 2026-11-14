@@ -528,7 +528,9 @@ class GithubController:
         try:
             # Clear out any output that might exist from prior steps
             self._console.consume_captured_output()
-            if plan.restatements:
+            if plan.restatements and not (
+                plan.start_extension_restatements and not plan.selected_models_to_restate
+            ):
                 self._console._print("\n**Restating models**\n")
             else:
                 self._console.show_environment_difference_summary(

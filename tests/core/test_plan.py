@@ -4510,3 +4510,582 @@ def test_forward_only_indirect_change_to_materialized_view(make_snapshot):
     # Forward-only indirect changes to MVs should not always be classified as indirect breaking.
     # Instead, we want to preserve the standard categorization.
     assert snapshot_b_new.change_category == SnapshotChangeCategory.INDIRECT_NON_BREAKING
+
+
+# --- Start extension (#4837): extending a model's `start` earlier must refresh downstream intervals ---
+
+_EXECUTION_TIME = "2023-01-04 12:00:00 UTC"
+
+
+def _ts(value: str) -> int:
+    return to_timestamp(value)
+
+
+def _start_extension_context_diff(
+    make_snapshot: t.Callable,
+    specs: t.List[t.Dict[str, t.Any]],
+    environment: str = "prod",
+) -> t.Tuple[ContextDiff, t.Dict[str, Snapshot], t.Dict[str, Snapshot]]:
+    """Builds a context diff in which every listed model has an old and a new version.
+
+    Each spec is a dict with `name`, an optional `parent`, `old` / `new` model kwargs overrides and
+    optional `intervals` (a list of (start, end) dates added to the old snapshot).
+    """
+    old_nodes: t.Dict[str, t.Any] = {}
+    new_nodes: t.Dict[str, t.Any] = {}
+    olds: t.Dict[str, Snapshot] = {}
+    news: t.Dict[str, Snapshot] = {}
+
+    for spec in specs:
+        name = spec["name"]
+        parent = spec.get("parent")
+        if spec.get("parents"):
+            query = parse_one(" union all ".join(f"select ds from {p}" for p in spec["parents"]))
+        elif parent and spec.get("self_referencing"):
+            query = parse_one(f"select ds from {parent} union all select ds from {name}")
+        else:
+            query = parse_one(f"select ds from {parent}" if parent else "select 1 as ds")
+        common: t.Dict[str, t.Any] = {
+            "name": name,
+            "query": query,
+            "kind": spec.get("kind", IncrementalByTimeRangeKind(time_column="ds")),
+            "start": spec.get("start", "2020-01-01"),
+            "cron": spec.get("cron", "@daily"),
+        }
+        old = make_snapshot(SqlModel(**{**common, **spec.get("old", {})}), nodes=dict(old_nodes))
+        new = make_snapshot(SqlModel(**{**common, **spec.get("new", {})}), nodes=dict(new_nodes))
+        old.categorize_as(SnapshotChangeCategory.BREAKING)
+        new.previous_versions = old.all_versions
+        for start, end in spec.get("intervals", []):
+            old.add_interval(start, end)
+        if spec.get("unpaused"):
+            new.unpaused_ts = 1
+
+        old_nodes[old.name] = old.model
+        new_nodes[new.name] = new.model
+        olds[name] = old
+        news[name] = new
+
+    context_diff = ContextDiff(
+        environment=environment,
+        is_new_environment=False,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        modified_snapshots={new.name: (new, olds[n]) for n, new in news.items()},
+        snapshots={s.snapshot_id: s for s in news.values()},
+        new_snapshots={s.snapshot_id: s for s in news.values()},
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+    return context_diff, news, olds
+
+
+def _chain_specs(
+    a_old: str = "2023-01-02",
+    a_new: str = "2023-01-01",
+    **child_overrides: t.Any,
+) -> t.List[t.Dict[str, t.Any]]:
+    """a (start moves) -> b -> c where b and c have long-standing intervals."""
+    intervals = [("2020-01-01", "2023-01-03")]
+    return [
+        {
+            "name": "a",
+            "old": {"start": a_old},
+            "new": {"start": a_new},
+            "intervals": [(a_old, "2023-01-03")],
+        },
+        {"name": "b", "parent": "a", "intervals": intervals, **child_overrides},
+        {"name": "c", "parent": "b", "intervals": intervals},
+    ]
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_restates_downstream(make_snapshot):
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, _chain_specs())
+    plan = PlanBuilder(context_diff).build()
+
+    expected = (_ts("2023-01-01"), _ts("2023-01-02"))
+    assert plan.restatements == {
+        snaps["b"].snapshot_id: expected,
+        snaps["c"].snapshot_id: expected,
+    }
+    # The model whose start moved is backfilled as usual and is not restated itself.
+    assert snaps["a"].snapshot_id not in plan.restatements
+    # This is not a user requested restatement.
+    assert not plan.selected_models_to_restate
+    assert plan.models_to_backfill is None
+    assert plan.requires_backfill
+    assert plan.start_extension_restatements == {snaps["b"].snapshot_id, snaps["c"].snapshot_id}
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_moved_later_does_not_restate(make_snapshot):
+    context_diff, _, _ = _start_extension_context_diff(
+        make_snapshot, _chain_specs(a_old="2023-01-01", a_new="2023-01-02")
+    )
+    plan = PlanBuilder(context_diff).build()
+    assert not plan.restatements
+    assert not plan.start_extension_restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_without_downstream_is_a_noop(make_snapshot):
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, _chain_specs()[:1])
+    plan = PlanBuilder(context_diff).build()
+    assert not plan.restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_downstream_starting_after_range_is_not_restated(make_snapshot):
+    specs = _chain_specs()
+    specs[1].update(start="2023-01-03", intervals=[("2023-01-03", "2023-01-03")])
+    specs[2].update(start="2023-01-03", intervals=[("2023-01-03", "2023-01-03")])
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, specs)
+    assert not PlanBuilder(context_diff).build().restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_unchanged_relative_start_is_not_an_extension(make_snapshot):
+    specs = _chain_specs()
+    specs[0].update(
+        old={"start": "2 days ago", "description": "old"},
+        new={"start": "2 days ago", "description": "new"},
+    )
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, specs)
+    assert not PlanBuilder(context_diff).build().restatements
+
+    # The same relative expression resolves against the plan's execution time, not the clock
+    # at the time the snapshots were created.
+    assert not PlanBuilder(context_diff, execution_time="2023-02-01").build().restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_relative_start_moved_earlier(make_snapshot):
+    specs = _chain_specs()
+    specs[0].update(old={"start": "2 days ago"}, new={"start": "3 days ago"})
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    expected = (_ts("3 days ago"), _ts("2 days ago"))
+    assert plan.restatements[snaps["b"].snapshot_id] == expected
+    assert plan.restatements[snaps["c"].snapshot_id] == expected
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_widens_range_for_coarser_downstream(make_snapshot):
+    specs = _chain_specs(a_old="2023-01-01 06:00:00", a_new="2023-01-01 00:00:00")
+    specs[0]["cron"] = "@hourly"
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    # The six hours that were added belong to a daily interval, which gets restated as a whole.
+    whole_day = (_ts("2023-01-01"), _ts("2023-01-02"))
+    assert plan.restatements[snaps["b"].snapshot_id] == whole_day
+    assert plan.restatements[snaps["c"].snapshot_id] == whole_day
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_full_downstream_is_restated(make_snapshot):
+    context_diff, snaps, _ = _start_extension_context_diff(
+        make_snapshot, _chain_specs(kind=FullKind())
+    )
+    plan = PlanBuilder(context_diff).build()
+    assert snaps["b"].snapshot_id in plan.restatements
+    # Descendants of the FULL model still only get the affected range.
+    assert plan.restatements[snaps["c"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-02"))
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_respects_disable_restatement(make_snapshot, mocker: MockerFixture):
+    context_diff, snaps, _ = _start_extension_context_diff(
+        make_snapshot,
+        _chain_specs(kind=IncrementalByTimeRangeKind(time_column="ds", disable_restatement=True)),
+    )
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    # b keeps its data in this plan, so c (derived from it) is consistent with it.
+    assert not plan.restatements
+    console.log_warning.assert_called_once()
+    message = console.log_warning.call_args[0][0]
+    assert "Restatement is disabled for this model" in message
+    assert "Models downstream of it are not restated through it" in message
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_no_spurious_warning_without_existing_intervals(
+    make_snapshot, mocker: MockerFixture
+):
+    # SCD Type 2 has `disable_restatement` enabled by default, but there is nothing stale to
+    # restate if the model has no intervals in the affected range, so there must be no warning.
+    specs = _chain_specs(
+        kind=dict(name=ModelKindName.SCD_TYPE_2_BY_TIME, unique_key=["ds"]),
+        start="2023-01-02",
+        intervals=[("2023-01-02", "2023-01-03")],
+    )
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    assert not PlanBuilder(context_diff, console=console).build().restatements
+    console.log_warning.assert_not_called()
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_scd_type_2_downstream_warns(make_snapshot, mocker: MockerFixture):
+    specs = _chain_specs(kind=dict(name=ModelKindName.SCD_TYPE_2_BY_TIME, unique_key=["ds"]))
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    assert (
+        snaps["b"].snapshot_id
+        not in PlanBuilder(context_diff, console=console).build().restatements
+    )
+    assert "Restatement is disabled" in console.log_warning.call_args[0][0]
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_full_history_only_downstream_warns_once(
+    make_snapshot, mocker: MockerFixture
+):
+    specs = _chain_specs(kind=dict(name=ModelKindName.INCREMENTAL_BY_UNIQUE_KEY, unique_key=["ds"]))
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    # A one day start move must not rebuild the full history of b automatically.
+    assert snaps["b"].snapshot_id not in plan.restatements
+    console.log_warning.assert_called_once()
+    message = console.log_warning.call_args[0][0]
+    assert snaps["b"].name in message and "full history" in message
+    assert f"--restate-model '{snaps['b'].name}'" in message
+    assert "--start 2023-01-01 --end 2023-01-01" in message
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_dev_does_not_restate_versions_shared_with_prod(
+    make_snapshot, mocker: MockerFixture
+):
+    # The new (paused) versions of b and c are metadata only changes: they share their physical
+    # tables with prod, so a dev plan must not rewrite those.
+    context_diff, snaps, _ = _start_extension_context_diff(
+        make_snapshot, _chain_specs(), environment="dev"
+    )
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, is_dev=True, console=console).build()
+
+    assert not plan.restatements
+    assert not plan.start_extension_restatements
+    console.log_warning.assert_called_once()
+    message = console.log_warning.call_args[0][0]
+    assert snaps["b"].name in message
+    assert "tables that production uses or will use" in message
+    assert "along with their downstream models" in message
+    assert "Cannot restate model" not in message
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_dev_restates_versions_with_their_own_table(
+    make_snapshot, mocker: MockerFixture
+):
+    # Forward-only changes are previewed in dev tables (initialized from the production intervals),
+    # so restating them can't affect prod.
+    specs = _chain_specs()
+    specs[0]["new"]["query"] = parse_one("select 1 as ds, 2 as extra")
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs, environment="dev")
+    console = mocker.Mock()
+    plan = PlanBuilder(
+        context_diff, is_dev=True, forward_only=True, start="2023-01-01", console=console
+    ).build()
+
+    assert not plan.deployability_index.is_deployable(snaps["b"])
+    assert {s_id.name for s_id in plan.start_extension_restatements} == {
+        snaps["b"].name,
+        snaps["c"].name,
+    }
+    assert snaps["b"].dev_intervals
+    console.log_warning.assert_not_called()
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flows_through_view_without_intervals(make_snapshot):
+    specs = _chain_specs(kind=ViewKind(), intervals=[])
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+    # c is derived from the view, which reflects the new data of a right away.
+    assert plan.restatements[snaps["c"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-02"))
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flows_through_embedded_model(make_snapshot):
+    specs = _chain_specs(kind=dict(name=ModelKindName.EMBEDDED), intervals=[])
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+    assert plan.restatements[snaps["c"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-02"))
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flow_stops_at_models_that_do_not_cover_the_range(make_snapshot):
+    # b starts after the added range, so it has no data in it and neither does anything derived from it.
+    specs = _chain_specs(
+        kind=ViewKind(), start="2023-01-03", intervals=[("2023-01-03", "2023-01-03")]
+    )
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, specs)
+    assert not PlanBuilder(context_diff).build().restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flow_stops_at_child_skipped_by_a_guard(
+    make_snapshot, mocker: MockerFixture
+):
+    specs = _chain_specs(kind=dict(name=ModelKindName.INCREMENTAL_BY_UNIQUE_KEY, unique_key=["ds"]))
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    # b is warn-only and unchanged by this plan, so c is consistent with it: no second warning either.
+    assert not plan.restatements
+    console.log_warning.assert_called_once()
+    assert (
+        "models downstream of them are not restated through them"
+        in console.log_warning.call_args[0][0]
+    )
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flows_through_child_that_is_backfilled_in_this_plan(make_snapshot):
+    # b has no intervals at all so it is backfilled for the added range, and c was computed from the old b.
+    specs = _chain_specs(intervals=[])
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+    assert set(plan.restatements) == {snaps["c"].snapshot_id}
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_ignores_unresolvable_inferred_start(make_snapshot):
+    # b has no start and one of its old parents is gone, so its old start can't be known.
+    specs = _chain_specs()
+    specs[1].update(start=None)
+    specs[2].update(start=None)
+    context_diff, snaps, olds = _start_extension_context_diff(make_snapshot, specs)
+    # a is no longer reported as modified, so the old version of a that b was derived from can't be found.
+    context_diff.modified_snapshots = {
+        name: pair
+        for name, pair in context_diff.modified_snapshots.items()
+        if name != snaps["a"].name
+    }
+    assert olds["a"].snapshot_id not in context_diff.snapshots
+
+    plan = PlanBuilder(context_diff).build()
+    assert not plan.restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_before_plan_start_is_ignored(make_snapshot):
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, _chain_specs())
+    assert not PlanBuilder(context_diff, is_dev=True, start="2023-01-02").build().restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_within_the_same_interval_unit_is_ignored(make_snapshot):
+    context_diff, _, _ = _start_extension_context_diff(
+        make_snapshot, _chain_specs(a_old="2023-01-01 12:00:00", a_new="2023-01-01 00:00:00")
+    )
+    assert not PlanBuilder(context_diff).build().restatements
+
+
+def test_evaluatable_plan_is_restatement_ignores_start_extensions(make_snapshot):
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, _chain_specs())
+    with time_machine.travel(_EXECUTION_TIME):
+        plan = PlanBuilder(context_diff).build()
+        evaluatable = plan.to_evaluatable()
+        assert evaluatable.restatements
+        assert evaluatable.start_extension_restatements == {snaps["b"].name, snaps["c"].name}
+        assert not evaluatable.is_restatement
+
+        explicit = PlanBuilder(context_diff, restate_models={snaps["a"].name}).build()
+        assert explicit.to_evaluatable().is_restatement
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_with_breaking_change_does_not_restate(make_snapshot):
+    specs = _chain_specs()
+    specs[0]["new"]["query"] = parse_one("select 1 as ds, 2 as extra")
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    builder = PlanBuilder(context_diff, auto_categorization_enabled=False)
+    builder.set_choice(snaps["a"], SnapshotChangeCategory.BREAKING)
+    plan = builder.build()
+
+    # Downstream models get new versions and are rebuilt from scratch: no extra work is needed.
+    assert snaps["b"].change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+    assert not plan.restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_with_non_breaking_change_restates_extension_only(make_snapshot):
+    specs = _chain_specs()
+    specs[0]["new"]["query"] = parse_one("select 1 as ds, 2 as extra")
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    builder = PlanBuilder(context_diff, auto_categorization_enabled=False)
+    builder.set_choice(snaps["a"], SnapshotChangeCategory.NON_BREAKING)
+    plan = builder.build()
+
+    assert snaps["b"].change_category == SnapshotChangeCategory.INDIRECT_NON_BREAKING
+    expected = (_ts("2023-01-01"), _ts("2023-01-02"))
+    assert plan.restatements == {
+        snaps["b"].snapshot_id: expected,
+        snaps["c"].snapshot_id: expected,
+    }
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_inferred_start_is_resolved_through_parents(make_snapshot):
+    # b has no explicit start so its start moves together with a's. It has no intervals in the
+    # affected range itself, but c (explicit start) does and is derived from b.
+    specs = _chain_specs()
+    specs[1].update(start=None, intervals=[("2023-01-02", "2023-01-03")])
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert set(plan.restatements) == {snaps["c"].snapshot_id}
+    assert plan.restatements[snaps["c"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-02"))
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_depends_on_past_downstream_restates_through_execution_time(
+    make_snapshot,
+):
+    specs = _chain_specs()
+    specs[1]["self_referencing"] = True
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert snaps["b"].depends_on_past
+    start, end = plan.restatements[snaps["b"].snapshot_id]
+    assert start == _ts("2023-01-01")
+    assert end >= _ts(_EXECUTION_TIME)
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_forward_only_downstream_follows_regular_rules(make_snapshot):
+    specs = _chain_specs(kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True))
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+    assert snaps["b"].snapshot_id in plan.restatements
+    assert snaps["c"].snapshot_id in plan.restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_merges_with_explicit_restatement(make_snapshot):
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, _chain_specs())
+    plan = PlanBuilder(
+        context_diff, restate_models={snaps["a"].name}, start="2023-01-01", end="2023-01-03"
+    ).build()
+
+    # The extension range is covered by the explicit range: there is a single, merged range per model.
+    assert plan.restatements[snaps["a"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-04"))
+    for name in ("b", "c"):
+        assert plan.restatements[snaps[name].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-04"))
+    # Only explicitly requested models are listed as such.
+    assert plan.selected_models_to_restate == {snaps["a"].name}
+    assert plan.start_extension_restatements == set()
+
+
+@time_machine.travel(_EXECUTION_TIME)
+@pytest.mark.parametrize("flag", ["select_model", "skip_backfill", "empty_backfill"])
+def test_start_extension_warns_instead_of_restating_when_backfill_is_limited(
+    make_snapshot, mocker: MockerFixture, flag: str
+):
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, _chain_specs())
+    kwargs: t.Dict[str, t.Any] = (
+        {"backfill_models": {snaps["a"].name}} if flag == "select_model" else {flag: True}
+    )
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console, **kwargs).build()
+
+    assert not plan.restatements
+    message = console.log_warning.call_args[0][0]
+    assert snaps["b"].name in message and snaps["c"].name in message
+    assert "--restate-model" in message
+    assert "--start 2023-01-01 --end 2023-01-01" in message
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_with_select_model_restates_selected_downstream(
+    make_snapshot, mocker: MockerFixture
+):
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, _chain_specs())
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console, backfill_models={snaps["b"].name}).build()
+
+    # b is selected (c isn't), so only b is restated and the plan warns about c.
+    assert set(plan.restatements) == {snaps["b"].snapshot_id}
+    message = console.log_warning.call_args[0][0]
+    assert snaps["c"].name in message and snaps["b"].name not in message
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_in_diamond_flows_through_unguarded_branch(
+    make_snapshot, mocker: MockerFixture
+):
+    # a -> b (restatement disabled) -> d and a -> c -> d: d is restated through c only.
+    intervals = [("2020-01-01", "2023-01-03")]
+    specs: t.List[t.Dict[str, t.Any]] = [
+        {
+            "name": "a",
+            "old": {"start": "2023-01-02"},
+            "new": {"start": "2023-01-01"},
+            "intervals": [("2023-01-02", "2023-01-03")],
+        },
+        {
+            "name": "b",
+            "parent": "a",
+            "kind": IncrementalByTimeRangeKind(time_column="ds", disable_restatement=True),
+            "intervals": intervals,
+        },
+        {"name": "c", "parent": "a", "intervals": intervals},
+        {"name": "d", "parents": ["b", "c"], "intervals": intervals},
+    ]
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    day = (_ts("2023-01-01"), _ts("2023-01-02"))
+    assert plan.restatements == {snaps["c"].snapshot_id: day, snaps["d"].snapshot_id: day}
+    console.log_warning.assert_called_once()
+    assert snaps["b"].name in console.log_warning.call_args[0][0]
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_cut_by_plan_start_warns_in_prod_only(make_snapshot, mocker: MockerFixture):
+    # The range [01-01, 01-03) is cut to [01-02, 01-03) by the plan start. The remainder won't be
+    # detected again once this plan is applied.
+    def build(is_dev: bool, console) -> Plan:
+        context_diff, snaps, _ = _start_extension_context_diff(
+            make_snapshot,
+            _chain_specs(a_old="2023-01-03", a_new="2023-01-01"),
+            environment="dev" if is_dev else "prod",
+        )
+        return PlanBuilder(
+            context_diff,
+            is_dev=is_dev,
+            start="2023-01-02",
+            restate_models=None if is_dev else {snaps["a"].name},
+            console=console,
+        ).build()
+
+    console = mocker.Mock()
+    build(False, console)
+    console.log_warning.assert_called_once()
+    message = console.log_warning.call_args[0][0]
+    assert "--restate-model '\"b\"' --restate-model '\"c\"'" in message
+    assert "--start 2023-01-01 --end 2023-01-01" in message
+
+    console = mocker.Mock()
+    build(True, console)
+    assert not any("cut off" in call[0][0] for call in console.log_warning.call_args_list)
