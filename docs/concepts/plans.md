@@ -458,6 +458,24 @@ These examples demonstrate how to select which models to restate based on model 
     sqlmesh plan --restate-model "db.model_a" --start "2024-01-01" --end "2024-01-10"
     ```
 
+### Restatement after moving a model's start earlier
+
+When you move an incremental model's `start` earlier, SQLMesh backfills that model for the newly added date range, as usual. Downstream models may already hold intervals for that same range, though, and those were computed while the upstream model was empty there.
+
+To keep that stale data from lingering, SQLMesh also restates the downstream models' existing intervals for the added range. The range is widened to each downstream model's interval unit. The plan output lists these models under the heading "Models restated because the start of an upstream model moved earlier".
+
+No restatement happens when the new `start` is later than before or when the change is [breaking](#breaking-change), because downstream models are rebuilt anyway.
+
+SQLMesh skips a model and prints a single warning in these cases. Models downstream of a skipped model are not restated through it, since its data doesn't change, but they can still be restated through another upstream model:
+
+- The model has `disable_restatement` set to `true` (this is the default for SCD Type 2 models).
+- The model's kind only supports restating its full history (`INCREMENTAL_BY_UNIQUE_KEY`, `INCREMENTAL_UNMANAGED`, `INCREMENTAL_BY_PARTITION`, and the SCD Type 2 kinds). The warning prints the `sqlmesh plan --restate-model ...` command to run manually.
+- The plan targets a development environment and the downstream model's table is one that `prod` uses or will use. These models are restated when the change is applied to `prod`.
+
+If you use `--select-model`, `--skip-backfill` or `--empty-backfill`, stale models that the plan does not backfill are not restated either. The same applies to the part of the added range before the plan's `--start`, when it is set later than the new model `start` outside a development environment. In both cases the warning prints the `--restate-model` command to run manually.
+
+Unlike a plan with `--restate-model`, these automatic restatements do not make the plan a restatement plan. For example, [signals](../guides/signals.md) are evaluated as in a regular run.
+
 ### Restating production vs development
 
 Restatement plans behave differently depending on if you're targeting the `prod` environment or a [development environment](./environments.md#how-to-use-environments).
