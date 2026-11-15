@@ -44,7 +44,7 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
     MIN_NATIVE_MERGE_VERSION = version.parse("1.4.0")
     # Catalog types whose storage extension supports MERGE INTO. Other attached catalogs
     # (postgres, sqlite, mysql, ...) fall back to DELETE + INSERT.
-    NATIVE_MERGE_CATALOG_TYPES = {"duckdb", "ducklake"}
+    NATIVE_MERGE_CATALOG_TYPES = {"duckdb", "ducklake", "motherduck"}
 
     @property
     def catalog_support(self) -> CatalogSupport:
@@ -89,11 +89,12 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
     def _supports_native_merge(self, target_table: TableName) -> bool:
         if not self._duckdb_supports_merge:
             return False
-        if self._is_motherduck:
-            return True
-        catalog = exp.to_table(target_table).catalog or self.get_current_catalog()
+        catalog = (
+            exp.to_table(target_table, dialect=self.dialect).catalog or self.get_current_catalog()
+        )
         # Errors from the catalog lookup propagate on purpose; only a None/unknown type falls back.
-        return self._get_catalog_type(catalog) in self.NATIVE_MERGE_CATALOG_TYPES
+        catalog_type = (self._get_catalog_type(catalog) or "").lower()
+        return catalog_type in self.NATIVE_MERGE_CATALOG_TYPES
 
     def merge(
         self,
@@ -121,10 +122,83 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
             source_columns=source_columns,
         )
 
-    def _prepare_merge_source_query(self, query: Query, unique_key: t.Sequence[exp.Expr]) -> Query:
-        # A native MERGE inserts every unmatched source row, so duplicate keys in the source would
-        # produce duplicate keys in the target. Keep one row per key, like the DELETE + INSERT path.
-        return exp.select("*").distinct(*unique_key).from_(query.subquery("_src"))  # type: ignore
+    def _prepare_merge_source_query(
+        self,
+        query: Query,
+        target_table: TableName,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        unique_key: t.Optional[t.Sequence[exp.Expr]] = None,
+        when_matched: t.Optional[exp.Whens] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+    ) -> Query:
+        if target_columns_to_types is None:
+            try:
+                target_columns_to_types = self.columns(target_table)
+            except Exception:
+                target_columns_to_types = None
+
+        unique_key = unique_key or []
+
+        if not target_columns_to_types or all(
+            not dtype or dtype.is_type(exp.DataType.Type.UNKNOWN)
+            for dtype in target_columns_to_types.values()
+        ):
+            return exp.select("*").distinct(*unique_key).from_(query.subquery("_src", copy=False))  # type: ignore
+
+        source_columns_set = (
+            {s.lower() for s in source_columns} if source_columns is not None else None
+        )
+        target_cols_to_project = (
+            [col for col in target_columns_to_types if col.lower() in source_columns_set]
+            if source_columns_set is not None
+            else list(target_columns_to_types)
+        )
+        projected_target_cols = {col.lower(): col for col in target_cols_to_project}
+
+        projections: t.List[exp.Expr] = []
+        for col in target_cols_to_project:
+            dtype = target_columns_to_types[col]
+            if dtype and not dtype.is_type(exp.DataType.Type.UNKNOWN):
+                projections.append(exp.alias_(exp.cast(exp.column(col), to=dtype), col, copy=False))
+            else:
+                projections.append(exp.column(col))
+
+        seen_extra: t.Set[str] = set()
+        extra_cols: t.List[str] = []
+        target_names = {
+            MERGE_TARGET_ALIAS,
+            exp.to_table(target_table, dialect=self.dialect).name.upper(),
+        }
+        for expr in [when_matched, merge_filter, *unique_key]:
+            if expr:
+                for column_expr in expr.find_all(exp.Column):
+                    if column_expr.table and column_expr.table.upper() in target_names:
+                        continue
+                    col_name = column_expr.name
+                    if (
+                        col_name.lower() not in projected_target_cols
+                        and col_name.lower() not in seen_extra
+                    ):
+                        seen_extra.add(col_name.lower())
+                        extra_cols.append(col_name)
+
+        inner_query = query.this if isinstance(query, exp.Subquery) else query
+        if isinstance(inner_query, exp.Select):
+            for name in inner_query.named_selects:
+                if (
+                    name != "*"
+                    and name.lower() not in projected_target_cols
+                    and name.lower() not in seen_extra
+                ):
+                    seen_extra.add(name.lower())
+                    extra_cols.append(name)
+
+        for extra in extra_cols:
+            projections.append(exp.column(extra))
+
+        coerced = exp.select(*projections).from_(query.subquery("_raw_src", copy=False), copy=False)
+        return exp.select("*").distinct(*unique_key).from_(coerced.subquery("_src", copy=False))  # type: ignore
 
     def _merge(
         self,
@@ -138,6 +212,10 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
         # TODO: sqlglot's DuckDB generator doesn't apply `merge_without_target_sql` yet. Remove this
         # once the pinned sqlglot version does.
         whens = whens.copy()
+        target_names = {
+            MERGE_TARGET_ALIAS,
+            exp.to_table(target_table, dialect=self.dialect).name.upper(),
+        }
         for when in whens.expressions:
             then = when.args.get("then")
             targets: t.List[exp.Expr] = []
@@ -146,7 +224,11 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
             elif isinstance(then, exp.Insert) and isinstance(then.this, exp.Tuple):
                 targets = then.this.expressions
             for column in targets:
-                if isinstance(column, exp.Column) and column.table.upper() == MERGE_TARGET_ALIAS:
+                if (
+                    isinstance(column, exp.Column)
+                    and column.table
+                    and column.table.upper() in target_names
+                ):
                     column.set("table", None)
         super()._merge(target_table, query, on, whens)
 

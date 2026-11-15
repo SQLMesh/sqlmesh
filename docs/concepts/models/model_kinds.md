@@ -624,7 +624,7 @@ MODEL (
 * Snowflake
 * Spark
 
-In DuckDB's case, the native `MERGE` statement is used on version 1.4 or later when the target table is in a DuckDB, DuckLake or MotherDuck catalog. Older DuckDB versions, and target tables in other attached catalogs (such as PostgreSQL, SQLite or MySQL), use `DELETE` + `INSERT` instead, and `when_matched` and `merge_filter` raise an error there. Source rows are de-duplicated by `unique_key` before the merge so there is one row per key. Which of several duplicate rows is kept is unspecified.
+In DuckDB's case, the native `MERGE` statement is used on version 1.4 or later when the target table is in a DuckDB, DuckLake or MotherDuck catalog. Older DuckDB versions, and target tables in other attached catalogs (such as PostgreSQL, SQLite or MySQL), use `DELETE` + `INSERT` instead, and `when_matched` and `merge_filter` raise an error there. Source rows are de-duplicated by `unique_key` before the merge so there is one row per key. Which of several duplicate rows is kept is unspecified. Key matching follows standard SQL `=` equality semantics (`NULL` key values do not match existing rows), consistent with other native `MERGE` engines in SQLMesh. To achieve null-safe matching on nullable composite keys, specify an expression such as `COALESCE(key_col, '<sentinel>')` in `unique_key`.
 
 In Redshift's case, to enable the use of the native `MERGE` statement, you need to pass the `enable_merge` flag in the connection and set it to `true`. It is disabled by default.
 

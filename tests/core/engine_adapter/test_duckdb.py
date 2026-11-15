@@ -320,7 +320,9 @@ def test_merge_native_sql(make_mocked_engine_adapter: t.Callable, mocker: Mocker
 
     assert to_sql_calls(adapter) == [
         'MERGE INTO "tgt" AS "__MERGE_TARGET__" USING '
-        '(SELECT DISTINCT ON ("id") * FROM (SELECT "id", "name", "value" FROM "src") AS "_src") AS "__MERGE_SOURCE__" '
+        '(SELECT DISTINCT ON ("id") * FROM '
+        '(SELECT CAST("id" AS INT) AS "id", CAST("name" AS TEXT) AS "name", CAST("value" AS INT) AS "value" FROM '
+        '(SELECT "id", "name", "value" FROM "src") AS "_raw_src") AS "_src") AS "__MERGE_SOURCE__" '
         'ON "__MERGE_TARGET__"."id" = "__MERGE_SOURCE__"."id" '
         'WHEN MATCHED THEN UPDATE SET "id" = "__MERGE_SOURCE__"."id", "name" = "__MERGE_SOURCE__"."name", "value" = "__MERGE_SOURCE__"."value" '
         'WHEN NOT MATCHED THEN INSERT ("id", "name", "value") '
@@ -542,7 +544,7 @@ def test_merge_catalog_gate_uses_target_catalog_when_qualified(
     assert to_sql_calls(adapter)[0].startswith('MERGE INTO "lake"."s"."tgt"')
 
 
-def test_merge_motherduck_uses_native_without_catalog_lookup(
+def test_merge_motherduck_catalog_uses_native(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
 ):
     adapter = _mocked_adapter(
@@ -556,7 +558,45 @@ def test_merge_motherduck_uses_native_without_catalog_lookup(
         target_columns_to_types=MERGE_COLUMNS,
         unique_key=[exp.to_column("id")],
     )
-    get_type.assert_not_called()
+    get_type.assert_called_once_with("md")
+    assert to_sql_calls(adapter)[0].startswith('MERGE INTO "md"."s"."tgt"')
+
+
+def test_merge_motherduck_foreign_catalog_falls_back(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = _mocked_adapter(
+        make_mocked_engine_adapter, mocker, "1.4.1", "sqlite", is_motherduck=True
+    )
+    get_type = t.cast(MagicMock, adapter._get_catalog_type)
+
+    adapter.merge(
+        target_table="sqlite_db.s.tgt",
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    get_type.assert_any_call("sqlite_db")
+    sql_calls = to_sql_calls(adapter)
+    assert not any(call.startswith("MERGE") for call in sql_calls)
+    assert any(call.startswith('DELETE FROM "sqlite_db"."s"."tgt"') for call in sql_calls)
+
+
+def test_merge_local_duckdb_attached_motherduck_uses_native(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = _mocked_adapter(
+        make_mocked_engine_adapter, mocker, "1.4.1", "motherduck", is_motherduck=False
+    )
+    get_type = t.cast(MagicMock, adapter._get_catalog_type)
+
+    adapter.merge(
+        target_table="md.s.tgt",
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    get_type.assert_called_once_with("md")
     assert to_sql_calls(adapter)[0].startswith('MERGE INTO "md"."s"."tgt"')
 
 
@@ -618,3 +658,88 @@ def test_merge_native_ducklake(ducklake_conn, tmp_path, mocker: MockerFixture):
     rows = ducklake_conn.execute("SELECT * FROM lake.s.tgt ORDER BY id").fetchall()
     assert [r[0] for r in rows] == [1, 2, 3]
     assert rows[1] == (2, "b", 21)
+
+
+def test_merge_native_pre_distinct_coercion_decimal_to_int(native_merge_adapter, duck_conn):
+    _set_up_merge_tables(duck_conn, "(1, 'a', 10)")
+    # DuckDB will create src with DOUBLE for 1.1 and 1.2
+    duck_conn.execute("DROP TABLE src")
+    duck_conn.execute("CREATE TABLE src (id DOUBLE, name TEXT, value INT)")
+    duck_conn.execute("INSERT INTO src VALUES (1.1, 'a2', 20), (1.2, 'a3', 30)")
+
+    _merge(native_merge_adapter)
+    rows = _rows(duck_conn)
+    # The two decimal keys coerce to 1::INT before DISTINCT ON and join, updating in place without duplicates
+    assert len(rows) == 1
+    assert rows[0][0] == 1
+    assert rows[0] in {(1, "a2", 20), (1, "a3", 30)}
+
+
+def test_merge_native_extra_source_columns_preserved(native_merge_adapter, duck_conn):
+    _set_up_merge_tables(duck_conn, "(1, 'a', 10)")
+    duck_conn.execute("DROP TABLE src")
+    duck_conn.execute("CREATE TABLE src (id DOUBLE, name TEXT, value INT, op VARCHAR)")
+    duck_conn.execute("INSERT INTO src VALUES (1.0, 'a', 10, 'D'), (2.0, 'b', 20, 'U')")
+
+    _merge(
+        native_merge_adapter,
+        source_table=parse_one("SELECT id, name, value, op FROM src"),
+        when_matched=_when_matched(
+            "WHEN MATCHED AND __MERGE_SOURCE__.op = 'D' THEN DELETE "
+            "WHEN MATCHED THEN UPDATE SET value = __MERGE_SOURCE__.value"
+        ),
+    )
+    # op is preserved in _raw_src; id=1 is deleted and id=2 is inserted
+    assert _rows(duck_conn) == [(2, "b", 20)]
+
+
+def test_merge_native_target_table_name_stripped_from_update_set(native_merge_adapter, duck_conn):
+    _set_up_merge_tables(duck_conn, "(1, 'a', 10)", "(1, 'a2', 20)")
+    _merge(
+        native_merge_adapter,
+        when_matched=_when_matched(
+            "WHEN MATCHED THEN UPDATE SET tgt.value = __MERGE_SOURCE__.value"
+        ),
+    )
+    assert _rows(duck_conn) == [(1, "a", 20)]
+
+
+def test_merge_native_composite_unique_key_option_a(native_merge_adapter, duck_conn):
+    duck_conn.execute("DROP TABLE IF EXISTS tgt")
+    duck_conn.execute("DROP TABLE IF EXISTS src")
+    duck_conn.execute("CREATE TABLE tgt (id INT, name TEXT, value INT)")
+    duck_conn.execute("CREATE TABLE src (id INT, name TEXT, value INT)")
+
+    duck_conn.execute("INSERT INTO tgt VALUES (1, 'a', 10), (1, NULL, 20), (NULL, 'b', 30)")
+    duck_conn.execute("INSERT INTO src VALUES (1, NULL, 25), (NULL, 'b', 35), (2, 'c', 40)")
+
+    # Standard SQL = equality on composite key: NULL != NULL
+    _merge(
+        native_merge_adapter,
+        unique_key=[exp.to_column("id"), exp.to_column("name")],
+    )
+    rows = duck_conn.execute("SELECT * FROM tgt ORDER BY id NULLS LAST, name NULLS LAST").fetchall()
+    assert rows == [
+        (1, "a", 10),
+        (1, None, 20),
+        (1, None, 25),
+        (2, "c", 40),
+        (None, "b", 30),
+        (None, "b", 35),
+    ]
+
+    # Null-safe matching with COALESCE expression keys
+    duck_conn.execute("DELETE FROM tgt")
+    duck_conn.execute("DELETE FROM src")
+    duck_conn.execute("INSERT INTO tgt VALUES (1, 'a', 10), (1, NULL, 20)")
+    duck_conn.execute("INSERT INTO src VALUES (1, NULL, 25)")
+
+    _merge(
+        native_merge_adapter,
+        unique_key=[
+            parse_one("COALESCE(id, -1)", dialect="duckdb"),
+            parse_one("COALESCE(name, '')", dialect="duckdb"),
+        ],
+    )
+    rows = duck_conn.execute("SELECT * FROM tgt ORDER BY id NULLS LAST, name NULLS LAST").fetchall()
+    assert rows == [(1, "a", 10), (1, None, 25)]
