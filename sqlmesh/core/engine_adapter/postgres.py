@@ -18,6 +18,7 @@ from sqlmesh.core.engine_adapter.mixins import (
 )
 from sqlmesh.core.engine_adapter.shared import SourceQuery, set_catalog
 from sqlmesh.utils import random_id
+from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
     import pandas as pd
@@ -155,7 +156,9 @@ class PostgresEngineAdapter(
         staging_columns_to_types = (
             None
             if ordered_df.empty or not hasattr(self.cursor, "copy_expert")
-            else self._get_copy_staging_columns_to_types(ordered_df, null_marker)
+            else self._get_copy_staging_columns_to_types(
+                ordered_df, null_marker, target_columns_to_types
+            )
         )
         if staging_columns_to_types is None:
             return super()._df_to_source_queries(
@@ -173,8 +176,9 @@ class PostgresEngineAdapter(
             # assumes that every call would have produced the same result.
             if not self.table_exists(staging_table):
                 try:
-                    self.create_table(staging_table, staging_columns_to_types)
-                    self._copy_df(staging_table, ordered_df, null_marker, batch_size)
+                    with self.transaction():
+                        self.create_table(staging_table, staging_columns_to_types)
+                        self._copy_df(staging_table, ordered_df, null_marker, batch_size)
                 except Exception:
                     # Callers such as `replace_query` invoke the factory outside of `with source_query`,
                     # so `cleanup_func` won't run and a committed staging table would leak.
@@ -194,6 +198,67 @@ class PostgresEngineAdapter(
             )
         ]
 
+    def _get_temp_table(
+        self, table: TableName, table_only: bool = False, quoted: bool = True
+    ) -> exp.Table:
+        if self.MAX_IDENTIFIER_LENGTH is None:
+            return super()._get_temp_table(table, table_only=table_only, quoted=quoted)
+
+        table = t.cast(exp.Table, exp.to_table(table).copy())
+        prefix, suffix = "__temp_", f"_{random_id(short=True)}"
+        name = table.name
+        prefix_bytes = len(prefix.encode("utf-8"))
+        suffix_bytes = len(suffix.encode("utf-8"))
+        max_bytes = self.MAX_IDENTIFIER_LENGTH
+        total_bytes = prefix_bytes + len(name.encode("utf-8")) + suffix_bytes
+
+        if total_bytes > max_bytes:
+            budget = max(max_bytes - prefix_bytes - suffix_bytes, 0)
+            if budget == 0:
+                name = ""
+            else:
+                target_tail_bytes = budget // 2
+                target_head_bytes = budget - target_tail_bytes
+
+                head = []
+                head_bytes = 0
+                for ch in name:
+                    ch_b = len(ch.encode("utf-8"))
+                    if head_bytes + ch_b > target_head_bytes:
+                        break
+                    head.append(ch)
+                    head_bytes += ch_b
+
+                remaining_tail_budget = budget - head_bytes
+                tail = []
+                tail_bytes = 0
+                for ch in reversed(name[len(head) :]):
+                    ch_b = len(ch.encode("utf-8"))
+                    if tail_bytes + ch_b > remaining_tail_budget:
+                        break
+                    tail.append(ch)
+                    tail_bytes += ch_b
+
+                name = "".join(head) + "".join(reversed(tail))
+
+        table.set("this", exp.to_identifier(f"{prefix}{name}{suffix}", quoted=quoted))
+        if table_only:
+            table.set("db", None)
+            table.set("catalog", None)
+        return table
+
+    def _check_identifier_length(self, expression: exp.Expr) -> None:
+        if self.MAX_IDENTIFIER_LENGTH is None or not isinstance(expression, exp.DDL):
+            return
+
+        for identifier in expression.find_all(exp.Identifier):
+            name = identifier.name
+            name_bytes = len(name.encode("utf-8"))
+            if name_bytes > self.MAX_IDENTIFIER_LENGTH:
+                raise SQLMeshError(
+                    f"Identifier name '{name}' (length {name_bytes} bytes) exceeds {self.dialect.capitalize()}'s max identifier limit of {self.MAX_IDENTIFIER_LENGTH} bytes"
+                )
+
     def _drop_copy_staging_table(self, staging_table: exp.Table) -> None:
         try:
             self.drop_table(staging_table)
@@ -207,19 +272,59 @@ class PostgresEngineAdapter(
             logger.debug("Skipped dropping %s from an aborted transaction", staging_table.sql())
 
     @staticmethod
+    def _is_oid_or_reg_type(data_type: exp.DataType) -> bool:
+        type_str = str(data_type.this).lower()
+        sql_str = data_type.sql("postgres").lower()
+        return (
+            type_str
+            in (
+                "oid",
+                "regclass",
+                "regtype",
+                "regproc",
+                "regprocedure",
+                "regoper",
+                "regoperator",
+                "regnamespace",
+                "regrole",
+                "regconfig",
+                "regdictionary",
+                "regcollation",
+            )
+            or sql_str == "oid"
+            or sql_str.startswith("reg")
+        )
+
+    @classmethod
     def _get_copy_staging_columns_to_types(
-        df: pd.DataFrame, null_marker: str
+        cls,
+        df: pd.DataFrame,
+        null_marker: str,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
     ) -> t.Optional[t.Dict[str, exp.DataType]]:
         """Returns the staging table column types for the DataFrame, or None if it can't be loaded with COPY.
 
         None is returned when a column has a dtype or values that wouldn't be read back by COPY exactly
         as the generic `VALUES` implementation would write them, e.g. dicts, bytes, Decimals, dates or
-        categoricals, or when a string would be misread by the CSV parser.
+        categoricals, or when a string would be misread by the CSV parser, or when the staging type is
+        incompatible with the target column type.
         """
         import pandas as pd
 
+        if target_columns_to_types is None:
+            return None
+
         staging_columns_to_types: t.Dict[str, exp.DataType] = {}
         for column, series in df.items():
+            col_name = str(column)
+            target_type = target_columns_to_types.get(col_name)
+            if target_type is None:
+                return None
+            if not isinstance(target_type, exp.DataType):
+                target_type = exp.DataType.build(target_type, dialect=cls.DIALECT)
+            if target_type.is_type(exp.DataType.Type.UNKNOWN):
+                return None
+
             dtype = series.dtype
             staging_type: t.Optional[str]
             if isinstance(dtype, pd.DatetimeTZDtype):
@@ -228,21 +333,55 @@ class PostgresEngineAdapter(
                 staging_type = "TIMESTAMP"
             elif str(dtype) in _COPY_DTYPE_TO_STAGING_TYPE:
                 staging_type = _COPY_DTYPE_TO_STAGING_TYPE[str(dtype)]
+                if staging_type == "BIGINT" and target_type.is_type(exp.DataType.Type.BOOLEAN):
+                    return None
+                if staging_type == "NUMERIC":
+                    if target_type.is_type(
+                        exp.DataType.Type.BOOLEAN, exp.DataType.Type.BIT
+                    ) or cls._is_oid_or_reg_type(target_type):
+                        return None
             elif dtype == object or isinstance(dtype, pd.StringDtype):
-                staging_type = _COPY_INFERRED_TO_STAGING_TYPE.get(
-                    pd.api.types.infer_dtype(series, skipna=True)
-                )
-                if staging_type == "TEXT":
-                    if series.eq(null_marker).any():
+                inferred = pd.api.types.infer_dtype(series, skipna=True)
+                if inferred == "integer":
+                    if target_type.is_type(exp.DataType.Type.BOOLEAN):
                         return None
-                    # On PostgreSQL <= 17 an unquoted `\.` line ends the data, which happens if it is the only column
-                    if len(df.columns) == 1 and series.eq("\\.").any():
-                        return None
+                    non_nulls = series.dropna()
+                    try:
+                        fits_bigint = bool(
+                            (
+                                (non_nulls >= -9223372036854775808)
+                                & (non_nulls <= 9223372036854775807)
+                            ).all()
+                        )
+                    except Exception:
+                        fits_bigint = False
+
+                    if fits_bigint:
+                        staging_type = "BIGINT"
+                    else:
+                        staging_type = "NUMERIC"
+                        if target_type.is_type(exp.DataType.Type.BIT) or cls._is_oid_or_reg_type(
+                            target_type
+                        ):
+                            return None
+                else:
+                    staging_type = _COPY_INFERRED_TO_STAGING_TYPE.get(inferred)
+                    if staging_type == "TEXT":
+                        if series.eq(null_marker).any():
+                            return None
+                        # On PostgreSQL <= 17 an unquoted `\.` line ends the data, which happens if it is the only column
+                        if len(df.columns) == 1 and series.eq("\\.").any():
+                            return None
+                    elif staging_type == "NUMERIC":
+                        if target_type.is_type(
+                            exp.DataType.Type.BOOLEAN, exp.DataType.Type.BIT
+                        ) or cls._is_oid_or_reg_type(target_type):
+                            return None
             else:
                 staging_type = None
             if staging_type is None:
                 return None
-            staging_columns_to_types[str(column)] = exp.DataType.build(
+            staging_columns_to_types[col_name] = exp.DataType.build(
                 staging_type, dialect=PostgresEngineAdapter.DIALECT
             )
         return staging_columns_to_types

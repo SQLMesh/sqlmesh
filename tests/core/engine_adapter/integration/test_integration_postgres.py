@@ -1910,22 +1910,26 @@ def test_df_copy_engine_adapter_operations(
     ]
 
     # merge: native (PG >= 15) and the logical implementation used for PG < 15
-    for version in (engine_adapter.server_version, (14, 0)):
-        merged = ctx.table(f"merged_{version[0]}")
-        engine_adapter.create_table(merged, types)
-        engine_adapter.insert_append(
-            merged,
-            pd.DataFrame({"id": [1, 2], "name": ["a", "b"], "ds": ["x", "x"]}),
-            target_columns_to_types=types,
-        )
-        engine_adapter.server_version = version  # type: ignore
-        engine_adapter.merge(
-            merged,
-            pd.DataFrame({"id": [2, 3], "name": ["B", "C"], "ds": ["y", "y"]}),
-            target_columns_to_types=types,
-            unique_key=[exp.to_column("id", quoted=True)],
-        )
-        assert _read(merged) == [(1, "a", "x"), (2, "B", "y"), (3, "C", "y")]
+    original_version = engine_adapter.server_version
+    try:
+        for idx, version in enumerate((original_version, (14, 0))):
+            merged = ctx.table(f"merged_{idx}_{version[0]}")
+            engine_adapter.create_table(merged, types)
+            engine_adapter.insert_append(
+                merged,
+                pd.DataFrame({"id": [1, 2], "name": ["a", "b"], "ds": ["x", "x"]}),
+                target_columns_to_types=types,
+            )
+            engine_adapter.server_version = version  # type: ignore
+            engine_adapter.merge(
+                merged,
+                pd.DataFrame({"id": [2, 3], "name": ["B", "C"], "ds": ["y", "y"]}),
+                target_columns_to_types=types,
+                unique_key=[exp.to_column("id", quoted=True)],
+            )
+            assert _read(merged) == [(1, "a", "x"), (2, "B", "y"), (3, "C", "y")]
+    finally:
+        engine_adapter.server_version = original_version
 
     assert spy.call_count >= 8
     assert (
@@ -2000,19 +2004,79 @@ def execute(context: ExecutionContext, start: datetime, end: datetime, execution
 
 
 @pytest.mark.parametrize("operation", ["replace_query", "insert_append"])
+@pytest.mark.parametrize("pre_ping", [True, False])
 def test_df_copy_failure_leaves_no_staging_table(
-    engine_adapter: PostgresEngineAdapter, ctx: TestContext, operation: str
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext, operation: str, pre_ping: bool
 ):
     """A failing COPY (here: a NUL character) must not leak the staging table, outside a transaction too."""
-    table = ctx.table("copy_failure")
+    adapter = t.cast(
+        PostgresEngineAdapter,
+        engine_adapter if pre_ping else engine_adapter.with_settings(pre_ping=False),
+    )
+    table = ctx.table(f"copy_failure_{operation}_{pre_ping}")
     types = _types(x="text", y="int")
-    engine_adapter.create_table(table, types)
+    adapter.create_table(table, types)
     df = pd.DataFrame({"x": ["a\x00b"], "y": [1]})
 
     with pytest.raises(Exception, match="0x00|null character|NUL"):
-        getattr(engine_adapter, operation)(table, df, target_columns_to_types=types)
+        getattr(adapter, operation)(table, df, target_columns_to_types=types)
 
+    assert _leftover_staging_tables(adapter, exp.to_table(ctx.schema(TEST_SCHEMA)).name) == []
+    assert adapter.fetchone("select 1") == (1,)
+
+
+def test_df_copy_cjk_table_name_utf8(engine_adapter: PostgresEngineAdapter, ctx: TestContext):
+    """Temp staging table name for multi-byte CJK table must not exceed 63 bytes in PostgreSQL."""
+    # Target table is 53 bytes (<= 63 bytes), but temp table (__temp_..._<rand>) would be 69 bytes without truncation
+    table = ctx.table(f"cjk_{'界' * 8}_{'世' * 8}")
+    types = _types(a="int", b="text")
+    engine_adapter.create_table(table, types)
+    df = pd.DataFrame({"a": [1, 2], "b": ["foo", "bar"]})
+    engine_adapter.insert_append(table, df, target_columns_to_types=types)
+    assert engine_adapter.fetchall(f"SELECT * FROM {table.sql('postgres', identify=True)}") == [
+        (1, "foo"),
+        (2, "bar"),
+    ]
     assert (
         _leftover_staging_tables(engine_adapter, exp.to_table(ctx.schema(TEST_SCHEMA)).name) == []
     )
-    assert engine_adapter.fetchone("select 1") == (1,)
+
+
+def test_df_copy_cast_compatibility_live_pg(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext
+):
+    """Live PostgreSQL verifies integer->boolean falls back to VALUES, while object integer->bit(4) uses COPY."""
+    # 1. Integer DataFrame into boolean column (falls back to VALUES)
+    bool_table = ctx.table("target_bool")
+    bool_types = _types(id="int", flag="boolean")
+    engine_adapter.create_table(bool_table, bool_types)
+    df_bool = pd.DataFrame({"id": [1, 2], "flag": [0, 1]})
+    engine_adapter.insert_append(bool_table, df_bool, target_columns_to_types=bool_types)
+    assert engine_adapter.fetchall(
+        f"SELECT * FROM {bool_table.sql('postgres', identify=True)}"
+    ) == [
+        (1, False),
+        (2, True),
+    ]
+
+    # 2. Object-dtype integer DataFrame into boolean column (falls back to VALUES)
+    df_obj_bool = pd.DataFrame({"id": [3, 4], "flag": pd.Series([1, 0], dtype=object)})
+    engine_adapter.insert_append(bool_table, df_obj_bool, target_columns_to_types=bool_types)
+    assert (
+        len(engine_adapter.fetchall(f"SELECT * FROM {bool_table.sql('postgres', identify=True)}"))
+        == 4
+    )
+
+    # 3. Object-dtype integer DataFrame into bit(4) column (uses COPY via BIGINT)
+    bit_table = ctx.table("target_bit")
+    bit_types = _types(id="int", b="bit(4)")
+    engine_adapter.create_table(bit_table, bit_types)
+    df_obj_bit = pd.DataFrame({"id": [1, 2], "b": pd.Series([1, 2], dtype=object)})
+    engine_adapter.insert_append(bit_table, df_obj_bit, target_columns_to_types=bit_types)
+    assert engine_adapter.fetchall(f"SELECT * FROM {bit_table.sql('postgres', identify=True)}") == [
+        (1, "0001"),
+        (2, "0010"),
+    ]
+    assert (
+        _leftover_staging_tables(engine_adapter, exp.to_table(ctx.schema(TEST_SCHEMA)).name) == []
+    )

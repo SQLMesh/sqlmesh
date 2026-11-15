@@ -124,7 +124,9 @@ def test_merge_version_lt_15(
     adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
     adapter.server_version = (14, 0)
 
-    temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table")
+    temp_table_mock = mocker.patch(
+        "sqlmesh.core.engine_adapter.postgres.PostgresEngineAdapter._get_temp_table"
+    )
     table_name = "test"
     temp_table_id = "abcdefgh"
     temp_table_mock.return_value = make_temp_table_name(table_name, temp_table_id)
@@ -314,7 +316,7 @@ def copy_adapter(
     adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
     mocker.patch.object(adapter, "table_exists", return_value=False)
     mocker.patch(
-        "sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table",
+        "sqlmesh.core.engine_adapter.postgres.PostgresEngineAdapter._get_temp_table",
         return_value=make_temp_table_name("tbl", "abcdefgh"),
     )
     return adapter
@@ -574,3 +576,131 @@ def test_df_copy_failure_drops_staging_table_and_reraises(
     with pytest.raises(ValueError, match="copy failed"):
         source_queries[0].query_factory()
     assert to_sql_calls(copy_adapter)[-1] == 'DROP TABLE IF EXISTS "__temp_tbl_abcdefgh"'
+
+
+def test_temp_table_name_respects_max_identifier_length_utf8(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    # CJK: 20 characters * 3 bytes/char = 60 bytes
+    cjk_table = f"s.{'界' * 10}__{'世' * 10}"
+    first = adapter._get_temp_table(cjk_table)
+    second = adapter._get_temp_table(cjk_table)
+    for temp in (first, second):
+        name_bytes = temp.name.encode("utf-8")
+        assert len(name_bytes) <= 63
+        assert temp.name.startswith("__temp_界")
+        assert temp.name.rsplit("_", 1)[0].endswith("世")
+        # Validate that the string is valid UTF-8 and code points are intact
+        assert temp.name == name_bytes.decode("utf-8")
+        adapter._check_identifier_length(exp.Create(this=temp, kind="TABLE"))
+    assert first.name != second.name
+
+    # 4-byte UTF-8 emojis
+    emoji_table = f"s.{'🚀' * 16}"
+    emoji_temp = adapter._get_temp_table(emoji_table)
+    assert len(emoji_temp.name.encode("utf-8")) <= 63
+    assert emoji_temp.name.startswith("__temp_🚀")
+    assert emoji_temp.name.rsplit("_", 1)[0].endswith("🚀")
+    adapter._check_identifier_length(exp.Create(this=emoji_temp, kind="TABLE"))
+
+    # Accented Latin: 35 characters * 2 bytes/char = 70 bytes
+    latin_table = f"s.{'é' * 35}"
+    latin_temp = adapter._get_temp_table(latin_table)
+    assert len(latin_temp.name.encode("utf-8")) <= 63
+    assert latin_temp.name.startswith("__temp_é")
+    adapter._check_identifier_length(exp.Create(this=latin_temp, kind="TABLE"))
+
+
+def test_check_identifier_length_utf8_raises(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    # 22 CJK characters = 66 bytes > 63 bytes (even though char length is 22 < 63)
+    long_utf8 = "界" * 22
+    with pytest.raises(SQLMeshError, match="exceeds Postgres's max identifier limit of 63 bytes"):
+        adapter._check_identifier_length(exp.Create(this=exp.to_table(long_utf8), kind="TABLE"))
+
+
+def test_df_copy_incompatible_target_types_fall_back_to_values(
+    copy_adapter: PostgresEngineAdapter,
+):
+    # BIGINT DataFrame column targeting BOOLEAN
+    df_int = pd.DataFrame({"a": [0, 1]})
+    copy_adapter.insert_append(
+        "tbl",
+        df_int,
+        target_columns_to_types={"a": exp.DataType.build("boolean", dialect="postgres")},
+    )
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert "VALUES" in to_sql_calls(copy_adapter)[-1]
+
+    # Object-dtype integer column targeting BOOLEAN
+    df_obj_int = pd.DataFrame({"a": pd.Series([0, 1, None], dtype=object)})
+    copy_adapter.insert_append(
+        "tbl",
+        df_obj_int,
+        target_columns_to_types={"a": exp.DataType.build("boolean", dialect="postgres")},
+    )
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert "VALUES" in to_sql_calls(copy_adapter)[-1]
+
+    # Huge integer (> 64-bit) staged as NUMERIC targeting BIT(4) or OID falls back to VALUES
+    df_huge = pd.DataFrame({"a": pd.Series([2**64, None], dtype=object)})
+    copy_adapter.insert_append(
+        "tbl",
+        df_huge,
+        target_columns_to_types={"a": exp.DataType.build("bit(4)", dialect="postgres")},
+    )
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert "VALUES" in to_sql_calls(copy_adapter)[-1]
+
+    copy_adapter.insert_append(
+        "tbl", df_huge, target_columns_to_types={"a": exp.DataType.build("oid", dialect="postgres")}
+    )
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert "VALUES" in to_sql_calls(copy_adapter)[-1]
+
+    # Float64 staged as NUMERIC targeting BIT(4) falls back to VALUES
+    df_float = pd.DataFrame({"a": [1.5, 2.5]})
+    copy_adapter.insert_append(
+        "tbl",
+        df_float,
+        target_columns_to_types={"a": exp.DataType.build("bit(4)", dialect="postgres")},
+    )
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert "VALUES" in to_sql_calls(copy_adapter)[-1]
+
+    # UNKNOWN target type falls back to VALUES
+    copy_adapter.insert_append(
+        "tbl",
+        df_int,
+        target_columns_to_types={"a": exp.DataType.build("unknown", dialect="postgres")},
+    )
+    copy_adapter.cursor.copy_expert.assert_not_called()
+    assert "VALUES" in to_sql_calls(copy_adapter)[-1]
+
+
+def test_df_copy_compatible_object_int_uses_copy(
+    copy_adapter: PostgresEngineAdapter,
+):
+    # Object-dtype integer within 64-bit range targeting BIT(4) stages as BIGINT and uses COPY
+    df_obj_int = pd.DataFrame({"a": pd.Series([1, 2, None], dtype=object)})
+    copy_adapter.insert_append(
+        "tbl",
+        df_obj_int,
+        target_columns_to_types={"a": exp.DataType.build("bit(4)", dialect="postgres")},
+    )
+    assert copy_adapter.cursor.copy_expert.call_count == 1
+    assert "BIGINT" in to_sql_calls(copy_adapter)[0]
+
+
+def test_df_copy_transaction_block_encloses_create_and_copy(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    tx_spy = mocker.spy(copy_adapter, "transaction")
+    df = pd.DataFrame({"a": [1, 2]})
+    source_queries = copy_adapter._df_to_source_queries(
+        df, {"a": exp.DataType.build("int", dialect="postgres")}, 10000, "tbl"
+    )
+    with source_queries[0]:
+        pass
+    assert tx_spy.call_count >= 1

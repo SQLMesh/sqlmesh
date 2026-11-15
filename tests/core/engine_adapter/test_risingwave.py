@@ -99,3 +99,11 @@ def test_df_is_not_loaded_with_copy(adapter: t.Callable):
     sql_calls = [call_[0][0] for call_ in risingwave.cursor.execute.call_args_list]
     assert len(sql_calls) == 1
     assert "VALUES" in str(sql_calls[0]) and "__temp_" not in str(sql_calls[0])
+
+
+def test_temp_table_name_not_truncated(adapter: t.Callable):
+    """RisingWave does not enforce MAX_IDENTIFIER_LENGTH, so temp table names are not truncated."""
+    long_name = "x" * 70
+    temp = adapter._get_temp_table(f"db.{long_name}")
+    assert temp.name.startswith(f"__temp_{long_name}_")
+    assert len(temp.name) > 70

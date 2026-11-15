@@ -31,6 +31,7 @@ When using the `psycopg2` driver, SQLMesh loads pandas DataFrames (such as those
 No configuration is required and there is no option to disable this behavior. SQLMesh automatically falls back to `INSERT ... VALUES` when:
 
 - A column has a type or values that cannot be loaded with `COPY` identically. Supported columns are integers (up to 64 bits signed, up to 32 bits unsigned), `float64`, booleans, timestamps (with or without time zone), and strings. Other types, such as `float32`, 64-bit unsigned integers, `Decimal`, dates, bytes, dicts, lists, and categoricals, trigger the fallback.
+- A column's staging type is incompatible with the target column's cast (for example, an integer or numeric DataFrame column targeting a `BOOLEAN`, `BIT`, or `OID`/`REG*` type).
 - The DataFrame has a single column and one of its values is `\.`.
 - The driver does not support `copy_expert` (for example, a driver other than `psycopg2`).
 
