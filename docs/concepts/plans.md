@@ -474,7 +474,7 @@ SQLMesh skips a model and prints a single warning in these cases. Models downstr
 
 If you use `--select-model`, `--skip-backfill` or `--empty-backfill`, stale models that the plan does not backfill are not restated either. The same applies to the part of the added range before the plan's `--start`, when it is set later than the new model `start` outside a development environment. In both cases the warning prints the `--restate-model` command to run manually.
 
-Unlike a plan with `--restate-model`, these automatic restatements do not make the plan a restatement plan. For example, [signals](../guides/signals.md) are evaluated as in a regular run.
+Unlike a plan with `--restate-model`, these automatic restatements do not make the plan a restatement plan (`context.is_restatement` remains `False`). Built-in signals like `freshness()` automatically evaluate intervals restated due to upstream start extensions while still respecting signals for un-restated intervals.
 
 ### Restating production vs development
 

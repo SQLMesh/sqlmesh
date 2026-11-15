@@ -500,9 +500,13 @@ class PlanBuilder:
 
             extension_start = min((r[0] for r in extension_ranges), default=0)
             extension_end = max((r[1] for r in extension_ranges), default=0)
-            if extension_ranges and (
-                is_explicit
-                or to_timestamp(
+            aligned_extension = (
+                _align_to_interval_unit(snapshot, extension_start, extension_end)
+                if extension_ranges
+                else (0, 0)
+            )
+            floored_snapshot_start = to_timestamp(
+                snapshot.node.interval_unit.cron_floor(
                     start_date(
                         snapshot,
                         self._context_diff.snapshots,
@@ -510,28 +514,34 @@ class PlanBuilder:
                         relative_to=self.execution_time,
                     )
                 )
-                < extension_end
-            ):
+            )
+            if extension_ranges and (is_explicit or floored_snapshot_start < aligned_extension[1]):
                 # The extended range flows to the downstream models even if this snapshot isn't restated
                 # itself, as long as it holds (or will hold) data for that range.
-                start_extension_flow[s_id] = _align_to_interval_unit(
-                    snapshot, extension_start, extension_end
-                )
+                start_extension_flow[s_id] = aligned_extension
 
             if not is_explicit:
+                if floored_snapshot_start >= aligned_extension[1]:
+                    if _has_intervals_in_range(
+                        snapshot, aligned_extension[0], aligned_extension[1], deployability_index
+                    ):
+                        outside_backfill_scope.append(snapshot)
+                        stale_ranges[s_id] = aligned_extension
+                    continue
+
                 if self._is_dev and (
                     not snapshot.is_paused or deployability_index.is_deployable(snapshot)
                 ):
                     # The physical table of this version is the one used in production.
                     if _has_intervals_in_range(
-                        snapshot, extension_start, extension_end, deployability_index
+                        snapshot, aligned_extension[0], aligned_extension[1], deployability_index
                     ):
                         shared_with_prod.append(snapshot)
                         start_extension_flow.pop(s_id, None)
                     continue
                 # Only existing intervals can be stale. Anything else is backfilled as usual.
                 if not _has_intervals_in_range(
-                    snapshot, extension_start, extension_end, deployability_index
+                    snapshot, aligned_extension[0], aligned_extension[1], deployability_index
                 ):
                     continue
 
@@ -565,7 +575,7 @@ class PlanBuilder:
                     # Restating these models rebuilds their whole history, which is too expensive
                     # to do just because the start of an upstream model moved by a few intervals.
                     full_history_only.append(snapshot)
-                    stale_ranges[s_id] = start_extension_flow.pop(s_id)
+                    stale_ranges[s_id] = start_extension_flow.pop(s_id, aligned_extension)
                     continue
                 if (
                     self._skip_backfill
@@ -573,7 +583,7 @@ class PlanBuilder:
                     or (backfill_scope is not None and snapshot.name not in backfill_scope)
                 ):
                     outside_backfill_scope.append(snapshot)
-                    stale_ranges[s_id] = start_extension_flow[s_id]
+                    stale_ranges[s_id] = start_extension_flow.get(s_id, aligned_extension)
                     continue
 
             possible_intervals = {
@@ -593,11 +603,12 @@ class PlanBuilder:
                     )
                 )
             if extension_ranges:
-                possible_intervals.add(
-                    snapshot.get_removal_interval(
-                        extension_start, extension_end, self._execution_time, strict=False
-                    )
+                ext_removal = snapshot.get_removal_interval(
+                    extension_start, extension_end, self._execution_time, strict=False
                 )
+                possible_intervals.add(ext_removal)
+                if snapshot.is_incremental:
+                    start_extension_flow[s_id] = _align_to_interval_unit(snapshot, *ext_removal)
 
             # We may be tasked with restating a time range smaller than the target snapshot interval unit
             # For example, restating an hour of Hourly Model A, which has a downstream dependency of Daily Model B
@@ -646,10 +657,11 @@ class PlanBuilder:
 
         extensions: t.Dict[SnapshotId, Interval] = {}
         cut: t.Dict[SnapshotId, Interval] = {}
+        resolvable_cache: t.Dict[SnapshotId, bool] = {}
         for new, old in modified.values():
             if not (new.is_model and old.is_model and new.is_incremental):
                 continue
-            if not _is_start_resolvable(old, previous_snapshots):
+            if not _is_start_resolvable(old, previous_snapshots, resolvable_cache):
                 # The previous start would be guessed wrongly if some of its parents are unknown.
                 continue
             interval_unit = new.node.interval_unit
@@ -1361,22 +1373,37 @@ def _has_intervals_in_range(
     return any(i_start < end and start < i_end for i_start, i_end in intervals)
 
 
-def _is_start_resolvable(snapshot: Snapshot, snapshots: t.Dict[SnapshotId, Snapshot]) -> bool:
+def _is_start_resolvable(
+    snapshot: Snapshot,
+    snapshots: t.Dict[SnapshotId, Snapshot],
+    cache: t.Optional[t.Dict[SnapshotId, bool]] = None,
+) -> bool:
     """Whether the effective start can be derived from the given snapshots (it may be inferred from parents)."""
+    if cache is not None and snapshot.snapshot_id in cache:
+        return cache[snapshot.snapshot_id]
+
     if snapshot.node.start or not snapshot.parents:
-        return True
-    return all(
-        p in snapshots and _is_start_resolvable(snapshots[p], snapshots) for p in snapshot.parents
-    )
+        res = True
+    else:
+        res = all(
+            p in snapshots and _is_start_resolvable(snapshots[p], snapshots, cache)
+            for p in snapshot.parents
+        )
+
+    if cache is not None:
+        cache[snapshot.snapshot_id] = res
+
+    return res
 
 
 def _align_to_interval_unit(snapshot: Snapshot, start: int, end: int) -> Interval:
-    """Widens the range if it ends in the middle of one of the snapshot's intervals."""
+    """Widens the range if it starts or ends in the middle of one of the snapshot's intervals."""
     interval_unit = snapshot.node.interval_unit
+    floored_start = to_timestamp(interval_unit.cron_floor(start))
     floored_end = interval_unit.cron_floor(end)
-    if to_timestamp(floored_end) < end:
-        return (
-            to_timestamp(interval_unit.cron_floor(start)),
-            to_timestamp(interval_unit.cron_next(floored_end)),
-        )
-    return start, end
+    aligned_end = (
+        to_timestamp(interval_unit.cron_next(floored_end))
+        if to_timestamp(floored_end) < end
+        else end
+    )
+    return floored_start, aligned_end

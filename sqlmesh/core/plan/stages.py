@@ -110,9 +110,11 @@ class RestatementStage:
     Args:
         all_snapshots: All snapshots in the plan by name. Note that this does not include the snapshots from other environments that will get their
             intervals cleared, it's included here as an optimization to prevent having to re-fetch the current plan's snapshots
+        expected_previous_snapshots: The baseline snapshots by name in the target environment when the plan was created.
     """
 
     all_snapshots: t.Dict[str, Snapshot]
+    expected_previous_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
 
 
 @dataclass
@@ -377,7 +379,9 @@ class PlanStagesBuilder:
         # in addition, when we update intervals in state, we only clear intervals from dev snapshots to force dev models to be backfilled based on the new prod data.
         # we can leave prod intervals alone because by the time this plan finishes, the intervals in state have not actually changed, since restatement replaces
         # data for existing intervals and does not produce new ones
-        restatement_stage = self._get_restatement_stage(plan, snapshots_by_name)
+        restatement_stage = self._get_restatement_stage(
+            plan, snapshots_by_name, existing_environment
+        )
         if restatement_stage:
             stages.append(restatement_stage)
 
@@ -473,7 +477,10 @@ class PlanStagesBuilder:
         )
 
     def _get_restatement_stage(
-        self, plan: EvaluatablePlan, snapshots_by_name: t.Dict[str, Snapshot]
+        self,
+        plan: EvaluatablePlan,
+        snapshots_by_name: t.Dict[str, Snapshot],
+        existing_environment: t.Optional[Environment] = None,
     ) -> t.Optional[RestatementStage]:
         if plan.restate_all_snapshots:
             if plan.is_dev:
@@ -482,8 +489,21 @@ class PlanStagesBuilder:
                 )
 
             if plan.restatements:
+                expected_previous_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
+                baseline_snapshots = plan.environment.previous_finalized_snapshots
+                if baseline_snapshots is None:
+                    if existing_environment is None:
+                        existing_environment = self.state_reader.get_environment(
+                            plan.environment.name
+                        )
+                    if existing_environment is not None:
+                        baseline_snapshots = existing_environment.snapshots
+                if baseline_snapshots is not None:
+                    expected_previous_snapshots = {s.name: s.table_info for s in baseline_snapshots}
+
                 return RestatementStage(
                     all_snapshots=snapshots_by_name,
+                    expected_previous_snapshots=expected_previous_snapshots,
                 )
 
         return None
