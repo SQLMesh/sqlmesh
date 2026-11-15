@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import typing as t
 from sqlmesh.utils import UniqueKeyDict, registry_decorator
+from sqlmesh.utils.date import to_timestamp
 from sqlmesh.utils.errors import MissingSourceError
 
 if t.TYPE_CHECKING:
     from sqlmesh.core.context import ExecutionContext
     from sqlmesh.core.snapshot.definition import Snapshot
     from sqlmesh.utils.date import DatetimeRanges
-    from sqlmesh.core.snapshot.definition import DeployabilityIndex
 
 
 class signal(registry_decorator):
@@ -47,7 +47,7 @@ def freshness(
     batch: DatetimeRanges,
     snapshot: Snapshot,
     context: ExecutionContext,
-) -> bool:
+) -> t.Union[bool, DatetimeRanges]:
     """
     Implements model freshness as a signal, i.e it considers this model to be fresh if:
     - Any upstream SQLMesh model has available intervals to compute i.e is fresh
@@ -57,6 +57,8 @@ def freshness(
     if context.is_restatement or not adapter.SUPPORTS_METADATA_TABLE_LAST_MODIFIED_TS:
         return True
 
+    from sqlmesh.core.snapshot.definition import DeployabilityIndex
+
     deployability_index = context.deployability_index or DeployabilityIndex.all_deployable()
 
     last_altered_ts = (
@@ -65,34 +67,46 @@ def freshness(
         else snapshot.dev_last_altered_ts
     )
 
+    ready_intervals: t.Union[bool, DatetimeRanges]
     if not last_altered_ts:
-        return True
+        ready_intervals = True
+    else:
+        parent_snapshots = {context.snapshots[p.name] for p in snapshot.parents}
+        upstream_parent_snapshots = {p for p in parent_snapshots if not p.is_external}
+        external_parents = snapshot.node.depends_on - {p.name for p in upstream_parent_snapshots}
 
-    parent_snapshots = {context.snapshots[p.name] for p in snapshot.parents}
-
-    upstream_parent_snapshots = {p for p in parent_snapshots if not p.is_external}
-    external_parents = snapshot.node.depends_on - {p.name for p in upstream_parent_snapshots}
-
-    if context.parent_intervals:
-        # At least one upstream sqlmesh model has intervals to compute (i.e is fresh),
-        # so the current model is considered fresh too
-        return True
-
-    if external_parents:
-        external_last_altered_timestamps = adapter.get_table_last_modified_ts(
-            list(external_parents)
-        )
-
-        if len(external_last_altered_timestamps) != len(external_parents):
-            raise MissingSourceError(
-                f"Expected {len(external_parents)} sources to be present, but got {len(external_last_altered_timestamps)}."
+        if context.parent_intervals:
+            # At least one upstream sqlmesh model has intervals to compute (i.e is fresh),
+            # so the current model is considered fresh too
+            ready_intervals = True
+        elif external_parents:
+            external_last_altered_timestamps = adapter.get_table_last_modified_ts(
+                list(external_parents)
             )
 
-        # Finding new data means that the upstream depedencies have been altered
-        # since the last time the model was evaluated
-        return any(
-            external_last_altered_ts > last_altered_ts
-            for external_last_altered_ts in external_last_altered_timestamps
-        )
+            if len(external_last_altered_timestamps) != len(external_parents):
+                raise MissingSourceError(
+                    f"Expected {len(external_parents)} sources to be present, but got {len(external_last_altered_timestamps)}."
+                )
 
-    return False
+            # Finding new data means that the upstream depedencies have been altered
+            # since the last time the model was evaluated
+            ready_intervals = any(
+                external_last_altered_ts > last_altered_ts
+                for external_last_altered_ts in external_last_altered_timestamps
+            )
+        else:
+            ready_intervals = False
+
+    if context.restated_interval and ready_intervals is not True:
+        r_start, r_end = context.restated_interval
+        restated_batch = [
+            i for i in batch if to_timestamp(i[0]) < r_end and r_start < to_timestamp(i[1])
+        ]
+        if restated_batch:
+            if isinstance(ready_intervals, list):
+                combined_set = set(ready_intervals) | set(restated_batch)
+                return [i for i in batch if i in combined_set]
+            return restated_batch
+
+    return ready_intervals

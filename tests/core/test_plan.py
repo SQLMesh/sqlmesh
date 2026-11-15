@@ -5089,3 +5089,176 @@ def test_start_extension_cut_by_plan_start_warns_in_prod_only(make_snapshot, moc
     console = mocker.Mock()
     build(True, console)
     assert not any("cut off" in call[0][0] for call in console.log_warning.call_args_list)
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_depends_on_past_propagates_expanded_range_to_descendants(
+    make_snapshot,
+):
+    specs = [
+        {
+            "name": "a",
+            "old": {"start": "2023-01-02"},
+            "new": {"start": "2023-01-01"},
+            "intervals": [("2023-01-02", "2023-01-03")],
+        },
+        {
+            "name": "b",
+            "parent": "a",
+            "self_referencing": True,
+            "intervals": [("2020-01-01", "2023-01-03")],
+        },
+        {
+            "name": "c",
+            "parent": "b",
+            "start": "2023-01-03",
+            "intervals": [("2023-01-03", "2023-01-05")],
+        },
+        {
+            "name": "v",
+            "parent": "b",
+            "kind": ViewKind(),
+        },
+        {
+            "name": "d",
+            "parent": "v",
+            "start": "2023-01-03",
+            "intervals": [("2023-01-03", "2023-01-05")],
+        },
+    ]
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert snaps["b"].snapshot_id in plan.restatements
+    assert snaps["c"].snapshot_id in plan.restatements
+    assert snaps["d"].snapshot_id in plan.restatements
+
+    c_start, c_end = plan.restatements[snaps["c"].snapshot_id]
+    assert c_start == _ts("2023-01-01")
+    assert c_end >= _ts(_EXECUTION_TIME)
+
+    d_start, d_end = plan.restatements[snaps["d"].snapshot_id]
+    assert d_start == _ts("2023-01-01")
+    assert d_end >= _ts(_EXECUTION_TIME)
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_full_model_does_not_over_expand_downstream(
+    make_snapshot, mocker: MockerFixture
+):
+    specs: t.List[t.Dict[str, t.Any]] = [
+        {
+            "name": "a",
+            "old": {"start": "2023-01-02"},
+            "new": {"start": "2023-01-01"},
+            "intervals": [("2023-01-02", "2023-01-03")],
+        },
+        {
+            "name": "b",
+            "parent": "a",
+            "kind": FullKind(),
+            "intervals": [("2020-01-01", "2023-01-03")],
+        },
+        {
+            "name": "c",
+            "parent": "b",
+            "start": "2020-01-01",
+            "intervals": [("2020-01-01", "2023-01-03")],
+        },
+    ]
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    assert snaps["b"].snapshot_id in plan.restatements
+    assert snaps["c"].snapshot_id in plan.restatements
+    c_start, c_end = plan.restatements[snaps["c"].snapshot_id]
+    assert c_start == _ts("2023-01-01")
+    assert c_end == _ts("2023-01-02")
+
+
+def test_align_to_interval_unit_independent_start_and_end(make_snapshot):
+    from sqlmesh.core.plan.builder import _align_to_interval_unit
+
+    model = SqlModel(name="daily_model", query=parse_one("SELECT 1 as id, ds"), cron="@daily")
+    snap = make_snapshot(model)
+
+    start = _ts("2023-01-01 12:00:00")
+    end = _ts("2023-01-02 00:00:00")
+    aligned_start, aligned_end = _align_to_interval_unit(snap, start, end)
+    assert aligned_start == _ts("2023-01-01 00:00:00")
+    assert aligned_end == _ts("2023-01-02 00:00:00")
+
+    end_midday = _ts("2023-01-02 12:00:00")
+    aligned_start, aligned_end = _align_to_interval_unit(snap, start, end_midday)
+    assert aligned_start == _ts("2023-01-01 00:00:00")
+    assert aligned_end == _ts("2023-01-03 00:00:00")
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_retained_pre_start_intervals_no_key_error(
+    make_snapshot, mocker: MockerFixture
+):
+    specs: t.List[t.Dict[str, t.Any]] = [
+        {
+            "name": "a",
+            "old": {"start": "2023-01-02"},
+            "new": {"start": "2023-01-01"},
+            "intervals": [("2023-01-02", "2023-01-03")],
+        },
+        {
+            "name": "b",
+            "parent": "a",
+            "start": "2023-01-05",
+            "intervals": [("2023-01-01", "2023-01-03"), ("2023-01-05", "2023-01-10")],
+        },
+    ]
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    assert snaps["b"].snapshot_id not in plan.restatements
+    console.log_warning.assert_called_once()
+    assert snaps["b"].name in console.log_warning.call_args[0][0]
+
+
+def test_is_start_resolvable_memoization_diamond_dag(make_snapshot):
+    import time
+    from sqlmesh.core.plan.builder import _is_start_resolvable
+
+    snapshots = {}
+    all_nodes = {}
+    root = make_snapshot(
+        SqlModel(name="root", query=parse_one("SELECT 1 as ds"), start="2023-01-01")
+    )
+    snapshots[root.snapshot_id] = root
+    all_nodes[root.name] = root.model
+    prev_layer = [root]
+
+    for level in range(25):
+        next_layer = []
+        for i in range(2):
+            node = make_snapshot(
+                SqlModel(
+                    name=f"level_{level}_node_{i}",
+                    query=parse_one(
+                        " UNION ALL ".join(f"SELECT ds FROM {p.name}" for p in prev_layer)
+                    ),
+                ),
+                nodes=all_nodes,
+            )
+            snapshots[node.snapshot_id] = node
+            next_layer.append(node)
+        for n in next_layer:
+            all_nodes[n.name] = n.model
+        prev_layer = next_layer
+
+    leaf = prev_layer[0]
+    cache = {}
+    t0 = time.perf_counter()
+    res = _is_start_resolvable(leaf, snapshots, cache=cache)
+    duration = time.perf_counter() - t0
+
+    assert res is True
+    assert duration < 0.2
+    assert leaf.snapshot_id in cache

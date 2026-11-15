@@ -158,7 +158,7 @@ if t.TYPE_CHECKING:
     )
     from sqlmesh.core.snapshot import Node
 
-    from sqlmesh.core.snapshot.definition import Intervals
+    from sqlmesh.core.snapshot.definition import Intervals, Interval
 
     ModelOrSnapshot = t.Union[str, Model, Snapshot]
     NodeOrSnapshot = t.Union[str, Model, StandaloneAudit, Snapshot]
@@ -285,6 +285,7 @@ class ExecutionContext(BaseContext):
         parent_intervals: t.Optional[Intervals] = None,
         variables: t.Optional[t.Dict[str, t.Any]] = None,
         blueprint_variables: t.Optional[t.Dict[str, t.Any]] = None,
+        restated_interval: t.Optional[Interval] = None,
     ):
         self.snapshots = snapshots
         self.deployability_index = deployability_index
@@ -295,6 +296,7 @@ class ExecutionContext(BaseContext):
         self._blueprint_variables = blueprint_variables or {}
         self._is_restatement = is_restatement
         self._parent_intervals = parent_intervals
+        self._restated_interval = restated_interval
 
     @property
     def default_dialect(self) -> t.Optional[str]:
@@ -327,6 +329,10 @@ class ExecutionContext(BaseContext):
     def parent_intervals(self) -> t.Optional[Intervals]:
         return self._parent_intervals
 
+    @property
+    def restated_interval(self) -> t.Optional[Interval]:
+        return self._restated_interval
+
     def var(self, var_name: str, default: t.Optional[t.Any] = None) -> t.Optional[t.Any]:
         """Returns a variable value."""
         return self._variables.get(var_name.lower(), default)
@@ -348,6 +354,8 @@ class ExecutionContext(BaseContext):
             self._default_dialect,
             self._default_catalog,
             self._is_restatement,
+            parent_intervals=self._parent_intervals,
+            restated_interval=self._restated_interval,
             variables=variables,
             blueprint_variables=blueprint_variables,
         )
