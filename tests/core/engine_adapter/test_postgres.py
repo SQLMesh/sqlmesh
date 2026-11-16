@@ -358,9 +358,9 @@ def test_df_copy_chunks_sql_and_payload(copy_adapter: PostgresEngineAdapter):
     assert [sql for sql, _ in calls] == [expected_sql, expected_sql]
     assert (
         calls[0][1]
-        == f"1,x,1.5,True,2020-01-01 00:00:00.123456\n2,{marker},{marker},False,{marker}\n"
+        == f"1,x,1.5,True,2020-01-01 00:00:00.123456\r\n2,{marker},{marker},False,{marker}\r\n"
     )
-    assert calls[1][1] == '3,"q""uote, comma",0.1,True,1960-01-01 12:00:00\n'
+    assert calls[1][1] == '3,"q""uote, comma",0.1,True,1960-01-01 12:00:00\r\n'
 
     assert to_sql_calls(copy_adapter) == [
         'CREATE TABLE IF NOT EXISTS "__temp_tbl_abcdefgh" '
@@ -378,7 +378,7 @@ def test_df_copy_batch_size_zero_is_single_chunk(copy_adapter: PostgresEngineAda
     copy_adapter.DEFAULT_BATCH_SIZE = 0
     copy_adapter.insert_append("tbl", df, target_columns_to_types={"a": exp.DataType.build("int")})
     assert len(calls) == 1
-    assert calls[0][1] == "1\n2\n3\n"
+    assert calls[0][1] == "1\r\n2\r\n3\r\n"
 
 
 def test_df_copy_reorders_columns_and_skips_missing_source_columns(
@@ -400,7 +400,7 @@ def test_df_copy_reorders_columns_and_skips_missing_source_columns(
     # Only the source columns are copied, in the source order
     assert len(calls) == 1
     assert calls[0][0].startswith('COPY "__temp_tbl_abcdefgh" ("b", "a") FROM STDIN')
-    assert calls[0][1] == "x,1\ny,2\n"
+    assert calls[0][1] == "x,1\r\ny,2\r\n"
     assert to_sql_calls(copy_adapter)[1] == (
         'INSERT INTO "tbl" ("a", "b", "c") SELECT CAST("a" AS INT) AS "a", CAST("b" AS TEXT) AS "b", '
         'CAST(NULL AS INT) AS "c" FROM "__temp_tbl_abcdefgh"'
@@ -704,3 +704,272 @@ def test_df_copy_transaction_block_encloses_create_and_copy(
     with source_queries[0]:
         pass
     assert tx_spy.call_count >= 1
+
+
+def test_df_copy_csv_carriage_return_and_newline_quoting(
+    copy_adapter: PostgresEngineAdapter,
+):
+    calls = _capture_copy_calls(copy_adapter)
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "s": ["a\rb", "a\nb", "a\r\nb", "plain"],
+        }
+    )
+    copy_adapter.insert_append(
+        "tbl",
+        df,
+        target_columns_to_types={
+            "id": exp.DataType.build("int", dialect="postgres"),
+            "s": exp.DataType.build("text", dialect="postgres"),
+        },
+    )
+    assert len(calls) == 1
+    assert calls[0][1] == '1,"a\rb"\r\n2,"a\nb"\r\n3,"a\r\nb"\r\n4,plain\r\n'
+
+
+@pytest.mark.parametrize("json_type", ["json", "jsonb"])
+@pytest.mark.parametrize(
+    "series, expect_copy",
+    [
+        (pd.Series([1, 2], dtype="int64"), False),
+        (pd.Series([1.5, 2.5], dtype="float64"), False),
+        (pd.Series([1, 2, None], dtype=object), False),
+        (pd.Series([2**64, None], dtype=object), False),
+        (pd.Series([1.5, None], dtype=object), False),
+        (pd.Series([True, False], dtype=object), False),
+        (pd.Series([True, False, None], dtype=object), False),
+        (pd.Series(pd.to_datetime(["2020-01-01", "2020-01-02"])), False),
+        (pd.Series(pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize("UTC")), False),
+        (pd.Series(['{"a": 1}', "[1, 2]", None], dtype=object), True),
+        (pd.Series(['{"a": 1}', None], dtype="string"), True),
+        (pd.Series([None, None], dtype=object), True),
+    ],
+)
+def test_df_copy_json_and_jsonb_target_types(
+    copy_adapter: PostgresEngineAdapter,
+    json_type: str,
+    series: pd.Series,
+    expect_copy: bool,
+):
+    df = pd.DataFrame({"j": series})
+    target_types = {"j": exp.DataType.build(json_type, dialect="postgres")}
+    staging_types = copy_adapter._get_copy_staging_columns_to_types(
+        df, "__sqlmesh_null_test__", target_types
+    )
+    if expect_copy:
+        assert staging_types == {"j": exp.DataType.build("TEXT", dialect="postgres")}
+        copy_adapter.insert_append("tbl", df, target_columns_to_types=target_types)
+        assert copy_adapter.cursor.copy_expert.call_count == 1
+        assert "__temp_tbl_abcdefgh" in to_sql_calls(copy_adapter)[0]
+    else:
+        assert staging_types is None
+        copy_adapter.insert_append("tbl", df, target_columns_to_types=target_types)
+        copy_adapter.cursor.copy_expert.assert_not_called()
+        sql_calls = to_sql_calls(copy_adapter)
+        assert len(sql_calls) == 1
+        assert "VALUES" in sql_calls[0]
+        assert "__temp_" not in sql_calls[0]
+
+    # Numpy bool and nullable pandas dtypes also return None from staging type resolution
+    for non_text_series in (
+        pd.Series([True, False], dtype="bool"),
+        pd.Series([True, None], dtype="boolean"),
+        pd.Series([1, None], dtype="Int64"),
+        pd.Series([1.5, None], dtype="Float64"),
+    ):
+        assert (
+            copy_adapter._get_copy_staging_columns_to_types(
+                pd.DataFrame({"j": non_text_series}), "__sqlmesh_null_test__", target_types
+            )
+            is None
+        )
+
+
+def test_df_high_level_operations_run_in_single_transaction(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+    make_temp_table_name: t.Callable,
+):
+    from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
+
+    df = pd.DataFrame({"id": [1, 2], "val": ["a", "b"]})
+    types = {
+        "id": exp.DataType.build("int", dialect="postgres"),
+        "val": exp.DataType.build("text", dialect="postgres"),
+    }
+
+    for op in ("replace_new", "replace_existing", "ctas", "merge_15", "merge_14"):
+        adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+        adapter.server_version = (14, 0) if op == "merge_14" else (15, 0)
+        mocker.patch.object(adapter, "table_exists", return_value=False)
+        mocker.patch(
+            "sqlmesh.core.engine_adapter.postgres.PostgresEngineAdapter._get_temp_table",
+            side_effect=[
+                make_temp_table_name("tbl", "stage123"),
+                make_temp_table_name("tbl", "merge123"),
+            ],
+        )
+        if op == "replace_existing":
+            mocker.patch.object(
+                adapter,
+                "get_data_object",
+                return_value=DataObject(schema="public", name="tbl", type=DataObjectType.TABLE),
+            )
+
+        begin_spy = mocker.spy(adapter._connection_pool, "begin")
+        commit_spy = mocker.spy(adapter._connection_pool, "commit")
+
+        def _assert_in_tx(*_args: t.Any, **_kwargs: t.Any) -> None:
+            assert adapter._connection_pool.is_transaction_active
+
+        adapter.cursor.copy_expert.side_effect = _assert_in_tx
+
+        if op in ("replace_new", "replace_existing"):
+            adapter.replace_query("tbl", df, target_columns_to_types=types)
+        elif op == "ctas":
+            adapter.ctas("tbl", df, target_columns_to_types=types)
+        else:
+            adapter.merge(
+                "tbl",
+                df,
+                target_columns_to_types=types,
+                unique_key=[exp.to_column("id", quoted=True)],
+            )
+
+        # Entire staging CREATE + COPY + target write + staging DROP ran in a single transaction
+        assert begin_spy.call_count == 1
+        assert commit_spy.call_count == 1
+        assert not adapter._connection_pool.is_transaction_active
+
+
+def test_sql_query_operations_do_not_add_extra_dataframe_transaction(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    adapter.server_version = (15, 0)
+    query = t.cast(exp.Select, parse_one("SELECT 1 AS id, 'a' AS val"))
+    types = {
+        "id": exp.DataType.build("int", dialect="postgres"),
+        "val": exp.DataType.build("text", dialect="postgres"),
+    }
+
+    tx_spy = mocker.spy(adapter, "transaction")
+    adapter.merge("tbl", query, target_columns_to_types=types, unique_key=[exp.to_column("id")])
+    # Outer DataFrame guard passes condition=False, so only `execute()` enters a transaction
+    assert tx_spy.call_args_list[0].kwargs == {"condition": False}
+
+    tx_spy.reset_mock()
+    adapter.ctas("tbl", query, target_columns_to_types=types)
+    assert tx_spy.call_args_list[0].kwargs == {"condition": False}
+
+    tx_spy.reset_mock()
+    adapter.replace_query("tbl", query, target_columns_to_types=types)
+    assert tx_spy.call_args_list[0].kwargs == {"condition": False}
+
+
+def test_drop_copy_staging_table_committed_standalone_aborted_tx(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    df = pd.DataFrame({"a": [1, 2]})
+    types = {"a": exp.DataType.build("int", dialect="postgres")}
+
+    # 1. Standalone SourceQuery whose subsequent raw cursor query aborts the implicit tx (25P02):
+    # cleanup rolls back the aborted implicit tx, drops the staging table in a committed tx,
+    # and lets the caller's original exception propagate unmasked.
+    source_queries = copy_adapter._df_to_source_queries(df, types, 10000, "tbl")
+    rollback_spy = mocker.spy(copy_adapter._connection_pool, "rollback")
+    commit_spy = mocker.spy(copy_adapter._connection_pool, "commit")
+    real_drop = copy_adapter.drop_table
+    drop_attempts = 0
+
+    def _flaky_drop(table_name: t.Any, *args: t.Any, **kwargs: t.Any) -> None:
+        nonlocal drop_attempts
+        drop_attempts += 1
+        if drop_attempts == 1:
+            raise _FakeDbError("25P02")
+        real_drop(table_name, *args, **kwargs)
+
+    mocker.patch.object(copy_adapter, "drop_table", side_effect=_flaky_drop)
+
+    with pytest.raises(RuntimeError, match="caller query failed"):
+        with source_queries[0]:
+            # Commit count is 1 from standalone staging table load
+            assert commit_spy.call_count == 1
+            assert not copy_adapter._connection_pool.is_transaction_active
+            raise RuntimeError("caller query failed")
+
+    assert drop_attempts == 2
+    assert rollback_spy.call_count == 1
+    assert commit_spy.call_count == 2  # retry drop_table was also committed
+    assert to_sql_calls(copy_adapter)[-1] == 'DROP TABLE IF EXISTS "__temp_tbl_abcdefgh"'
+
+    # 2. If the retry drop ALSO fails while an exception is propagating, the caller's original
+    # exception is still preserved (never masked).
+    source_queries_2 = copy_adapter._df_to_source_queries(df, types, 10000, "tbl")
+    mocker.patch.object(copy_adapter, "drop_table", side_effect=_FakeDbError("25P02"))
+
+    with pytest.raises(RuntimeError, match="original failure"):
+        with source_queries_2[0]:
+            raise RuntimeError("original failure")
+
+    # 3. If no caller exception is propagating and the retry drop fails, the retry error raises.
+    source_queries_3 = copy_adapter._df_to_source_queries(df, types, 10000, "tbl")
+    with pytest.raises(_FakeDbError):
+        with source_queries_3[0]:
+            pass
+
+
+def test_drop_copy_staging_table_non_25p02_does_not_mask_propagating_error(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    """If the connection drops mid-load (OperationalError, pgcode=None), a secondary InterfaceError
+    from `drop_table` during `SourceQuery.__exit__` must be logged rather than masking the root error."""
+
+    class _FakeOperationalError(Exception):
+        pass
+
+    class _FakeInterfaceError(Exception):
+        pass
+
+    df = pd.DataFrame({"a": [1, 2]})
+    types = {"a": exp.DataType.build("int", dialect="postgres")}
+    source_queries = copy_adapter._df_to_source_queries(df, types, 10000, "tbl")
+    mocker.patch.object(
+        copy_adapter, "drop_table", side_effect=_FakeInterfaceError("cursor already closed")
+    )
+
+    with pytest.raises(_FakeOperationalError, match="SSL connection closed"):
+        with source_queries[0]:
+            raise _FakeOperationalError("SSL connection closed")
+
+
+def test_df_ctas_comments_use_savepoint_inside_transaction(
+    copy_adapter: PostgresEngineAdapter, mocker: MockerFixture
+):
+    df = pd.DataFrame({"a": [1, 2]})
+    types = {"a": exp.DataType.build("int", dialect="postgres")}
+    real_execute = copy_adapter._execute
+
+    def _fail_table_comment(sql: str, *args: t.Any, **kwargs: t.Any) -> None:
+        if sql.startswith("COMMENT ON TABLE"):
+            raise _FakeDbError("42501")
+        real_execute(sql, *args, **kwargs)
+
+    mocker.patch.object(copy_adapter, "_execute", side_effect=_fail_table_comment)
+    commit_spy = mocker.spy(copy_adapter._connection_pool, "commit")
+
+    copy_adapter.ctas(
+        "tbl",
+        df,
+        target_columns_to_types=types,
+        table_description="tbl comment",
+        column_descriptions={"a": "col comment"},
+    )
+
+    sql_calls = to_sql_calls(copy_adapter)
+    assert "SAVEPOINT _sqlmesh_comment" in sql_calls
+    assert "ROLLBACK TO SAVEPOINT _sqlmesh_comment" in sql_calls
+    assert "RELEASE SAVEPOINT _sqlmesh_comment" in sql_calls
+    assert """COMMENT ON COLUMN "tbl"."a" IS 'col comment'""" in sql_calls
+    assert commit_spy.call_count == 1

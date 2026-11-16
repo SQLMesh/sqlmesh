@@ -2080,3 +2080,363 @@ def test_df_copy_cast_compatibility_live_pg(
     assert (
         _leftover_staging_tables(engine_adapter, exp.to_table(ctx.schema(TEST_SCHEMA)).name) == []
     )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["replace_query_new", "replace_query_existing", "ctas", "merge_native", "merge_logical"],
+)
+@pytest.mark.parametrize("pre_ping", [False, True])
+def test_df_copy_target_failure_cleans_up_staging_table_and_preserves_error(
+    engine_adapter: PostgresEngineAdapter,
+    ctx: TestContext,
+    mocker: MockerFixture,
+    operation: str,
+    pre_ping: bool,
+):
+    """When COPY into `__temp_*` succeeds and the subsequent target write fails, the original DB
+    error must propagate (never `InFailedSqlTransaction`) and zero `__temp_*` tables may remain."""
+    if operation == "merge_native" and engine_adapter.server_version < (15, 0):
+        pytest.skip("Native MERGE requires PostgreSQL 15+")
+
+    adapter = t.cast(
+        PostgresEngineAdapter,
+        engine_adapter.with_settings(pre_ping=pre_ping),
+    )
+    schema_name = exp.to_table(ctx.schema(TEST_SCHEMA)).name
+    table = ctx.table(f"target_fail_{operation}_{pre_ping}")
+    sql_table = table.sql("postgres", identify=True)
+    types = _types(id="int", val="int")
+
+    exists_before = operation in ("replace_query_existing", "merge_native", "merge_logical")
+    if exists_before:
+        adapter.execute(f"CREATE TABLE {sql_table} (id INT, val INT CHECK (val >= 0))")
+        adapter.insert_append(
+            table, pd.DataFrame({"id": [1], "val": [100]}), target_columns_to_types=types
+        )
+
+    # Strings stage into TEXT via COPY without error, then fail when cast to INT in target SQL
+    bad_df = pd.DataFrame({"id": [1, 2], "val": ["10", "not_an_int"]})
+    spy = mocker.spy(PostgresEngineAdapter, "_copy_df")
+
+    original_version = adapter.server_version
+    try:
+        if operation == "merge_logical":
+            adapter.server_version = (14, 0)  # type: ignore
+
+        with pytest.raises(Exception) as exc_info:
+            if operation in ("replace_query_new", "replace_query_existing"):
+                adapter.replace_query(table, bad_df, target_columns_to_types=types)
+            elif operation == "ctas":
+                adapter.ctas(table, bad_df, target_columns_to_types=types)
+            else:
+                adapter.merge(
+                    table,
+                    bad_df,
+                    target_columns_to_types=types,
+                    unique_key=[exp.to_column("id", quoted=True)],
+                )
+    finally:
+        adapter.server_version = original_version
+
+    err_msg = str(exc_info.value)
+    assert "not_an_int" in err_msg
+    assert "current transaction is aborted" not in err_msg
+    assert spy.call_count == 1
+    assert not adapter._connection_pool.is_transaction_active
+    assert _leftover_staging_tables(adapter, schema_name) == []
+    assert adapter.fetchone("SELECT 1") == (1,)
+
+    if exists_before:
+        assert adapter.fetchall(f"SELECT id, val FROM {sql_table}") == [(1, 100)]
+    else:
+        assert not adapter.table_exists(table)
+
+
+def test_df_copy_check_constraint_failure_rolls_back_atomically(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext, mocker: MockerFixture
+):
+    """Check constraint failure on replace_query / merge with pre_ping=False leaves zero `__temp_*` tables."""
+    adapter = t.cast(PostgresEngineAdapter, engine_adapter.with_settings(pre_ping=False))
+    schema_name = exp.to_table(ctx.schema(TEST_SCHEMA)).name
+    table = ctx.table("check_violation")
+    sql_table = table.sql("postgres", identify=True)
+    types = _types(id="int", val="int")
+    adapter.execute(f"CREATE TABLE {sql_table} (id INT, val INT CHECK (val > 0))")
+    adapter.insert_append(
+        table, pd.DataFrame({"id": [1], "val": [10]}), target_columns_to_types=types
+    )
+
+    spy = mocker.spy(PostgresEngineAdapter, "_copy_df")
+    bad_df = pd.DataFrame({"id": [1, 2], "val": [5, -1]})
+
+    for fn in (
+        lambda: adapter.replace_query(table, bad_df, target_columns_to_types=types),
+        lambda: adapter.merge(
+            table,
+            bad_df,
+            target_columns_to_types=types,
+            unique_key=[exp.to_column("id", quoted=True)],
+        ),
+    ):
+        with pytest.raises(Exception, match="check_violation_val_check|violates check constraint"):
+            fn()
+        assert _leftover_staging_tables(adapter, schema_name) == []
+        assert adapter.fetchall(f"SELECT id, val FROM {sql_table}") == [(1, 10)]
+        assert adapter.fetchone("SELECT 1") == (1,)
+
+    assert spy.call_count == 2
+
+
+def test_df_copy_standalone_source_query_cleanup_after_aborted_tx(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext
+):
+    """Direct SourceQuery callers that commit `__temp_*` standalone still clean up on 25P02."""
+    adapter = t.cast(PostgresEngineAdapter, engine_adapter.with_settings(pre_ping=False))
+    schema_name = exp.to_table(ctx.schema(TEST_SCHEMA)).name
+    table = ctx.table("standalone_sq")
+    types = _types(a="int")
+    adapter.create_table(table, types)
+
+    # 1. Implicit psycopg2 transaction aborted via raw cursor execution (is_transaction_active=False)
+    sq1 = adapter._df_to_source_queries(pd.DataFrame({"a": [1, 2]}), types, 1000, table)[0]
+    with pytest.raises(Exception, match="bad_implicit_int") as exc1:
+        with sq1:
+            assert len(_leftover_staging_tables(engine_adapter, schema_name)) == 1
+            adapter.cursor.execute("SELECT 'bad_implicit_int'::int")
+    assert "current transaction is aborted" not in str(exc1.value)
+    assert _leftover_staging_tables(adapter, schema_name) == []
+    assert _leftover_staging_tables(engine_adapter, schema_name) == []
+    assert adapter.fetchone("SELECT 1") == (1,)
+
+    # 2. Factory invoked standalone before an explicit outer transaction that then aborts
+    sq2 = adapter._df_to_source_queries(pd.DataFrame({"a": [3, 4]}), types, 1000, table)[0]
+    sq2.query_factory()
+    assert len(_leftover_staging_tables(engine_adapter, schema_name)) == 1
+    with pytest.raises(Exception, match="bad_explicit_int") as exc2:
+        with adapter.transaction():
+            with sq2:
+                adapter.execute("SELECT 'bad_explicit_int'::int")
+    assert "current transaction is aborted" not in str(exc2.value)
+    assert _leftover_staging_tables(adapter, schema_name) == []
+    assert _leftover_staging_tables(engine_adapter, schema_name) == []
+    assert adapter.fetchone("SELECT 1") == (1,)
+
+
+def test_df_copy_json_and_jsonb_live_pg(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext, mocker: MockerFixture
+):
+    """Numeric DataFrames targeting JSON succeed via VALUES fallback; string JSON DataFrames use COPY."""
+    schema_name = exp.to_table(ctx.schema(TEST_SCHEMA)).name
+    spy = mocker.spy(PostgresEngineAdapter, "_copy_df")
+
+    # 1. Numeric DataFrames (int64, float64, object-int) targeting JSON succeed via VALUES fallback
+    json_num_table = ctx.table("target_json_num")
+    json_types = _types(id="int", payload="json")
+    engine_adapter.create_table(json_num_table, json_types)
+    engine_adapter.insert_append(
+        json_num_table,
+        pd.DataFrame({"id": [1, 2], "payload": [10, 20]}),
+        target_columns_to_types=json_types,
+    )
+    engine_adapter.insert_append(
+        json_num_table,
+        pd.DataFrame({"id": [3, 4], "payload": [1.5, 2.5]}),
+        target_columns_to_types=json_types,
+    )
+    engine_adapter.insert_append(
+        json_num_table,
+        pd.DataFrame({"id": [5, 6], "payload": pd.Series([100, 200], dtype=object)}),
+        target_columns_to_types=json_types,
+    )
+    assert spy.call_count == 0
+    assert engine_adapter.fetchall(
+        f"SELECT id, payload FROM {json_num_table.sql('postgres', identify=True)} ORDER BY id"
+    ) == [(1, 10), (2, 20), (3, 1.5), (4, 2.5), (5, 100), (6, 200)]
+
+    # 2. Numeric DataFrames targeting JSONB also fall back to VALUES without creating staging tables
+    jsonb_types = _types(id="int", payload="jsonb")
+    jsonb_num_table = ctx.table("target_jsonb_num")
+    engine_adapter.create_table(jsonb_num_table, jsonb_types)
+    for num_df in (
+        pd.DataFrame({"id": [1], "payload": [10]}),
+        pd.DataFrame({"id": [2], "payload": [1.5]}),
+    ):
+        with pytest.raises(Exception, match="cannot cast type"):
+            engine_adapter.insert_append(
+                jsonb_num_table, num_df, target_columns_to_types=jsonb_types
+            )
+    assert spy.call_count == 0
+    assert _leftover_staging_tables(engine_adapter, schema_name) == []
+
+    # 3. Valid JSON string DataFrames targeting JSON and JSONB succeed via COPY
+    for col_kind in ("json", "jsonb"):
+        str_table = ctx.table(f"target_{col_kind}_str")
+        str_types = _types(id="int", payload=col_kind)
+        engine_adapter.create_table(str_table, str_types)
+        df_str = pd.DataFrame(
+            {
+                "id": [1, 2, 3, 4],
+                "payload": ['{"k": 1}', '[1, "two"]', "true", None],
+            }
+        )
+        before_calls = spy.call_count
+        engine_adapter.insert_append(str_table, df_str, target_columns_to_types=str_types)
+        assert spy.call_count == before_calls + 1
+        assert engine_adapter.fetchall(
+            f"SELECT id, payload FROM {str_table.sql('postgres', identify=True)} ORDER BY id"
+        ) == [
+            (1, {"k": 1}),
+            (2, [1, "two"]),
+            (3, True),
+            (4, None),
+        ]
+
+    assert _leftover_staging_tables(engine_adapter, schema_name) == []
+
+
+def test_df_copy_carriage_returns_and_newlines_round_trip(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext, mocker: MockerFixture
+):
+    """Strings with bare CR, bare LF, and CRLF must round-trip byte-for-byte via COPY."""
+    spy = mocker.spy(PostgresEngineAdapter, "_copy_df")
+    values = [
+        "a\rb",
+        "\r",
+        "\r\r",
+        "a\nb",
+        "\n",
+        "a\r\nb",
+        "\r\n",
+        "\n\r",
+        'q"uote\rhere',
+        "c,omma\r\nhere",
+        "",
+    ]
+
+    # Multi-column table (ordered by id)
+    multi_table = ctx.table("cr_lf_multi")
+    multi_types = _types(id="int", s="text")
+    engine_adapter.create_table(multi_table, multi_types)
+    engine_adapter.insert_append(
+        multi_table,
+        pd.DataFrame({"id": list(range(len(values))), "s": values}),
+        target_columns_to_types=multi_types,
+    )
+    rows = engine_adapter.fetchall(
+        f"SELECT id, s, encode(convert_to(s, 'UTF8'), 'hex') "
+        f"FROM {multi_table.sql('postgres', identify=True)} ORDER BY id"
+    )
+    assert [(r[0], r[1], r[2]) for r in rows] == [
+        (idx, val, val.encode("utf-8").hex()) for idx, val in enumerate(values)
+    ]
+
+    # Single-column table
+    single_table = ctx.table("cr_lf_single")
+    single_types = _types(s="text")
+    engine_adapter.create_table(single_table, single_types)
+    engine_adapter.insert_append(
+        single_table,
+        pd.DataFrame({"s": values}),
+        target_columns_to_types=single_types,
+    )
+    single_hex = sorted(
+        r[0]
+        for r in engine_adapter.fetchall(
+            f"SELECT encode(convert_to(s, 'UTF8'), 'hex') "
+            f"FROM {single_table.sql('postgres', identify=True)}"
+        )
+    )
+    assert single_hex == sorted(v.encode("utf-8").hex() for v in values)
+    assert spy.call_count == 2
+    assert (
+        _leftover_staging_tables(engine_adapter, exp.to_table(ctx.schema(TEST_SCHEMA)).name) == []
+    )
+
+
+def test_df_copy_swallowed_comment_failure_does_not_rollback_load(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext, config: Config
+):
+    """A swallowed `COMMENT ON` error inside transactional `ctas(df)` / `replace_query(df)` must
+    roll back only to `_sqlmesh_comment` and still commit the table and DataFrame rows."""
+    schema_name = exp.to_table(ctx.schema(TEST_SCHEMA)).name
+    types = _types(id="int", val="text")
+    df = pd.DataFrame({"id": [1, 2], "val": ["alpha", "beta"]})
+
+    # 1. Event trigger rejects COMMENT ON TABLE while allowing COMMENT ON COLUMN:
+    # both `ctas(df)` and `replace_query(df)` must commit the table, its rows, AND column comments!
+    fn_name = f"_block_tbl_comment_{random_id(short=True)}"
+    trg_name = f"_trg_block_tbl_comment_{random_id(short=True)}"
+    tag_prefix = f"comment_guard_{random_id(short=True)}"
+    engine_adapter.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {fn_name}() RETURNS event_trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF current_query() LIKE 'COMMENT ON TABLE%' AND current_query() LIKE '%{tag_prefix}%' THEN
+                RAISE EXCEPTION 'table comments blocked for {tag_prefix}';
+            END IF;
+        END;
+        $$
+        """
+    )
+    engine_adapter.execute(
+        f"CREATE EVENT TRIGGER {trg_name} ON ddl_command_start "
+        f"WHEN TAG IN ('COMMENT') EXECUTE FUNCTION {fn_name}()"
+    )
+    try:
+        ctas_table = ctx.table(f"{tag_prefix}_ctas")
+        engine_adapter.ctas(
+            ctas_table,
+            df,
+            target_columns_to_types=types,
+            table_description="blocked table comment",
+            column_descriptions={"id": "id col comment", "val": "val col comment"},
+        )
+        replace_table = ctx.table(f"{tag_prefix}_replace")
+        engine_adapter.replace_query(
+            replace_table,
+            df,
+            target_columns_to_types=types,
+            table_description="blocked table comment",
+            column_descriptions={"id": "id col comment"},
+        )
+    finally:
+        engine_adapter.execute(f"DROP EVENT TRIGGER IF EXISTS {trg_name}")
+        engine_adapter.execute(f"DROP FUNCTION IF EXISTS {fn_name}()")
+
+    for tbl in (ctas_table, replace_table):
+        sql_tbl = tbl.sql("postgres", identify=True)
+        assert engine_adapter.table_exists(tbl)
+        assert engine_adapter.fetchall(f"SELECT id, val FROM {sql_tbl} ORDER BY id") == [
+            (1, "alpha"),
+            (2, "beta"),
+        ]
+        col_comment = engine_adapter.fetchone(f"SELECT col_description('{sql_tbl}'::regclass, 1)")
+        assert col_comment == ("id col comment",)
+
+    # 2. Non-owner role (`42501: must be owner of table`) running inside an active transaction
+    # (`insert_append` + `ctas(..., exists=True, table_description=...)`) must keep inserted rows!
+    shared_table = ctx.table("shared_comment_perm")
+    engine_adapter.create_table(shared_table, types)
+    with create_users(engine_adapter, "writer") as roles:
+        writer_user = roles["writer"]["username"]
+        engine_adapter.execute(f'GRANT USAGE, CREATE ON SCHEMA "{schema_name}" TO "{writer_user}"')
+        engine_adapter.execute(
+            f'GRANT SELECT, INSERT ON {shared_table.sql("postgres", identify=True)} TO "{writer_user}"'
+        )
+        with engine_adapter_for_role(roles["writer"], ctx, config) as writer_adapter:
+            with writer_adapter.transaction():
+                writer_adapter.insert_append(shared_table, df, target_columns_to_types=types)
+                writer_adapter.ctas(
+                    shared_table,
+                    df,
+                    target_columns_to_types=types,
+                    exists=True,
+                    table_description="non-owner comment fails with 42501",
+                    column_descriptions={"id": "non-owner col comment fails with 42501"},
+                )
+
+    assert engine_adapter.fetchall(
+        f"SELECT id, val FROM {shared_table.sql('postgres', identify=True)} ORDER BY id"
+    ) == [(1, "alpha"), (2, "beta")]
+    assert _leftover_staging_tables(engine_adapter, schema_name) == []

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import logging
 import re
+import sys
 import typing as t
 from functools import cached_property, partial
 from sqlglot import exp
@@ -170,20 +172,28 @@ class PostgresEngineAdapter(
             )
 
         staging_table = self._get_temp_table(target_table or "pandas")
+        committed_standalone = False
 
         def query_factory() -> Query:
+            nonlocal committed_standalone
             # The factory can be called multiple times. The staging table is only loaded once, which
             # assumes that every call would have produced the same result.
             if not self.table_exists(staging_table):
+                committed_standalone = False
+                created_in_outer_tx = self._connection_pool.is_transaction_active
                 try:
                     with self.transaction():
                         self.create_table(staging_table, staging_columns_to_types)
                         self._copy_df(staging_table, ordered_df, null_marker, batch_size)
+                    if not created_in_outer_tx:
+                        committed_standalone = True
                 except Exception:
                     # Callers such as `replace_query` invoke the factory outside of `with source_query`,
                     # so `cleanup_func` won't run and a committed staging table would leak.
                     try:
-                        self._drop_copy_staging_table(staging_table)
+                        self._drop_copy_staging_table(
+                            staging_table, committed_standalone=committed_standalone
+                        )
                     except Exception:
                         logger.warning("Failed to drop staging table %s", staging_table.sql())
                     raise
@@ -194,7 +204,9 @@ class PostgresEngineAdapter(
         return [
             SourceQuery(
                 query_factory=query_factory,
-                cleanup_func=lambda: self._drop_copy_staging_table(staging_table),
+                cleanup_func=lambda: self._drop_copy_staging_table(
+                    staging_table, committed_standalone=committed_standalone
+                ),
             )
         ]
 
@@ -259,17 +271,51 @@ class PostgresEngineAdapter(
                     f"Identifier name '{name}' (length {name_bytes} bytes) exceeds {self.dialect.capitalize()}'s max identifier limit of {self.MAX_IDENTIFIER_LENGTH} bytes"
                 )
 
-    def _drop_copy_staging_table(self, staging_table: exp.Table) -> None:
+    def _drop_copy_staging_table(
+        self, staging_table: exp.Table, *, committed_standalone: bool = False
+    ) -> None:
+        exc_propagating = sys.exc_info()[0] is not None
         try:
             self.drop_table(staging_table)
         except Exception as ex:
-            # The cleanup runs while an exception is propagating. If it left the transaction aborted
-            # the DROP fails with "current transaction is aborted", which would hide the original
-            # error. The staging table was created in that transaction, so its rollback removes it.
             sqlstate = getattr(ex, "pgcode", None) or getattr(ex, "sqlstate", None)
-            if sqlstate != "25P02" or not self._connection_pool.is_transaction_active:
-                raise
-            logger.debug("Skipped dropping %s from an aborted transaction", staging_table.sql())
+            if (
+                sqlstate == "25P02"
+                and self._connection_pool.is_transaction_active
+                and not committed_standalone
+            ):
+                # The staging table was created in the active (aborted) outer transaction, so its
+                # rollback removes it without masking the caller's error.
+                logger.debug("Skipped dropping %s from an aborted transaction", staging_table.sql())
+                return
+            if sqlstate == "25P02" and committed_standalone:
+                # The staging table was already committed in its own transaction before a subsequent
+                # statement aborted the connection's transaction, so rollback alone will not drop it.
+                was_in_tx = self._connection_pool.is_transaction_active
+                try:
+                    self._connection_pool.rollback()
+                    with self.transaction():
+                        self.drop_table(staging_table)
+                    if was_in_tx and not exc_propagating:
+                        self._connection_pool.begin()
+                    return
+                except Exception:
+                    if exc_propagating:
+                        logger.warning(
+                            "Failed to drop staging table %s after rolling back aborted transaction",
+                            staging_table.sql(),
+                            exc_info=True,
+                        )
+                        return
+                    raise
+            if exc_propagating:
+                logger.warning(
+                    "Failed to drop staging table %s",
+                    staging_table.sql(),
+                    exc_info=True,
+                )
+                return
+            raise
 
     @staticmethod
     def _is_oid_or_reg_type(data_type: exp.DataType) -> bool:
@@ -381,6 +427,10 @@ class PostgresEngineAdapter(
                 staging_type = None
             if staging_type is None:
                 return None
+            if staging_type != "TEXT" and target_type.is_type(
+                exp.DataType.Type.JSON, exp.DataType.Type.JSONB
+            ):
+                return None
             staging_columns_to_types[col_name] = exp.DataType.build(
                 staging_type, dialect=PostgresEngineAdapter.DIALECT
             )
@@ -408,11 +458,129 @@ class PostgresEngineAdapter(
                 index=False,
                 na_rep=null_marker,
                 quoting=csv.QUOTE_MINIMAL,
-                lineterminator="\n",
+                lineterminator="\r\n",
             )
             buffer.seek(0)
             # A text buffer is encoded by the driver with the connection's client_encoding
             self.cursor.copy_expert(copy_sql, buffer)
+
+    def replace_query(
+        self,
+        table_name: TableName,
+        query_or_df: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        supports_replace_table_override: t.Optional[bool] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        import pandas as pd
+
+        with self.transaction(condition=isinstance(query_or_df, pd.DataFrame)):
+            return super().replace_query(
+                table_name,
+                query_or_df,
+                target_columns_to_types=target_columns_to_types,
+                table_description=table_description,
+                column_descriptions=column_descriptions,
+                source_columns=source_columns,
+                supports_replace_table_override=supports_replace_table_override,
+                **kwargs,
+            )
+
+    def ctas(
+        self,
+        table_name: TableName,
+        query_or_df: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        exists: bool = True,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        import pandas as pd
+
+        with self.transaction(condition=isinstance(query_or_df, pd.DataFrame)):
+            return super().ctas(
+                table_name,
+                query_or_df,
+                target_columns_to_types=target_columns_to_types,
+                exists=exists,
+                table_description=table_description,
+                column_descriptions=column_descriptions,
+                source_columns=source_columns,
+                **kwargs,
+            )
+
+    def _scd_type_2(
+        self,
+        target_table: TableName,
+        source_table: QueryOrDF,
+        *args: t.Any,
+        **kwargs: t.Any,
+    ) -> None:
+        import pandas as pd
+
+        with self.transaction(condition=isinstance(source_table, pd.DataFrame)):
+            super()._scd_type_2(target_table, source_table, *args, **kwargs)
+
+    @contextlib.contextmanager
+    def _comment_savepoint(self) -> t.Iterator[None]:
+        if (
+            self._connection_pool.is_transaction_active is not True
+            or not self.SUPPORTS_TRANSACTIONS
+        ):
+            yield
+            return
+
+        savepoint = "_sqlmesh_comment"
+        self.execute(f"SAVEPOINT {savepoint}")
+        try:
+            yield
+        except Exception:
+            try:
+                self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:
+                logger.debug("Failed to roll back savepoint %s", savepoint, exc_info=True)
+            raise
+        else:
+            self.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+    def _create_table_comment(
+        self, table_name: TableName, table_comment: str, table_kind: str = "TABLE"
+    ) -> None:
+        table = exp.to_table(table_name)
+        try:
+            with self._comment_savepoint():
+                self.execute(self._build_create_comment_table_exp(table, table_comment, table_kind))
+        except Exception:
+            logger.warning(
+                f"Table comment for '{table.alias_or_name}' not registered - this may be due to limited permissions",
+                exc_info=True,
+            )
+
+    def _create_column_comments(
+        self,
+        table_name: TableName,
+        column_comments: t.Dict[str, str],
+        table_kind: str = "TABLE",
+        materialized_view: bool = False,
+    ) -> None:
+        table = exp.to_table(table_name)
+        for col, comment in column_comments.items():
+            try:
+                with self._comment_savepoint():
+                    self.execute(
+                        self._build_create_comment_column_exp(table, col, comment, table_kind)
+                    )
+            except Exception:
+                logger.warning(
+                    f"Column comments for column '{col}' in table '{table.alias_or_name}' not registered - this may be due to limited permissions",
+                    exc_info=True,
+                )
 
     def _create_table_like(
         self,
@@ -448,18 +616,21 @@ class PostgresEngineAdapter(
         source_columns: t.Optional[t.List[str]] = None,
         **kwargs: t.Any,
     ) -> None:
+        import pandas as pd
+
         # Merge isn't supported until Postgres 15
         major, minor = self.server_version
         merge_impl = super().merge if major >= 15 else partial(logical_merge, self)
-        merge_impl(  # type: ignore
-            target_table,
-            source_table,
-            target_columns_to_types,
-            unique_key,
-            when_matched=when_matched,
-            merge_filter=merge_filter,
-            source_columns=source_columns,
-        )
+        with self.transaction(condition=isinstance(source_table, pd.DataFrame)):
+            merge_impl(  # type: ignore
+                target_table,
+                source_table,
+                target_columns_to_types,
+                unique_key,
+                when_matched=when_matched,
+                merge_filter=merge_filter,
+                source_columns=source_columns,
+            )
 
     @cached_property
     def server_version(self) -> t.Tuple[int, int]:
