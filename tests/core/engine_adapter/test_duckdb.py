@@ -321,7 +321,7 @@ def test_merge_native_sql(make_mocked_engine_adapter: t.Callable, mocker: Mocker
     assert to_sql_calls(adapter) == [
         'MERGE INTO "tgt" AS "__MERGE_TARGET__" USING '
         '(SELECT DISTINCT ON ("id") * FROM '
-        '(SELECT CAST("id" AS INT) AS "id", CAST("name" AS TEXT) AS "name", CAST("value" AS INT) AS "value" FROM '
+        '(SELECT * REPLACE (CAST("id" AS INT) AS "id", CAST("name" AS TEXT) AS "name", CAST("value" AS INT) AS "value") FROM '
         '(SELECT "id", "name", "value" FROM "src") AS "_raw_src") AS "_src") AS "__MERGE_SOURCE__" '
         'ON "__MERGE_TARGET__"."id" = "__MERGE_SOURCE__"."id" '
         'WHEN MATCHED THEN UPDATE SET "id" = "__MERGE_SOURCE__"."id", "name" = "__MERGE_SOURCE__"."name", "value" = "__MERGE_SOURCE__"."value" '
@@ -743,3 +743,323 @@ def test_merge_native_composite_unique_key_option_a(native_merge_adapter, duck_c
     )
     rows = duck_conn.execute("SELECT * FROM tgt ORDER BY id NULLS LAST, name NULLS LAST").fetchall()
     assert rows == [(1, "a", 10), (1, None, 25)]
+
+
+def test_merge_and_drop_two_part_catalog_vs_schema_mocked(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    mocker.patch("duckdb.__version__", "1.5.0")
+    adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    mocker.patch.object(adapter, "get_current_catalog", return_value="memory")
+
+    catalog_types = {
+        "memory": "duckdb",
+        "sqlite_db": "sqlite",
+        "lake": "ducklake",
+    }
+    mocker.patch.object(
+        adapter,
+        "_get_catalog_type",
+        side_effect=lambda cat: catalog_types.get((cat or "").lower()),
+    )
+
+    # 2-part foreign catalog falls back to DELETE + INSERT even when current_catalog is "memory"
+    for target in ("sqlite_db.tgt", exp.table_("tgt", db="sqlite_db")):
+        adapter.cursor.execute.reset_mock()
+        adapter.merge(
+            target_table=target,
+            source_table=parse_one("SELECT id, name, value FROM src"),
+            target_columns_to_types=MERGE_COLUMNS,
+            unique_key=[exp.to_column("id")],
+        )
+        calls = to_sql_calls(adapter)
+        assert not any(call.startswith("MERGE") for call in calls)
+        assert any(call.startswith('DELETE FROM "sqlite_db"."tgt"') for call in calls)
+        assert any(call.startswith('INSERT INTO "sqlite_db"."tgt"') for call in calls)
+
+    # 2-part schema inside "memory" resolves via get_current_catalog() -> native MERGE
+    adapter.cursor.execute.reset_mock()
+    adapter.merge(
+        target_table="my_schema.tgt",
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    assert to_sql_calls(adapter)[0].startswith('MERGE INTO "my_schema"."tgt"')
+
+    # 2-part DuckLake catalog uses native MERGE and strips CASCADE on DROP TABLE/VIEW
+    adapter.cursor.execute.reset_mock()
+    adapter.merge(
+        target_table="lake.tgt",
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    adapter.drop_table("lake.tgt", cascade=True)
+    adapter.drop_view("lake.v", cascade=True)
+    adapter.drop_table("my_schema.tgt", cascade=True)
+    calls = to_sql_calls(adapter)
+    assert calls[0].startswith('MERGE INTO "lake"."tgt"')
+    assert calls[1:] == [
+        'DROP TABLE IF EXISTS "lake"."tgt"',
+        'DROP VIEW IF EXISTS "lake"."v"',
+        'DROP TABLE IF EXISTS "my_schema"."tgt" CASCADE',
+    ]
+
+
+@pytest.mark.isolated
+@pytest.mark.xdist_group("sqlite_extension")
+def test_merge_two_part_sqlite_catalog_falls_back_live(
+    native_merge_adapter, duck_conn, tmp_path, mocker: MockerFixture
+):
+    duck_conn.load_extension("sqlite")
+    sqlite_path = tmp_path / "ext.sqlite"
+    duck_conn.execute(f"ATTACH '{sqlite_path}' AS sqlite_db (TYPE SQLITE)")
+    duck_conn.execute("CREATE TABLE sqlite_db.tgt (id INT, name TEXT, value INT)")
+    duck_conn.execute("INSERT INTO sqlite_db.tgt VALUES (1, 'a', 10), (2, 'b', 20)")
+    duck_conn.execute("CREATE TABLE src (id INT, name TEXT, value INT)")
+    duck_conn.execute("INSERT INTO src VALUES (2, 'b2', 21), (3, 'c', 30)")
+
+    assert native_merge_adapter.get_current_catalog() == "memory"
+    spy = mocker.spy(native_merge_adapter, "_merge")
+
+    # Test both string and exp.Table 2-part catalog-qualified forms
+    native_merge_adapter.merge(
+        target_table="sqlite_db.tgt",
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    assert _rows(duck_conn, "sqlite_db.tgt") == [(1, "a", 10), (2, "b2", 21), (3, "c", 30)]
+
+    duck_conn.execute("DELETE FROM src")
+    duck_conn.execute("INSERT INTO src VALUES (1, 'a2', 11), (4, 'd', 40)")
+    native_merge_adapter.merge(
+        target_table=exp.table_("tgt", db="sqlite_db"),
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    assert not spy.called
+    assert _rows(duck_conn, "sqlite_db.tgt") == [
+        (1, "a2", 11),
+        (2, "b2", 21),
+        (3, "c", 30),
+        (4, "d", 40),
+    ]
+
+
+def test_merge_two_part_schema_in_memory_uses_native_live(
+    native_merge_adapter, duck_conn, mocker: MockerFixture
+):
+    duck_conn.execute("CREATE SCHEMA my_schema")
+    duck_conn.execute("CREATE TABLE my_schema.tgt (id INT, name TEXT, value INT)")
+    duck_conn.execute("INSERT INTO my_schema.tgt VALUES (1, 'a', 10), (2, 'b', 20)")
+    duck_conn.execute("CREATE TABLE src (id INT, name TEXT, value INT)")
+    duck_conn.execute("INSERT INTO src VALUES (2, 'b2', 21), (3, 'c', 30)")
+
+    assert native_merge_adapter.get_current_catalog() == "memory"
+    spy = mocker.spy(native_merge_adapter, "_merge")
+    native_merge_adapter.merge(
+        target_table="my_schema.tgt",
+        source_table=parse_one("SELECT id, name, value FROM src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    spy.assert_called_once()
+    assert _rows(duck_conn, "my_schema.tgt") == [(1, "a", 10), (2, "b2", 21), (3, "c", 30)]
+
+
+@pytest.mark.isolated
+@pytest.mark.xdist_group("ducklake_extension")
+@pytest.mark.skipif(
+    not _installed_duckdb_supports_merge(), reason="Installed duckdb doesn't support MERGE"
+)
+def test_merge_and_drop_two_part_ducklake_catalog_live(
+    ducklake_conn, tmp_path, mocker: MockerFixture
+):
+    mocker.patch("duckdb.__version__", "1.4.0")
+    adapter = DuckDBEngineAdapter(lambda: ducklake_conn)
+    ducklake_conn.execute(
+        f"ATTACH 'ducklake:{tmp_path}/lake2.ducklake' AS lake (DATA_PATH '{tmp_path}')"
+    )
+    # Create table and view in lake's default 'main' schema and address via 2-part 'lake.<name>'
+    ducklake_conn.execute("CREATE TABLE lake.tgt (id INT, name TEXT, value INT)")
+    ducklake_conn.execute("CREATE VIEW lake.v AS SELECT * FROM lake.tgt")
+    ducklake_conn.execute("CREATE TABLE lake.src (id INT, name TEXT, value INT)")
+    ducklake_conn.execute("INSERT INTO lake.tgt VALUES (1, 'a', 10), (2, 'b', 20)")
+    ducklake_conn.execute("INSERT INTO lake.src VALUES (2, 'b2', 21), (3, 'c', 30)")
+
+    assert adapter.get_current_catalog() == "memory"
+    spy = mocker.spy(adapter, "_merge")
+    adapter.merge(
+        target_table="lake.tgt",
+        source_table=parse_one("SELECT id, name, value FROM lake.src"),
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=[exp.to_column("id")],
+    )
+    spy.assert_called_once()
+    assert _rows(ducklake_conn, "lake.tgt") == [(1, "a", 10), (2, "b2", 21), (3, "c", 30)]
+
+    # 2-part DuckLake drops with cascade=True must omit CASCADE at runtime
+    adapter.drop_view("lake.v", cascade=True)
+    adapter.drop_table("lake.tgt", cascade=True)
+    assert not adapter.table_exists("lake.main.v")
+    assert not adapter.table_exists("lake.main.tgt")
+
+
+def test_merge_native_subqueries_in_when_matched_and_merge_filter(native_merge_adapter, duck_conn):
+    _set_up_merge_tables(duck_conn, "(1, 'a', 20), (2, 'b', 25), (3, 'c', 5)")
+    duck_conn.execute("DROP TABLE src")
+    duck_conn.execute(
+        "CREATE TABLE src (id DOUBLE, name TEXT, value INT, corr INT, unqual_corr INT)"
+    )
+    duck_conn.execute(
+        "INSERT INTO src VALUES "
+        "(1.0, 'a2', 15, 100, 1), "
+        "(2.0, 'b2', 25, 200, 0), "
+        "(3.0, 'c2', 35, 300, 1), "
+        "(4.0, 'd', 40, 400, 1)"
+    )
+    duck_conn.execute("CREATE TABLE thresholds (k INT, flag INT, new_value INT)")
+    duck_conn.execute("INSERT INTO thresholds VALUES (100, 1, 999), (200, 1, 888)")
+    duck_conn.execute("CREATE TABLE cutoff (min_val INT)")
+    duck_conn.execute("INSERT INTO cutoff VALUES (15)")
+
+    _merge(
+        native_merge_adapter,
+        source_table=parse_one("SELECT * FROM src", dialect="duckdb"),
+        merge_filter=parse_one(
+            "__MERGE_TARGET__.value >= (SELECT MAX(c.min_val) FROM cutoff AS c)",
+            dialect="duckdb",
+        ),
+        when_matched=_when_matched(
+            "WHEN MATCHED AND unqual_corr = 1 THEN UPDATE SET value = ("
+            "  SELECT MAX(t.new_value) FROM thresholds AS t "
+            "  WHERE t.k = __MERGE_SOURCE__.corr AND t.flag = unqual_corr"
+            ") "
+            "WHEN MATCHED THEN UPDATE SET value = __MERGE_SOURCE__.value + ("
+            "  SELECT MIN(c.min_val) FROM cutoff AS c"
+            ")"
+        ),
+    )
+    # id=1: passes merge_filter (20 >= 15), unqual_corr=1 -> correlated subquery sets value=999
+    # id=2: passes merge_filter (25 >= 15), unqual_corr=0 -> scalar subquery sets value=25+15=40
+    # id=3: fails merge_filter (5 < 15) in ON -> target (3, 'c', 5) stays and source (3, 'c2', 35) inserts
+    # id=4: unmatched -> inserts (4, 'd', 40)
+    assert _rows(duck_conn) == [
+        (1, "a", 999),
+        (2, "b", 40),
+        (3, "c", 5),
+        (3, "c2", 35),
+        (4, "d", 40),
+    ]
+
+
+def test_merge_native_unaliased_expr_and_duplicate_unused_join_columns(
+    native_merge_adapter, duck_conn
+):
+    # 1. Source query with unaliased unused expression (1 + 2) and pre-distinct key coercion
+    _set_up_merge_tables(duck_conn, "(1, 'a', 10)")
+    duck_conn.execute("DROP TABLE src")
+    duck_conn.execute("CREATE TABLE src (id DOUBLE, name TEXT, value INT)")
+    duck_conn.execute("INSERT INTO src VALUES (1.1, 'a2', 20), (1.2, 'a2', 20), (2.0, 'b', 30)")
+
+    _merge(
+        native_merge_adapter,
+        source_table=parse_one("SELECT id, name, value, 1 + 2 FROM src", dialect="duckdb"),
+    )
+    assert _rows(duck_conn) == [(1, "a2", 20), (2, "b", 30)]
+
+    # 2. Source query with duplicate unused join columns (j1.dup, j2.dup)
+    duck_conn.execute("CREATE TABLE j1 (id DOUBLE, dup TEXT)")
+    duck_conn.execute("CREATE TABLE j2 (id DOUBLE, dup TEXT)")
+    duck_conn.execute("INSERT INTO j1 VALUES (2.0, 'x'), (3.0, 'x3')")
+    duck_conn.execute("INSERT INTO j2 VALUES (2.0, 'y'), (3.0, 'y3')")
+    duck_conn.execute("DELETE FROM src")
+    duck_conn.execute("INSERT INTO src VALUES (2.0, 'b2', 25), (3.0, 'c', 35)")
+
+    _merge(
+        native_merge_adapter,
+        source_table=parse_one(
+            "SELECT s.id, s.name, s.value, j1.dup, j2.dup "
+            "FROM src AS s JOIN j1 USING (id) JOIN j2 USING (id)",
+            dialect="duckdb",
+        ),
+    )
+    assert _rows(duck_conn) == [(1, "a2", 20), (2, "b2", 25), (3, "c", 35)]
+
+
+def test_merge_native_struct_access_spaces_and_case_mismatch(native_merge_adapter, duck_conn):
+    duck_conn.execute('CREATE TABLE tgt_special ("ID" INT, "my col" TEXT, "My Val" INT)')
+    duck_conn.execute("INSERT INTO tgt_special VALUES (1, 'old a', 10), (2, 'old b', 20)")
+    duck_conn.execute(
+        'CREATE TABLE src_special (id DOUBLE, "my col" TEXT, "MY VAL" INT, info STRUCT(nested_field INT))'
+    )
+    duck_conn.execute(
+        "INSERT INTO src_special VALUES "
+        "(1.0, 'new a', 100, {'nested_field': 7}), "
+        "(2.0, 'new b', 200, {'nested_field': 3}), "
+        "(3.0, 'new c', 300, {'nested_field': 1})"
+    )
+
+    native_merge_adapter.merge(
+        target_table="tgt_special",
+        source_table=parse_one(
+            'SELECT id, "my col", "MY VAL", info FROM src_special', dialect="duckdb"
+        ),
+        target_columns_to_types={
+            "ID": exp.DataType.build("int"),
+            "my col": exp.DataType.build("text"),
+            "My Val": exp.DataType.build("int"),
+        },
+        unique_key=[exp.column("ID", quoted=True)],
+        when_matched=_when_matched(
+            "WHEN MATCHED AND __MERGE_SOURCE__.info.nested_field = 7 "
+            'THEN UPDATE SET "my col" = __MERGE_SOURCE__."my col", '
+            '"My Val" = __MERGE_SOURCE__."My Val" + __MERGE_SOURCE__.info.nested_field '
+            'WHEN MATCHED THEN UPDATE SET "My Val" = __MERGE_SOURCE__."My Val"'
+        ),
+    )
+    rows = duck_conn.execute(
+        'SELECT "ID", "my col", "My Val" FROM tgt_special ORDER BY 1'
+    ).fetchall()
+    assert rows == [
+        (1, "new a", 107),
+        (2, "old b", 200),
+        (3, "new c", 300),
+    ]
+
+
+def test_prepare_merge_source_query_preserves_caller_ast_and_empty_unique_key(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = _mocked_adapter(make_mocked_engine_adapter, mocker, "1.5.0")
+
+    # 1. With concrete replacements: caller query.parent is not mutated and empty unique_key omits DISTINCT
+    query = t.cast(exp.Query, parse_one("SELECT id, name, value FROM src", dialect="duckdb"))
+    assert query.parent is None
+    prepared_no_key = adapter._prepare_merge_source_query(
+        query,
+        target_table="tgt",
+        target_columns_to_types=MERGE_COLUMNS,
+        unique_key=None,
+    )
+    assert query.parent is None
+    assert prepared_no_key.sql(dialect="duckdb") == (
+        'SELECT * FROM (SELECT * REPLACE (CAST("id" AS INT) AS "id", '
+        'CAST("name" AS TEXT) AS "name", CAST("value" AS INT) AS "value") '
+        "FROM (SELECT id, name, value FROM src) AS _raw_src) AS _src"
+    )
+
+    # 2. Without replacements (all UNKNOWN / empty): caller query.parent is not mutated and [] omits DISTINCT
+    query_unknown = t.cast(exp.Query, parse_one("SELECT id FROM src", dialect="duckdb"))
+    assert query_unknown.parent is None
+    prepared_unknown = adapter._prepare_merge_source_query(
+        query_unknown,
+        target_table="tgt",
+        target_columns_to_types={"id": exp.DataType.build("UNKNOWN")},
+        unique_key=[],
+    )
+    assert query_unknown.parent is None
+    assert prepared_unknown.sql(dialect="duckdb") == ("SELECT * FROM (SELECT id FROM src) AS _src")

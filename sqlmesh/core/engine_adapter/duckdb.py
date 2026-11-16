@@ -89,11 +89,8 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
     def _supports_native_merge(self, target_table: TableName) -> bool:
         if not self._duckdb_supports_merge:
             return False
-        catalog = (
-            exp.to_table(target_table, dialect=self.dialect).catalog or self.get_current_catalog()
-        )
         # Errors from the catalog lookup propagate on purpose; only a None/unknown type falls back.
-        catalog_type = (self._get_catalog_type(catalog) or "").lower()
+        catalog_type = (self._get_target_catalog_type(target_table) or "").lower()
         return catalog_type in self.NATIVE_MERGE_CATALOG_TYPES
 
     def merge(
@@ -140,65 +137,40 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
 
         unique_key = unique_key or []
 
-        if not target_columns_to_types or all(
-            not dtype or dtype.is_type(exp.DataType.Type.UNKNOWN)
-            for dtype in target_columns_to_types.values()
-        ):
-            return exp.select("*").distinct(*unique_key).from_(query.subquery("_src", copy=False))  # type: ignore
+        if target_columns_to_types:
+            source_columns_set = (
+                {s.lower() for s in source_columns} if source_columns is not None else None
+            )
+            target_cols_to_project = (
+                [col for col in target_columns_to_types if col.lower() in source_columns_set]
+                if source_columns_set is not None
+                else list(target_columns_to_types)
+            )
+            replacements = [
+                exp.alias_(
+                    exp.cast(exp.column(col, quoted=True), to=dtype),
+                    col,
+                    quoted=True,
+                    copy=False,
+                )
+                for col in target_cols_to_project
+                if (dtype := target_columns_to_types[col])
+                and not dtype.is_type(exp.DataType.Type.UNKNOWN)
+            ]
+        else:
+            replacements = []
 
-        source_columns_set = (
-            {s.lower() for s in source_columns} if source_columns is not None else None
+        select = exp.select("*")
+        if unique_key:
+            select = select.distinct(*unique_key)
+
+        if not replacements:
+            return select.from_(query.subquery("_src"), copy=False)
+
+        coerced = exp.select(exp.Star(replace=replacements)).from_(
+            query.subquery("_raw_src"), copy=False
         )
-        target_cols_to_project = (
-            [col for col in target_columns_to_types if col.lower() in source_columns_set]
-            if source_columns_set is not None
-            else list(target_columns_to_types)
-        )
-        projected_target_cols = {col.lower(): col for col in target_cols_to_project}
-
-        projections: t.List[exp.Expr] = []
-        for col in target_cols_to_project:
-            dtype = target_columns_to_types[col]
-            if dtype and not dtype.is_type(exp.DataType.Type.UNKNOWN):
-                projections.append(exp.alias_(exp.cast(exp.column(col), to=dtype), col, copy=False))
-            else:
-                projections.append(exp.column(col))
-
-        seen_extra: t.Set[str] = set()
-        extra_cols: t.List[str] = []
-        target_names = {
-            MERGE_TARGET_ALIAS,
-            exp.to_table(target_table, dialect=self.dialect).name.upper(),
-        }
-        for expr in [when_matched, merge_filter, *unique_key]:
-            if expr:
-                for column_expr in expr.find_all(exp.Column):
-                    if column_expr.table and column_expr.table.upper() in target_names:
-                        continue
-                    col_name = column_expr.name
-                    if (
-                        col_name.lower() not in projected_target_cols
-                        and col_name.lower() not in seen_extra
-                    ):
-                        seen_extra.add(col_name.lower())
-                        extra_cols.append(col_name)
-
-        inner_query = query.this if isinstance(query, exp.Subquery) else query
-        if isinstance(inner_query, exp.Select):
-            for name in inner_query.named_selects:
-                if (
-                    name != "*"
-                    and name.lower() not in projected_target_cols
-                    and name.lower() not in seen_extra
-                ):
-                    seen_extra.add(name.lower())
-                    extra_cols.append(name)
-
-        for extra in extra_cols:
-            projections.append(exp.column(extra))
-
-        coerced = exp.select(*projections).from_(query.subquery("_raw_src", copy=False), copy=False)
-        return exp.select("*").distinct(*unique_key).from_(coerced.subquery("_src", copy=False))  # type: ignore
+        return select.from_(coerced.subquery("_src", copy=False), copy=False)
 
     def _merge(
         self,
@@ -379,11 +351,20 @@ class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
         # "Cascade Drop not supported in DuckLake". Views in DuckDB are late-binding, so
         # dropping the underlying table without CASCADE is safe there.
         if cascade and kind.upper() in ("TABLE", "VIEW"):
-            catalog = exp.to_table(name).catalog or self.get_current_catalog()
-            if self._get_catalog_type(catalog) == "ducklake":
+            if (self._get_target_catalog_type(name) or "").lower() == "ducklake":
                 cascade = False
 
         super()._drop_object(name=name, exists=exists, kind=kind, cascade=cascade, **drop_args)
+
+    def _get_target_catalog_type(self, name: TableName) -> t.Optional[str]:
+        table = exp.to_table(name, dialect=self.dialect)
+        if table.catalog:
+            return self._get_catalog_type(table.catalog)
+        if table.db:
+            db_catalog_type = self._get_catalog_type(table.db)
+            if db_catalog_type is not None:
+                return db_catalog_type
+        return self._get_catalog_type(self.get_current_catalog())
 
     def _get_catalog_type(self, catalog: t.Optional[str]) -> t.Optional[str]:
         """Returns the type of the given catalog (e.g. 'duckdb', 'ducklake') as reported by duckdb_databases()."""
