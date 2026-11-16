@@ -141,25 +141,55 @@ class MetricMeta(PydanticModel, frozen=True):
 class Metric(MetricMeta, frozen=True):
     expanded: exp.Expr
 
+    def _aggregate_output_names(self) -> t.List[str]:
+        """Returns the output column name for each aggregate in the expanded metric."""
+        nested_aggregate_names: t.Dict[exp.AggFunc, str] = {}
+        output_names = []
+
+        for agg in self.expanded.find_all(exp.AggFunc):
+            if isinstance(agg.parent, exp.Alias):
+                output_names.append(agg.parent.alias)
+                continue
+
+            if agg not in nested_aggregate_names:
+                nested_aggregate_names[agg] = (
+                    f"__sqlmesh_metric_{self.name.replace('.', '_')}__agg_"
+                    f"{len(nested_aggregate_names)}"
+                )
+            output_names.append(nested_aggregate_names[agg])
+
+        return output_names
+
     @property
     def aggs(self) -> t.Dict[exp.AggFunc, MeasureAndDimTables]:
         """Returns a dictionary of aggregation to referenced tables.
 
         This method removes catalog and schema information from columns.
         """
-        return {
-            t.cast(
-                exp.AggFunc,
-                t.cast(exp.Expr, agg.parent).transform(
-                    lambda node: (
-                        exp.column(node.this, table=remove_namespace(node))
-                        if isinstance(node, exp.Column) and node.table
-                        else node
-                    )
-                ),
-            ): _get_measure_and_dim_tables(agg)
-            for agg in self.expanded.find_all(exp.AggFunc)
-        }
+        aggs: t.Dict[exp.AggFunc, MeasureAndDimTables] = {}
+
+        for agg, output_name in zip(
+            self.expanded.find_all(exp.AggFunc), self._aggregate_output_names()
+        ):
+            projection = (
+                agg.parent
+                if isinstance(agg.parent, exp.Alias)
+                else exp.alias_(agg.copy(), output_name)
+            )
+            aggs[
+                t.cast(
+                    exp.AggFunc,
+                    projection.transform(
+                        lambda node: (
+                            exp.column(node.this, table=remove_namespace(node))
+                            if isinstance(node, exp.Column) and node.table
+                            else node
+                        )
+                    ),
+                )
+            ] = _get_measure_and_dim_tables(agg)
+
+        return aggs
 
     @property
     def formula(self) -> exp.Expr:
@@ -168,10 +198,38 @@ class Metric(MetricMeta, frozen=True):
         For simple metrics it is just the metric name. For derived metrics,
         it consists of the operations of the derived metrics without aggregations.
         """
+        formula = (
+            self.expanded.this.copy()
+            if isinstance(self.expanded, exp.Alias)
+            else self.expanded.copy()
+        )
+        formula_aggregates = list(formula.find_all(exp.AggFunc))
+        aggregate_output_names = {
+            id(agg): output_name
+            for agg, output_name in zip(formula_aggregates, self._aggregate_output_names())
+        }
+
+        def _replace_metric_alias(node: exp.Expr) -> exp.Expr:
+            if not isinstance(node, exp.Alias):
+                return node
+
+            if isinstance(node.this, exp.AggFunc):
+                return exp.Column(this=exp.to_identifier(node.alias))
+            if node.this.find(exp.AggFunc):
+                return node.this
+            return exp.Column(this=exp.to_identifier(node.alias))
+
+        formula = formula.transform(_replace_metric_alias, copy=False)
+
+        def _replace_aggregate(node: exp.Expr) -> exp.Expr:
+            if not isinstance(node, exp.AggFunc):
+                return node
+            output_name = aggregate_output_names[id(node)]
+            return exp.Column(this=exp.to_identifier(output_name))
+
+        formula = formula.transform(_replace_aggregate, copy=False)
         return exp.alias_(
-            self.expanded.transform(
-                lambda node: exp.column(node.args["alias"]) if isinstance(node, exp.Alias) else node
-            ),
+            formula,
             self.name,
             copy=False,
         )
