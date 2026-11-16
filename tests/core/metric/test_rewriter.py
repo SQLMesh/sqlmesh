@@ -255,7 +255,7 @@ def test_rewrite_nested_metric_aggregates():
     dialect = "bigquery"
     model = load_sql_based_model(
         d.parse(
-            "MODEL (name sushi.orders, kind FULL); SELECT 1 AS customer_id, 10 AS amount",
+            "MODEL (name sushi.orders, kind FULL); SELECT 1 AS customer_id, 10 AS amount, 100 AS other_amount",
             default_dialect=dialect,
         ),
         dialect=dialect,
@@ -270,6 +270,7 @@ def test_rewrite_nested_metric_aggregates():
         METRIC (name safe_median_plus_one, expression safe_median_amount + 1);
         METRIC (name combined_amount, expression SUM(sushi.orders.amount) + MAX(sushi.orders.amount));
         METRIC (name reused_amount, expression SUM(sushi.orders.amount) / NULLIF(SUM(sushi.orders.amount), 0));
+        METRIC (name __sqlmesh_metric_safe_median_amount__agg_0, expression SUM(sushi.orders.other_amount));
         """,
         default_dialect=dialect,
     )
@@ -293,6 +294,7 @@ def test_rewrite_nested_metric_aggregates():
           METRIC(safe_median_plus_one),
           METRIC(combined_amount),
           METRIC(reused_amount),
+          METRIC(__sqlmesh_metric_safe_median_amount__agg_0),
           METRIC(total_amount),
           METRIC(derived_amount)
         FROM __semantic.__table
@@ -349,3 +351,11 @@ def test_rewrite_nested_metric_aggregates():
     # Existing simple and derived metric behavior remains intact.
     assert isinstance(outer_projections["total_amount"], exp.Column)
     assert isinstance(outer_projections["derived_amount"], exp.Add)
+
+    # A public metric name can match the generated alias for an aggregate
+    # nested under a wrapper. The source query must allocate distinct aliases.
+    colliding_metric = outer_projections["__sqlmesh_metric_safe_median_amount__agg_0"]
+    assert isinstance(colliding_metric, exp.Column)
+    assert colliding_metric.name != safe_median_aggregate_ref.name
+    projected_aliases = [projection.alias for projection in aggregate_projections]
+    assert len(projected_aliases) == len(set(projected_aliases))
