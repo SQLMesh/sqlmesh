@@ -255,7 +255,7 @@ def test_rewrite_nested_metric_aggregates():
     dialect = "bigquery"
     model = load_sql_based_model(
         d.parse(
-            "MODEL (name sushi.orders, kind FULL); SELECT 1 AS customer_id, 10 AS amount, 100 AS other_amount",
+            "MODEL (name sushi.orders, kind FULL); SELECT 1 AS customer_id, 10 AS amount, 100 AS other_amount, 1000 AS __sqlmesh_metric_median_amount__agg_0",
             default_dialect=dialect,
         ),
         dialect=dialect,
@@ -359,3 +359,42 @@ def test_rewrite_nested_metric_aggregates():
     assert colliding_metric.name != safe_median_aggregate_ref.name
     projected_aliases = [projection.alias for projection in aggregate_projections]
     assert len(projected_aliases) == len(set(projected_aliases))
+
+    dimension_metrics = {"median_amount": metrics["median_amount"]}
+    selected_dimension_query = rewrite(
+        """
+        SELECT __sqlmesh_metric_median_amount__agg_0, METRIC(median_amount)
+        FROM __semantic.__table
+        GROUP BY __sqlmesh_metric_median_amount__agg_0
+        """,
+        graph=graph,
+        metrics=dimension_metrics,
+        dialect=dialect,
+    )
+    selected_dimension_source = selected_dimension_query.args["from_"].this
+    selected_dimension_inner = (
+        selected_dimension_source.this
+        if isinstance(selected_dimension_source, exp.Subquery)
+        else None
+    )
+    assert isinstance(selected_dimension_inner, exp.Select)
+    selected_dimension_names = [
+        projection.output_name for projection in selected_dimension_inner.selects
+    ]
+    assert len(selected_dimension_names) == len(set(selected_dimension_names))
+
+    dimension_collision_query = rewrite(
+        """
+        SELECT METRIC(median_amount)
+        FROM __semantic.__table
+        GROUP BY __sqlmesh_metric_median_amount__agg_0
+        """,
+        graph=graph,
+        metrics=dimension_metrics,
+        dialect=dialect,
+    )
+    dimension_source = dimension_collision_query.args["from_"].this
+    dimension_inner = dimension_source.this if isinstance(dimension_source, exp.Subquery) else None
+    assert isinstance(dimension_inner, exp.Select)
+    dimension_projection_names = [projection.output_name for projection in dimension_inner.selects]
+    assert len(dimension_projection_names) == len(set(dimension_projection_names))
