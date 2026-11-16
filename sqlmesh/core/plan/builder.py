@@ -734,7 +734,7 @@ class PlanBuilder:
                 return
 
             all_upstream_forward_only = set()
-            data_changing_upstream_forward_only = set()
+            new_upstream_requires_rebuild = False
             all_upstream_categories = set()
             direct_parent_categories = set()
 
@@ -745,25 +745,31 @@ class PlanBuilder:
                     all_upstream_categories.add(parent.change_category)
                     all_upstream_forward_only.add(parent.is_forward_only)
                     if parent.change_category not in DOWNSTREAM_REBUILD_NOT_REQUIRED_CATEGORIES:
-                        data_changing_upstream_forward_only.add(parent.is_forward_only)
+                        new_upstream_requires_rebuild = True
                     if p_id in snapshot.parents:
                         direct_parent_categories.add(parent.change_category)
 
             # Direct parents that already exist in state but changed relative to the previous version
             # of this snapshot (eg. they were categorized in another plan) don't show up above.
             stored_parent_categories: t.Set[SnapshotChangeCategory] = set()
+            stored_parent_forward_only: t.Set[bool] = set()
             if direct_parent_categories:
                 stored_parent_categories, stored_parent_forward_only = (
                     self._get_stored_direct_parent_changes(snapshot)
                 )
 
-            if stored_parent_categories:
-                # A parent that changed in another plan is part of this change too. Whether the snapshot
-                # can skip a rebuild now depends on the changes that require downstream history to be
-                # recomputed: a metadata or non-breaking change doesn't, so it can't veto forward-only.
+            if stored_parent_forward_only:
+                # A stored parent has a breaking version since the previous version of this snapshot (or
+                # its history can't be traced back that far), so that change is part of this one too and
+                # its forward-only flags are added to the vote. The new parents keep the rule used when
+                # only new parents changed, so the same changes to them give the same result. The only
+                # exception is when none of the new upstream changes require downstream history to be
+                # recomputed (metadata or non-breaking changes only): then they don't vote, so they can't
+                # undo a forward-only change to the stored parent. Without such a stored parent the
+                # decision is the same as when only new parents changed.
                 all_upstream_forward_only = (
-                    data_changing_upstream_forward_only | stored_parent_forward_only
-                )
+                    all_upstream_forward_only if new_upstream_requires_rebuild else set()
+                ) | stored_parent_forward_only
 
             if all_upstream_forward_only == {True} or (
                 snapshot.is_model and snapshot.model.forward_only
@@ -847,6 +853,12 @@ class PlanBuilder:
         """Returns the change categories and forward-only flags of direct parents that already exist in
         state (they are not new in this plan) but changed since the previous version of the snapshot
         was built.
+
+        A forward-only flag is only returned for a parent with a breaking version since then (True if
+        every such version was applied forward-only), or False for a parent whose history can't be traced
+        back that far. Metadata and non-breaking changes don't contribute a flag. The flags are added to
+        the forward-only vote of the new parents, which otherwise follows the same rule as when only new
+        parents changed.
 
         For example, a parent was changed in a dev plan and is now combined with another parent
         that is changed in the current plan. The change to the first parent is not visible to the

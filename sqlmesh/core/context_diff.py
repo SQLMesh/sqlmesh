@@ -89,8 +89,9 @@ class ContextDiff(PydanticModel):
     diff_rendered: bool = False
     """Whether the diff should compare raw vs rendered models"""
     stored_parent_forward_only: t.Dict[SnapshotId, bool] = {}
-    """Whether the earlier versions of the stored parents of modified snapshots were forward-only.
-    A past version doesn't record this, so it is read from the snapshot stored for that version."""
+    """Whether the earlier versions of the stored parents of new indirectly modified snapshots were
+    forward-only. A past version doesn't record this, so it is read from the snapshot stored for that
+    version."""
 
     @classmethod
     def create(
@@ -505,13 +506,20 @@ def _get_stored_parent_forward_only(
 ) -> t.Dict[SnapshotId, bool]:
     """Returns whether the past versions of stored parents were forward-only.
 
-    A stored parent already exists in state and is a parent of a new modified snapshot, but it has changed
-    since that snapshot's previous version. Only the versions created after that change are returned,
-    and those that can't be found in state are left out.
+    A stored parent already exists in state and is a direct parent of a new indirectly modified snapshot
+    that also has a new direct parent, but it has changed since that snapshot's previous version. These
+    are the only snapshots for which the plan builder reads the flags. For each such parent, the earlier
+    versions in its history (`all_versions`, as used by the plan builder) created after the version the
+    previous snapshot was built from are returned. Nothing is returned for a parent whose history doesn't
+    reach back to that version, and versions that can't be found in state are left out.
     """
     version_ids: t.Set[SnapshotId] = set()
     for snapshot, previous_snapshot in modified_snapshots.values():
-        if snapshot.snapshot_id not in new_snapshots:
+        if (
+            snapshot.snapshot_id not in new_snapshots
+            or not any(parent_id in new_snapshots for parent_id in snapshot.parents)
+            or not snapshot.is_indirectly_modified(previous_snapshot)
+        ):
             continue
         previous_parent_ids = {p.name: p for p in previous_snapshot.parents}
         for parent_id in snapshot.parents:
@@ -524,11 +532,14 @@ def _get_stored_parent_forward_only(
                 or previous_parent_id == parent_id
             ):
                 continue
-            for version in reversed(parent.previous_versions):
+            # The latest version is the parent itself, whose flag is known.
+            parent_version_ids: t.List[SnapshotId] = []
+            for version in reversed(parent.all_versions[:-1]):
                 version_id = version.snapshot_id(parent.name)
                 if version_id == previous_parent_id:
+                    version_ids.update(parent_version_ids)
                     break
-                version_ids.add(version_id)
+                parent_version_ids.append(version_id)
 
     if not version_ids:
         return {}

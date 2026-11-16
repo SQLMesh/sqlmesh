@@ -1592,39 +1592,6 @@ def test_stored_changed_parent_with_new_parent(
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
-def test_unchanged_historic_breaking_parent_with_new_parent(init_and_plan_context: t.Callable):
-    context, plan = init_and_plan_context("examples/sushi")
-    context.apply(plan)
-
-    initial_model_b = context.get_model("sushi.items")
-
-    # Deploy a breaking change to the first parent to prod, including its children.
-    context.upsert_model("sushi.orders", stamp="1")
-    plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
-    plan_builder.set_choice(
-        context.get_snapshot("sushi.orders", raise_if_missing=True),
-        SnapshotChangeCategory.BREAKING,
-    )
-    context.apply(plan_builder.build())
-    child_before = context.get_snapshot("sushi.order_items", raise_if_missing=True)
-
-    # The first parent is unchanged relative to the deployed child, so its history must be ignored.
-    context.upsert_model(initial_model_b.name, stamp="1")
-    parent_b = context.get_snapshot(initial_model_b.name, raise_if_missing=True)
-    plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
-    plan_builder.set_choice(parent_b, SnapshotChangeCategory.METADATA)
-    plan = plan_builder.build()
-
-    child_after = context.get_snapshot("sushi.order_items", raise_if_missing=True)
-    assert child_after.snapshot_id in plan.context_diff.new_snapshots
-    assert (
-        plan.snapshots[child_after.snapshot_id].change_category == SnapshotChangeCategory.METADATA
-    )
-    assert plan.snapshots[child_after.snapshot_id].version == child_before.version
-    assert not any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
-
-
-@time_machine.travel("2023-01-08 15:00:00 UTC")
 @pytest.mark.parametrize(
     "new_parent_category, expected_forward_only",
     [
@@ -1713,57 +1680,56 @@ def test_stored_breaking_parent_with_new_forward_only_parent(init_and_plan_conte
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
-def test_stored_parent_history_with_earlier_non_forward_only_change(
-    init_and_plan_context: t.Callable,
-):
-    """Only the latest version of the stored parent is forward-only. An earlier breaking version
-    that is not forward-only was never applied to the child, so the child has to be rebuilt."""
+def test_stored_parent_history_with_two_forward_only_changes(init_and_plan_context: t.Callable):
+    """Both breaking versions of the stored parent were applied forward-only, so the child is
+    forward-only and keeps its previous version. Only the latest version's flag is on the parent
+    itself, the earlier one has to be read from state: if it can't be found, the child is rebuilt."""
     context, plan = init_and_plan_context("examples/sushi")
     context.apply(plan)
 
     child_before = context.get_snapshot("sushi.order_items", raise_if_missing=True)
 
-    # First, a breaking change that is not forward-only is deployed to dev only.
-    context.upsert_model("sushi.orders", stamp="1")
-    plan_builder = context.plan_builder("dev", skip_tests=True, enable_preview=False)
-    plan_builder.set_choice(
-        context.get_snapshot("sushi.orders", raise_if_missing=True), SnapshotChangeCategory.BREAKING
-    )
-    context.apply(plan_builder.build())
-
-    # Then a forward-only breaking change to the same model is deployed to dev only.
+    # Deploy two forward-only breaking changes to sushi.orders to dev only.
     model = context.get_model("sushi.orders")
     updated_model_kind = model.kind.copy(update={"forward_only": True})
-    context.upsert_model(model.copy(update={"stamp": "2", "kind": updated_model_kind}))
+    for stamp in ("1", "2"):
+        context.upsert_model(model.copy(update={"stamp": stamp, "kind": updated_model_kind}))
+        plan_builder = context.plan_builder("dev", skip_tests=True, enable_preview=False)
+        plan_builder.set_choice(
+            context.get_snapshot("sushi.orders", raise_if_missing=True),
+            SnapshotChangeCategory.BREAKING,
+        )
+        context.apply(plan_builder.build())
+        assert context.get_snapshot("sushi.orders", raise_if_missing=True).is_forward_only
     parent_a = context.get_snapshot("sushi.orders", raise_if_missing=True)
-    plan_builder = context.plan_builder("dev", skip_tests=True, enable_preview=False)
-    plan_builder.set_choice(parent_a, SnapshotChangeCategory.BREAKING)
-    context.apply(plan_builder.build())
-    assert context.get_snapshot("sushi.orders", raise_if_missing=True).is_forward_only
 
     # The prod plan only creates a metadata change to the other parent.
     context.upsert_model("sushi.items", stamp="1")
-    parent_b = context.get_snapshot("sushi.items", raise_if_missing=True)
     plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
-    plan_builder.set_choice(parent_b, SnapshotChangeCategory.METADATA)
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.items", raise_if_missing=True), SnapshotChangeCategory.METADATA
+    )
     plan = plan_builder.build()
 
     assert parent_a.snapshot_id not in plan.context_diff.new_snapshots
+    # The earlier forward-only version was read from state.
+    assert set(plan.context_diff.stored_parent_forward_only.values()) == {True}
     child_after = plan.snapshots[context.get_snapshot("sushi.order_items").snapshot_id]
     assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
-    assert not child_after.is_forward_only
-    assert child_after.version != child_before.version
-    assert any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
+    assert child_after.is_forward_only
+    assert child_after.version == child_before.version
+    assert not any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
-@pytest.mark.parametrize("with_new_parent", [False, True])
 def test_stored_pinned_parent_switched_to_full_virtual_environment_mode(
-    init_and_plan_context: t.Callable, with_new_parent: bool
+    init_and_plan_context: t.Callable,
 ):
-    """A pinned version is not derived from the fingerprint, so it can't be used to tell whether the
-    stored parent was applied forward-only. Switching the virtual environment mode to FULL requires
-    a rebuild, adding a metadata-only parent change must not change that outcome."""
+    """Guards against inferring whether a stored parent version was applied forward-only from the
+    version itself (eg. "it reused the previous version"). A pinned version is not derived from the
+    fingerprint: here the latest version of the stored parent keeps the previous version but is not
+    forward-only, because switching the virtual environment mode to FULL requires a rebuild. With a
+    metadata-only change to a sibling parent, the child must still be rebuilt."""
     context, plan = init_and_plan_context("examples/sushi")
     context.apply(plan)
 
@@ -1799,17 +1765,91 @@ def test_stored_pinned_parent_switched_to_full_virtual_environment_mode(
     parent_a = context.get_snapshot("sushi.orders", raise_if_missing=True)
     assert not parent_a.is_forward_only
 
-    if with_new_parent:
-        context.upsert_model("sushi.items", stamp="1")
+    context.upsert_model("sushi.items", stamp="1")
     plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
-    if with_new_parent:
-        plan_builder.set_choice(
-            context.get_snapshot("sushi.items", raise_if_missing=True),
-            SnapshotChangeCategory.METADATA,
-        )
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.items", raise_if_missing=True), SnapshotChangeCategory.METADATA
+    )
     plan = plan_builder.build()
 
     child_after = plan.snapshots[context.get_snapshot("sushi.order_items").snapshot_id]
+    assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+    assert not child_after.is_forward_only
+    assert child_after.version != child_before.version
+    assert any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+@pytest.mark.parametrize(
+    "other_new_parent_category",
+    [SnapshotChangeCategory.NON_BREAKING, SnapshotChangeCategory.METADATA],
+    ids=["non_breaking", "metadata"],
+)
+def test_stored_forward_only_parent_with_new_forward_only_and_other_parent(
+    init_and_plan_context: t.Callable, other_new_parent_category: SnapshotChangeCategory
+):
+    """A stored forward-only breaking parent doesn't change how the new parents vote: a forward-only
+    breaking change to one new parent with a change that is not forward-only to another new parent
+    rebuilds the child, the same as when the stored parent is unchanged."""
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    child_name = "memory.sushi.orders_items_marketing"
+    context.upsert_model(
+        load_sql_based_model(
+            d.parse(
+                f"""
+                MODEL (name {child_name}, kind FULL);
+
+                SELECT o.id AS order_id, i.id AS item_id, m.customer_id
+                FROM memory.sushi.orders AS o
+                CROSS JOIN memory.sushi.items AS i
+                CROSS JOIN memory.sushi.raw_marketing AS m
+                WHERE FALSE
+                """
+            )
+        )
+    )
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    child_before = context.get_snapshot(child_name, raise_if_missing=True)
+
+    # Deploy a forward-only breaking change to sushi.orders to dev only.
+    model = context.get_model("sushi.orders")
+    context.upsert_model(
+        model.copy(update={"stamp": "1", "kind": model.kind.copy(update={"forward_only": True})})
+    )
+    plan_builder = context.plan_builder("dev", skip_tests=True, enable_preview=False)
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.orders", raise_if_missing=True), SnapshotChangeCategory.BREAKING
+    )
+    context.apply(plan_builder.build())
+    parent_a = context.get_snapshot("sushi.orders", raise_if_missing=True)
+    assert parent_a.is_forward_only
+
+    # The prod plan makes a forward-only breaking change to sushi.items and a change that is not
+    # forward-only to sushi.raw_marketing.
+    model = context.get_model("sushi.items")
+    context.upsert_model(
+        model.copy(update={"stamp": "1", "kind": model.kind.copy(update={"forward_only": True})})
+    )
+    context.upsert_model("sushi.raw_marketing", stamp="1")
+    plan_builder = context.plan_builder("prod", skip_tests=True, enable_preview=False)
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.items", raise_if_missing=True), SnapshotChangeCategory.BREAKING
+    )
+    plan_builder.set_choice(
+        context.get_snapshot("sushi.raw_marketing", raise_if_missing=True),
+        other_new_parent_category,
+    )
+    plan = plan_builder.build()
+
+    assert parent_a.snapshot_id not in plan.context_diff.new_snapshots
+    assert plan.snapshots[context.get_snapshot("sushi.items").snapshot_id].is_forward_only
+    other_parent = plan.snapshots[context.get_snapshot("sushi.raw_marketing").snapshot_id]
+    assert other_parent.change_category == other_new_parent_category
+    assert not other_parent.is_forward_only
+
+    child_after = plan.snapshots[context.get_snapshot(child_name).snapshot_id]
     assert child_after.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
     assert not child_after.is_forward_only
     assert child_after.version != child_before.version
