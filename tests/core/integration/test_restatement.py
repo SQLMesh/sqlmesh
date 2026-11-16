@@ -23,6 +23,7 @@ from sqlmesh.core.config import (
     GatewayConfig,
     ModelDefaultsConfig,
     DuckDBConnectionConfig,
+    PlanConfig,
 )
 from sqlmesh.core.context import Context
 from sqlmesh.core.model import (
@@ -2309,3 +2310,168 @@ def test_start_extension_does_not_run_plan_as_restatement(tmp_path: Path, mocker
         no_prompts=True,
     )
     assert spy.call_args.kwargs["is_restatement"] is True
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+@pytest.mark.parametrize("b_kind", ["VIEW", "EMBEDDED"])
+def test_start_extension_flows_through_passthrough_starting_after_range(
+    tmp_path: Path, b_kind: str
+):
+    models = {
+        "a": _extension_model("a", "s.src", "2023-01-02"),
+        "b": f"MODEL (name s.b, kind {b_kind}, start '2023-01-03');\nSELECT ds FROM s.a",
+        "c": _extension_model("c", "s.b", "2020-01-01"),
+    }
+    project = _ExtensionProject(tmp_path, models)
+    project.context.plan(auto_apply=True, no_prompts=True)
+    assert project.ds("s.c") == ["2023-01-02", "2023-01-03"]
+
+    project.update({"a": _extension_model("a", "s.src", "2023-01-01")})
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+
+    restated_names = {s_id.name for s_id in plan.restatements}
+    assert restated_names == {'"memory"."s"."c"'}
+    assert project.ds("s.c") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_rebuilds_full_intermediate_starting_after_range_and_downstream(
+    tmp_path: Path,
+):
+    models = {
+        "a": _extension_model("a", "s.src", "2023-01-02"),
+        "b": _extension_model("b", "s.a", "2023-01-03", kind="FULL"),
+        "c": _extension_model("c", "s.b", "2020-01-01"),
+    }
+    project = _ExtensionProject(tmp_path, models)
+    project.context.plan(auto_apply=True, no_prompts=True)
+    assert project.ds("s.b") == ["2023-01-02", "2023-01-03"]
+    assert project.ds("s.c") == ["2023-01-02", "2023-01-03"]
+
+    project.update({"a": _extension_model("a", "s.src", "2023-01-01")})
+    plan = project.context.plan(auto_apply=True, no_prompts=True)
+
+    restated = {s_id.name: interval for s_id, interval in plan.restatements.items()}
+    assert set(restated) == {'"memory"."s"."b"', '"memory"."s"."c"'}
+    assert restated['"memory"."s"."c"'] == (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    assert project.ds("s.b") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+    assert project.ds("s.c") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+def test_start_extension_full_intermediate_clears_early_interval_on_derived_dev_model(
+    tmp_path: Path,
+):
+    models = {
+        "a": _extension_model("a", "s.src", "2023-01-02"),
+        "b": _extension_model("b", "s.a", "2023-01-03", kind="FULL"),
+        "c": _extension_model("c", "s.b", "2020-01-01"),
+    }
+    project = _ExtensionProject(tmp_path, models)
+    context = project.context
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    # Create a dev environment with a modified version of c downstream of FULL b.
+    project.update({"c": _extension_model("c", "s.b", "2020-01-01", extra_columns=", 1 AS one")})
+    context.plan("dev", auto_apply=True, no_prompts=True)
+    dev_c = context.get_snapshot("s.c")
+    assert dev_c is not None and dev_c.intervals
+    assert project.ds("s__dev.c") == ["2023-01-02", "2023-01-03"]
+
+    # Extend a's start in prod; both b ([Jan 3, Jan 5)) and c ([Jan 1, Jan 2)) are restated in prod,
+    # and dev_c must have its [Jan 1, Jan 2) interval cleared too.
+    project.update(
+        {
+            "a": _extension_model("a", "s.src", "2023-01-01"),
+            "c": _extension_model("c", "s.b", "2020-01-01"),
+        }
+    )
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    day = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    state_dev_c = context.state_sync.get_snapshots([dev_c.snapshot_id])[dev_c.snapshot_id]
+    assert not any(start <= day[0] and day[1] <= end for start, end in state_dev_c.intervals)
+
+    # Re-applying dev_c in dev backfills the cleared 2023-01-01 interval from rebuilt prod b.
+    project.update({"c": _extension_model("c", "s.b", "2020-01-01", extra_columns=", 1 AS one")})
+    context.plan("dev", auto_apply=True, no_prompts=True)
+    assert project.ds("s__dev.c") == ["2023-01-01", "2023-01-02", "2023-01-03"]
+
+
+@time_machine.travel(_EXTENSION_NOW, tick=False)
+@pytest.mark.parametrize("use_finalized_state", [False, True])
+def test_start_extension_recovers_unfinalized_prod_without_conflict(
+    tmp_path: Path, use_finalized_state: bool
+):
+    from unittest.mock import patch
+
+    models = _chain("2023-01-02", c_start="2020-01-01")
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    for name, definition in models.items():
+        (models_dir / f"{name}.sql").write_text(definition)
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        default_connection=DuckDBConnectionConfig(),
+        plan=PlanConfig(use_finalized_state=use_finalized_state),
+    )
+    context = Context(paths=[tmp_path], config=config)
+    context.engine_adapter.create_schema("s")
+    context.engine_adapter.execute(
+        "CREATE TABLE s.src AS SELECT range::DATE AS ds FROM "
+        "range(DATE '2022-12-25', DATE '2023-01-06', INTERVAL 1 DAY)"
+    )
+
+    # 1. Finalized initial prod deployment (v1).
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    # 2. Separate dev version of b so RestatementStage has cross-environment intervals to clear.
+    for name, definition in _chain(
+        "2023-01-02", c_start="2020-01-01", extra_columns=", 99 AS dev_col"
+    ).items():
+        (models_dir / f"{name}.sql").write_text(definition)
+    context.load()
+    context.plan("dev", auto_apply=True, no_prompts=True)
+    dev_b = context.get_snapshot("s.b")
+    assert dev_b is not None and dev_b.intervals
+
+    # 3. Promote v2 to prod, failing right before FinalizeEnvironmentStage so prod stays unfinalized
+    # with snapshots=[v2] and previous_finalized_snapshots=[v1].
+    for name, definition in _chain(
+        "2023-01-02", c_start="2020-01-01", extra_columns=", 2 AS v2_col"
+    ).items():
+        (models_dir / f"{name}.sql").write_text(definition)
+    context.load()
+
+    with patch.object(context.state_sync, "finalize", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            context.plan("prod", auto_apply=True, no_prompts=True)
+
+    unfinalized_prod = context.state_sync.get_environment("prod")
+    assert unfinalized_prod is not None
+    assert unfinalized_prod.finalized_ts is None
+    assert unfinalized_prod.previous_finalized_snapshots is not None
+
+    # 4. Extend a's start to 2023-01-01 on top of the active baseline and apply to prod.
+    baseline_extra = "" if use_finalized_state else ", 2 AS v2_col"
+    for name, definition in _chain(
+        "2023-01-01", c_start="2020-01-01", extra_columns=baseline_extra
+    ).items():
+        (models_dir / f"{name}.sql").write_text(definition)
+    context.load()
+
+    plan = context.plan("prod", auto_apply=True, no_prompts=True)
+    assert plan.restatements
+
+    finalized_prod = context.state_sync.get_environment("prod")
+    assert finalized_prod is not None
+    assert finalized_prod.finalized_ts is not None
+
+    for table in ("a", "b", "c"):
+        rows = context.engine_adapter.fetchall(f"SELECT ds FROM s.{table} ORDER BY ds")
+        assert [str(r[0]) for r in rows] == ["2023-01-01", "2023-01-02", "2023-01-03"], table
+
+    day = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
+    state_dev_b = context.state_sync.get_snapshots([dev_b.snapshot_id])[dev_b.snapshot_id]
+    assert not any(start <= day[0] and day[1] <= end for start, end in state_dev_b.intervals)

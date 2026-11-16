@@ -268,11 +268,20 @@ class Plan(PydanticModel, frozen=True):
         return self.models_to_backfill is None or model_fqn in self.models_to_backfill
 
     def to_evaluatable(self) -> EvaluatablePlan:
+        if not self.context_diff.is_new_environment:
+            previous_environment_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = {
+                s.name: s.table_info for s in self.context_diff.environment_snapshots
+            }
+        elif self.previous_plan_id is None:
+            previous_environment_snapshots = {}
+        else:
+            previous_environment_snapshots = None
         return EvaluatablePlan(
             start=self.start,
             end=self.end,
             new_snapshots=self.new_snapshots,
             environment=self.environment,
+            previous_environment_snapshots=previous_environment_snapshots,
             no_gaps=self.no_gaps,
             skip_backfill=self.skip_backfill,
             empty_backfill=self.empty_backfill,
@@ -319,6 +328,7 @@ class EvaluatablePlan(PydanticModel):
     end: TimeLike
     new_snapshots: t.List[Snapshot]
     environment: Environment
+    previous_environment_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
     no_gaps: bool
     skip_backfill: bool
     empty_backfill: bool
