@@ -1404,16 +1404,25 @@ class SnapshotEvaluator:
                     # this situation can happen when a snapshot expires but downstream view snapshots that reference it have not yet expired
                     cascade=True,
                 )
-            except Exception:
+            except Exception as ex:
                 # Use `get_data_object` to check if the table exists instead of `table_exists` since the former
                 # is based on `INFORMATION_SCHEMA` and avoids touching the table directly.
                 # This is important when the table name is malformed for some reason and running any statement
                 # that touches the table would result in an error.
-                if adapter.get_data_object(table_name) is not None:
-                    raise
-                logger.warning(
-                    "Skipping cleanup of table '%s' because it does not exist", table_name
-                )
+                try:
+                    data_object = adapter.get_data_object(table_name)
+                except Exception:
+                    logger.warning(
+                        "Skipping cleanup of table '%s' after delete failure (%s); failed to verify existence",
+                        table_name,
+                        ex,
+                    )
+                else:
+                    if data_object is not None:
+                        raise
+                    logger.warning(
+                        "Skipping cleanup of table '%s' because it does not exist", table_name
+                    )
 
             if on_complete is not None:
                 on_complete(table_name)
