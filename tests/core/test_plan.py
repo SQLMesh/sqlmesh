@@ -4831,12 +4831,100 @@ def test_start_extension_flows_through_embedded_model(make_snapshot):
 
 @time_machine.travel(_EXECUTION_TIME)
 def test_start_extension_flow_stops_at_models_that_do_not_cover_the_range(make_snapshot):
-    # b starts after the added range, so it has no data in it and neither does anything derived from it.
+    # Incremental b starts after the added range, so its interval-sliced query does not cover
+    # the extended range and neither does anything derived from it.
     specs = _chain_specs(
-        kind=ViewKind(), start="2023-01-03", intervals=[("2023-01-03", "2023-01-03")]
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        start="2023-01-03",
+        intervals=[("2023-01-03", "2023-01-04")],
     )
     context_diff, _, _ = _start_extension_context_diff(make_snapshot, specs)
     assert not PlanBuilder(context_diff).build().restatements
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flows_through_view_starting_after_range(make_snapshot):
+    specs = _chain_specs(
+        kind=ViewKind(),
+        start="2023-01-03",
+        intervals=[("2023-01-03", "2023-01-04")],
+    )
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert snaps["b"].snapshot_id not in plan.restatements
+    assert plan.restatements == {snaps["c"].snapshot_id: (_ts("2023-01-01"), _ts("2023-01-02"))}
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_flows_through_embedded_starting_after_range(make_snapshot):
+    specs = _chain_specs(
+        kind=dict(name=ModelKindName.EMBEDDED),
+        start="2023-01-03",
+        intervals=[],
+    )
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert snaps["b"].snapshot_id not in plan.restatements
+    assert plan.restatements == {snaps["c"].snapshot_id: (_ts("2023-01-01"), _ts("2023-01-02"))}
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_refreshes_full_model_starting_after_range_and_flows_downstream(
+    make_snapshot,
+):
+    specs = _chain_specs(
+        kind=FullKind(),
+        start="2023-01-03",
+        intervals=[("2023-01-03", "2023-01-04")],
+    )
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert snaps["b"].snapshot_id in plan.restatements
+    assert snaps["c"].snapshot_id in plan.restatements
+    assert plan.restatements[snaps["c"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-02"))
+    missing_by_id = {si.snapshot_id: si.intervals for si in plan.missing_intervals}
+    assert snaps["b"].snapshot_id in missing_by_id
+    assert snaps["c"].snapshot_id in missing_by_id
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_refreshes_materialized_view_starting_after_range_and_flows_downstream(
+    make_snapshot,
+):
+    specs = _chain_specs(
+        kind=ViewKind(materialized=True),
+        start="2023-01-03",
+        intervals=[("2023-01-03", "2023-01-04")],
+    )
+    context_diff, snaps, _ = _start_extension_context_diff(make_snapshot, specs)
+    plan = PlanBuilder(context_diff).build()
+
+    assert snaps["b"].snapshot_id in plan.restatements
+    assert snaps["c"].snapshot_id in plan.restatements
+    assert plan.restatements[snaps["c"].snapshot_id] == (_ts("2023-01-01"), _ts("2023-01-02"))
+    missing_by_id = {si.snapshot_id: si.intervals for si in plan.missing_intervals}
+    assert snaps["b"].snapshot_id in missing_by_id
+    assert snaps["c"].snapshot_id in missing_by_id
+
+
+@time_machine.travel(_EXECUTION_TIME)
+def test_start_extension_stops_at_future_unpopulated_full_model(
+    make_snapshot, mocker: MockerFixture
+):
+    specs = _chain_specs(
+        kind=FullKind(),
+        start="2023-01-10",
+        intervals=[],
+    )
+    context_diff, _, _ = _start_extension_context_diff(make_snapshot, specs)
+    console = mocker.Mock()
+    plan = PlanBuilder(context_diff, console=console).build()
+
+    assert not plan.restatements
+    console.log_warning.assert_not_called()
 
 
 @time_machine.travel(_EXECUTION_TIME)

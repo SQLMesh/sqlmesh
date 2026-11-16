@@ -477,16 +477,35 @@ class PlanStagesBuilder:
 
             if plan.restatements:
                 expected_previous_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
-                baseline_snapshots = plan.environment.previous_finalized_snapshots
-                if baseline_snapshots is None:
+                previous_env_snapshots = getattr(plan, "previous_environment_snapshots", None)
+                if isinstance(previous_env_snapshots, dict):
+                    expected_previous_snapshots = previous_env_snapshots
+                else:
+                    ensure_finalized = getattr(plan, "ensure_finalized_snapshots", False) is True
                     if existing_environment is None:
                         existing_environment = self.state_reader.get_environment(
                             plan.environment.name
                         )
-                    if existing_environment is not None:
-                        baseline_snapshots = existing_environment.snapshots
-                if baseline_snapshots is not None:
-                    expected_previous_snapshots = {s.name: s.table_info for s in baseline_snapshots}
+                    if isinstance(existing_environment, Environment) and (
+                        plan.environment.previous_finalized_snapshots is None
+                        or existing_environment.plan_id == plan.environment.previous_plan_id
+                    ):
+                        if existing_environment.expired:
+                            expected_previous_snapshots = {}
+                        else:
+                            baseline = (
+                                existing_environment.finalized_or_current_snapshots
+                                if ensure_finalized
+                                else existing_environment.snapshots
+                            )
+                            expected_previous_snapshots = {s.name: s.table_info for s in baseline}
+                    elif plan.environment.previous_finalized_snapshots is not None:
+                        expected_previous_snapshots = {
+                            s.name: s.table_info
+                            for s in plan.environment.previous_finalized_snapshots
+                        }
+                    elif existing_environment is None:
+                        expected_previous_snapshots = {}
 
                 return RestatementStage(
                     all_snapshots=snapshots_by_name,

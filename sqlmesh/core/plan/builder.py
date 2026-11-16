@@ -32,6 +32,7 @@ from sqlmesh.core.schema_diff import (
 )
 from sqlmesh.core.snapshot import (
     DeployabilityIndex,
+    Intervals,
     Snapshot,
     SnapshotChangeCategory,
 )
@@ -507,35 +508,96 @@ class PlanBuilder:
                     )
                 )
             )
-            if extension_ranges and (is_explicit or floored_snapshot_start < aligned_extension[1]):
-                # The extended range flows to the downstream models even if this snapshot isn't restated
-                # itself, as long as it holds (or will hold) data for that range.
-                start_extension_flow[s_id] = aligned_extension
+            is_passthrough = snapshot.is_embedded or (
+                snapshot.is_view and not snapshot.is_materialized_view
+            )
+            is_full_refresh = snapshot.is_full or snapshot.is_materialized_view
+            existing_intervals = _intervals(snapshot, deployability_index)
 
-            if not is_explicit:
-                if floored_snapshot_start >= aligned_extension[1]:
-                    if _has_intervals_in_range(
-                        snapshot, aligned_extension[0], aligned_extension[1], deployability_index
-                    ):
+            if is_passthrough:
+                if extension_ranges:
+                    start_extension_flow[s_id] = aligned_extension
+                if not is_explicit:
+                    continue
+            elif is_full_refresh:
+                if is_explicit:
+                    if extension_ranges:
+                        start_extension_flow[s_id] = aligned_extension
+                else:
+                    execution_ts = to_timestamp(self.execution_time)
+                    upper_bound_ts = (
+                        execution_ts
+                        if self._ignore_cron
+                        else to_timestamp(snapshot.node.cron_floor(execution_ts))
+                    )
+                    if not snapshot.allow_partials:
+                        upper_bound_ts = to_timestamp(
+                            snapshot.node.interval_unit.cron_floor(upper_bound_ts)
+                        )
+                    if self.end:
+                        plan_end_ts = snapshot.inclusive_exclusive(
+                            self.end, self.end, strict=False
+                        )[1]
+                        upper_bound_ts = min(upper_bound_ts, plan_end_ts)
+
+                    can_backfill_in_plan = floored_snapshot_start < upper_bound_ts
+                    if not existing_intervals:
+                        if extension_ranges and can_backfill_in_plan:
+                            start_extension_flow[s_id] = aligned_extension
+                        continue
+                    if not can_backfill_in_plan:
                         outside_backfill_scope.append(snapshot)
                         stale_ranges[s_id] = aligned_extension
-                    continue
-
-                if self._is_dev and (
-                    not snapshot.is_paused or deployability_index.is_deployable(snapshot)
-                ):
-                    # The physical table of this version is the one used in production.
-                    if _has_intervals_in_range(
-                        snapshot, aligned_extension[0], aligned_extension[1], deployability_index
+                        continue
+                    if extension_ranges:
+                        start_extension_flow[s_id] = aligned_extension
+                    if self._is_dev and (
+                        not snapshot.is_paused or deployability_index.is_deployable(snapshot)
                     ):
                         shared_with_prod.append(snapshot)
                         start_extension_flow.pop(s_id, None)
-                    continue
-                # Only existing intervals can be stale. Anything else is backfilled as usual.
-                if not _has_intervals_in_range(
-                    snapshot, aligned_extension[0], aligned_extension[1], deployability_index
+                        continue
+            else:
+                if extension_ranges and (
+                    is_explicit or floored_snapshot_start < aligned_extension[1]
                 ):
-                    continue
+                    # The extended range flows to the downstream models even if this snapshot isn't restated
+                    # itself, as long as it holds (or will hold) data for that range.
+                    start_extension_flow[s_id] = aligned_extension
+
+                if not is_explicit:
+                    if floored_snapshot_start >= aligned_extension[1]:
+                        if _has_intervals_in_range(
+                            snapshot,
+                            aligned_extension[0],
+                            aligned_extension[1],
+                            deployability_index,
+                        ):
+                            outside_backfill_scope.append(snapshot)
+                            stale_ranges[s_id] = aligned_extension
+                        continue
+
+                    if self._is_dev and (
+                        not snapshot.is_paused or deployability_index.is_deployable(snapshot)
+                    ):
+                        # The physical table of this version is the one used in production.
+                        if _has_intervals_in_range(
+                            snapshot,
+                            aligned_extension[0],
+                            aligned_extension[1],
+                            deployability_index,
+                        ):
+                            shared_with_prod.append(snapshot)
+                            start_extension_flow.pop(s_id, None)
+                        continue
+                    # Only existing intervals can be stale. Anything else is backfilled as usual.
+                    if not _has_intervals_in_range(
+                        snapshot,
+                        aligned_extension[0],
+                        aligned_extension[1],
+                        deployability_index,
+                    ):
+                        continue
 
             if not (forward_only_preview_needed and is_explicit):
                 if self._is_dev and not snapshot.is_paused:
@@ -598,6 +660,11 @@ class PlanBuilder:
                 ext_removal = snapshot.get_removal_interval(
                     extension_start, extension_end, self._execution_time, strict=False
                 )
+                if is_full_refresh and existing_intervals and not (is_explicit and is_preview):
+                    ext_removal = (
+                        min(ext_removal[0], existing_intervals[0][0]),
+                        max(ext_removal[1], existing_intervals[-1][1]),
+                    )
                 possible_intervals.add(ext_removal)
                 if snapshot.is_incremental:
                     start_extension_flow[s_id] = _align_to_interval_unit(snapshot, *ext_removal)
@@ -1222,14 +1289,18 @@ def _range_args(start: int, end: int) -> str:
     return f"--start '{to_ts(start)}' --end '{to_ts(end)}'"
 
 
-def _has_intervals_in_range(
-    snapshot: Snapshot, start: int, end: int, deployability_index: DeployabilityIndex
-) -> bool:
-    intervals = (
+def _intervals(snapshot: Snapshot, deployability_index: DeployabilityIndex) -> Intervals:
+    return (
         snapshot.intervals
         if deployability_index.is_deployable(snapshot)
         else snapshot.dev_intervals
     )
+
+
+def _has_intervals_in_range(
+    snapshot: Snapshot, start: int, end: int, deployability_index: DeployabilityIndex
+) -> bool:
+    intervals = _intervals(snapshot, deployability_index)
     return any(i_start < end and start < i_end for i_start, i_end in intervals)
 
 
