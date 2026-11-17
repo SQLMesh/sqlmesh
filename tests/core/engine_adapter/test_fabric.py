@@ -475,6 +475,19 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
     assert to_sql_calls(adapter) == []
 
 
+def test_concat_columns_uses_varchar_max(adapter: FabricEngineAdapter):
+    # Inherited from MSSQL: a CAST to VARCHAR without a length truncates to 30 characters
+    columns_to_types = {
+        "id": exp.DataType.build("UNIQUEIDENTIFIER", dialect=adapter.dialect),
+        "name": exp.DataType.build("VARCHAR(100)", dialect=adapter.dialect),
+    }
+
+    assert (
+        adapter.concat_columns(columns_to_types).sql(dialect=adapter.dialect)
+        == "COALESCE(CAST(id AS VARCHAR(MAX)), '') + ',' + COALESCE(CAST(name AS VARCHAR(MAX)), '')"
+    )
+
+
 def test_create_warehouse_already_exists_is_noop(
     fabric_http_client: FabricHttpClient, mocker: MockerFixture
 ) -> None:
