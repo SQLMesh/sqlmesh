@@ -24,6 +24,7 @@ from sqlmesh.core.snapshot.definition import (
     has_paused_forward_only as has_paused_forward_only,
     merge_intervals as merge_intervals,
     missing_intervals as missing_intervals,
+    missing_intervals_for_no_gaps as missing_intervals_for_no_gaps,
     snapshots_to_dag as snapshots_to_dag,
     start_date as start_date,
     table_name as table_name,
