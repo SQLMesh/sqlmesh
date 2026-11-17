@@ -664,13 +664,15 @@ This example asserts that the symmetrised KL Divergence between columns `age` an
 ```sql linenums="1"
 MODEL (
   audits (
-    kl_divergence(column := age, target_column := reference_age, threshold := 0.1)
+    kl_divergence(source_column := age, target_column := reference_age, threshold := 0.1)
     )
 );
 ```
 
 #### chi_square, chi_square_non_blocking
-Ensures that the [chi-square](https://en.wikipedia.org/wiki/Chi-squared_test) statistic for two categorical columns does not exceed a critical value.
+Performs a [chi-square](https://en.wikipedia.org/wiki/Chi-squared_test) test of independence between two categorical columns, `column_a` and `column_b`, and compares the statistic with `critical_value`.
+
+By default (`dependent := true`), the audit asserts that the columns are dependent: it fails when the chi-square statistic does not exceed the critical value. Set `dependent := false` to assert that the columns are independent: the audit then fails when the statistic exceeds the critical value.
 
 You can look up the critical value corresponding to a p-value with a table (such as [this one](https://www.medcalc.org/manual/chi-square-table.php)) or by using the Python [scipy library](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.chi2.html):
 
@@ -680,12 +682,12 @@ from scipy.stats import chi2
 # critical value for p-value := 0.95 and degrees of freedom := 1
 chi2.ppf(0.95, 1)
 ```
-This example asserts that the chi-square statistic0 for columns `user_state` and `user_type` does not exceed 6.635:
+This example asserts that columns `user_state` and `user_type` are dependent, i.e. that their chi-square statistic exceeds 6.635:
 
 ```sql linenums="1"
 MODEL (
   audits (
-    chi_square(column := user_state, target_column := user_type, critical_value := 6.635)
+    chi_square(column_a := user_state, column_b := user_type, critical_value := 6.635)
     )
 );
 ```
