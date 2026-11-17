@@ -2583,6 +2583,12 @@ def _create_model(
     use_original_sql: bool = False,
     **kwargs: t.Any,
 ) -> Model:
+    """Creates a model of the given class, applying the project's model defaults.
+
+    Defaults that don't apply to the model class are dropped. External models, for example, don't
+    inherit the default gateway or the default pre-statements, post-statements and on-virtual-update
+    statements.
+    """
     validate_extra_and_required_fields(
         klass,
         {"name", *kwargs} - {"grain", "table_properties"},
@@ -2614,6 +2620,10 @@ def _create_model(
         # external_models.yaml, so it must remain explicit rather than inheriting the
         # gateway used to execute managed models in the project.
         defaults.pop("gateway", None)
+        # External models are symbolic, so their statements are never executed. They are also
+        # built without the project's macros, so default statements could not be rendered.
+        for statement_field in ("pre_statements", "post_statements", "on_virtual_update"):
+            defaults.pop(statement_field, None)
     if not issubclass(klass, SqlModel):
         defaults.pop("optimize_query", None)
 
