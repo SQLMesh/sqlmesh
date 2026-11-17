@@ -325,13 +325,13 @@ def _parse_join(
     macro = _parse_matching_macro(self, "JOIN")
     if not macro:
         self._retreat(index)
-        return super(Parser, self)._parse_join(
+        return self.__parse_join(  # type: ignore
             skip_join_token=skip_join_token,
             parse_bracket=parse_bracket,
             alias_tokens=alias_tokens,
         )
 
-    join = super(Parser, self)._parse_join(skip_join_token=True, alias_tokens=alias_tokens)
+    join = self.__parse_join(skip_join_token=True, alias_tokens=alias_tokens)  # type: ignore
     if method:
         join.set("method", method.text)
     if side:
