@@ -518,6 +518,127 @@ def test_plan_dev_start_date(runner, tmp_path):
     assert "sqlmesh_example__dev.incremental_model: [2023-01-01" in result.output
 
 
+@time_machine.travel("2023-01-20 03:00:00 UTC", tick=False)
+def test_apply_time_zone_kwargs_converts_day_sized_bounds_to_utc():
+    from sqlmesh.cli.main import _apply_time_zone_kwargs
+
+    kwargs = {
+        "start": "today",
+        "end": "2 hours ago",
+        "execution_time": "2023-01-20 03:00:00",
+        "time_zone": "America/Los_Angeles",
+    }
+    _apply_time_zone_kwargs(kwargs)
+
+    assert "time_zone" not in kwargs
+    assert kwargs["start"] == to_datetime("2023-01-19 08:00:00+00:00")
+    assert kwargs["execution_time"] == "2023-01-20 03:00:00"
+    assert kwargs["end"] == "2 hours ago"
+
+    utc_kwargs = {"start": "today", "time_zone": "UTC"}
+    _apply_time_zone_kwargs(utc_kwargs)
+    assert utc_kwargs == {"start": "today"}
+
+
+@time_machine.travel("2023-01-20 03:00:00 UTC", tick=False)
+def test_render_today_with_time_zone_uses_local_midnight(runner, tmp_path):
+    create_example_project(tmp_path)
+    (tmp_path / "models" / "incremental_model.sql").write_text(
+        """MODEL (
+  name sqlmesh_example.incremental_model,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column event_date
+  ),
+  start '2020-01-01',
+  cron '@daily',
+  grain (id, event_date)
+);
+
+SELECT
+  id,
+  item_id,
+  event_date,
+  @start_tstz AS start_tstz,
+  @start_ds AS start_ds,
+FROM sqlmesh_example.seed_model
+WHERE event_date BETWEEN @start_date AND @end_date
+"""
+    )
+
+    with_tz = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(tmp_path),
+            "render",
+            "sqlmesh_example.incremental_model",
+            "--start",
+            "today",
+            "--end",
+            "today",
+            "--time-zone",
+            "America/Los_Angeles",
+        ],
+    )
+    assert with_tz.exit_code == 0, with_tz.output
+    # 2023-01-20 03:00 UTC is still 2023-01-19 in Los Angeles, so local midnight is 08:00 UTC.
+    # @start_ds is the UTC date of that timestamp, not a separately localized calendar date.
+    assert "'2023-01-19 08:00:00+00:00'" in with_tz.output
+    assert "'2023-01-19'" in with_tz.output
+
+    without_tz = runner.invoke(
+        cli,
+        [
+            "--paths",
+            str(tmp_path),
+            "render",
+            "sqlmesh_example.incremental_model",
+            "--start",
+            "today",
+            "--end",
+            "today",
+        ],
+    )
+    assert without_tz.exit_code == 0, without_tz.output
+    assert "'2023-01-20 00:00:00+00:00'" in without_tz.output
+    assert "'2023-01-20'" in without_tz.output
+
+
+def test_plan_accepts_time_zone_option(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan", "--help"],
+    )
+    assert result.exit_code == 0
+    assert "--time-zone" in result.output
+
+
+@time_machine.travel("2023-01-20 12:30:30 UTC", tick=False)
+def test_plan_rejects_invalid_time_zone(runner, tmp_path):
+    create_example_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "dev",
+            "--start",
+            "1 week ago",
+            "--time-zone",
+            "Not/A_Timezone",
+            "--skip-tests",
+            "--no-prompts",
+        ],
+    )
+    assert result.exit_code != 0
+
+
 def test_plan_dev_end_date(runner, tmp_path):
     create_example_project(tmp_path)
 
