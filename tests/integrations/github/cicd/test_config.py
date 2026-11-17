@@ -1,3 +1,4 @@
+import math
 import pathlib
 
 import pytest
@@ -9,7 +10,7 @@ from sqlmesh.core.config import (
     load_config_from_paths,
 )
 from sqlmesh.utils.errors import ConfigError
-from sqlmesh.integrations.github.cicd.config import MergeMethod
+from sqlmesh.integrations.github.cicd.config import GithubCICDBotConfig, MergeMethod
 from tests.utils.test_filesystem import create_temp_file
 
 pytestmark = pytest.mark.github
@@ -44,6 +45,7 @@ model_defaults:
     assert config.cicd_bot.prod_branch_names == ["main", "master"]
     assert not config.cicd_bot.pr_min_intervals
     assert config.cicd_bot.pr_preview_min_intervals == 1
+    assert config.cicd_bot.max_trailing_gap_intervals_on_deploy_to_prod == 0
 
 
 def test_load_yaml_config(tmp_path):
@@ -70,6 +72,7 @@ cicd_bot:
     prod_branch_name: testing
     pr_min_intervals: 1
     pr_preview_min_intervals: 2
+    max_trailing_gap_intervals_on_deploy_to_prod: 2
 model_defaults:
     dialect: duckdb
 """,
@@ -97,6 +100,7 @@ model_defaults:
     assert config.cicd_bot.prod_branch_names == ["testing"]
     assert config.cicd_bot.pr_min_intervals == 1
     assert config.cicd_bot.pr_preview_min_intervals == 2
+    assert config.cicd_bot.max_trailing_gap_intervals_on_deploy_to_prod == 2
 
 
 def test_load_python_config_defaults(tmp_path):
@@ -131,6 +135,7 @@ config = Config(
     assert config.cicd_bot.prod_branch_names == ["main", "master"]
     assert not config.cicd_bot.pr_min_intervals
     assert config.cicd_bot.pr_preview_min_intervals == 1
+    assert config.cicd_bot.max_trailing_gap_intervals_on_deploy_to_prod == 0
 
 
 def test_load_python_config(tmp_path):
@@ -225,6 +230,12 @@ model_defaults:
         ConfigError, match=r".*merge_method must be set if enable_deploy_command is True.*"
     ):
         load_config_from_paths(Config, project_paths=[tmp_path / "config.yaml"])
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, math.inf, math.nan, True, "1"])
+def test_max_trailing_gap_intervals_on_deploy_to_prod_requires_nonnegative_finite_int(value):
+    with pytest.raises(ValueError):
+        GithubCICDBotConfig(max_trailing_gap_intervals_on_deploy_to_prod=value)
 
 
 def test_ttl_in_past(tmp_path):

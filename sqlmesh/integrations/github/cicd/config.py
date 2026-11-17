@@ -31,6 +31,7 @@ class GithubCICDBotConfig(BaseConfig):
     skip_pr_backfill_: t.Optional[bool] = Field(default=None, alias="skip_pr_backfill")
     pr_include_unmodified_: t.Optional[bool] = Field(default=None, alias="pr_include_unmodified")
     run_on_deploy_to_prod: bool = False
+    max_trailing_gap_intervals_on_deploy_to_prod: int = Field(default=0, ge=0, strict=True)
     pr_environment_name: t.Optional[str] = None
     pr_min_intervals: t.Optional[int] = None
     pr_preview_min_intervals: int = Field(default=1, ge=0)
