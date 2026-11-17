@@ -529,7 +529,11 @@ class JinjaMacroRegistry(PydanticModel):
         trimmed_global_objs = {
             k: self.global_objs[k] for k in ("refs", "sources", "vars") if k in self.global_objs
         }
-        data.append(json.dumps(trimmed_global_objs, sort_keys=True))
+        # `default=str` covers values that JSON can't represent, such as dbt vars loaded from an
+        # unquoted YAML date. It doesn't apply to JSON-serializable values, so their hashes are
+        # unchanged. A snapshot stored in state keeps such a value as its string, so hashing the
+        # string form keeps the hash the same after the snapshot is loaded back.
+        data.append(json.dumps(trimmed_global_objs, sort_keys=True, default=str))
 
         return data
 
