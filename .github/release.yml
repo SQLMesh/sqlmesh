@@ -1,0 +1,37 @@
+# Groups the notes that GitHub generates for each release (see
+# `generate_release_notes` in workflows/release.yaml) by PR label.
+# Labels are applied automatically by workflows/pr-labels.yaml.
+# A PR is listed under the first category whose labels it matches.
+# RELEASING.md refers to these section titles, so keep the two in sync.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - ci
+      - test
+      - dependencies
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: State migrations (run `sqlmesh migrate` after upgrading)
+      labels:
+        - migration
+    - title: Features
+      labels:
+        - feature
+    - title: Performance
+      labels:
+        - performance
+    - title: Bug fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Maintenance
+      labels:
+        - maintenance
+    - title: Other changes
+      labels:
+        - "*"
