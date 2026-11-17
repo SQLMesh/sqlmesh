@@ -850,12 +850,16 @@ class _Model(ModelMeta, frozen=True):
             if columns_to_types is None:
                 columns_to_types = self.columns_to_types_or_raise
 
-            if self.time_column.column.name not in columns_to_types:
+            time_column_name = self.time_column.column.name
+            time_column_type = columns_to_types.get(time_column_name)
+            if time_column_type is None:
+                time_column_type = {k.lower(): v for k, v in columns_to_types.items()}.get(
+                    time_column_name.lower()
+                )
+            if time_column_type is None:
                 raise ConfigError(
                     f"Time column '{self.time_column.column.sql(dialect=self.dialect)}' not found in model '{self.name}'."
                 )
-
-            time_column_type = columns_to_types[self.time_column.column.name]
 
             return to_time_column(
                 time,
