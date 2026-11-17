@@ -569,6 +569,25 @@ def _parse_alter_table_alter(self: Parser) -> t.Optional[exp.Expr]:
     return alter_column
 
 
+# Snowflake session parameter names in ALTER SESSION SET / UNSET (e.g. TIMEZONE or QUERY_TAG) are
+# keywords, not identifiers, so Snowflake rejects them when quoted: ALTER SESSION SET "TIMEZONE" = 'UTC'
+# is a syntax error. sqlglot parses them as identifiers, which means they get normalized and quoted
+# along with the rest of the statement, so we turn them into vars instead. Vars are also left out of
+# case normalization, so a parameter written as query_tag stays lowercase; Snowflake treats parameter
+# names case-insensitively, so this is intentional.
+def _parse_alter_session(self: Snowflake.Parser) -> exp.AlterSession:
+    alter_session = self.__parse_alter_session()  # type: ignore
+
+    for item in alter_session.expressions:
+        name = item.this.this if isinstance(item.this, exp.EQ) else item.this
+        if isinstance(name, exp.Column) and not name.table:
+            name = name.this
+        if isinstance(name, exp.Identifier) and not name.quoted:
+            name.replace(exp.var(name.name))
+
+    return alter_session
+
+
 def altercolumn_sql(self: Generator, expression: exp.AlterColumn) -> str:
     sql = self._altercolumn_sql(expression)  # type: ignore
 
@@ -1430,6 +1449,7 @@ def extend_sqlglot() -> None:
     _override(Parser, _parse_interval_span)
     _override(Parser, _warn_unsupported)
     _override(Snowflake.Parser, _parse_table_parts)
+    _override(Snowflake.Parser, _parse_alter_session)
     _override(TSQL.Parser, _parse_alter_table_alter)
     _override(TSQL.Generator, altercolumn_sql)
 
