@@ -141,25 +141,75 @@ class MetricMeta(PydanticModel, frozen=True):
 class Metric(MetricMeta, frozen=True):
     expanded: exp.Expr
 
+    def _aggregate_output_names(
+        self,
+        aggregates: t.Optional[t.List[exp.AggFunc]] = None,
+        used_names: t.Optional[t.Set[str]] = None,
+    ) -> t.List[str]:
+        """Returns the output column name for each aggregate in the expanded metric."""
+        nested_aggregate_names: t.Dict[exp.AggFunc, str] = {}
+        output_names = []
+        used_names = used_names if used_names is not None else set()
+
+        if aggregates is None:
+            aggregates = list(self.expanded.find_all(exp.AggFunc))
+
+        for agg in aggregates:
+            if isinstance(agg.parent, exp.Alias):
+                output_names.append(agg.parent.alias)
+                used_names.add(agg.parent.alias)
+                continue
+
+            if agg not in nested_aggregate_names:
+                base_name = (
+                    f"__sqlmesh_metric_{self.name.replace('.', '_')}__agg_"
+                    f"{len(nested_aggregate_names)}"
+                )
+                output_name = base_name
+                suffix = 1
+                while output_name in used_names:
+                    output_name = f"{base_name}_{suffix}"
+                    suffix += 1
+                nested_aggregate_names[agg] = output_name
+                used_names.add(output_name)
+            output_names.append(nested_aggregate_names[agg])
+
+        return output_names
+
     @property
     def aggs(self) -> t.Dict[exp.AggFunc, MeasureAndDimTables]:
         """Returns a dictionary of aggregation to referenced tables.
 
         This method removes catalog and schema information from columns.
         """
-        return {
-            t.cast(
-                exp.AggFunc,
-                t.cast(exp.Expr, agg.parent).transform(
-                    lambda node: (
-                        exp.column(node.this, table=remove_namespace(node))
-                        if isinstance(node, exp.Column) and node.table
-                        else node
-                    )
-                ),
-            ): _get_measure_and_dim_tables(agg)
-            for agg in self.expanded.find_all(exp.AggFunc)
-        }
+        aggregates = list(self.expanded.find_all(exp.AggFunc))
+        return self._aggs_with_output_names(self._aggregate_output_names(aggregates))
+
+    def _aggs_with_output_names(
+        self, output_names: t.List[str]
+    ) -> t.Dict[exp.AggFunc, MeasureAndDimTables]:
+        aggs: t.Dict[exp.AggFunc, MeasureAndDimTables] = {}
+        aggregates = list(self.expanded.find_all(exp.AggFunc))
+        for agg, output_name in zip(aggregates, output_names):
+            projection = (
+                agg.parent
+                if isinstance(agg.parent, exp.Alias)
+                else exp.alias_(agg.copy(), output_name)
+            )
+            aggs[
+                t.cast(
+                    exp.AggFunc,
+                    projection.transform(
+                        lambda node: (
+                            exp.column(node.this, table=remove_namespace(node))
+                            if isinstance(node, exp.Column) and node.table
+                            else node
+                        )
+                    ),
+                )
+            ] = _get_measure_and_dim_tables(agg)
+
+        return aggs
 
     @property
     def formula(self) -> exp.Expr:
@@ -168,10 +218,40 @@ class Metric(MetricMeta, frozen=True):
         For simple metrics it is just the metric name. For derived metrics,
         it consists of the operations of the derived metrics without aggregations.
         """
+        return self._formula_with_output_names(self._aggregate_output_names())
+
+    def _formula_with_output_names(self, output_names: t.List[str]) -> exp.Expr:
+        formula = (
+            self.expanded.this.copy()
+            if isinstance(self.expanded, exp.Alias)
+            else self.expanded.copy()
+        )
+        formula_aggregates = list(formula.find_all(exp.AggFunc))
+        aggregate_output_names = {
+            id(agg): output_name for agg, output_name in zip(formula_aggregates, output_names)
+        }
+
+        def _replace_metric_alias(node: exp.Expr) -> exp.Expr:
+            if not isinstance(node, exp.Alias):
+                return node
+
+            if isinstance(node.this, exp.AggFunc):
+                return exp.Column(this=exp.to_identifier(node.alias))
+            if node.this.find(exp.AggFunc):
+                return node.this
+            return exp.Column(this=exp.to_identifier(node.alias))
+
+        formula = formula.transform(_replace_metric_alias, copy=False)
+
+        def _replace_aggregate(node: exp.Expr) -> exp.Expr:
+            if not isinstance(node, exp.AggFunc):
+                return node
+            output_name = aggregate_output_names[id(node)]
+            return exp.Column(this=exp.to_identifier(output_name))
+
+        formula = formula.transform(_replace_aggregate, copy=False)
         return exp.alias_(
-            self.expanded.transform(
-                lambda node: exp.column(node.args["alias"]) if isinstance(node, exp.Alias) else node
-            ),
+            formula,
             self.name,
             copy=False,
         )

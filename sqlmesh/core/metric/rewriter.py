@@ -40,15 +40,37 @@ class Rewriter:
 
         return expression
 
-    def _build_sources(self, projections: t.List[exp.Expr]) -> SourceAggsAndJoins:
+    def _build_sources(
+        self, projections: t.List[exp.Expr], group_by: t.List[exp.Expr]
+    ) -> SourceAggsAndJoins:
         sources: SourceAggsAndJoins = {}
+        used_names = {metric.name for metric in self.metrics.values()}
+        used_names.update(
+            projection.alias if isinstance(projection, exp.Alias) else projection.output_name
+            for projection in projections
+            if projection.alias_or_name
+        )
+        used_names.update(
+            expression.output_name for expression in group_by if expression.output_name
+        )
+        for metric in self.metrics.values():
+            used_names.update(
+                node.alias for node in metric.expanded.find_all(exp.Alias) if node.alias
+            )
+
+        output_names_by_metric: t.Dict[str, t.List[str]] = {}
 
         for projection in projections:
             for ref in find_all_in_scope(projection, d.MetricAgg):
                 metric = self.metrics[ref.this.name]
-                ref.replace(metric.formula.this)
+                output_names = output_names_by_metric.get(metric.name)
+                if output_names is None:
+                    aggregates = list(metric.expanded.find_all(exp.AggFunc))
+                    output_names = metric._aggregate_output_names(aggregates, used_names)
+                    output_names_by_metric[metric.name] = output_names
+                ref.replace(metric._formula_with_output_names(output_names).this)
 
-                for agg, (measure, dims) in metric.aggs.items():
+                for agg, (measure, dims) in metric._aggs_with_output_names(output_names).items():
                     aggs, joins = sources.setdefault(measure, (set(), dict()))
                     aggs.add(agg)
                     for dim in dims:
@@ -60,14 +82,13 @@ class Rewriter:
         base = select.args["from_"].this.find(exp.Table)
         base_alias = base.alias_or_name
         base_name = exp.table_name(base)
+        group = select.args.pop("group", None)
+        group_by = group.expressions if group else []
 
         sources: SourceAggsAndJoins = (
             {} if base_name == self.semantic_name else {base_name: (set(), {})}
         )
-        sources.update(self._build_sources(select.selects))
-
-        group = select.args.pop("group", None)
-        group_by = group.expressions if group else []
+        sources.update(self._build_sources(select.selects, group_by))
 
         mapping = {
             remove_namespace(exp.table_name(source.assert_is(exp.Table))): name
