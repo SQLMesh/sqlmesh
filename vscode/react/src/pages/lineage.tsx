@@ -80,7 +80,9 @@ function Lineage() {
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     undefined,
   )
-  const [activeFileError, setActiveFileError] = useState(false)
+  const [lookupStatus, setLookupStatus] = useState<
+    'pending' | 'unmatched' | 'failed'
+  >('pending')
   const { on } = useEventBus()
   const queryClient = useQueryClient()
 
@@ -102,7 +104,6 @@ function Lineage() {
     let current = true
     const version = focusVersion.current
     // get_active_file uses a plain payload on the existing RPC wire protocol.
-    setActiveFileError(false)
     rpc('get_active_file', {})
       .then(response => {
         if (!current || focusVersion.current !== version) return
@@ -113,15 +114,15 @@ function Lineage() {
           activeFile.fileUri,
           activeFile.isWindows,
         )
-        setSelectedModel(
-          previous =>
-            previous ??
-            (matches.length > 1 ? undefined : (matches[0] ?? models[0]).name),
-        )
+        if (matches.length === 1) {
+          setSelectedModel(matches[0].name)
+        } else {
+          setLookupStatus('unmatched')
+        }
       })
       .catch(() => {
         if (!current || focusVersion.current !== version) return
-        setActiveFileError(true)
+        setLookupStatus('failed')
       })
     return () => {
       current = false
@@ -143,19 +144,18 @@ function Lineage() {
       fileUri: string
       isWindows?: boolean
     }) => {
-      focusVersion.current += 1
       const matches = findModelsByPath(
         Object.values(modelsRecord),
         file.fileUri,
         file.isWindows,
       )
-      if (matches.length < 2) {
-        setSelectedModel(
-          previous =>
-            matches[0]?.name ??
-            previous ??
-            (Array.isArray(models) ? models[0]?.name : undefined),
-        )
+      // A miss changes nothing, so a pending lookup stays in charge.
+      if (!matches.length) return
+      focusVersion.current += 1
+      if (matches.length === 1) {
+        setSelectedModel(matches[0].name)
+      } else {
+        setLookupStatus('unmatched')
       }
     }
 
@@ -191,10 +191,13 @@ function Lineage() {
     return <div>No models available.</div>
   }
   if (selectedModel === undefined) {
+    if (lookupStatus === 'pending') {
+      return <div>Loading models...</div>
+    }
     return (
       <div>
         <p>
-          {activeFileError
+          {lookupStatus === 'failed'
             ? 'Unable to determine the active model. Select a model to view its lineage.'
             : 'Select a model to view its lineage.'}
         </p>

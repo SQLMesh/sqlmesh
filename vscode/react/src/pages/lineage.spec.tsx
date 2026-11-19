@@ -183,7 +183,7 @@ describe('lineage active-editor selection', () => {
     expect(screen.queryByRole('combobox')).toBeNull()
   })
 
-  it('keeps a manual selection when a pending initial lookup finishes', async () => {
+  it('shows loading rather than the picker while the lookup is pending', async () => {
     let resolve!: (value: { fileUri: string; isWindows: boolean }) => void
     rpc.mockReturnValue(
       new Promise(done => {
@@ -191,24 +191,46 @@ describe('lineage active-editor selection', () => {
       }),
     )
     render(page())
-    fireEvent.change(screen.getByRole('combobox', { name: 'Select a model' }), {
-      target: { value: 'second' },
-    })
-    await selected('second')
+    await act(async () => {})
+    expect(screen.getByText('Loading models...')).toBeTruthy()
+    expect(screen.queryByRole('combobox')).toBeNull()
     await act(async () => {
-      resolve({ fileUri: models[0].full_path, isWindows: true })
+      resolve({ fileUri: models[1].full_path, isWindows: true })
     })
     await selected('second')
   })
 
   it.each([undefined, 'C:/project/README.md'])(
-    'falls back to the first model at initialization for %s',
+    'offers model selection without selecting one when the initial file is %s',
     async fileUri => {
       rpc.mockResolvedValue({ fileUri, isWindows: true })
       render(page())
-      await selected('first')
+      await screen.findByRole('combobox', { name: 'Select a model' })
+      expect(screen.queryByTestId('selected-model')).toBeNull()
+      expect(screen.queryByText('Loading models...')).toBeNull()
+      expect(
+        screen.getByText('Select a model to view its lineage.'),
+      ).toBeTruthy()
     },
   )
+
+  it('keeps the picker visible while a models refetch repeats the lookup', async () => {
+    rpc.mockResolvedValueOnce({
+      fileUri: 'C:/project/README.md',
+      isWindows: true,
+    })
+    const view = render(page())
+    await screen.findByRole('combobox', { name: 'Select a model' })
+    rpc.mockReturnValue(new Promise(() => {}))
+    api.mockReturnValue({ data: [...models], isLoading: false })
+    view.rerender(page())
+    await act(async () => {})
+    expect(rpc).toHaveBeenCalledTimes(2)
+    expect(
+      screen.getByRole('combobox', { name: 'Select a model' }),
+    ).toBeTruthy()
+    expect(screen.queryByText('Loading models...')).toBeNull()
+  })
 
   it('keeps selection when focusing a non-model file', async () => {
     render(page())
@@ -263,7 +285,7 @@ describe('lineage active-editor selection', () => {
     await selected('second')
   })
 
-  it('does not revive an initial match after focus moves to a non-model file', async () => {
+  it('lets a late lookup select the model after a non-model focus', async () => {
     let resolve!: (value: { fileUri: string; isWindows: boolean }) => void
     rpc.mockReturnValue(
       new Promise(done => {
@@ -272,26 +294,39 @@ describe('lineage active-editor selection', () => {
     )
     render(page())
     focus('C:/project/README.md', true)
-    await selected('first')
+    await act(async () => {})
+    expect(screen.queryByTestId('selected-model')).toBeNull()
+    expect(screen.queryByRole('combobox')).toBeNull()
     await act(async () => {
       resolve({ fileUri: models[1].full_path, isWindows: true })
     })
-    await selected('first')
+    await selected('second')
   })
 
-  it('disposes an initial lookup on unmount', async () => {
-    let resolve!: (value: { fileUri: string }) => void
+  it('shows the picker for an ambiguous focus and ignores the stale lookup', async () => {
+    const candidates = [
+      { name: 'upper', full_path: 'C:/A.sql' },
+      { name: 'lower', full_path: 'c:/a.sql' },
+      { name: 'other', full_path: 'C:/other.sql' },
+    ]
+    api.mockReturnValue({ data: candidates, isLoading: false })
+    let resolve!: (value: { fileUri: string; isWindows: boolean }) => void
     rpc.mockReturnValue(
       new Promise(done => {
         resolve = done
       }),
     )
-    const view = render(page())
-    view.unmount()
+    render(page())
+    expect(screen.getByText('Loading models...')).toBeTruthy()
+    focus('C:/a.SQL', true)
+    await screen.findByRole('combobox', { name: 'Select a model' })
     await act(async () => {
-      resolve({ fileUri: models[0].full_path })
+      resolve({ fileUri: 'C:/other.sql', isWindows: true })
     })
     expect(screen.queryByTestId('selected-model')).toBeNull()
+    expect(
+      screen.getByRole('combobox', { name: 'Select a model' }),
+    ).toBeTruthy()
   })
 
   it('preserves original paths for graph navigation and invalidates on save', async () => {
