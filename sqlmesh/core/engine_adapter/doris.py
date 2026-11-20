@@ -51,7 +51,7 @@ from sqlmesh.utils.errors import MissingDefaultCatalogError, SQLMeshError
 
 if t.TYPE_CHECKING:
     from sqlmesh.core._typing import SchemaName, TableName
-    from sqlmesh.core.engine_adapter._typing import DF, QueryOrDF
+    from sqlmesh.core.engine_adapter._typing import DF, Query, QueryOrDF
     from sqlmesh.core.model.kind import TimeColumn
     from sqlmesh.core.node import IntervalUnit
     from sqlmesh.core.schema_diff import TableAlterOperation
@@ -263,6 +263,60 @@ class DorisEngineAdapter(
         "AGG_STATE",
     }
 
+    _NON_NULLABLE_OLAP_OBJECT_TYPES: t.ClassVar[t.FrozenSet[str]] = frozenset(
+        {
+            "BITMAP",
+            "HLL",
+            "HLLSKETCH",
+            "QUANTILE_STATE",
+            "AGG_STATE",
+        }
+    )
+
+    _NON_NULLABLE_OLAP_OBJECT_FUNCTIONS: t.ClassVar[t.FrozenSet[str]] = frozenset(
+        {
+            "TO_BITMAP",
+            "TO_BITMAP_WITH_CHECK",
+            "BITMAP_HASH",
+            "BITMAP_HASH64",
+            "BITMAP_EMPTY",
+            "BITMAP_FROM_STRING",
+            "BITMAP_FROM_BASE64",
+            "BITMAP_FROM_ARRAY",
+            "BITMAP_UNION",
+            "BITMAP_INTERSECT",
+            "BITMAP_OR",
+            "BITMAP_AND",
+            "BITMAP_XOR",
+            "BITMAP_NOT",
+            "BITMAP_AND_NOT",
+            "BITMAP_SUBSET_IN_RANGE",
+            "BITMAP_SUBSET_LIMIT",
+            "SUB_BITMAP",
+            "BITMAP_REMOVE",
+            "HLL_HASH",
+            "HLL_EMPTY",
+            "HLL_FROM_BASE64",
+            "HLL_UNION",
+            "TO_QUANTILE_STATE",
+            "QUANTILE_UNION",
+        }
+    )
+
+    _VALID_OLAP_AGG_TYPES: t.ClassVar[t.FrozenSet[str]] = frozenset(
+        {
+            "SUM",
+            "MIN",
+            "MAX",
+            "REPLACE",
+            "REPLACE_IF_NOT_NULL",
+            "HLL_UNION",
+            "BITMAP_UNION",
+            "QUANTILE_UNION",
+            "GENERIC",
+        }
+    )
+
     def _get_thread_state(self) -> threading.local:
         state = getattr(self._connection_pool, "_doris_thread_state", None)
         if not isinstance(state, threading.local):
@@ -335,6 +389,17 @@ class DorisEngineAdapter(
     @_in_iceberg_replace_by_key.setter
     def _in_iceberg_replace_by_key(self, value: bool) -> None:
         self._get_thread_state().in_iceberg_replace_by_key = bool(value)
+
+    @property
+    def _recent_described_columns(
+        self,
+    ) -> t.Dict[t.Tuple[str, str, str], t.Dict[str, exp.DataType]]:
+        state = self._get_thread_state()
+        cache = getattr(state, "recent_described_columns", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            state.recent_described_columns = cache
+        return cache
 
     @property
     def _pool_generation(self) -> int:
@@ -655,6 +720,7 @@ class DorisEngineAdapter(
             kind = (
                 str(dtype.args.get("kind") or dtype.sql(dialect=cls.DIALECT))
                 .upper()
+                .split("<", 1)[0]
                 .split("(", 1)[0]
                 .strip()
                 .strip("`")
@@ -662,6 +728,105 @@ class DorisEngineAdapter(
             if kind in cls.INVALID_KEY_TYPES:
                 return False
         return True
+
+    @classmethod
+    def _is_non_nullable_olap_object_type(cls, dtype: exp.DataType) -> bool:
+        if dtype.is_type(exp.DataType.Type.HLLSKETCH):
+            return True
+        type_name = (
+            dtype.this.value.upper()
+            if isinstance(dtype.this, exp.DataType.Type)
+            else str(dtype.this).upper()
+        )
+        if type_name in cls._NON_NULLABLE_OLAP_OBJECT_TYPES:
+            return True
+        if dtype.this == exp.DataType.Type.USERDEFINED:
+            kind = (
+                str(dtype.args.get("kind") or dtype.sql(dialect=cls.DIALECT))
+                .upper()
+                .split("<", 1)[0]
+                .split("(", 1)[0]
+                .strip()
+                .strip("`")
+            )
+            if kind in cls._NON_NULLABLE_OLAP_OBJECT_TYPES:
+                return True
+        return False
+
+    @classmethod
+    def _query_has_non_nullable_olap_object_expr(cls, query: t.Optional[exp.Expr]) -> bool:
+        if query is None:
+            return False
+        if any(cls._is_non_nullable_olap_object_type(dt) for dt in query.find_all(exp.DataType)):
+            return True
+        return any(
+            fn.name.upper() in cls._NON_NULLABLE_OLAP_OBJECT_FUNCTIONS
+            for fn in query.find_all(exp.Anonymous)
+        )
+
+    @classmethod
+    def _extract_agg_types(
+        cls, table_props: t.Optional[t.Dict[str, t.Any]], *, pop: bool = False
+    ) -> t.Dict[str, str]:
+        if not table_props:
+            return {}
+        get_fn = table_props.pop if pop else table_props.get
+        raw_agg = get_fn("agg_types", None)
+        raw_agg_alias = get_fn("aggregate_types", None)
+        if raw_agg is not None and raw_agg_alias is not None:
+            raise SQLMeshError(
+                "Cannot specify both 'agg_types' and 'aggregate_types' in physical_properties."
+            )
+        chosen = raw_agg if raw_agg is not None else raw_agg_alias
+        if chosen is None:
+            return {}
+        while isinstance(chosen, exp.Paren) and not isinstance(chosen.this, exp.EQ):
+            chosen = chosen.this
+        pairs: t.List[t.Tuple[str, str]] = []
+        if isinstance(chosen, dict):
+            for k, v in chosen.items():
+                col_str = (cls._extract_str_value(k) or str(k)).strip().strip("`'\"")
+                fn_str = (cls._extract_str_value(v) or str(v)).strip().strip("`'\"").upper()
+                pairs.append((col_str, fn_str))
+        else:
+            items: t.Sequence[t.Any]
+            if isinstance(chosen, (exp.Tuple, exp.Array)):
+                items = chosen.expressions
+            elif isinstance(chosen, (list, tuple)):
+                items = chosen
+            else:
+                items = [chosen]
+            for item in items:
+                curr = item.this if isinstance(item, exp.Paren) else item
+                if not isinstance(curr, exp.EQ):
+                    raise SQLMeshError(
+                        f"Invalid Doris 'agg_types' entry '{item}'. Expected column = 'AGG_FUNC' pairs (e.g. total = 'SUM')."
+                    )
+                col_str = (cls._extract_str_value(curr.this) or "").strip().strip("`'\"").strip()
+                fn_str = (
+                    (cls._extract_str_value(curr.expression) or "")
+                    .strip()
+                    .strip("`'\"")
+                    .strip()
+                    .upper()
+                )
+                pairs.append((col_str, fn_str))
+        result: t.Dict[str, str] = {}
+        seen_lower: t.Set[str] = set()
+        for col_str, fn_str in pairs:
+            if not col_str or fn_str not in cls._VALID_OLAP_AGG_TYPES:
+                raise SQLMeshError(
+                    f"Invalid Doris aggregation type '{fn_str}' for column '{col_str}'. "
+                    f"Expected one of: {', '.join(sorted(cls._VALID_OLAP_AGG_TYPES))}."
+                )
+            col_low = col_str.lower()
+            if col_low in seen_lower:
+                raise SQLMeshError(
+                    f"Duplicate column '{col_str}' in Doris 'agg_types' configuration."
+                )
+            seen_lower.add(col_low)
+            result[col_str] = fn_str
+        return result
 
     def _normalize_nested_value(self, expr: exp.Expr) -> exp.Expr:
         return exp.cast(expr, exp.DataType.build("VARCHAR", dialect=self.dialect))
@@ -688,7 +853,7 @@ class DorisEngineAdapter(
                 exp.func("BITMAP_TO_STRING", expr),
                 to=exp.DataType.build("VARCHAR"),
             )
-        if type.is_type("hllsketch") or udt_kind in ("HLL", "HLLSKETCH"):
+        if type.is_type(exp.DataType.Type.HLLSKETCH) or udt_kind in ("HLL", "HLLSKETCH"):
             return exp.cast(
                 exp.func("HLL_TO_BASE64", expr),
                 to=exp.DataType.build("VARCHAR"),
@@ -699,6 +864,120 @@ class DorisEngineAdapter(
             decimal_precision=decimal_precision,
             timestamp_precision=timestamp_precision,
         )
+
+    def _table_diff_projection_expr(
+        self, col_expr: exp.Column, dtype: exp.DataType
+    ) -> t.Optional[exp.Expr]:
+        udt_kind = (
+            str(dtype.args.get("kind") or "")
+            .upper()
+            .split("<", 1)[0]
+            .split("(", 1)[0]
+            .strip()
+            .strip("`")
+            if dtype.this == exp.DataType.Type.USERDEFINED
+            else ""
+        )
+        varchar_type = exp.DataType.build("VARCHAR", dialect=self.dialect)
+        if udt_kind == "BITMAP":
+            return exp.cast(exp.func("BITMAP_TO_STRING", col_expr.copy()), to=varchar_type)
+        if dtype.is_type(exp.DataType.Type.HLLSKETCH) or udt_kind in ("HLL", "HLLSKETCH"):
+            return exp.cast(exp.func("HLL_TO_BASE64", col_expr.copy()), to=varchar_type)
+        if udt_kind == "QUANTILE_STATE":
+            return exp.cast(
+                exp.func("QUANTILE_PERCENT", col_expr.copy(), exp.Literal.number(0.5)),
+                to=varchar_type,
+            )
+        if udt_kind == "AGG_STATE":
+            return exp.cast(exp.Literal.string("<agg_state>"), to=varchar_type)
+        if dtype.is_type(
+            exp.DataType.Type.JSON,
+            exp.DataType.Type.JSONB,
+            exp.DataType.Type.VARIANT,
+            exp.DataType.Type.OBJECT,
+        ) or udt_kind in (
+            "JSON",
+            "JSONB",
+            "VARIANT",
+            "OBJECT",
+        ):
+            return exp.cast(col_expr.copy(), to=varchar_type)
+        return None
+
+    def ensure_nulls_for_unmatched_after_join(self, query: Query) -> Query:
+        with_clause = query.args.get("with_")
+        if not isinstance(with_clause, exp.With):
+            return query
+        cte_map = {
+            cte.alias.lower(): cte
+            for cte in with_clause.expressions
+            if isinstance(cte, exp.CTE) and cte.alias and isinstance(cte.this, exp.Select)
+        }
+        if not {"__source", "__target", "__stats"}.issubset(cte_map):
+            return query
+        src_sel = t.cast(exp.Select, cte_map["__source"].this)
+        tgt_sel = t.cast(exp.Select, cte_map["__target"].this)
+        src_from = src_sel.args.get("from_")
+        tgt_from = tgt_sel.args.get("from_")
+        if not (
+            isinstance(src_from, exp.From)
+            and isinstance(src_from.this, exp.Table)
+            and isinstance(tgt_from, exp.From)
+            and isinstance(tgt_from.this, exp.Table)
+        ):
+            return query
+
+        def _lookup_schema(tbl: exp.Table) -> t.Dict[str, exp.DataType]:
+            key = ((tbl.catalog or "").lower(), (tbl.db or "").lower(), tbl.name.lower())
+            cached = self._recent_described_columns.get(key)
+            if cached is not None:
+                return cached
+            try:
+                return self.columns(tbl)
+            except Exception:
+                return {}
+
+        src_by_low = {c.lower(): dt for c, dt in _lookup_schema(src_from.this).items()}
+        tgt_by_low = {c.lower(): dt for c, dt in _lookup_schema(tgt_from.this).items()}
+        if not src_by_low and not tgt_by_low:
+            return query
+
+        needs_rewrite = any(
+            isinstance(p, exp.Column)
+            and p.name.lower() != "__sqlmesh_join_key"
+            and (dt := schema_map.get(p.name.lower())) is not None
+            and self._table_diff_projection_expr(p, dt) is not None
+            for sel, schema_map in ((src_sel, src_by_low), (tgt_sel, tgt_by_low))
+            for p in sel.expressions
+        )
+        if not needs_rewrite:
+            return query
+
+        updated_query = query.copy()
+        upd_with = t.cast(exp.With, updated_query.args["with_"])
+        for cte in upd_with.expressions:
+            if not isinstance(cte, exp.CTE) or not isinstance(cte.this, exp.Select):
+                continue
+            cte_name = cte.alias.lower()
+            if cte_name == "__source":
+                schema_map = src_by_low
+            elif cte_name == "__target":
+                schema_map = tgt_by_low
+            else:
+                continue
+            new_projs: t.List[exp.Expr] = []
+            for proj in cte.this.expressions:
+                if (
+                    isinstance(proj, exp.Column)
+                    and proj.name.lower() != "__sqlmesh_join_key"
+                    and (dt := schema_map.get(proj.name.lower())) is not None
+                    and (conv := self._table_diff_projection_expr(proj, dt)) is not None
+                ):
+                    new_projs.append(exp.alias_(conv, proj.name, quoted=True))
+                else:
+                    new_projs.append(proj)
+            cte.this.set("expressions", new_projs)
+        return updated_query
 
     @staticmethod
     def _extract_disconnect_info(
@@ -1107,6 +1386,15 @@ class DorisEngineAdapter(
                     self._needs_catalog_restore = True
                 raise
 
+    def _clear_data_object_cache(self, table_name: t.Optional[TableName] = None) -> None:
+        super()._clear_data_object_cache(table_name)
+        cache = self._recent_described_columns
+        if table_name is None:
+            cache.clear()
+        else:
+            tbl = exp.to_table(table_name)
+            cache.pop(((tbl.catalog or "").lower(), (tbl.db or "").lower(), tbl.name.lower()), None)
+
     def columns(
         self, table_name: TableName, include_pseudo_columns: bool = False
     ) -> t.Dict[str, exp.DataType]:
@@ -1114,6 +1402,14 @@ class DorisEngineAdapter(
         cols, key_cols, has_explicit_keys = self._describe_columns_with_keys(table_name)
         self._last_described_key_cols = key_cols
         self._last_described_has_explicit_keys = has_explicit_keys
+        tbl = exp.to_table(table_name)
+        if tbl.name:
+            cache = self._recent_described_columns
+            cache[((tbl.catalog or "").lower(), (tbl.db or "").lower(), tbl.name.lower())] = dict(
+                cols
+            )
+            if len(cache) > 64:
+                cache.pop(next(iter(cache)))
         return cols
 
     def _describe_columns_with_keys(
@@ -5360,9 +5656,31 @@ class DorisEngineAdapter(
         raw_not_null_cols = kwargs.get("not_null_columns") or table_props.get("not_null_columns")
         explicit_not_null_list = self._extract_column_names(raw_not_null_cols)
         has_explicit_not_null_cols = bool(explicit_not_null_list)
-        requires_schema_ddl_ctas = is_internal_iceberg or (
-            has_explicit_not_null_cols and not self_referencing
+        agg_types_map = self._extract_agg_types(table_props)
+        has_agg_types = bool(agg_types_map)
+        has_known_non_nullable_obj_cols = bool(
+            not is_iceberg
+            and target_columns_to_types
+            and any(
+                self._is_non_nullable_olap_object_type(dtype)
+                for dtype in target_columns_to_types.values()
+            )
         )
+        has_query_non_nullable_obj_cols = bool(
+            not is_iceberg
+            and not target_columns_to_types_known
+            and self._query_has_non_nullable_olap_object_expr(first_query)
+        )
+        needs_schema_ddl_resolution = bool(
+            (
+                has_explicit_not_null_cols
+                or has_agg_types
+                or has_known_non_nullable_obj_cols
+                or has_query_non_nullable_obj_cols
+            )
+            and not self_referencing
+        )
+        requires_schema_ddl_ctas = is_internal_iceberg or needs_schema_ddl_resolution
 
         target_already_existed = bool(
             requires_schema_ddl_ctas
@@ -5373,13 +5691,13 @@ class DorisEngineAdapter(
         )
 
         # 3. Doris's `CreateTableAsSelectCommand` ignores `NON_NULLABLE(...)` for non-`AUTO PARTITION`
-        #    columns and forbids `ALTER TABLE ... MODIFY COLUMN ... NOT NULL`. Therefore, when
-        #    `not_null_columns` is requested (for example `ARRAY<FLOAT> NOT NULL` for `USING ANN`
-        #    vector indexes or `NOT NULL` Iceberg columns), resolve column types if needed and
-        #    materialize via schema DDL (`_create_table_from_columns`) + `INSERT INTO`.
+        #    columns, forbids `ALTER TABLE ... MODIFY COLUMN ... NOT NULL`, rejects OLAP non-nullable
+        #    object types (`BITMAP`, `HLL`, `QUANTILE_STATE`, `AGG_STATE`) in `CTAS` (`complex type
+        #    column must be not nullable`), and cannot attach per-column `AGGREGATE KEY` functions
+        #    (`agg_types`). Resolve column types if needed and materialize via schema DDL
+        #    (`_create_table_from_columns`) + `INSERT INTO`.
         if (
-            has_explicit_not_null_cols
-            and not self_referencing
+            needs_schema_ddl_resolution
             and not target_columns_to_types_known
             and not target_already_existed
             and first_query is not None
@@ -5400,13 +5718,19 @@ class DorisEngineAdapter(
                     for proj in curr_query_node.expressions
                     if proj.alias_or_name
                 }
-                if proj_names_lower:
+                if proj_names_lower and has_explicit_not_null_cols:
                     missing_not_null = sorted(
                         {c.lower() for c in explicit_not_null_list} - proj_names_lower
                     )
                     if missing_not_null:
                         raise SQLMeshError(
                             f"not_null_columns {missing_not_null} not found in table columns {sorted(proj_names_lower)}."
+                        )
+                if proj_names_lower and has_agg_types:
+                    missing_agg_cols = sorted({c.lower() for c in agg_types_map} - proj_names_lower)
+                    if missing_agg_cols:
+                        raise SQLMeshError(
+                            f"Doris agg_types columns {missing_agg_cols} not found in table columns {sorted(proj_names_lower)}."
                         )
                 known_by_lower = {
                     c.lower(): dtype
@@ -5431,6 +5755,10 @@ class DorisEngineAdapter(
                         and unaliased.to.this != exp.DataType.Type.UNKNOWN
                     ):
                         inferred_cols[col_alias] = unaliased.to.copy()
+                    elif self._is_non_nullable_olap_object_type(
+                        inferred_obj_dtype := self._infer_projection_type(proj)
+                    ):
+                        inferred_cols[col_alias] = inferred_obj_dtype
                     else:
                         all_inferred = False
                         break
@@ -5443,47 +5771,57 @@ class DorisEngineAdapter(
                     target_columns_to_types_known = True
 
             if not target_columns_to_types_known and not is_iceberg:
-                probe_table = self._get_temp_table(table)
-                probe_query = (
-                    exp.select(
-                        exp.cast(exp.Literal.number(0), to="TINYINT").as_(
-                            "__sqlmesh_probe_key", quoted=True
-                        ),
-                        exp.Column(this=exp.Star(), table=exp.to_identifier("_q", quoted=True)),
+                if has_known_non_nullable_obj_cols or has_query_non_nullable_obj_cols:
+                    probed_cols = self._probe_query_columns_via_view(table, first_query)
+                else:
+                    probe_table = self._get_temp_table(table)
+                    probe_query = (
+                        exp.select(
+                            exp.cast(exp.Literal.number(0), to="TINYINT").as_(
+                                "__sqlmesh_probe_key", quoted=True
+                            ),
+                            exp.Column(this=exp.Star(), table=exp.to_identifier("_q", quoted=True)),
+                        )
+                        .from_(first_query.copy().subquery(alias="_q"))
+                        .where(exp.false())
+                        .limit(0)
                     )
-                    .from_(first_query.copy().subquery(alias="_q"))
-                    .where(exp.false())
-                    .limit(0)
-                )
-                probe_props: t.Dict[str, t.Any] = {
-                    "duplicate_key": exp.Tuple(
-                        expressions=[exp.column("__sqlmesh_probe_key", quoted=True)]
-                    ),
-                    "buckets": exp.Literal.number(1),
-                }
-                for prop_name in (
-                    "replication_num",
-                    "replication_allocation",
-                    "storage_vault_name",
-                ):
-                    if prop_name in table_props:
-                        probe_props[prop_name] = table_props[prop_name]
-                super()._create_table_from_source_queries(
-                    probe_table,
-                    [SourceQuery(query_factory=lambda: probe_query)],
-                    exists=True,
-                    replace=False,
-                    table_properties=probe_props,
-                    track_rows_processed=False,
-                )
-                try:
-                    probed_cols = {
-                        col_k: col_v
-                        for col_k, col_v in self.columns(probe_table).items()
-                        if col_k.lower() != "__sqlmesh_probe_key"
+                    probe_props: t.Dict[str, t.Any] = {
+                        "duplicate_key": exp.Tuple(
+                            expressions=[exp.column("__sqlmesh_probe_key", quoted=True)]
+                        ),
+                        "buckets": exp.Literal.number(1),
                     }
-                finally:
-                    self.drop_table(probe_table, exists=True)
+                    for prop_name in (
+                        "replication_num",
+                        "replication_allocation",
+                        "storage_vault_name",
+                    ):
+                        if prop_name in table_props:
+                            probe_props[prop_name] = table_props[prop_name]
+                    try:
+                        super()._create_table_from_source_queries(
+                            probe_table,
+                            [SourceQuery(query_factory=lambda: probe_query)],
+                            exists=True,
+                            replace=False,
+                            table_properties=probe_props,
+                            track_rows_processed=False,
+                        )
+                    except Exception as probe_exc:
+                        if "complex type column must be not nullable" in str(probe_exc).lower():
+                            probed_cols = self._probe_query_columns_via_view(table, first_query)
+                        else:
+                            raise
+                    else:
+                        try:
+                            probed_cols = {
+                                col_k: col_v
+                                for col_k, col_v in self.columns(probe_table).items()
+                                if col_k.lower() != "__sqlmesh_probe_key"
+                            }
+                        finally:
+                            self.drop_table(probe_table, exists=True)
                 if probed_cols and columns_to_types_all_known(probed_cols):
                     target_columns_to_types = self._reorder_olap_columns(probed_cols, kwargs)
                     target_columns_to_types_known = True
@@ -5492,15 +5830,21 @@ class DorisEngineAdapter(
             return
 
         if (
-            has_explicit_not_null_cols
+            (has_explicit_not_null_cols or has_agg_types)
             and not self_referencing
             and first_query is not None
             and not target_columns_to_types_known
         ):
+            if has_explicit_not_null_cols:
+                raise SQLMeshError(
+                    f"Doris cannot apply not_null_columns {sorted(explicit_not_null_list)} to CTAS on "
+                    f"'{table_name}' because the column types could not be resolved. Specify explicit "
+                    "column types or CAST each projection."
+                )
             raise SQLMeshError(
-                f"Doris cannot apply not_null_columns {sorted(explicit_not_null_list)} to CTAS on "
-                f"'{table_name}' because the column types could not be resolved. Specify explicit "
-                "column types or CAST each projection."
+                f"Doris cannot apply agg_types {sorted(agg_types_map)} to CTAS on '{table_name}' "
+                "because the column types could not be resolved. Specify explicit column types or "
+                "CAST each projection."
             )
 
         if (
@@ -5533,18 +5877,79 @@ class DorisEngineAdapter(
                     )
             return
 
-        super()._create_table_from_source_queries(
-            table_name,
-            source_queries,
-            target_columns_to_types=target_columns_to_types,
-            exists=exists,
-            replace=replace,
-            table_description=table_description,
-            column_descriptions=column_descriptions,
-            table_kind=table_kind,
-            track_rows_processed=track_rows_processed,
-            **kwargs,
+        try:
+            super()._create_table_from_source_queries(
+                table_name,
+                source_queries,
+                target_columns_to_types=target_columns_to_types,
+                exists=exists,
+                replace=replace,
+                table_description=table_description,
+                column_descriptions=column_descriptions,
+                table_kind=table_kind,
+                track_rows_processed=track_rows_processed,
+                **kwargs,
+            )
+        except Exception as ctas_exc:
+            if (
+                not is_iceberg
+                and not self_referencing
+                and first_query is not None
+                and "complex type column must be not nullable" in str(ctas_exc).lower()
+            ):
+                fallback_probed_cols = self._probe_query_columns_via_view(table, first_query)
+                if fallback_probed_cols and columns_to_types_all_known(fallback_probed_cols):
+                    resolved_fallback_cols = self._reorder_olap_columns(
+                        fallback_probed_cols, kwargs
+                    )
+                    existed_before_fallback = bool(
+                        exists
+                        and not replace
+                        and not from_replace_query
+                        and self.get_data_object(table) is not None
+                    )
+                    if replace:
+                        self.drop_table(table_name, exists=True)
+                    self._create_table_from_columns(
+                        table_name,
+                        resolved_fallback_cols,
+                        exists=exists,
+                        table_description=table_description,
+                        column_descriptions=column_descriptions,
+                        **kwargs,
+                    )
+                    if not existed_before_fallback:
+                        for source_query in source_queries:
+                            with source_query as query:
+                                query = self._order_projections_and_filter(
+                                    query, resolved_fallback_cols, coerce_types=True
+                                )
+                                self._insert_append_query(
+                                    table_name,
+                                    query,
+                                    resolved_fallback_cols,
+                                    track_rows_processed=track_rows_processed,
+                                )
+                    return
+            raise
+
+    def _probe_query_columns_via_view(
+        self, table: exp.Table, query: exp.Expr
+    ) -> t.Dict[str, exp.DataType]:
+        probe_view = self._get_temp_table(table)
+        self.execute(
+            exp.Create(
+                this=probe_view,
+                kind="VIEW",
+                replace=True,
+                expression=query.copy(),
+            ),
+            quote_identifiers=self.QUOTE_IDENTIFIERS_IN_VIEWS,
         )
+        try:
+            return self.columns(probe_view)
+        finally:
+            self.drop_view(probe_view, ignore_if_not_exists=True, materialized=False)
 
     @staticmethod
     def _remap_positional_group_and_order(
@@ -5749,8 +6154,11 @@ class DorisEngineAdapter(
         table_props = self._get_table_properties(kwargs) or {}
         raw_not_null_cols = kwargs.get("not_null_columns") or table_props.get("not_null_columns")
         explicit_not_null_cols = {c.lower() for c in self._extract_column_names(raw_not_null_cols)}
-        if explicit_not_null_cols:
-            known_cols_lower: t.Set[str] = set()
+        agg_types_raw_map = self._extract_agg_types(table_props)
+        agg_types_by_lower = {k.lower(): v for k, v in agg_types_raw_map.items()}
+
+        known_cols_lower: t.Set[str] = set()
+        if explicit_not_null_cols or agg_types_by_lower:
             if target_columns_to_types:
                 known_cols_lower = {c.lower() for c in target_columns_to_types}
             elif isinstance(table_name_or_schema, exp.Schema):
@@ -5768,12 +6176,37 @@ class DorisEngineAdapter(
                     for proj in expression.expressions
                     if proj.alias_or_name
                 }
-            if known_cols_lower:
+            if known_cols_lower and explicit_not_null_cols:
                 missing_not_null = sorted(explicit_not_null_cols - known_cols_lower)
                 if missing_not_null:
                     raise SQLMeshError(
                         f"not_null_columns {missing_not_null} not found in table columns {sorted(known_cols_lower)}."
                     )
+
+        if agg_types_by_lower:
+            if is_iceberg or table_kind == "MATERIALIZED_VIEW":
+                raise SQLMeshError(
+                    "Doris 'agg_types' is only supported on internal OLAP AGGREGATE KEY tables."
+                )
+            _, _, resolved_ak_for_agg = self._resolve_table_type_and_keys(table_props)
+            ak_cols_set_lower = {k.lower() for k in self._extract_column_names(resolved_ak_for_agg)}
+            if not ak_cols_set_lower:
+                raise SQLMeshError(
+                    "Doris 'agg_types' requires 'aggregate_key' (or table_type = 'AGGREGATE' with 'keys') "
+                    "to be specified in physical_properties."
+                )
+            if known_cols_lower:
+                missing_agg = sorted(set(agg_types_by_lower) - known_cols_lower)
+                if missing_agg:
+                    raise SQLMeshError(
+                        f"Doris agg_types columns {missing_agg} not found in table columns {sorted(known_cols_lower)}."
+                    )
+            key_agg_overlap = sorted(set(agg_types_by_lower) & ak_cols_set_lower)
+            if key_agg_overlap:
+                raise SQLMeshError(
+                    f"Doris 'agg_types' cannot be specified on AGGREGATE KEY columns {key_agg_overlap}; "
+                    "only non-key value columns accept aggregation functions."
+                )
 
         not_null_cols: t.Set[str] = set(explicit_not_null_cols)
         if not is_iceberg:
@@ -5811,24 +6244,41 @@ class DorisEngineAdapter(
                         auto_range_cols = set()
                     not_null_cols |= auto_range_cols
 
-        if not_null_cols and isinstance(table_name_or_schema, exp.Schema):
+        if (not_null_cols or agg_types_by_lower) and isinstance(table_name_or_schema, exp.Schema):
             table_name_or_schema = table_name_or_schema.copy()
             updated_exprs: t.List[exp.Expr] = []
             for expr in table_name_or_schema.expressions:
-                if isinstance(expr, exp.ColumnDef) and expr.name.lower() in not_null_cols:
+                if isinstance(expr, exp.ColumnDef):
+                    col_low = expr.name.lower()
                     existing_constraints = list(expr.args.get("constraints") or [])
-                    has_not_null = any(
-                        isinstance(c, exp.NotNullColumnConstraint)
-                        or isinstance(getattr(c, "kind", None), exp.NotNullColumnConstraint)
-                        for c in existing_constraints
-                    )
-                    if not has_not_null:
-                        expr = expr.copy()
-                        expr.set(
-                            "constraints",
-                            [exp.ColumnConstraint(kind=exp.NotNullColumnConstraint())]
-                            + existing_constraints,
+                    new_constraints = list(existing_constraints)
+                    changed_col_def = False
+                    if col_low in not_null_cols:
+                        has_not_null = any(
+                            isinstance(c, exp.NotNullColumnConstraint)
+                            or isinstance(getattr(c, "kind", None), exp.NotNullColumnConstraint)
+                            for c in new_constraints
                         )
+                        if not has_not_null:
+                            new_constraints = [
+                                exp.ColumnConstraint(kind=exp.NotNullColumnConstraint())
+                            ] + new_constraints
+                            changed_col_def = True
+                    agg_fn = agg_types_by_lower.get(col_low)
+                    if agg_fn:
+                        has_agg_constraint = any(
+                            isinstance(getattr(c, "kind", None), exp.Var)
+                            and str(c.kind.this).upper() == agg_fn
+                            for c in new_constraints
+                        )
+                        if not has_agg_constraint:
+                            new_constraints = [
+                                exp.ColumnConstraint(kind=exp.Var(this=agg_fn))
+                            ] + new_constraints
+                            changed_col_def = True
+                    if changed_col_def:
+                        expr = expr.copy()
+                        expr.set("constraints", new_constraints)
                 updated_exprs.append(expr)
             table_name_or_schema.set("expressions", updated_exprs)
         elif (
@@ -7075,6 +7525,7 @@ class DorisEngineAdapter(
             "cluster_by", None
         )
         table_properties_copy.pop("not_null_columns", None)
+        popped_agg_types = self._extract_agg_types(table_properties_copy, pop=True)
 
         unique_key_cols = self._extract_column_names(unique_key)
         duplicate_key_cols = self._extract_column_names(duplicate_key)
@@ -7083,6 +7534,29 @@ class DorisEngineAdapter(
         col_by_lower = (
             {c.lower(): c for c in target_columns_to_types} if target_columns_to_types else {}
         )
+        if popped_agg_types:
+            if is_iceberg or is_materialized_view:
+                raise SQLMeshError(
+                    "Doris 'agg_types' is only supported on internal OLAP AGGREGATE KEY tables."
+                )
+            if not aggregate_key_cols:
+                raise SQLMeshError(
+                    "Doris 'agg_types' requires 'aggregate_key' (or table_type = 'AGGREGATE' with 'keys') "
+                    "to be specified in physical_properties."
+                )
+            if col_by_lower:
+                missing_agg = [c for c in popped_agg_types if c.lower() not in col_by_lower]
+                if missing_agg:
+                    raise SQLMeshError(
+                        f"Doris agg_types columns {missing_agg} not found in table schema columns {list(target_columns_to_types or ())}."
+                    )
+            ak_lower_set = {k.lower() for k in aggregate_key_cols}
+            overlap_agg = [c for c in popped_agg_types if c.lower() in ak_lower_set]
+            if overlap_agg:
+                raise SQLMeshError(
+                    f"Doris 'agg_types' cannot be specified on AGGREGATE KEY columns {overlap_agg}; "
+                    "only non-key value columns accept aggregation functions."
+                )
 
         # Pop partitioning-related properties before building key properties so explicit duplicate_key
         # can automatically include active OLAP partition columns (required by Doris FE validation).
@@ -7717,7 +8191,7 @@ class DorisEngineAdapter(
             (
                 isinstance(node, (exp.Cast, exp.TryCast))
                 and isinstance(node.to, exp.DataType)
-                and node.to.is_type("date", "date32")
+                and node.to.is_type("date", "date32", "time")
                 and self._is_timestamptz_expr(node.this)
             )
             or (
@@ -7734,7 +8208,7 @@ class DorisEngineAdapter(
                 if (
                     isinstance(node, (exp.Cast, exp.TryCast))
                     and isinstance(node.to, exp.DataType)
-                    and node.to.is_type("date", "date32")
+                    and node.to.is_type("date", "date32", "time")
                     and self._is_timestamptz_expr(node.this)
                 ):
                     dt6 = exp.DataType.build("DATETIME(6)", dialect=self.dialect)
@@ -8070,6 +8544,8 @@ class DorisEngineAdapter(
             "order_by",
             "cluster_by",
             "not_null_columns",
+            "agg_types",
+            "aggregate_types",
             "engine",
             "properties",
             "materialized_type",

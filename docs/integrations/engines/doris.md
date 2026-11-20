@@ -240,24 +240,44 @@ WHERE _rn = 1;
 
 ### AGGREGATE KEY model
 
-For pre-aggregated rollup tables, specify the key columns using `aggregate_key` in `physical_properties`. Note that Doris requires non-key value columns in an `AGGREGATE KEY` table to specify an aggregation function (`SUM`, `MAX`, `MIN`, `REPLACE`, etc.) in the column definition unless all columns are part of `aggregate_key` (or the table is created via a custom DDL / pre-statement):
+For pre-aggregated rollup tables, specify the key columns using `aggregate_key` (or `table_type = 'AGGREGATE'` with `keys`) and per-column aggregation functions (`SUM`, `MIN`, `MAX`, `REPLACE`, `REPLACE_IF_NOT_NULL`, `BITMAP_UNION`, `HLL_UNION`, `QUANTILE_UNION`, or `GENERIC`) using `agg_types` in `physical_properties`:
 
 ```sql
 MODEL (
-  name analytics.daily_site_keys,
-  kind FULL,
-  clustered_by (user_id),
+  name analytics.daily_site_metrics,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column event_dt,
+    partition_by_time_column false
+  ),
+  columns (
+    event_dt DATE,
+    event_type VARCHAR(64),
+    total_clicks BIGINT,
+    max_latency_ms INT,
+    uv_bitmap BITMAP,
+    uv_hll HLL
+  ),
   physical_properties (
-    aggregate_key = ('user_id', 'event_type'),
+    aggregate_key = ('event_dt', 'event_type'),
+    agg_types = (
+      total_clicks = 'SUM',
+      max_latency_ms = 'MAX',
+      uv_bitmap = 'BITMAP_UNION',
+      uv_hll = 'HLL_UNION'
+    ),
     buckets = 16
   )
 );
 
 SELECT
-  user_id::BIGINT AS user_id,
-  event_type::VARCHAR(64) AS event_type
+  CAST(event_time AS DATE) AS event_dt,
+  event_type::VARCHAR(64) AS event_type,
+  1::BIGINT AS total_clicks,
+  latency_ms::INT AS max_latency_ms,
+  TO_BITMAP(user_id) AS uv_bitmap,
+  HLL_HASH(user_id) AS uv_hll
 FROM analytics.user_events
-GROUP BY user_id, event_type;
+WHERE event_time BETWEEN @start_ts AND @end_ts;
 ```
 
 ---
@@ -546,6 +566,8 @@ SQLMesh's Doris dialect natively parses and transpiles Apache Iceberg snapshot t
   FROM iceberg_catalog.bronze.raw_events
   WHERE event_ts BETWEEN @start_ts AND @end_ts;
 
+  -- Keep Iceberg tag/branch creation and compaction guarded by `@runtime_stage = 'evaluating'`
+  -- (newly created empty Iceberg tables during `'creating'` have no snapshot on `main` yet).
   @IF(
     @runtime_stage = 'evaluating',
     ALTER TABLE @this_model EXECUTE rewrite_data_files("target-file-size-bytes" = "134217728")
@@ -1002,7 +1024,7 @@ WHERE order_date BETWEEN @start_ds AND @end_ds;
 
 - **Constant folding in `LIMIT` clauses**: Doris requires `LIMIT` arguments to be integer literals rather than arithmetic expressions (such as `LIMIT 10 + 1` emitted by `number_of_rows`). `DorisEngineAdapter` automatically folds constant arithmetic in `LIMIT` clauses before execution.
 - **Deferred Materialized Views (`build = 'DEFERRED'`)**: When a materialized view is created with `build = 'DEFERRED'` and has `audits (...)` attached, SQLMesh automatically triggers `REFRESH MATERIALIZED VIEW ... AUTO` before running audits so they evaluate against populated data.
-- **`sqlmesh table_diff` on floating-point and string columns**: Temporary diff tables created by `sqlmesh table_diff` automatically promote integer indicator columns into the Doris OLAP short-key prefix, so comparing tables whose leading user columns are `DOUBLE`, `FLOAT`, `STRING`, or `JSON` succeeds without manual key configuration.
+- **`sqlmesh table_diff` on floating-point, semi-structured, and object columns**: Temporary diff tables created by `sqlmesh table_diff` automatically promote integer indicator columns into the Doris OLAP short-key prefix and serialize non-equatable / non-nullable Doris types (`JSON`, `VARIANT`, `ARRAY`, `MAP`, `STRUCT`, `BITMAP` via `BITMAP_TO_STRING`, `HLL` via `HLL_TO_BASE64`, and `QUANTILE_STATE` via `QUANTILE_PERCENT`) to `VARCHAR`, so comparing tables with floating-point, string, nested, or sketch columns succeeds without manual configuration.
 
 ---
 
@@ -1040,6 +1062,7 @@ If you are migrating StarRocks SQLMesh models or existing Doris DDL conventions,
 | `duplicate_key = ('c1', 'c2')` | Emits `DUPLICATE KEY (c1, c2)` (and automatically appends active OLAP `partitioned_by` columns if omitted from `duplicate_key`) |
 | `unique_key = ('c1')` | Emits `UNIQUE KEY (c1)` (automatic for `INCREMENTAL_BY_UNIQUE_KEY`) |
 | `aggregate_key = ('c1', 'c2')` | Emits `AGGREGATE KEY (c1, c2)` |
+| `agg_types = (v1 = 'SUM', v2 = 'BITMAP_UNION')` | Attaches Doris column aggregation functions (`SUM`, `MIN`, `MAX`, `REPLACE`, `REPLACE_IF_NOT_NULL`, `BITMAP_UNION`, `HLL_UNION`, `QUANTILE_UNION`, `GENERIC`) to non-key value columns on `AGGREGATE KEY` tables |
 | `table_type = 'PRIMARY' \| 'UNIQUE' \| 'DUPLICATE' \| 'AGGREGATE'`, `keys = ('c1', 'c2')` | Maps directly to the corresponding Doris key model (`PRIMARY` maps to Doris `UNIQUE KEY`) |
 | `clustered_by (c1)` + `physical_properties (buckets = 10)` | Emits `DISTRIBUTED BY HASH(c1) BUCKETS 10` |
 | `physical_properties (partition_by = ...)` | Supported alias for top-level `partitioned_by` |

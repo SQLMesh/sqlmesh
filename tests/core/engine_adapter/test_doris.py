@@ -6484,6 +6484,14 @@ def test_doris_audit_fixes_and_docs_models(
         v408_adapter._to_sql(unannotated_tz_to_date)
         == "SELECT CAST(CAST('2026-11-17 14:30:00+00:00' AS DATETIME(6)) AS DATE)"
     )
+    unannotated_tz_to_time = parse_one(
+        "SELECT CAST(CAST('2026-11-17 14:30:45.123456+00:00' AS TIMESTAMPTZ(6)) AS TIME(6)), CAST(CAST('2026-11-17 14:30:45' AS DATETIME(6)) AS TIME)",
+        dialect="doris",
+    )
+    assert (
+        v415_adapter._to_sql(unannotated_tz_to_time)
+        == "SELECT CAST(CAST(CAST('2026-11-17 14:30:45.123456+00:00' AS TIMESTAMPTZ(6)) AS DATETIME(6)) AS TIME(6)), CAST(CAST('2026-11-17 14:30:45' AS DATETIME(6)) AS TIME)"
+    )
 
     # 15. `_gen_config` appends the Doris `state_connection` even when custom settings are supplied (e.g. DLT template).
     from sqlmesh.cli.project_init import InitCliMode, ProjectTemplate, _gen_config
@@ -6496,3 +6504,189 @@ def test_doris_audit_fixes_and_docs_models(
         cli_mode=InitCliMode.DEFAULT,
     )
     assert "state_connection:\n      type: duckdb\n      database: state.db" in dlt_doris_config
+
+    # 16. Doris OLAP non-nullable object types (`BITMAP`, `HLL`, `QUANTILE_STATE`, `AGG_STATE`) materialize
+    #     via schema DDL + `INSERT INTO` instead of `CTAS` (which Doris rejects with `complex type column must be not nullable`),
+    #     and `agg_types` attaches column aggregation functions on `AGGREGATE KEY` tables.
+    assert not DorisEngineAdapter._is_valid_olap_key_type(
+        exp.DataType.build("AGG_STATE<max_by(INT, INT)>", dialect="doris", udt=True)
+    )
+    obj_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    mocker.patch("sqlmesh.core.engine_adapter.doris.random_id", return_value="viewprb1")
+    # 16a. Statically resolvable CTAS (`CAST` + `TO_BITMAP` + `HLL_HASH`) skips probe view and uses schema DDL + INSERT
+    obj_adapter.ctas(
+        "analytics.bm_static",
+        parse_one(
+            "SELECT CAST(user_id AS BIGINT) AS user_id, TO_BITMAP(user_id) AS bm, HLL_HASH(user_id) AS hll_col FROM raw.events",
+            read="doris",
+        ),
+    )
+    # 16b. Unannotated CTAS with `TO_BITMAP` and untyped upstream columns probes via `CREATE OR REPLACE VIEW` + `DESCRIBE`
+    obj_adapter.cursor.fetchall.side_effect = [
+        [
+            ("bm", "bitmap", "No", "false", None, ""),
+            ("user_id", "bigint", "Yes", "false", None, ""),
+        ]
+    ]
+    obj_adapter.ctas(
+        "analytics.bm_probed",
+        parse_one("SELECT TO_BITMAP(user_id) AS bm, user_id FROM raw.events", read="doris"),
+    )
+    # 16c. Opaque upstream BITMAP column (`SELECT user_id, bm FROM raw.bm_tbl`) falls back to view probe on Doris CTAS error
+    orig_exec = obj_adapter._execute
+
+    def _fail_first_ctas(sql_text: str, *args: t.Any, **kw: t.Any) -> None:
+        if "CREATE TABLE IF NOT EXISTS `analytics`.`bm_fallback` AS SELECT" in sql_text:
+            raise RuntimeError(
+                "errCode = 2, detailMessage = complex type column must be not nullable, column:bm"
+            )
+        orig_exec(sql_text, *args, **kw)
+
+    mocker.patch.object(obj_adapter, "_execute", side_effect=_fail_first_ctas)
+    obj_adapter.cursor.fetchall.side_effect = [
+        [
+            ("user_id", "bigint", "Yes", "false", None, ""),
+            ("bm", "bitmap", "No", "false", None, ""),
+        ]
+    ]
+    obj_adapter.ctas(
+        "analytics.bm_fallback",
+        parse_one("SELECT user_id, bm FROM raw.bm_tbl", read="doris"),
+    )
+    obj_adapter.cursor.fetchall.side_effect = None
+    assert to_sql_calls(obj_adapter) == [
+        "CREATE TABLE IF NOT EXISTS `analytics`.`bm_static` (`user_id` BIGINT, `bm` BITMAP, `hll_col` HLL)",
+        "INSERT INTO `analytics`.`bm_static` (`user_id`, `bm`, `hll_col`) SELECT CAST(`user_id` AS BIGINT) AS `user_id`, CAST(`bm` AS BITMAP) AS `bm`, CAST(`hll_col` AS HLL) AS `hll_col` FROM (SELECT CAST(`user_id` AS BIGINT) AS `user_id`, TO_BITMAP(`user_id`) AS `bm`, HLL_HASH(`user_id`) AS `hll_col` FROM `raw`.`events`) AS `_subquery`",
+        "CREATE OR REPLACE VIEW `analytics`.`__temp_bm_probed_viewprb1` AS SELECT TO_BITMAP(`user_id`) AS `bm`, `user_id` FROM `raw`.`events`",
+        "DESCRIBE `analytics`.`__temp_bm_probed_viewprb1`",
+        "DROP VIEW IF EXISTS `analytics`.`__temp_bm_probed_viewprb1`",
+        "CREATE TABLE IF NOT EXISTS `analytics`.`bm_probed` (`user_id` BIGINT, `bm` BITMAP)",
+        "INSERT INTO `analytics`.`bm_probed` (`user_id`, `bm`) SELECT CAST(`user_id` AS BIGINT) AS `user_id`, CAST(`bm` AS BITMAP) AS `bm` FROM (SELECT TO_BITMAP(`user_id`) AS `bm`, `user_id` FROM `raw`.`events`) AS `_subquery`",
+        "CREATE OR REPLACE VIEW `analytics`.`__temp_bm_fallback_viewprb1` AS SELECT `user_id`, `bm` FROM `raw`.`bm_tbl`",
+        "DESCRIBE `analytics`.`__temp_bm_fallback_viewprb1`",
+        "DROP VIEW IF EXISTS `analytics`.`__temp_bm_fallback_viewprb1`",
+        "CREATE TABLE IF NOT EXISTS `analytics`.`bm_fallback` (`user_id` BIGINT, `bm` BITMAP)",
+        "INSERT INTO `analytics`.`bm_fallback` (`user_id`, `bm`) SELECT CAST(`user_id` AS BIGINT) AS `user_id`, CAST(`bm` AS BITMAP) AS `bm` FROM (SELECT `user_id`, `bm` FROM `raw`.`bm_tbl`) AS `_subquery`",
+    ]
+
+    # 16d. `AGGREGATE KEY` with `agg_types` + `not_null_columns` emits `<type> <agg_fn> [NOT NULL]` and validates properties
+    agg_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    agg_adapter.create_table(
+        "analytics.agg_rollup",
+        {
+            "event_dt": exp.DataType.build("DATE", dialect="doris"),
+            "total_clicks": exp.DataType.build("BIGINT", dialect="doris"),
+            "uv_bitmap": exp.DataType.build("BITMAP", dialect="doris", udt=True),
+        },
+        table_properties={
+            "table_type": exp.Literal.string("AGGREGATE"),
+            "keys": exp.Tuple(expressions=[exp.column("event_dt")]),
+            "agg_types": exp.Tuple(
+                expressions=[
+                    exp.EQ(this=exp.column("total_clicks"), expression=exp.Literal.string("SUM")),
+                    exp.EQ(
+                        this=exp.column("uv_bitmap"),
+                        expression=exp.Literal.string("BITMAP_UNION"),
+                    ),
+                ]
+            ),
+            "not_null_columns": exp.Tuple(expressions=[exp.column("total_clicks")]),
+        },
+    )
+    assert to_sql_calls(agg_adapter) == [
+        "CREATE TABLE IF NOT EXISTS `analytics`.`agg_rollup` (`event_dt` DATE, `total_clicks` BIGINT SUM NOT NULL, `uv_bitmap` BITMAP BITMAP_UNION) AGGREGATE KEY (`event_dt`) DISTRIBUTED BY HASH (`event_dt`) BUCKETS 10"
+    ]
+    with pytest.raises(SQLMeshError, match="requires 'aggregate_key'"):
+        agg_adapter.create_table(
+            "analytics.bad_agg_no_key",
+            {
+                "id": exp.DataType.build("INT", dialect="doris"),
+                "v": exp.DataType.build("BIGINT", dialect="doris"),
+            },
+            table_properties={
+                "duplicate_key": exp.Tuple(expressions=[exp.column("id")]),
+                "agg_types": exp.Tuple(
+                    expressions=[exp.EQ(this=exp.column("v"), expression=exp.Literal.string("SUM"))]
+                ),
+            },
+        )
+    with pytest.raises(SQLMeshError, match="cannot be specified on AGGREGATE KEY columns"):
+        agg_adapter.create_table(
+            "analytics.bad_agg_key_overlap",
+            {"id": exp.DataType.build("INT", dialect="doris")},
+            table_properties={
+                "aggregate_key": exp.Tuple(expressions=[exp.column("id")]),
+                "agg_types": exp.Tuple(
+                    expressions=[
+                        exp.EQ(this=exp.column("id"), expression=exp.Literal.string("SUM"))
+                    ]
+                ),
+            },
+        )
+    with pytest.raises(SQLMeshError, match="Invalid Doris aggregation type"):
+        agg_adapter.create_table(
+            "analytics.bad_agg_fn",
+            {
+                "id": exp.DataType.build("INT", dialect="doris"),
+                "v": exp.DataType.build("BIGINT", dialect="doris"),
+            },
+            table_properties={
+                "aggregate_key": exp.Tuple(expressions=[exp.column("id")]),
+                "agg_types": exp.Tuple(
+                    expressions=[
+                        exp.EQ(this=exp.column("v"), expression=exp.Literal.string("BOGUS"))
+                    ]
+                ),
+            },
+        )
+
+    # 17. `ensure_nulls_for_unmatched_after_join` normalizes Doris `JSON`, `VARIANT`, `BITMAP`, `HLL`,
+    #     and `QUANTILE_STATE` projections inside `TableDiff` `__source` / `__target` CTEs so `FULL JOIN`
+    #     and `=` predicates succeed without Doris type-comparison or non-nullable object errors.
+    diff_adapter = make_mocked_engine_adapter(DorisEngineAdapter)
+    diff_adapter.cursor.fetchall.side_effect = [
+        [
+            ("id", "bigint", "No", "true", None, ""),
+            ("j_doc", "json", "Yes", "false", None, ""),
+            ("v_doc", "variant", "Yes", "false", None, ""),
+            ("bm_col", "bitmap", "No", "false", None, ""),
+            ("hll_col", "hll", "No", "false", None, ""),
+            ("qs_col", "quantile_state", "No", "false", None, ""),
+        ],
+        [
+            ("id", "bigint", "No", "true", None, ""),
+            ("j_doc", "json", "Yes", "false", None, ""),
+            ("v_doc", "variant", "Yes", "false", None, ""),
+            ("bm_col", "bitmap", "No", "false", None, ""),
+            ("hll_col", "hll", "No", "false", None, ""),
+            ("qs_col", "quantile_state", "No", "false", None, ""),
+        ],
+    ]
+    _ = diff_adapter.columns("db.prod_exotic")
+    _ = diff_adapter.columns("db.dev_exotic")
+    diff_adapter.cursor.fetchall.side_effect = None
+    raw_diff_query = t.cast(
+        exp.Query,
+        parse_one(
+            """WITH `__source` AS (
+                SELECT `s`.`id`, `s`.`j_doc`, `s`.`v_doc`, `s`.`bm_col`, `s`.`hll_col`, `s`.`qs_col`, `s`.`id` AS `__sqlmesh_join_key`
+                FROM `db`.`prod_exotic` AS `s`
+            ), `__target` AS (
+                SELECT `t`.`id`, `t`.`j_doc`, `t`.`v_doc`, `t`.`bm_col`, `t`.`hll_col`, `t`.`qs_col`, `t`.`id` AS `__sqlmesh_join_key`
+                FROM `db`.`dev_exotic` AS `t`
+            ), `__stats` AS (
+                SELECT `s`.`j_doc` AS `s__j_doc`, `t`.`j_doc` AS `t__j_doc`,
+                       CASE WHEN `s`.`j_doc` = `t`.`j_doc` THEN 1 ELSE 0 END AS `j_doc_matches`
+                FROM `__source` AS `s` FULL JOIN `__target` AS `t` ON `s`.`__sqlmesh_join_key` = `t`.`__sqlmesh_join_key`
+            ) SELECT * FROM `__stats`""",
+            read="doris",
+        ),
+    )
+    rewritten_diff_sql = diff_adapter._to_sql(
+        diff_adapter.ensure_nulls_for_unmatched_after_join(raw_diff_query)
+    )
+    assert "CAST(`s`.`j_doc` AS VARCHAR) AS `j_doc`" in rewritten_diff_sql
+    assert "CAST(`s`.`v_doc` AS VARCHAR) AS `v_doc`" in rewritten_diff_sql
+    assert "CAST(BITMAP_TO_STRING(`s`.`bm_col`) AS VARCHAR) AS `bm_col`" in rewritten_diff_sql
+    assert "CAST(HLL_TO_BASE64(`s`.`hll_col`) AS VARCHAR) AS `hll_col`" in rewritten_diff_sql
+    assert "CAST(QUANTILE_PERCENT(`s`.`qs_col`, 0.5) AS VARCHAR) AS `qs_col`" in rewritten_diff_sql

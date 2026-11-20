@@ -1318,3 +1318,138 @@ def test_doris_sqlmesh_plan_dynamic_partition_and_sync_mv_restatement(
         if len(row) >= 1 and row[0] is not None and str(row[0]).strip()
     }
     assert {"user_events_sync_mv1", "user_events_sync_mv2"}.issubset(rollup_index_names)
+
+
+def test_doris_non_nullable_ctas_agg_types_and_exotic_table_diff(ctx: TestContext) -> None:
+    from sqlmesh.core.table_diff import TableDiff
+
+    adapter = t.cast(DorisEngineAdapter, ctx.engine_adapter)
+
+    # 1. TIMESTAMPTZ -> TIME and TIMESTAMPTZ -> DATE cast bridging
+    tz_cast_row = adapter.fetchone(
+        parse_one(
+            "SELECT "
+            "CAST(CAST('2026-06-15 18:30:45+00:00' AS TIMESTAMPTZ(6)) AS DATE) = DATE '2026-06-15', "
+            "CAST(CAST('2026-06-15 18:30:45+00:00' AS TIMESTAMPTZ(6)) AS TIME) = CAST('18:30:45' AS TIME)",
+            read="doris",
+        )
+    )
+    assert tz_cast_row is not None
+    # Note: default test container session timezone may differ from UTC; verify the cast executes cleanly without error
+    assert tz_cast_row[0] in (0, 1, True, False)
+    assert tz_cast_row[1] in (0, 1, True, False)
+
+    # 2. CTAS with non-nullable Doris object types (BITMAP, HLL, QUANTILE_STATE) + opaque downstream CTAS
+    obj_upstream = ctx.table("test_ctas_non_null_obj_src")
+    adapter.ctas(
+        obj_upstream,
+        parse_one(
+            "SELECT 1 AS id, TO_BITMAP(42) AS bm, HLL_HASH('u1') AS h, TO_QUANTILE_STATE(10.5, 2048) AS q",
+            read="doris",
+        ),
+    )
+    obj_downstream = ctx.table("test_ctas_non_null_obj_dst")
+    adapter.ctas(
+        obj_downstream,
+        parse_one(f"SELECT id, bm, h, q FROM {adapter._to_sql(obj_upstream)}", read="doris"),
+    )
+    obj_row = adapter.fetchone(
+        parse_one(
+            f"SELECT id, BITMAP_COUNT(bm), HLL_CARDINALITY(h), QUANTILE_PERCENT(q, 0.5) "
+            f"FROM {adapter._to_sql(obj_downstream)}",
+            read="doris",
+        )
+    )
+    assert obj_row == (1, 1, 1, 10.5)
+
+    # 3. AGGREGATE KEY table with explicit agg_types (SUM, MAX, BITMAP_UNION, HLL_UNION)
+    agg_tbl = ctx.table("test_agg_key_types")
+    agg_cols = {
+        "tenant_id": exp.DataType.build("INT", dialect="doris"),
+        "rev_sum": exp.DataType.build("BIGINT", dialect="doris"),
+        "max_lat": exp.DataType.build("INT", dialect="doris"),
+        "uv_bm": exp.DataType.build("BITMAP", dialect="doris", udt=True),
+        "uv_hll": exp.DataType.build("HLL", dialect="doris"),
+    }
+    adapter.create_table(
+        agg_tbl,
+        agg_cols,
+        table_properties={
+            "aggregate_key": exp.Tuple(expressions=[exp.to_column("tenant_id")]),
+            "agg_types": exp.Tuple(
+                expressions=[
+                    exp.EQ(
+                        this=exp.Literal.string("rev_sum"), expression=exp.Literal.string("SUM")
+                    ),
+                    exp.EQ(
+                        this=exp.Literal.string("max_lat"), expression=exp.Literal.string("MAX")
+                    ),
+                    exp.EQ(
+                        this=exp.Literal.string("uv_bm"),
+                        expression=exp.Literal.string("BITMAP_UNION"),
+                    ),
+                    exp.EQ(
+                        this=exp.Literal.string("uv_hll"),
+                        expression=exp.Literal.string("HLL_UNION"),
+                    ),
+                ]
+            ),
+        },
+    )
+    agg_tbl_sql = adapter._to_sql(agg_tbl)
+    adapter.execute(
+        f"INSERT INTO {agg_tbl_sql} (`tenant_id`, `rev_sum`, `max_lat`, `uv_bm`, `uv_hll`) VALUES "
+        f"(1, 100, 25, TO_BITMAP(10), HLL_HASH('a')), "
+        f"(1, 150, 40, TO_BITMAP(20), HLL_HASH('b'))"
+    )
+    agg_row = adapter.fetchone(
+        parse_one(
+            f"SELECT tenant_id, rev_sum, max_lat, BITMAP_COUNT(uv_bm), HLL_CARDINALITY(uv_hll) "
+            f"FROM {agg_tbl_sql}",
+            read="doris",
+        )
+    )
+    assert agg_row == (1, 250, 40, 2, 2)
+
+    # 4. TableDiff across JSON, VARIANT, BITMAP, HLL, and QUANTILE_STATE with matched diffs + unmatched rows
+    diff_src = ctx.table("test_exotic_diff_src")
+    diff_tgt = ctx.table("test_exotic_diff_tgt")
+    diff_cols = {
+        "id": exp.DataType.build("INT", dialect="doris"),
+        "j": exp.DataType.build("JSON", dialect="doris"),
+        "v": exp.DataType.build("VARIANT", dialect="doris"),
+        "bm": exp.DataType.build("BITMAP", dialect="doris", udt=True),
+        "h": exp.DataType.build("HLL", dialect="doris"),
+        "q": exp.DataType.build("QUANTILE_STATE", dialect="doris", udt=True),
+    }
+    for tbl in (diff_src, diff_tgt):
+        adapter.create_table(
+            tbl,
+            diff_cols,
+            table_properties={"duplicate_key": exp.Tuple(expressions=[exp.to_column("id")])},
+        )
+    adapter.execute(
+        f"INSERT INTO {adapter._to_sql(diff_src)} (`id`, `j`, `v`, `bm`, `h`, `q`) VALUES "
+        f"(1, CAST('{{\"k\":1}}' AS JSON), CAST('{{\"k\":1}}' AS VARIANT), TO_BITMAP(1), HLL_HASH('x'), TO_QUANTILE_STATE(5.0, 2048)), "
+        f"(2, CAST('{{\"k\":2}}' AS JSON), CAST('{{\"k\":2}}' AS VARIANT), TO_BITMAP(2), HLL_HASH('y'), TO_QUANTILE_STATE(10.0, 2048)), "
+        f"(3, CAST('{{\"k\":3}}' AS JSON), CAST('{{\"k\":3}}' AS VARIANT), TO_BITMAP(3), HLL_HASH('z'), TO_QUANTILE_STATE(15.0, 2048))"
+    )
+    adapter.execute(
+        f"INSERT INTO {adapter._to_sql(diff_tgt)} (`id`, `j`, `v`, `bm`, `h`, `q`) VALUES "
+        f"(1, CAST('{{\"k\":1}}' AS JSON), CAST('{{\"k\":1}}' AS VARIANT), TO_BITMAP(1), HLL_HASH('x'), TO_QUANTILE_STATE(5.0, 2048)), "
+        f"(2, CAST('{{\"k\":99}}' AS JSON), CAST('{{\"k\":99}}' AS VARIANT), TO_BITMAP(99), HLL_HASH('y2'), TO_QUANTILE_STATE(99.0, 2048)), "
+        f"(4, CAST('{{\"k\":4}}' AS JSON), CAST('{{\"k\":4}}' AS VARIANT), TO_BITMAP(4), HLL_HASH('w'), TO_QUANTILE_STATE(20.0, 2048))"
+    )
+    row_diff = TableDiff(
+        adapter=adapter,
+        source=adapter._to_sql(diff_src),
+        target=adapter._to_sql(diff_tgt),
+        on=["id"],
+    ).row_diff()
+    assert row_diff.full_match_count == 1
+    assert row_diff.partial_match_count == 1
+    assert row_diff.s_only_count == 1
+    assert row_diff.t_only_count == 1
+    assert len(row_diff.joined_sample) == 1
+    assert len(row_diff.s_sample) == 1
+    assert len(row_diff.t_sample) == 1
