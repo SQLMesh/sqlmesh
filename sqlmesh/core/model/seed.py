@@ -89,10 +89,17 @@ class CsvSettings(PydanticModel):
 
 
 class CsvSeedReader:
-    def __init__(self, content: str, dialect: str, settings: CsvSettings):
+    def __init__(
+        self,
+        content: str,
+        dialect: str,
+        settings: CsvSettings,
+        columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+    ):
         self.content = content
         self.dialect = dialect
         self.settings = settings
+        self._declared_columns_to_types = columns_to_types or {}
         self._df: t.Optional[pd.DataFrame] = None
 
     @property
@@ -117,24 +124,79 @@ class CsvSeedReader:
             batch_start += batch_size
 
     def _get_df(self) -> pd.DataFrame:
-        import pandas as pd
-
         if self._df is None:
-            self._df = pd.read_csv(
-                StringIO(self.content),
-                index_col=False,
-                on_bad_lines="error",
-                low_memory=False,
-                **{k: v for k, v in self.settings.dict().items() if v is not None},
-            )
-            self._df = self._df.rename(
-                columns={
-                    col: normalize_identifiers(col, dialect=self.dialect).name
-                    for col in self._df.columns
-                },
-            )
+            df = self._read_csv()
+            if self._declared_columns_to_types:
+                self._restore_declared_types(df)
+            self._df = df
 
         return self._df
+
+    def _read_csv(self, **kwargs: t.Any) -> pd.DataFrame:
+        import pandas as pd
+
+        df = pd.read_csv(
+            StringIO(self.content),
+            index_col=False,
+            on_bad_lines="error",
+            low_memory=False,
+            **kwargs,
+            **{k: v for k, v in self.settings.dict().items() if v is not None},
+        )
+        return df.rename(
+            columns={
+                col: normalize_identifiers(col, dialect=self.dialect).name for col in df.columns
+            },
+        )
+
+    def _restore_declared_types(self, df: pd.DataFrame) -> None:
+        """Fixes columns whose declared type was lost by pandas' type inference (in place).
+
+        Inference turns TEXT columns like `00123` into integers (dropping leading zeros) and
+        integer columns with blanks into floats. Such columns are re-read as raw strings: TEXT
+        columns keep them as is, and integer columns are converted to Python ints (exact and
+        unbounded), unless a non-NULL value isn't an integer literal, in which case they're left
+        as is. Restored columns keep the NULLs of the original read, whose NA markers
+        (`na_values`) can also match parsed numbers, unlike the raw re-read.
+        """
+        import pandas as pd
+
+        text_columns = []
+        int_columns = []
+        for name, data_type in self._declared_columns_to_types.items():
+            # Mirror SeedModel.render_seed: exact name first, then the normalized name
+            # (the columns of `df` are already normalized)
+            if name not in df:
+                name = normalize_identifiers(name, dialect=self.dialect).name
+                if name not in df:
+                    continue
+            column = df[name]
+            if data_type.this in exp.DataType.TEXT_TYPES:
+                # Unless every value is already a string: e.g. 00123 is read as an int, and
+                # TRUE/FALSE as bools (in an object column when the column has blanks)
+                if pd.api.types.infer_dtype(column, skipna=True) != "string":
+                    text_columns.append(name)
+            elif data_type.is_type(*exp.DataType.INTEGER_TYPES):
+                if pd.api.types.is_float_dtype(column):
+                    int_columns.append(name)
+
+        if not text_columns and not int_columns:
+            return
+
+        raw_df = self._read_csv(dtype=str)
+        for name in text_columns:
+            df[name] = raw_df[name].where(df[name].notna())
+
+        for name in int_columns:
+            try:
+                df[name] = pd.Series(
+                    [None if is_na else int(v) for is_na, v in zip(df[name].isna(), raw_df[name])],
+                    index=df.index,
+                    dtype=object,
+                )
+            except ValueError:
+                # A non-integer literal (e.g. 1.5, 1e3): keep the floats inferred by pandas
+                pass
 
 
 class Seed(PydanticModel):
@@ -145,8 +207,13 @@ class Seed(PydanticModel):
 
     content: str
 
-    def reader(self, dialect: str = "", settings: t.Optional[CsvSettings] = None) -> CsvSeedReader:
-        return CsvSeedReader(self.content, dialect, settings or CsvSettings())
+    def reader(
+        self,
+        dialect: str = "",
+        settings: t.Optional[CsvSettings] = None,
+        columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+    ) -> CsvSeedReader:
+        return CsvSeedReader(self.content, dialect, settings or CsvSettings(), columns_to_types)
 
 
 def create_seed(path: str | Path) -> Seed:

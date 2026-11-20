@@ -1858,7 +1858,11 @@ class SeedModel(_Model):
 
     @cached_property
     def _reader(self) -> CsvSeedReader:
-        return self.seed.reader(dialect=self.dialect, settings=self.kind.csv_settings)
+        return self.seed.reader(
+            dialect=self.dialect,
+            settings=self.kind.csv_settings,
+            columns_to_types=self.columns_to_types_,
+        )
 
     @property
     def _data_hash_values_no_sql(self) -> t.List[str]:
