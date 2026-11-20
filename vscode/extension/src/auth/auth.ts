@@ -193,6 +193,7 @@ export class AuthenticationProviderTobikoCloud
       ['auth', 'vscode', 'login-url'],
       {
         cwd: workspacePath.uri.fsPath,
+        env: tcloudBinPath.env,
       },
     )
     if (result.exitCode !== 0) {
