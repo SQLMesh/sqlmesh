@@ -9,7 +9,7 @@ requires-python = ">= 3.9"
 dependencies = [
     "click",
     "croniter",
-    "duckdb>=0.10.0,!=0.10.3",
+    "duckdb>=0.10.0,!=0.10.3,<2",
     "dateparser<=1.2.1",
     "humanize",
     "hyperscript>=0.1.0",
@@ -114,14 +114,14 @@ dbt = ["dbt-core<2"]
 dlt = ["dlt"]
 db2 = [
     "ibm_db",
-    "db2-sqlglot-dialect;python_version>=\"3.10\""
+    "db2-sqlglot-dialect>=1.1.0;python_version>=\"3.10\""
 ]
 duckdb = []
 fabric = ["pyodbc>=5.0.0"]
 fabric-mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
 gcppostgres = ["cloud-sql-python-connector[pg8000]>=1.8.0"]
 github = ["PyGithub>=2.6.0"]
-motherduck = ["duckdb>=1.3.2"]
+motherduck = ["duckdb>=1.3.2,<2"]
 mssql = ["pymssql"]
 mssql-odbc = ["pyodbc>=5.0.0"]
 mssql-python = ["mssql-python>=1.1.0;python_version>=\"3.10\""]
@@ -273,6 +273,7 @@ markers = [
     "athena: test for Athena",
     "bigquery: test for BigQuery",
     "clickhouse: test for Clickhouse (standalone mode / cluster mode)",
+    "clickhouse_datalake: test for ClickHouse DataLakeCatalog mapping",
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
     "db2: test for Db2",

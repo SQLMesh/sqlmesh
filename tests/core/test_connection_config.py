@@ -1,4 +1,5 @@
 import base64
+import logging
 import re
 import typing as t
 from unittest.mock import MagicMock, patch
@@ -1426,21 +1427,20 @@ def test_databricks(make_config):
         )
 
 
-def test_databricks__u2m_oauth__shared_connection_pool(make_config):
-    """Databricks should use a shared connection pool when using OAuth to prevent CSRF races.
+def test_databricks__u2m_oauth__connection_pool(make_config):
+    """Databricks should use a connection per thread with U2M OAuth, sharing a single login.
 
-    When concurrent_tasks > 1, ThreadLocalConnectionPool creates one connection per
-    thread. For U2M OAuth, each thread triggers its own browser-based OAuth flow;
-    these race on the CSRF state parameter and cause MismatchingStateError.
-
-    For non-U2M OAuth authentication types (e.g. access_token and M2M OAuth) then
-    ThreadLocalConnectionPool should still be used.
+    If each connection ran its own U2M OAuth flow then the browser flows would race on the
+    CSRF state parameter and cause MismatchingStateError. Sharing a single connection avoids
+    that but forces all queries to run sequentially. Instead, every connection is given the
+    same credentials provider so the browser flow only runs once.
 
     See:
         https://github.com/tobymao/sqlmesh/issues/5646
         https://github.com/SQLMesh/sqlmesh/issues/5858
     """
-    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+    from sqlmesh.utils.connection_pool import ThreadLocalConnectionPool
+    from sqlmesh.utils.databricks import SharedU2MCredentialsProvider
 
     config = make_config(
         type="databricks",
@@ -1450,10 +1450,89 @@ def test_databricks__u2m_oauth__shared_connection_pool(make_config):
         concurrent_tasks=4,
     )
     assert isinstance(config, DatabricksConnectionConfig)
+    assert config.shared_connection is False
+
+    adapter = config.create_engine_adapter()
+    assert isinstance(adapter._connection_pool, ThreadLocalConnectionPool)
+
+    connection_kwargs = config._connection_factory_with_kwargs.keywords
+    assert connection_kwargs["auth_type"] == "databricks-oauth"
+    credentials_provider = connection_kwargs["credentials_provider"]
+    assert isinstance(credentials_provider, SharedU2MCredentialsProvider)
+
+    # Separate engine adapters (and copies of the config) must reuse the same login
+    other_config = make_config(
+        type="databricks",
+        server_hostname="dbc-test.cloud.databricks.com",
+        http_path="sql/test/bar",
+        auth_type="databricks-oauth",
+    )
+    assert (
+        other_config._connection_factory_with_kwargs.keywords["credentials_provider"]
+        is credentials_provider
+    )
+
+
+def test_databricks__u2m_oauth__incompatible_connector_shares_connection(make_config, caplog):
+    """If a connector upgrade changes the internals the shared login builds on, U2M OAuth falls back to one shared
+    connection and logs a warning rather than failing to connect."""
+    from sqlmesh.utils import databricks
+    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+
+    databricks.supports_shared_u2m_login.cache_clear()
+    try:
+        with (
+            patch("databricks.sql.utils.build_client_context", lambda server_hostname: None),
+            caplog.at_level(logging.WARNING, logger="sqlmesh.utils.databricks"),
+        ):
+            config = make_config(
+                type="databricks",
+                server_hostname="dbc-test.cloud.databricks.com",
+                http_path="sql/test/foo",
+                auth_type="databricks-oauth",
+                concurrent_tasks=4,
+            )
+            assert isinstance(config, DatabricksConnectionConfig)
+            assert config.shared_connection is True
+
+            adapter = config.create_engine_adapter()
+            assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+
+            connection_kwargs = config._connection_factory_with_kwargs.keywords
+            assert connection_kwargs["auth_type"] == "databricks-oauth"
+            assert "credentials_provider" not in connection_kwargs
+
+        assert "not compatible with SQLMesh's shared U2M OAuth login" in caplog.text
+    finally:
+        databricks.supports_shared_u2m_login.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "auth_kwargs",
+    [
+        {"auth_type": "databricks-oauth"},
+        {"access_token": "foo"},
+    ],
+)
+def test_databricks__force_shared_connection(make_config, auth_kwargs):
+    """`force_shared_connection` runs every query over one connection, for connector backends that can't share a
+    U2M OAuth login (the kernel backend runs its own browser flow for each connection)."""
+    from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+
+    config = make_config(
+        type="databricks",
+        server_hostname="dbc-test.cloud.databricks.com",
+        http_path="sql/test/foo",
+        concurrent_tasks=4,
+        force_shared_connection=True,
+        **auth_kwargs,
+    )
+    assert isinstance(config, DatabricksConnectionConfig)
     assert config.shared_connection is True
 
     adapter = config.create_engine_adapter()
     assert isinstance(adapter._connection_pool, ThreadLocalSharedConnectionPool)
+    assert "credentials_provider" not in config._connection_factory_with_kwargs.keywords
 
 
 @patch.object(DatabricksConnectionConfig, "_connection_factory_with_kwargs")
