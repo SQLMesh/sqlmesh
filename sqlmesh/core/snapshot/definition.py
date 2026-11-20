@@ -1048,6 +1048,11 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             return []
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
+        # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
+        # ever refer to the prod physical table, and so should never have any missing intervals.
+        if not deployability_index.is_eligible_for_physical_layer(self):
+            return []
+
         intervals = (
             self.intervals if deployability_index.is_representative(self) else self.dev_intervals
         )
@@ -1610,10 +1615,9 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         )
 
     def is_representative(self, snapshot: SnapshotIdLike) -> bool:
-        """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading, table mapping, and
-        computing missing intervals.
+        """Returns true if the deployable (non-dev) table of the given snapshot should be used for reading and table mapping.
 
-        Note, that deployable snapshots are also representative, but the reverse is not always true.
+        Note, that deployable snapshots are always representative, but the reverse is not always true.
 
         Unlike `is_deployable`, this variant also captures FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots that
         are not deployable by their nature but are currently promoted in production. Therefore, it's safe to consider
@@ -1628,6 +1632,23 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         snapshot_id = self._snapshot_id_key(snapshot.snapshot_id)
         representative = snapshot_id in self.representative_shared_version_ids
         return representative or self.is_deployable(snapshot)
+
+    def is_eligible_for_physical_layer(self, snapshot: SnapshotIdLike) -> bool:
+        """Returns true if the snapshot eligible for the physical layer. This will be true unless it is is representative
+        (looks like prod) but not deployable (can never become prod), and is used for computing missing intervals and
+        physical layer creation.
+
+        This will only return false for FORWARD_ONLY and INDIRECT_NON_BREAKING snapshots in non-production environments.
+
+        Args:
+            snapshot: The snapshot to check.
+
+        Returns:
+            True if the snapshot is representative and not deployable, False otherwise.
+        """
+        return not self.is_representative(snapshot=snapshot) or self.is_deployable(
+            snapshot=snapshot
+        )
 
     def with_non_deployable(self, snapshot: SnapshotIdLike) -> DeployabilityIndex:
         """Creates a new index with the given snapshot marked as non-deployable."""
@@ -1666,6 +1687,11 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         start: t.Optional[TimeLike] = None,  # plan start
         start_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ) -> DeployabilityIndex:
+        def _snapshot_is_representative(snapshot: Snapshot) -> bool:
+            return not snapshot.is_paused or (
+                snapshot.is_indirect_non_breaking and bool(snapshot.intervals)
+            )
+
         if not isinstance(snapshots, dict):
             snapshots = {s.snapshot_id: s for s in snapshots}
 
@@ -1721,9 +1747,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                     # Similarly, if the model depends on past and the start date is not aligned with the
                     # model's start, we should consider this snapshot non-deployable.
                     this_deployable = False
-                    if not snapshot.is_paused or (
-                        snapshot.is_indirect_non_breaking and snapshot.intervals
-                    ):
+                    if _snapshot_is_representative(snapshot):
                         # This snapshot represents what's currently deployed in prod.
                         representative_shared_version_ids.add(node)
                     else:
@@ -1731,7 +1755,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                         children_deployable = False
             else:
                 children_deployable = False
-                if not snapshots[node].is_paused:
+                if _snapshot_is_representative(snapshot):
                     representative_shared_version_ids.add(node)
 
             deployability_mapping[node] = this_deployable
@@ -2065,6 +2089,11 @@ def missing_intervals(
 
     for snapshot in snapshots.values():
         if not snapshot.evaluatable:
+            continue
+
+        # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
+        # ever refer to the prod physical table, and so should never have any missing intervals.
+        if not deployability_index.is_eligible_for_physical_layer(snapshot):
             continue
 
         snapshot_start_date = start_override_per_model.get(snapshot.name, start_dt)
