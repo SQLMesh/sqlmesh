@@ -29,9 +29,10 @@ concurrency:
 permissions:
   contents: read
 
+# Pin Ubuntu 24.04. ubuntu-latest now resolves to 26.04.
 jobs:
   db2-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: 2
