@@ -158,6 +158,10 @@ def test_drop_schema_catalog(ctx: TestContext, caplog):
         pytest.skip(
             f"Engine adapter {ctx.engine_adapter.dialect} doesn't support catalog operations"
         )
+    if ctx.dialect == "doris":
+        pytest.skip(
+            "Doris external catalogs require connector properties and do not support views; covered in test_integration_doris.py"
+        )
     if ctx.dialect == "spark":
         pytest.skip(
             "Currently local spark is configured to have iceberg be the testing catalog and drop cascade doesn't work on iceberg. Skipping until we have time to fix."
@@ -438,6 +442,12 @@ def test_materialized_view(ctx_query_and_df: TestContext):
             "StarRocks materialized views require a REFRESH clause (refresh_moment/refresh_scheme), "
             "which this generic test does not provide; StarRocks MVs are covered by "
             "test_integration_starrocks.py"
+        )
+    if ctx.engine_adapter.dialect == "doris":
+        pytest.skip(
+            "Doris materialized views require engine-specific properties (SYNC source_table or MTMV DISTRIBUTED BY), "
+            "which this generic test does not provide; Doris MVs are covered by "
+            "test_integration_doris.py"
         )
     input_data = pd.DataFrame(
         [
@@ -2684,6 +2694,7 @@ def test_dialects(ctx: TestContext):
                 "spark": pd.Timestamp("2020-01-01 00:00:00"),
                 "databricks": pd.Timestamp("2020-01-01 00:00:00"),
                 "starrocks": pd.Timestamp("2020-01-01 00:00:00"),
+                "doris": pd.Timestamp("2020-01-01 00:00:00+00:00"),
             },
         ),
         (
@@ -2735,10 +2746,17 @@ def test_to_time_column(
     expected = result.get(ctx.dialect, result.get("default"))
     # Db2 (UPPERCASE strategy) returns column names in uppercase, same as Snowflake
     col_name = "THE_COL" if ctx.dialect in ("snowflake", "db2") else "the_col"
+    actual = df[col_name][0]
+    if (
+        ctx.dialect == "doris"
+        and time_column_type.is_type(exp.DataType.Type.TIMESTAMPTZ)
+        and isinstance(actual, str)
+    ):
+        actual = pd.Timestamp(actual).tz_convert("UTC")
     if expected is pd.NaT or expected is None:
-        assert df[col_name][0] is expected
+        assert actual is expected
     else:
-        assert df[col_name][0] == expected
+        assert actual == expected
 
 
 def test_batch_size_on_incremental_by_unique_key_model(ctx: TestContext):
@@ -3258,8 +3276,8 @@ def test_value_normalization(
 
     # resolve dialect-specific types
     if column_type in (DATA_TYPE.DATETIME, DATA_TYPE.TIMESTAMP, DATA_TYPE.TIMESTAMPTZ):
-        if ctx.dialect in ("mysql", "trino"):
-            # MySQL needs DATETIME(6) instead of DATETIME or subseconds will be truncated.
+        if ctx.dialect in ("mysql", "trino", "doris"):
+            # MySQL and Doris need DATETIME(6) instead of DATETIME or subseconds will be truncated.
             # It also needs TIMESTAMP(6) as the column type for CREATE TABLE or the truncation will occur
             full_column_type = exp.DataType.build(
                 column_type,
@@ -3283,7 +3301,12 @@ def test_value_normalization(
         exp.to_table(ctx.table("test_value_normalization")), dialect=ctx.dialect
     )
     columns_to_types_normalized = {
-        normalize_identifiers(k, dialect=ctx.dialect).sql(dialect=ctx.dialect): v
+        (
+            # "value" is in DorisGenerator.RESERVED_KEYWORDS, so .sql(dialect="doris") returns "`value`"
+            normalize_identifiers(k, dialect=ctx.dialect).name
+            if ctx.dialect == "doris"
+            else normalize_identifiers(k, dialect=ctx.dialect).sql(dialect=ctx.dialect)
+        ): v
         for k, v in columns_to_types.items()
     }
 
@@ -3941,6 +3964,11 @@ def test_materialized_view_evaluation(ctx: TestContext):
             "which this generic test does not provide; StarRocks MVs are covered by "
             "test_integration_starrocks.py"
         )
+    elif dialect == "doris":
+        pytest.skip(
+            "Doris materialized views require DISTRIBUTED BY or physical_properties configuration; "
+            "Doris MVs are covered by test_integration_doris.py"
+        )
 
     model_name = ctx.table("test_tbl")
     mview_name = ctx.table("test_mview")
@@ -4008,6 +4036,11 @@ def test_unicode_characters(ctx: TestContext, tmp_path: Path):
     # I also think Spark may not support unicode in general but that would need to be verified.
     if not ctx.engine_adapter.QUOTE_IDENTIFIERS_IN_VIEWS:
         pytest.skip("Skipping as these engines have issues with unicode characters in model names")
+    # Doris static fe.conf setting `enable_unicode_name_support` defaults to false (and is not runtime-mutable)
+    if ctx.dialect == "doris":
+        pytest.skip(
+            "Skipping as Doris default setting has issues with unicode characters in model names"
+        )
 
     model_name = "客户数据"
     table = ctx.table(model_name).sql(dialect=ctx.dialect)

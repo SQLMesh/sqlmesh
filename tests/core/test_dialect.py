@@ -1605,3 +1605,337 @@ def test_extend_sqlglot_is_idempotent():
     assert parse_one("SELECT CAST(1 AS INT)").sql() == "SELECT CAST(1 AS INT)"
     # The class-level registries must not grow on repeated calls.
     assert Generator.UNWRAPPED_INTERVAL_VALUES == before
+
+
+def test_doris_userdefined_isolation():
+    # Non-Doris dialects must keep standard INFORMATION_SCHEMA `USER-DEFINED` behavior (`kind=None`)
+    for other_dialect in ("postgres", "mysql", "snowflake"):
+        other_udt = exp.DataType.build("USER-DEFINED", dialect=other_dialect)
+        assert other_udt.this == exp.DataType.Type.USERDEFINED
+        assert other_udt.args.get("kind") is None
+
+    # Doris dialect preserves native analytical UDT names and parameterized AGG_STATE
+    for doris_udt_sql in ("BITMAP", "QUANTILE_STATE", "AGG_STATE<max_by(INT, INT)>"):
+        doris_udt = exp.DataType.build(doris_udt_sql, dialect="doris", udt=True)
+        assert doris_udt.sql("doris") == doris_udt_sql
+
+
+def test_doris_alter_table_parsing():
+    # Doris `ALTER TABLE ... MODIFY COLUMN ... NOT NULL` parses as structured `exp.Alter`
+    # (enabling `@this_model` macro resolution) and preserves `NOT NULL` on generation.
+    alter_ast = d.parse_one(
+        "ALTER TABLE @this_model MODIFY COLUMN msg VARCHAR(128) NOT NULL",
+        dialect="doris",
+    )
+    assert isinstance(alter_ast, exp.Alter)
+    assert (
+        alter_ast.sql("doris") == "ALTER TABLE @this_model MODIFY COLUMN msg VARCHAR(128) NOT NULL"
+    )
+
+    # Doris `ALTER TABLE ... DROP` preserves base `_parse_alter_table_drop` support for
+    # `DROP PARTITION` and comma-separated drop actions while keeping raw action parsing for
+    # `BRANCH` and `TAG`.
+    drop_part_ast = d.parse_one(
+        "ALTER TABLE @this_model DROP IF EXISTS PARTITION (p202401)",
+        dialect="doris",
+    )
+    assert isinstance(drop_part_ast, exp.Alter)
+    assert isinstance(drop_part_ast.args["actions"][0], exp.DropPartition)
+
+    multi_drop_ast = d.parse_one(
+        "ALTER TABLE @this_model DROP COLUMN a, DROP COLUMN b",
+        dialect="doris",
+    )
+    assert isinstance(multi_drop_ast, exp.Alter)
+    assert len(multi_drop_ast.args["actions"]) == 2
+    assert multi_drop_ast.sql("doris") == "ALTER TABLE @this_model DROP COLUMN a, DROP COLUMN b"
+
+    drop_branch_ast = d.parse_one(
+        "ALTER TABLE @this_model DROP BRANCH IF EXISTS b1",
+        dialect="doris",
+    )
+    assert isinstance(drop_branch_ast, exp.Alter)
+    assert drop_branch_ast.sql("doris") == "ALTER TABLE @this_model DROP BRANCH IF EXISTS b1"
+
+    multi_add_index_ast = d.parse_one(
+        "ALTER TABLE db.model ADD INDEX i1(a) USING INVERTED, ADD INDEX i2(b) USING INVERTED",
+        dialect="doris",
+    )
+    assert isinstance(multi_add_index_ast, exp.Alter)
+    assert len(multi_add_index_ast.args["actions"]) == 2
+    assert all(
+        isinstance(action, exp.IndexColumnConstraint)
+        for action in multi_add_index_ast.args["actions"]
+    )
+    assert (
+        multi_add_index_ast.sql("doris")
+        == "ALTER TABLE db.model ADD INDEX i1 (a) USING INVERTED, ADD INDEX i2 (b) USING INVERTED"
+    )
+
+    alter_idx_if_not_exists_sql = "ALTER TABLE t ADD INDEX IF NOT EXISTS idx_body (body) USING INVERTED PROPERTIES ('parser'='english') COMMENT 'fts'"
+    alter_idx_if_not_exists_ast = d.parse_one(alter_idx_if_not_exists_sql, dialect="doris")
+    assert isinstance(alter_idx_if_not_exists_ast, exp.Alter)
+    assert isinstance(alter_idx_if_not_exists_ast.args["actions"][0], exp.IndexColumnConstraint)
+    assert alter_idx_if_not_exists_ast.args["actions"][0].args.get("exists") is True
+    assert alter_idx_if_not_exists_ast.sql("doris") == alter_idx_if_not_exists_sql
+
+    for drop_part_sql in (
+        "ALTER TABLE db.t DROP PARTITION p1",
+        "ALTER TABLE db.t DROP PARTITION IF EXISTS p1",
+        "ALTER TABLE db.t DROP PARTITION IF EXISTS p1 FORCE",
+        "ALTER TABLE db.t DROP TEMPORARY PARTITION IF EXISTS p1 FORCE",
+        "ALTER TABLE db.t DROP PARTITION p1, DROP PARTITION p2 FORCE",
+    ):
+        drop_part_item = d.parse_one(drop_part_sql, dialect="doris")
+        assert isinstance(drop_part_item, exp.Alter)
+        assert isinstance(drop_part_item.args["actions"][0], exp.DropPartition)
+        assert drop_part_item.copy().sql("doris") == drop_part_sql
+
+    drop_col_sql = "ALTER TABLE db.t DROP COLUMN c1"
+    assert d.parse_one(drop_col_sql, dialect="doris").sql("doris") == drop_col_sql
+
+
+def test_doris_timestamptz_and_timestamp_literals():
+    from unittest.mock import MagicMock
+    from sqlmesh.core.engine_adapter.doris import DorisEngineAdapter
+
+    assert exp.DataType.build("TIMESTAMPTZ", dialect="doris").sql("doris") == "TIMESTAMPTZ"
+    assert exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris") == "TIMESTAMPTZ(6)"
+    assert (
+        exp.DataType.build("TIMESTAMPTZ", dialect="doris, version=4.1.0").sql(
+            "doris, version=4.1.0"
+        )
+        == "TIMESTAMPTZ"
+    )
+    assert (
+        exp.DataType.build("TIMESTAMPTZ", dialect="doris, version=2.1").sql("doris, version=2.1")
+        == "DATETIME"
+    )
+    assert (
+        exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris").sql("doris, version=2.1")
+        == "DATETIME(6)"
+    )
+    assert (
+        d.parse_one("SELECT TIMESTAMP '2020-01-01 00:00:00'", dialect="doris").sql("doris")
+        == "SELECT CAST('2020-01-01 00:00:00' AS DATETIME)"
+    )
+    assert (
+        d.parse_one("SELECT TIMESTAMPTZ '2020-01-01 00:00:00+08:00'", dialect="doris").sql("doris")
+        == "SELECT CAST('2020-01-01 00:00:00+08:00' AS TIMESTAMPTZ)"
+    )
+
+    def _make_fresh_doris_adapter(version_row: tuple[str, str]) -> DorisEngineAdapter:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.return_value = version_row
+        conn.cursor.return_value = cur
+        return DorisEngineAdapter(lambda: conn)
+
+    fresh_v21_adapter = _make_fresh_doris_adapter(("Doris version doris-2.1.7-rc03", "5.7.99"))
+    v21_create_exp = fresh_v21_adapter._build_create_table_exp(
+        exp.Schema(
+            this=exp.to_table("db.events", dialect="doris"),
+            expressions=[
+                exp.ColumnDef(
+                    this=exp.to_identifier("id"),
+                    kind=exp.DataType.build("INT", dialect="doris"),
+                ),
+                exp.ColumnDef(
+                    this=exp.to_identifier("ts"),
+                    kind=exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+                ),
+            ],
+        ),
+        None,
+        target_columns_to_types={
+            "id": exp.DataType.build("INT", dialect="doris"),
+            "ts": exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+        },
+    )
+    assert (
+        fresh_v21_adapter._to_sql(v21_create_exp)
+        == "CREATE TABLE IF NOT EXISTS `db`.`events` (`id` INT, `ts` DATETIME(6))"
+    )
+
+    fresh_v41_adapter = _make_fresh_doris_adapter(("Doris version doris-4.1.0-rc01", "5.7.99"))
+    v41_create_exp = fresh_v41_adapter._build_create_table_exp(
+        exp.Schema(
+            this=exp.to_table("db.events", dialect="doris"),
+            expressions=[
+                exp.ColumnDef(
+                    this=exp.to_identifier("id"),
+                    kind=exp.DataType.build("INT", dialect="doris"),
+                ),
+                exp.ColumnDef(
+                    this=exp.to_identifier("ts"),
+                    kind=exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+                ),
+            ],
+        ),
+        None,
+        target_columns_to_types={
+            "id": exp.DataType.build("INT", dialect="doris"),
+            "ts": exp.DataType.build("TIMESTAMPTZ(6)", dialect="doris"),
+        },
+    )
+    assert (
+        fresh_v41_adapter._to_sql(v41_create_exp)
+        == "CREATE TABLE IF NOT EXISTS `db`.`events` (`id` INT, `ts` TIMESTAMPTZ(6))"
+    )
+
+
+def test_doris_match_struct_and_map_expressions():
+    from sqlmesh.core.model import load_sql_based_model
+
+    quoted_alias_ast = d.parse_one(
+        "SELECT body `match_any` FROM docs",
+        dialect="doris",
+    )
+    assert quoted_alias_ast.sql("doris") == "SELECT body AS `match_any` FROM docs"
+
+    negated_match_ast = d.parse_one(
+        "SELECT * FROM docs WHERE body NOT MATCH_ANY 'error warning'",
+        dialect="doris",
+    )
+    assert (
+        negated_match_ast.sql("doris")
+        == "SELECT * FROM docs WHERE NOT body MATCH_ANY 'error warning'"
+    )
+
+    match_analyzer_ast = d.parse_one(
+        "SELECT * FROM docs WHERE content MATCH 'hello' USING ANALYZER kw_analyzer",
+        dialect="doris",
+    )
+    assert (
+        match_analyzer_ast.sql("doris")
+        == "SELECT * FROM docs WHERE content MATCH 'hello' USING ANALYZER kw_analyzer"
+    )
+
+    aliased_struct_ast = d.parse_one(
+        "SELECT STRUCT(1 AS id, 'a' AS name)",
+        dialect="doris",
+    )
+    assert aliased_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('id', 1, 'name', 'a')"
+
+    mixed_struct_ast = d.parse_one(
+        "SELECT STRUCT(1 AS id, 'a')",
+        dialect="doris",
+    )
+    assert mixed_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('id', 1, 'col2', 'a')"
+
+    eq_struct_ast = d.parse_one(
+        "SELECT STRUCT(a = b, c = 1)",
+        dialect="doris",
+    )
+    assert eq_struct_ast.sql("doris") == "SELECT STRUCT(a = b, c = 1)"
+
+    aliased_eq_struct_ast = d.parse_one(
+        "SELECT STRUCT(a = b AS is_eq, c)",
+        dialect="doris",
+    )
+    assert aliased_eq_struct_ast.sql("doris") == "SELECT NAMED_STRUCT('is_eq', a = b, 'col2', c)"
+
+    unnamed_struct_dtype = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[
+            exp.DataType.build("INT", dialect="doris"),
+            exp.ColumnDef(this=None, kind=exp.DataType.build("VARCHAR(32)", dialect="doris")),
+        ],
+        nested=True,
+    )
+    assert unnamed_struct_dtype.sql("doris") == "STRUCT<col1: INT, col2: VARCHAR(32)>"
+
+    k_arr = exp.column("k_arr")
+    k_arr.type = exp.DataType.build("ARRAY<INT>", dialect="doris")
+    v_arr = exp.column("v_arr")
+    v_arr.type = exp.DataType.build("ARRAY<STRING>", dialect="doris")
+    map_from_arr_expr = exp.Map(keys=k_arr, values=v_arr)
+    with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        map_from_arr_expr.sql("doris")
+    with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        map_from_arr_expr.sql("doris, version=4.1.5")
+    assert map_from_arr_expr.sql("doris, version=4.2.0") == "MAP_FROM_ARRAYS(k_arr, v_arr)"
+
+    unannotated_map_from_arr = exp.Map(keys=exp.column("k_arr"), values=exp.column("v_arr"))
+    with pytest.raises(d.SQLMeshError, match="MAP_FROM_ARRAYS requires Doris 4.2\\+"):
+        unannotated_map_from_arr.sql("doris")
+    assert unannotated_map_from_arr.sql("doris, version=4.2.0") == "MAP_FROM_ARRAYS(k_arr, v_arr)"
+
+    with pytest.raises(
+        d.SQLMeshError,
+        match="Doris MAP requires key and value arrays to have the same number of elements",
+    ):
+        exp.Map(
+            keys=exp.Array(expressions=[exp.Literal.number(1), exp.Literal.number(2)]),
+            values=exp.Array(expressions=[exp.Literal.number(10)]),
+        ).sql("doris")
+
+    match_arith_model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+                name db.match_scores,
+                kind FULL,
+                dialect doris
+            );
+            SELECT (body MATCH_ANY 'x') + 1 AS score FROM db.docs
+            """,
+            default_dialect="doris",
+        ),
+        mapping_schema={"db": {"docs": {"body": "STRING"}}},
+    )
+    rendered_match_query = match_arith_model.render_query(optimize=True)
+    assert rendered_match_query is not None
+    assert (
+        rendered_match_query.sql("doris")
+        == "SELECT (`docs`.`body` MATCH_ANY 'x') + 1 AS `score` FROM `db`.`docs` AS `docs`"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_sql,expected_sql",
+    [
+        (
+            "SELECT * FROM lance_catalog.db.tbl@branch(dev) FOR VERSION AS OF 2",
+            "SELECT * FROM lance_catalog.db.tbl @branch(dev) FOR VERSION AS OF 2",
+        ),
+        (
+            "INSERT INTO iceberg_tbl@branch(b1) VALUES (1, 2)",
+            "INSERT INTO iceberg_tbl @branch(b1) VALUES (1, 2)",
+        ),
+        (
+            "INSERT INTO iceberg_tbl@branch(b1) (c1, c2) VALUES (1, 2)",
+            "INSERT INTO iceberg_tbl @branch(b1) (c1, c2) VALUES (1, 2)",
+        ),
+        (
+            "SELECT * FROM tbl@branch(`release-2026`)",
+            "SELECT * FROM tbl @branch(`release-2026`)",
+        ),
+        (
+            "SELECT * FROM tbl@tag(`v1.0.0`)",
+            "SELECT * FROM tbl @tag(`v1.0.0`)",
+        ),
+        (
+            "INSERT INTO tbl@branch(`release-2026`) VALUES (1)",
+            "INSERT INTO tbl @branch(`release-2026`) VALUES (1)",
+        ),
+    ],
+)
+def test_doris_branch_and_tag_references(raw_sql: str, expected_sql: str):
+    parsed_ast = d.parse_one(raw_sql, dialect="doris")
+    assert parsed_ast.sql("doris") == expected_sql
+    roundtrip_ast = d.parse_one(parsed_ast.sql("doris"), dialect="doris")
+    assert roundtrip_ast == parsed_ast
+    assert roundtrip_ast.sql("doris") == expected_sql
+
+
+def test_doris_extend_sqlglot_dispatch_cache_invalidation():
+    from sqlglot.dialects import Doris
+    from sqlglot.generator import _DISPATCH_CACHE
+
+    alter_idx_if_not_exists_sql = "ALTER TABLE t ADD INDEX IF NOT EXISTS idx_body (body) USING INVERTED PROPERTIES ('parser'='english') COMMENT 'fts'"
+    alter_idx_if_not_exists_ast = d.parse_one(alter_idx_if_not_exists_sql, dialect="doris")
+    _DISPATCH_CACHE[Doris.Generator] = {}
+    d.extend_sqlglot()
+    assert Doris.Generator not in _DISPATCH_CACHE
+    assert alter_idx_if_not_exists_ast.sql("doris") == alter_idx_if_not_exists_sql

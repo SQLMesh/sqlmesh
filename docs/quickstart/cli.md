@@ -118,6 +118,8 @@ Choose your SQL engine:
     [16] RisingWave
     [17] Fabric
     [18] StarRocks
+    [19] Db2
+    [20] Apache Doris
 
 Enter a number: 1
 ```

@@ -274,6 +274,7 @@ jobs:
             clickhouse-datalake,
             risingwave,
             starrocks,
+            doris,
           ]
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: 2

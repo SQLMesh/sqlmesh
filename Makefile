@@ -184,6 +184,7 @@ engine-%-install:
 	$(PIP) install -e ".[dev,web,slack,lsp,${*}]" ./examples/custom_materializations
 
 engine-docker-%-up:
+	@if [ "${*}" = "doris" ]; then $(MAKE) doris-host-setup; fi
 	docker compose -f ./tests/core/engine_adapter/integration/docker/compose.${*}.yaml up -d
 	./.github/scripts/wait-for-db.sh ${*}
 
@@ -241,6 +242,20 @@ starrocks-test: engine-starrocks-up
 	
 db2-test: engine-db2-up
 	pytest -n auto -m "db2" --reruns 3 --junitxml=test-results/junit-db2.xml
+
+doris-host-setup:
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		current=$$(sysctl -n vm.max_map_count 2>/dev/null || echo 0); \
+		if [ "$$current" -lt 2000000 ]; then \
+			sudo -n sysctl -w vm.max_map_count=2000000 >/dev/null 2>&1 || { \
+				echo "ERROR: vm.max_map_count is $$current (< 2000000); run 'sudo sysctl -w vm.max_map_count=2000000' before starting Doris."; \
+				exit 1; \
+			}; \
+		fi; \
+	fi
+
+doris-test: doris-host-setup engine-doris-up
+	pytest -n auto -m "doris" --reruns 3 --junitxml=test-results/junit-doris.xml
 
 #################
 # Cloud Engines #
