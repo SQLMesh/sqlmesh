@@ -6446,7 +6446,46 @@ def test_doris_audit_fixes_and_docs_models(
     ]
     assert to_sql_calls(existing_ref_adapter) == []
 
-    # 14. `_gen_config` appends the Doris `state_connection` even when custom settings are supplied (e.g. DLT template).
+    # 14. Doris 4.1+ TIMESTAMPTZ -> DATE casts and TO_DATE(TIMESTAMPTZ) bridge through DATETIME(6)
+    #     (Doris rejects direct `CAST(TIMESTAMPTZ AS DATE)` with `cannot cast TIMESTAMPTZ to DATEV2`).
+    from sqlglot.optimizer.annotate_types import annotate_types
+    from sqlglot.optimizer.qualify import qualify
+
+    tz_date_query = annotate_types(
+        qualify(
+            parse_one(
+                "SELECT CAST(ts AS DATE), TRY_CAST(ts AS DATE), TO_DATE(ts), CAST(dt AS DATE) FROM t",
+                dialect="doris",
+            ),
+            schema={"t": {"ts": "TIMESTAMPTZ(6)", "dt": "DATETIME(6)"}},
+            dialect="doris",
+        ),
+        schema={"t": {"ts": "TIMESTAMPTZ(6)", "dt": "DATETIME(6)"}},
+        dialect="doris",
+    )
+    tz_col_before = tz_date_query.expressions[0].this.this
+    assert isinstance(tz_col_before, exp.Column)
+    assert (
+        v415_adapter._to_sql(tz_date_query)
+        == "SELECT CAST(CAST(`t`.`ts` AS DATETIME(6)) AS DATE) AS `ts`, CAST(CAST(`t`.`ts` AS DATETIME(6)) AS DATE) AS `ts`, TO_DATE(CAST(`t`.`ts` AS DATETIME(6))) AS `_col_2`, CAST(`t`.`dt` AS DATE) AS `dt` FROM `t` AS `t`"
+    )
+    # Caller's AST must remain unmutated
+    assert isinstance(tz_date_query.expressions[0].this.this, exp.Column)
+
+    unannotated_tz_to_date = parse_one(
+        "SELECT CAST(CAST('2026-11-17 14:30:00+00:00' AS TIMESTAMPTZ(6)) AS DATE)",
+        dialect="doris",
+    )
+    assert (
+        v415_adapter._to_sql(unannotated_tz_to_date)
+        == "SELECT CAST(CAST(CAST('2026-11-17 14:30:00+00:00' AS TIMESTAMPTZ(6)) AS DATETIME(6)) AS DATE)"
+    )
+    assert (
+        v408_adapter._to_sql(unannotated_tz_to_date)
+        == "SELECT CAST(CAST('2026-11-17 14:30:00+00:00' AS DATETIME(6)) AS DATE)"
+    )
+
+    # 15. `_gen_config` appends the Doris `state_connection` even when custom settings are supplied (e.g. DLT template).
     from sqlmesh.cli.project_init import InitCliMode, ProjectTemplate, _gen_config
 
     dlt_doris_config = _gen_config(

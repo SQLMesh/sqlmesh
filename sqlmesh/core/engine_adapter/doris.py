@@ -7713,7 +7713,68 @@ class DorisEngineAdapter(
                         expression = struct_replacement
                     else:
                         dtype.replace(struct_replacement)
+        if any(
+            (
+                isinstance(node, (exp.Cast, exp.TryCast))
+                and isinstance(node.to, exp.DataType)
+                and node.to.is_type("date", "date32")
+                and self._is_timestamptz_expr(node.this)
+            )
+            or (
+                isinstance(node, exp.TsOrDsToDate)
+                and not node.args.get("format")
+                and self._is_timestamptz_expr(node.this)
+            )
+            for node in expression.find_all(exp.Cast, exp.TryCast, exp.TsOrDsToDate)
+        ):
+            expression = expression.copy()
+            for node in reversed(
+                list(expression.find_all(exp.Cast, exp.TryCast, exp.TsOrDsToDate))
+            ):
+                if (
+                    isinstance(node, (exp.Cast, exp.TryCast))
+                    and isinstance(node.to, exp.DataType)
+                    and node.to.is_type("date", "date32")
+                    and self._is_timestamptz_expr(node.this)
+                ):
+                    dt6 = exp.DataType.build("DATETIME(6)", dialect=self.dialect)
+                    bridged: exp.Expr = (
+                        exp.TryCast(this=node.this.copy(), to=dt6)
+                        if isinstance(node, exp.TryCast)
+                        else exp.cast(node.this.copy(), dt6)
+                    )
+                    node.set("this", bridged)
+                elif (
+                    isinstance(node, exp.TsOrDsToDate)
+                    and not node.args.get("format")
+                    and self._is_timestamptz_expr(node.this)
+                ):
+                    dt6 = exp.DataType.build("DATETIME(6)", dialect=self.dialect)
+                    bridged = (
+                        exp.TryCast(this=node.this.copy(), to=dt6)
+                        if node.args.get("safe")
+                        else exp.cast(node.this.copy(), dt6)
+                    )
+                    node.set("this", bridged)
         return super()._to_sql(expression, quote=quote, **kwargs)
+
+    @staticmethod
+    def _is_timestamptz_expr(expr: t.Optional[exp.Expr]) -> bool:
+        curr = expr
+        while isinstance(curr, exp.Paren):
+            curr = curr.this
+        if curr is None:
+            return False
+        if isinstance(curr, (exp.Cast, exp.TryCast)):
+            to_dtype = curr.to
+            if isinstance(to_dtype, exp.DataType):
+                if to_dtype.is_type("datetime", "timestamp"):
+                    return False
+                if to_dtype.is_type("timestamptz", "timestamptzltz"):
+                    return True
+        if isinstance(curr, exp.TimeStrToTime) and bool(curr.args.get("zone")):
+            return True
+        return curr.is_type("timestamptz", "timestamptzltz")
 
     def _build_distributed_by_exp(
         self,
