@@ -1490,7 +1490,7 @@ class SqlModel(_Model):
             unknown = exp.DataType.build("unknown")
 
             columns_to_types = {}
-            for select in query.selects:
+            for select in _output_projections(query):
                 output_name = select.output_name
 
                 # If model validation is disabled, we cannot assume that projections
@@ -1520,7 +1520,7 @@ class SqlModel(_Model):
 
         return {
             select.alias_or_name: select.comments[-1].strip()
-            for select in query.selects
+            for select in _output_projections(query)
             if select.comments
         }
 
@@ -2895,6 +2895,74 @@ def _list_of_calls_to_exp(value: t.List[t.Tuple[str, t.Dict[str, t.Any]]]) -> ex
     )
 
 
+def _output_projections(query: exp.Query) -> t.List[exp.Expr]:
+    """Return the projections that define a query's output columns.
+
+    A set operation takes its columns from its leftmost branch, unless it matches its branches'
+    columns BY NAME. Then a column that only a later branch has is also an output column (engines
+    such as DuckDB fill it with NULL for the other branches), so `query.selects`, which only covers
+    the leftmost branch, misses it. Each column is represented by the projection of the first
+    branch that has it, which carries its type and comments.
+
+    Like `query.selects`, this walks down a chain of set operations' left branches in a loop, so
+    long chains don't recurse; only a parenthesized right branch is visited recursively.
+    """
+    set_operations: t.List[exp.SetOperation] = []
+    expression = query.unnest()
+    while isinstance(expression, exp.SetOperation):
+        set_operations.append(expression)
+        expression = expression.left.unnest()
+
+    projections = expression.selects if isinstance(expression, exp.Query) else []
+    for set_operation in reversed(set_operations):
+        if set_operation.args.get("by_name"):
+            projections = _by_name_projections(
+                set_operation, projections, _output_projections(set_operation.right)
+            )
+    return projections
+
+
+def _by_name_projections(
+    set_operation: exp.SetOperation, left: t.List[exp.Expr], right: t.List[exp.Expr]
+) -> t.List[exp.Expr]:
+    """Combine the projections of a BY NAME set operation's branches into its output's.
+
+    For BigQuery's modifiers, this follows sqlglot's `Resolver.get_source_columns_from_set_op`: an
+    ON list names the columns, LEFT keeps the left branch's and INNER the ones both branches have.
+    With FULL or no modifier, as in DuckDB's `UNION BY NAME`, the output has every branch's columns
+    in order of first appearance. sqlglot 30.8's resolver takes the left branch's columns instead
+    in that case, which is the bug this works around.
+    """
+    on = set_operation.args.get("on")
+    if not on and set_operation.side == "LEFT":
+        return left
+
+    # An unexpanded star hides some of a branch's columns, so the output's columns can't be known.
+    # Keeping it among the projections makes `columns_to_types` return None.
+    stars = [projection for projection in (*left, *right) if projection.is_star]
+    if stars:
+        return [*left, *stars]
+
+    if on:
+        projections: t.Dict[str, exp.Expr] = {}
+        for projection in (*left, *right):
+            projections.setdefault(projection.output_name, projection)
+        return [projections[column.name] for column in on if column.name in projections]
+
+    if set_operation.kind == "INNER":
+        right_names = {projection.output_name for projection in right}
+        return [projection for projection in left if projection.output_name in right_names]
+
+    # Keep the left branch's projections as they are, so that a duplicate or missing name there
+    # still makes the columns unknown, and add the columns that only the right branch has
+    left_names = {projection.output_name for projection in left}
+    added: t.Dict[str, exp.Expr] = {}
+    for projection in right:
+        if projection.output_name not in left_names:
+            added.setdefault(projection.output_name, projection)
+    return [*left, *added.values()]
+
+
 def _has_ordinal_references(query: exp.Query) -> bool:
     order = query.args.get("order")
     if order and any(
@@ -3030,6 +3098,12 @@ def _is_only_projection_additions(
                     and isinstance(this_expression, exp.Select)
                     and arg_key == "expressions"
                 ):
+                    # In a branch of a set operation BY NAME, an added projection can fill in a
+                    # column that another branch already outputs, changing its values
+                    if len(previous_value) != len(this_value) and _is_by_name_branch(
+                        this_expression
+                    ):
+                        return False
                     if not _projections_only_safely_added(previous_expression, this_expression):
                         return False
                 elif len(previous_value) != len(this_value):
@@ -3047,6 +3121,16 @@ def _is_only_projection_additions(
                 return False
 
     return True
+
+
+def _is_by_name_branch(query: exp.Select) -> bool:
+    """Return whether the SELECT is a branch, at any depth, of a set operation BY NAME."""
+    parent = query.parent
+    while isinstance(parent, (exp.SetOperation, exp.Subquery)):
+        if isinstance(parent, exp.SetOperation) and parent.args.get("by_name"):
+            return True
+        parent = parent.parent
+    return False
 
 
 def _single_expr_or_tuple(values: t.Sequence[exp.Expr]) -> exp.Expr | exp.Tuple:
