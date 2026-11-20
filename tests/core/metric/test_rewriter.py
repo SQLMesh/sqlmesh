@@ -1,7 +1,9 @@
 from sqlglot import parse_one
 
-from sqlmesh.core.metric import rewrite
+from sqlmesh.core import dialect as d
+from sqlmesh.core.metric import expand_metrics, load_metric_ddl, rewrite
 from sqlmesh.core.reference import ReferenceGraph
+from sqlmesh.utils import UniqueKeyDict
 
 
 def test_rewrite(sushi_context_pre_scheduling, assert_exp_eq):
@@ -222,3 +224,27 @@ def test_rewrite(sushi_context_pre_scheduling, assert_exp_eq):
     #        dialect=context.config.dialect,
     #    ),
     # )
+
+
+def test_rewrite_order_by_metric(sushi_context_pre_scheduling):
+    context = sushi_context_pre_scheduling
+    graph = ReferenceGraph(context.models.values())
+    meta = load_metric_ddl(
+        d.parse_one(
+            "METRIC (name sorted_amounts, expression ARRAY_AGG(sushi.orders.amount ORDER BY sushi.orders.amount))",
+            dialect=context.config.dialect,
+        ),
+        dialect=context.config.dialect,
+    )
+    metrics = expand_metrics(UniqueKeyDict("metas", {meta.name: meta}))
+
+    query = rewrite(
+        "SELECT c.customer_id, METRIC(sorted_amounts) FROM sushi.customers AS c GROUP BY c.customer_id",
+        graph=graph,
+        metrics=metrics,
+    )
+    sql = query.sql()
+    # Stop before the generated NULLS LAST so the assertion doesn't depend on null ordering.
+    assert "ARRAY_AGG(sushi__orders.amount ORDER BY sushi__orders.amount" in sql
+    assert "sushi.orders AS sushi__orders" in sql
+    parse_one(sql, dialect=context.config.dialect)

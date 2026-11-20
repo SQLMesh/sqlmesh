@@ -4,6 +4,30 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    groups:
+      # Storybook add-ons declare a peer dependency on the matching `storybook`
+      # release, so they have to move together. Bump them in a single PR.
+      storybook:
+        patterns:
+          - 'storybook'
+          - '@storybook/*'
+          - '@chromatic-com/storybook'
+          - 'eslint-plugin-storybook'
+        update-types:
+          - 'minor'
+          - 'patch'
+    ignore:
+      # A Storybook major upgrade has to be done by hand as one coordinated
+      # migration (e.g. @storybook/addon-vitest 10 requires vitest 4+), so don't
+      # open per-package major-bump PRs, which break the Storybook build.
+      - dependency-name: 'storybook'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@storybook/*'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@chromatic-com/storybook'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'eslint-plugin-storybook'
+        update-types: ['version-update:semver-major']
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:

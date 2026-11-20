@@ -7,8 +7,8 @@ from sqlmesh.core.linter.helpers import (
 from sqlmesh.core.model import SqlModel
 
 
-def test_get_position_of_model_block():
-    context = Context(paths=["examples/sushi"])
+def test_get_position_of_model_block(copy_to_temp_path):
+    context = Context(paths=copy_to_temp_path("examples/sushi"))
 
     sql_models = [
         model
@@ -40,8 +40,8 @@ def test_get_position_of_model_block():
         assert read_range.endswith(";")
 
 
-def test_get_range_of_a_key_in_model_block_testing_on_sushi():
-    context = Context(paths=["examples/sushi"])
+def test_get_range_of_a_key_in_model_block_testing_on_sushi(copy_to_temp_path):
+    context = Context(paths=copy_to_temp_path("examples/sushi"))
 
     sql_models = [
         model
