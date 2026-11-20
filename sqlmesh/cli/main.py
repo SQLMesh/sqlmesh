@@ -44,6 +44,9 @@ SKIP_CONTEXT_COMMANDS = ("init", "ui")
 LOCAL_ONLY_COMMANDS = ("format",)
 # Commands that are local-only when they're passed --local.
 OPTIONAL_LOCAL_COMMANDS = ("lint", "test")
+# Flags that, when passed to `plan`, make the command restatement-only and allow
+# running without local model definitions, since restatements operate against state.
+_RESTATE_ONLY_PLAN_FLAGS = ("--restate-model", "-r")
 
 
 class _SQLMeshGroup(click.Group):
@@ -149,6 +152,13 @@ def cli(
 
     # Unlike the other commands above, lint can scope its own load for multi-project contexts.
     if ctx.invoked_subcommand == "lint":
+        load = False
+
+    # `plan --restate-model` works entirely against state, so missing local model
+    # files shouldn't block it (parity with `run`).
+    if ctx.invoked_subcommand == "plan" and any(
+        arg in _RESTATE_ONLY_PLAN_FLAGS for arg in ctx.meta["subcommand_args"]
+    ):
         load = False
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)

@@ -370,6 +370,43 @@ def test_plan_restate_model(runner, tmp_path):
     assert "Virtual layer updated" not in result.output
 
 
+def test_plan_restate_model_without_local_definitions(runner, tmp_path):
+    """`plan --restate-model` should work against state alone, like `run`.
+
+    Reproduces https://github.com/SQLMesh/sqlmesh/issues/3260.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    # Wipe every local project directory, keeping only config.yaml + db.db.
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+    assert not (tmp_path / "models").exists()
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--restate-model",
+            "sqlmesh_example.full_model",
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "doesn't seem to have any models" not in result.output
+    assert "Models selected for restatement" in result.output
+    assert "sqlmesh_example.full_model" in result.output
+    assert_model_batches_executed(result)
+
+
 @pytest.mark.parametrize("flag", ["--skip-backfill", "--dry-run"])
 def test_plan_skip_backfill(runner, tmp_path, flag):
     create_example_project(tmp_path)
