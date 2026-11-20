@@ -76,7 +76,11 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # ubuntu-latest is 26.04. setup-python publishes no CPython 3.9 build for
+    # it, and `default-jdk` there is OpenJDK 25. PySpark 3.5.9 / Hadoop 3.3.4
+    # call Subject.getSubject, which JDK 24+ rejects. 24.04 still has 3.9 and
+    # OpenJDK 21, which is what last passed these tests.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -257,7 +261,11 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # ubuntu-latest is 26.04, so this job's `default-jdk` install is OpenJDK 25.
+    # The spark leg then runs PySpark 3.5, which cannot start on JDK 24+.
+    # Spark and Trino also hit the 25 minute limit on that image; both finished
+    # on ubuntu-24.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -443,7 +451,9 @@ jobs:
       needs.changes.outputs.vscode == 'true' || needs.changes.outputs.lsp ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    # @playwright/test 1.54.1 has a Chromium download for ubuntu24.04-x64 and
+    # none for ubuntu26.04-x64, so `playwright install` fails on ubuntu-latest.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
