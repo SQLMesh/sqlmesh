@@ -59,7 +59,7 @@ class BatchColumn(ProgressColumn):
 
 def strip_ansi_codes(text: str) -> str:
     """Strip ANSI color codes and styling from text."""
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+    ansi_escape = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
     return ansi_escape.sub("", text).strip()
 
 

@@ -942,6 +942,10 @@ def test_run_dev(runner, tmp_path, flag):
     result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "run", "dev"])
     assert result.exit_code == 0
     assert_model_batches_executed(result)
+    running_lines = [
+        line for line in result.output.splitlines() if line.rstrip().endswith("Running")
+    ]
+    assert any("[1/1]" in line and "[insert " in line for line in running_lines)
 
 
 @time_machine.travel(FREEZE_TIME)
