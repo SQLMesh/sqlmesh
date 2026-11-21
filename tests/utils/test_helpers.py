@@ -1,11 +1,13 @@
+import typing as t
 import pytest
 from functools import wraps
 from sqlglot import expressions
 from sqlglot.optimizer.annotate_types import annotate_types
 
 from sqlmesh.core.console import set_console, get_console, TerminalConsole
-
+from sqlmesh.core.engine_adapter import EngineAdapter, RedshiftEngineAdapter
 from sqlmesh.utils import columns_to_types_all_known
+from sqlmesh.utils.errors import SQLMeshError
 
 
 @pytest.mark.parametrize(
@@ -71,10 +73,25 @@ from sqlmesh.utils import columns_to_types_all_known
             {"a": annotate_types(expressions.DataType.build("VARCHAR(MAX)", dialect="redshift"))},
             True,
         ),
+        ({}, False),
     ],
 )
 def test_columns_to_types_all_known(columns_to_types, expected) -> None:
     assert columns_to_types_all_known(columns_to_types) == expected
+
+
+@pytest.mark.parametrize("adapter_cls", [EngineAdapter, RedshiftEngineAdapter])
+def test_create_table_empty_columns_raises(
+    make_mocked_engine_adapter: t.Callable, adapter_cls: t.Type[EngineAdapter]
+) -> None:
+    adapter = make_mocked_engine_adapter(adapter_cls)
+    with pytest.raises(
+        SQLMeshError,
+        match="Cannot create a table without knowing the column types",
+    ):
+        adapter.create_table("s.t", {}, exists=False)
+
+    adapter.cursor.execute.assert_not_called()
 
 
 def use_terminal_console(func):
