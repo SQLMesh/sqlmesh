@@ -1331,3 +1331,137 @@ def test_destructive_change_checks_with_vde_mode_transitions_and_per_model_overr
             PlanError, match="Plan requires a destructive change to a forward-only model"
         ):
             ctx_mixed.plan_builder("prod").build()
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_dev_only_prod_kind_change_classification_is_stable_across_dev_plans(
+    init_and_plan_context: t.Callable,
+):
+    context, _ = init_and_plan_context(
+        "examples/sushi", config="test_config_virtual_environment_mode_dev_only"
+    )
+
+    model_name = "memory.sushi.test_kind_change"
+    unmanaged = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (name {model_name}, kind INCREMENTAL_UNMANAGED);
+            SELECT 1 AS id, 'a' AS value;
+            """
+        )
+    ).copy(update={"virtual_environment_mode": VirtualEnvironmentMode.DEV_ONLY})
+    context.upsert_model(unmanaged)
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    unique_key = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (name {model_name}, kind INCREMENTAL_BY_UNIQUE_KEY (unique_key id));
+            SELECT 1 AS id, 'a' AS value;
+            """
+        )
+    ).copy(update={"virtual_environment_mode": VirtualEnvironmentMode.DEV_ONLY})
+    context.upsert_model(unique_key)
+
+    # First dev plan: the baseline is the prod snapshot.
+    plan_1 = context.plan_builder("dev", skip_tests=True).build()
+    snapshot_1 = plan_1.context_diff.snapshots[context.get_snapshot(model_name).snapshot_id]
+    assert not snapshot_1.is_forward_only
+    context.apply(plan_1)
+
+    # Follow-up dev plan: the baseline is the earlier dev snapshot, but prod is still the unmanaged version.
+    follow_up = add_projection_to_model(t.cast(SqlModel, unique_key))
+    context.upsert_model(follow_up)
+    plan_2 = context.plan_builder("dev", skip_tests=True).build()
+    snapshot_2 = plan_2.context_diff.snapshots[context.get_snapshot(model_name).snapshot_id]
+    assert not snapshot_2.is_forward_only
+    assert snapshot_2.change_category == snapshot_1.change_category
+    assert not snapshot_2.intervals
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_dev_restatement_guard_not_disabled_by_unrelated_dev_only_change(
+    init_and_plan_context: t.Callable, mocker: MockerFixture
+):
+    context, _ = init_and_plan_context("examples/sushi")
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    # In an otherwise FULL project, modify one model as DEV_ONLY locally and explicitly
+    # restate an unrelated model that is live in prod.
+    modified = add_projection_to_model(
+        t.cast(SqlModel, context.get_model("sushi.waiter_revenue_by_day"))
+    ).copy(update={"virtual_environment_mode": VirtualEnvironmentMode.DEV_ONLY})
+    context.upsert_model(modified)
+    log_warning = mocker.patch.object(context.console, "log_warning")
+
+    plan = context.plan_builder(
+        "dev",
+        skip_tests=True,
+        restate_models=["sushi.customer_revenue_lifetime"],
+        always_include_local_changes=True,
+    ).build()
+
+    restated_names = {s_id.name for s_id in plan.restatements}
+    assert '"memory"."sushi"."customer_revenue_lifetime"' not in restated_names
+    assert any(
+        "used in production" in call.args[0] and "customer_revenue_lifetime" in call.args[0]
+        for call in log_warning.call_args_list
+    )
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_dev_only_seed_metadata_only_change_keeps_prod_intervals(
+    init_and_plan_context: t.Callable,
+):
+    context, _ = init_and_plan_context(
+        "examples/sushi", config="test_config_virtual_environment_mode_dev_only"
+    )
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    seed_name = "sushi.waiter_names"
+    old_snapshot = context.get_snapshot(seed_name)
+    seed_model = context.get_model(seed_name)
+    context.upsert_model(seed_model.copy(update={"description": "Updated seed description"}))
+
+    plan = context.plan_builder("prod", skip_tests=True).build()
+    new_snapshot = plan.context_diff.snapshots[context.get_snapshot(seed_name).snapshot_id]
+    assert new_snapshot.snapshot_id != old_snapshot.snapshot_id
+    assert new_snapshot.is_metadata
+    assert not plan.missing_intervals
+    context.apply(plan)
+
+    # The already loaded seed data must not be marked as missing after the metadata-only change.
+    refreshed = context.state_sync.get_snapshots([new_snapshot.snapshot_id])[
+        new_snapshot.snapshot_id
+    ]
+    context.state_sync.refresh_snapshot_intervals([refreshed])
+    assert refreshed.intervals
+    assert not context.plan_builder("prod", skip_tests=True).build().missing_intervals
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_dev_only_seed_metadata_only_change_dev_then_prod_keeps_prod_intervals(
+    init_and_plan_context: t.Callable,
+):
+    context, _ = init_and_plan_context(
+        "examples/sushi", config="test_config_virtual_environment_mode_dev_only"
+    )
+    context.plan("prod", auto_apply=True, no_prompts=True)
+
+    seed_name = "sushi.waiter_names"
+    seed_model = context.get_model(seed_name)
+    context.upsert_model(seed_model.copy(update={"description": "Updated seed description"}))
+
+    # The snapshot is created by the dev plan, so the prod plan doesn't see it as new.
+    context.plan("dev", auto_apply=True, no_prompts=True, skip_tests=True)
+    new_snapshot_id = context.get_snapshot(seed_name).snapshot_id
+
+    plan = context.plan_builder("prod", skip_tests=True).build()
+    assert new_snapshot_id not in {s.snapshot_id for s in plan.new_snapshots}
+    assert not plan.missing_intervals
+    context.apply(plan)
+
+    refreshed = context.state_sync.get_snapshots([new_snapshot_id])[new_snapshot_id]
+    context.state_sync.refresh_snapshot_intervals([refreshed])
+    assert refreshed.intervals
+    assert not context.plan_builder("prod", skip_tests=True).build().missing_intervals

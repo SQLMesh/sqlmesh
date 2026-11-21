@@ -2299,7 +2299,7 @@ Learn more at https://sqlmesh.readthedocs.io/en/stable/concepts/models/overview
     default_virtual_environment_mode = kwargs.pop("virtual_environment_mode", None)
     if (
         default_virtual_environment_mode is not None
-        and "virtual_environment_mode" not in rendered_defaults
+        and rendered_defaults.get("virtual_environment_mode") is None
     ):
         rendered_defaults["virtual_environment_mode"] = default_virtual_environment_mode
 

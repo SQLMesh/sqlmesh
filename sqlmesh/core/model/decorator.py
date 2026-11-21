@@ -220,7 +220,7 @@ class model(registry_decorator):
         rendered_defaults = parse_defaults_properties(rendered_defaults, dialect=dialect)
         if (
             virtual_environment_mode is not None
-            and "virtual_environment_mode" not in rendered_defaults
+            and rendered_defaults.get("virtual_environment_mode") is None
         ):
             rendered_defaults["virtual_environment_mode"] = virtual_environment_mode
 

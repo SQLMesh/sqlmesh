@@ -62,6 +62,7 @@ from sqlmesh.core.config import (
     Config,
     load_configs,
 )
+from sqlmesh.core.config.common import VirtualEnvironmentMode
 from sqlmesh.core.config.connection import ConnectionConfig
 from sqlmesh.core.config.loader import C
 from sqlmesh.core.config.root import RegexKeyDict
@@ -550,6 +551,19 @@ class GenericContext(BaseContext, t.Generic[C]):
             raise SQLMeshError(f"The disabled model '{model.name}' cannot be upserted")
         path = model._path
 
+        if kwargs.get("virtual_environment_mode") is not None:
+            # model_copy(update=...) does not validate, so normalize strings to the enum here.
+            raw_mode = kwargs["virtual_environment_mode"]
+            try:
+                kwargs["virtual_environment_mode"] = VirtualEnvironmentMode(
+                    str(getattr(raw_mode, "value", raw_mode)).lower()
+                )
+            except ValueError:
+                raise ConfigError(
+                    f"Invalid virtual_environment_mode '{raw_mode}'. "
+                    f"Expected one of: {', '.join(m.value for m in VirtualEnvironmentMode)}."
+                )
+
         model = model.copy(update=kwargs)
         model._path = path
         self._validate_model_virtual_environment_mode(model)
@@ -863,7 +877,11 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     def _validate_model_virtual_environment_mode(self, model: Model) -> None:
         if (
-            self.config_for_node(model).plan.use_finalized_state
+            # Plan selection reads the root flag for every model, so check it alongside the model's own project flag.
+            (
+                self.config.plan.use_finalized_state
+                or self.config_for_node(model).plan.use_finalized_state
+            )
             and not model.kind.is_symbolic
             and not model.virtual_environment_mode.is_full
         ):

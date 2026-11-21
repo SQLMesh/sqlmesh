@@ -405,9 +405,8 @@ class PlanBuilder:
             return {}
 
         restatements: t.Dict[SnapshotId, Interval] = {}
-        forward_only_preview_needed = self._forward_only_preview_needed
         is_preview = False
-        if not restate_models and forward_only_preview_needed:
+        if not restate_models and self._forward_only_preview_needed:
             # Add model names for new forward-only snapshots to the restatement list
             # in order to compute previews.
             restate_models = {
@@ -453,7 +452,7 @@ class PlanBuilder:
             if not restating_parents and snapshot.name not in restate_models:
                 continue
 
-            if not forward_only_preview_needed:
+            if not self._restatement_guard_bypassed:
                 if self._is_dev and not snapshot.is_paused:
                     self._console.log_warning(
                         f"Cannot restate model '{snapshot.name}' because the current version is used in production. "
@@ -582,6 +581,8 @@ class PlanBuilder:
         if prod_info is None:
             return False
         if (
+            prod_info.virtual_environment_mode.is_full and snapshot.virtual_environment_mode.is_full
+        ) and (
             snapshot.name in self._context_diff.modified_snapshots
             and self._context_diff.modified_snapshots[snapshot.name][1].snapshot_id
             == prod_info.snapshot_id
@@ -589,6 +590,10 @@ class PlanBuilder:
             return is_breaking_kind_change(
                 self._context_diff.modified_snapshots[snapshot.name][1], snapshot
             )
+        # DEV_ONLY incremental kind changes are deliberately treated conservatively as breaking.
+        # For DEV_ONLY models always compare against the prod table info, which can't tell whether
+        # the partitioning is unchanged. Comparing the full snapshots when prod is the dev baseline
+        # would classify the same prod transition differently across repeated dev plans.
         return is_breaking_kind_change(prod_info, snapshot)
 
     def _is_snapshot_forward_only(self, s_id: SnapshotId) -> bool:
@@ -1107,6 +1112,25 @@ class PlanBuilder:
             raise NoChangesPlanError(
                 f"Creating a new environment requires a change, but project files match the `{self._context_diff.create_from}` environment. Make a change or use the --include-unmodified flag to create a new environment without changes."
             )
+
+    @cached_property
+    def _restatement_guard_bypassed(self) -> bool:
+        """Whether explicit restatements skip the guard against restating models that are live in prod.
+
+        This intentionally excludes the DEV_ONLY-driven preview condition of `_forward_only_preview_needed`,
+        since an unrelated DEV_ONLY change must not allow restating active production tables.
+        """
+        return self._is_dev and (
+            self._forward_only
+            or (
+                self._enable_preview
+                and any(
+                    snapshot.model.forward_only
+                    for snapshot in self._modified_and_added_snapshots
+                    if snapshot.is_model
+                )
+            )
+        )
 
     @cached_property
     def _forward_only_preview_needed(self) -> bool:

@@ -22,15 +22,20 @@ def should_force_rebuild(old: Snapshot, new: Snapshot) -> bool:
     if new.is_view and new.is_indirect_non_breaking and not new.is_forward_only:
         # View models always need to be rebuilt to reflect updated upstream dependencies
         return True
-    if new.is_seed and not (
-        new.is_metadata
-        and new.previous_version
-        and new.previous_version.snapshot_id(new.name) == old.snapshot_id
-    ):
+    if new.is_seed and not is_seed_metadata_only_change(old.snapshot_id, new):
         # Seed models always need to be rebuilt to reflect changes in the seed file
         # Unless only their metadata has been updated (eg description added) and the seed file has not been touched
         return True
     return is_breaking_kind_change(old, new)
+
+
+def is_seed_metadata_only_change(old_snapshot_id: SnapshotId, new: Snapshot) -> bool:
+    """Whether `new` only differs from the snapshot `old_snapshot_id` in its metadata (eg a description)."""
+    return bool(
+        new.is_metadata
+        and new.previous_version
+        and new.previous_version.snapshot_id(new.name) == old_snapshot_id
+    )
 
 
 def is_breaking_kind_change(old: SnapshotInfoLike, new: SnapshotInfoLike) -> bool:

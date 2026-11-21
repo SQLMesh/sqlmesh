@@ -13930,3 +13930,125 @@ def test_per_model_dev_only_with_use_finalized_state_raises_config_error(tmp_pat
             ctx_ok.upsert_model(
                 "db.full_m", virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
             )
+
+
+def test_upsert_model_normalizes_string_virtual_environment_mode(tmp_path: Path) -> None:
+    from sqlmesh.core.config import PlanConfig
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    proj = tmp_path / "proj"
+    (proj / "models").mkdir(parents=True)
+    (proj / "models" / "m.sql").write_text(
+        "MODEL (name db.m, kind FULL); SELECT 1 AS a;\n", encoding="utf-8"
+    )
+
+    ctx = Context(
+        paths=proj,
+        config=Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())},
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            plan=PlanConfig(use_finalized_state=True),
+        ),
+    )
+    try:
+        # A plain string must be normalized to the enum instead of failing with AttributeError
+        updated = ctx.upsert_model("db.m", virtual_environment_mode="full")
+        assert updated.virtual_environment_mode == VirtualEnvironmentMode.FULL
+
+        updated = ctx.upsert_model("db.m", virtual_environment_mode=VirtualEnvironmentMode.FULL)
+        assert updated.virtual_environment_mode == VirtualEnvironmentMode.FULL
+
+        # dev_only is rejected with ConfigError, in both string and enum form, without mutating state
+        for dev_only in ("dev_only", "DEV_ONLY", VirtualEnvironmentMode.DEV_ONLY):
+            with pytest.raises(ConfigError, match="finalized state"):
+                ctx.upsert_model("db.m", virtual_environment_mode=dev_only)
+            assert ctx.get_model("db.m").virtual_environment_mode == VirtualEnvironmentMode.FULL
+    finally:
+        ctx.close()
+
+
+def test_virtual_environment_mode_none_default_falls_back_to_explicit_mode() -> None:
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    # defaults with an explicit None must not shadow the mode passed alongside them
+    sql_model = load_sql_based_model(
+        d.parse("MODEL (name db.m, kind FULL); SELECT 1 AS a"),
+        defaults={"virtual_environment_mode": None},
+        virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+    )
+    assert sql_model.virtual_environment_mode == VirtualEnvironmentMode.DEV_ONLY
+
+    # a concrete default still wins over the fallback
+    sql_model = load_sql_based_model(
+        d.parse("MODEL (name db.m, kind FULL); SELECT 1 AS a"),
+        defaults={"virtual_environment_mode": "full"},
+        virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+    )
+    assert sql_model.virtual_environment_mode == VirtualEnvironmentMode.FULL
+
+    from sqlmesh.utils import UniqueKeyDict
+
+    previous_registry = model.get_registry()
+    try:
+        model.set_registry(UniqueKeyDict("models"))
+
+        @model("db.py_m1", kind="FULL", columns={"a": "int"})
+        def py_m1(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+            return pd.DataFrame([{"a": 1}])
+
+        py_model = model.get_registry()["db.py_m1"].model(
+            module_path=Path("."),
+            path=Path("."),
+            defaults={"virtual_environment_mode": None},
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+        )
+        assert py_model.virtual_environment_mode == VirtualEnvironmentMode.DEV_ONLY
+
+        py_model = model.get_registry()["db.py_m1"].model(
+            module_path=Path("."),
+            path=Path("."),
+            defaults={"virtual_environment_mode": "full"},
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+        )
+        assert py_model.virtual_environment_mode == VirtualEnvironmentMode.FULL
+    finally:
+        model.set_registry(previous_registry)
+
+
+def test_finalized_state_check_uses_root_flag_in_multi_project_context(tmp_path: Path) -> None:
+    from sqlmesh.core.config import PlanConfig
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    root_proj = tmp_path / "root"
+    child_proj = tmp_path / "child"
+    for proj in (root_proj, child_proj):
+        (proj / "models").mkdir(parents=True)
+    (root_proj / "models" / "a.sql").write_text(
+        "MODEL (name db.a, kind FULL); SELECT 1 AS a;\n", encoding="utf-8"
+    )
+    (child_proj / "models" / "b.sql").write_text(
+        "MODEL (name db.b, kind FULL, virtual_environment_mode dev_only); SELECT 1 AS b;\n",
+        encoding="utf-8",
+    )
+
+    gateways = {"": GatewayConfig(connection=DuckDBConnectionConfig())}
+    defaults = ModelDefaultsConfig(dialect="duckdb")
+    # The plan reads the root config's flag for every model, including the child project's.
+    root_config = Config(
+        gateways=gateways,
+        model_defaults=defaults,
+        plan=PlanConfig(use_finalized_state=True),
+    )
+    child_config = Config(
+        gateways=gateways,
+        model_defaults=defaults,
+        virtual_environment_mode=VirtualEnvironmentMode.FULL,
+        plan=PlanConfig(use_finalized_state=False),
+    )
+
+    with pytest.raises(ConfigError, match="finalized state"):
+        ctx = Context(
+            paths=[root_proj, child_proj],
+            config={root_proj: root_config, child_proj: child_config},  # type: ignore
+        )
+        ctx.close()

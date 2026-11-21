@@ -45,6 +45,7 @@ from sqlmesh.core.state_sync import StateSync
 from sqlmesh.core.plan.common import (
     identify_restatement_intervals_across_snapshot_versions,
     is_breaking_kind_change,
+    is_seed_metadata_only_change,
 )
 from sqlmesh.utils import CorrelationId
 from sqlmesh.utils.concurrency import NodeExecutionFailedError
@@ -170,11 +171,20 @@ class BuiltInPlanEvaluator(PlanEvaluator):
                 if s.snapshot_id not in new_snapshots_by_id:
                     incremental_kind_change_ids.add(s.snapshot_id)
 
-        fetched_snapshots = (
-            self.state_sync.get_snapshots(incremental_kind_change_ids)
-            if incremental_kind_change_ids
-            else {}
-        )
+        # Seeds that aren't new in this plan (eg created by an earlier dev plan) are fetched too, to tell
+        # metadata-only changes from seed data changes.
+        seed_ids_to_fetch = {
+            s.snapshot_id
+            for s in dev_only_infos
+            if s.is_seed
+            and not s.is_forward_only
+            and s.snapshot_id not in new_snapshots_by_id
+            and (old_prod := existing_prod_by_name.get(s.name)) is not None
+            and old_prod.snapshot_id != s.snapshot_id
+        }
+        ids_to_fetch = incremental_kind_change_ids | seed_ids_to_fetch
+
+        fetched_snapshots = self.state_sync.get_snapshots(ids_to_fetch) if ids_to_fetch else {}
 
         rebuild_infos: t.List[SnapshotTableInfo] = []
         for s in dev_only_infos:
@@ -186,7 +196,17 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             if old_prod.snapshot_id == s.snapshot_id:
                 continue
             if not s.is_forward_only:
-                rebuild_infos.append(s)
+                new_full = new_snapshots_by_id.get(s.snapshot_id) or fetched_snapshots.get(
+                    s.snapshot_id
+                )
+                if not (
+                    new_full is not None
+                    and new_full.is_seed
+                    and old_prod.virtual_environment_mode == s.virtual_environment_mode
+                    and is_seed_metadata_only_change(old_prod.snapshot_id, new_full)
+                ):
+                    # Metadata-only seed changes keep their data, so their intervals must be preserved.
+                    rebuild_infos.append(s)
                 continue
             old_target: SnapshotInfoLike = fetched_snapshots.get(old_prod.snapshot_id, old_prod)
             new_target: SnapshotInfoLike = new_snapshots_by_id.get(

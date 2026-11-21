@@ -6320,7 +6320,7 @@ def test_seed_create_drops_existing_view_in_dev_only_prod(adapter_mock: Mock) ->
         type=DataObjectType.VIEW,
     )
 
-    # 1. Hydrated SeedModel in DEV_ONLY deployable prod drops mismatched view BEFORE create_table
+    # 1. Hydrated SeedModel in DEV_ONLY deployable prod drops mismatched view once content is rendered, BEFORE create_table
     events: t.List[str] = []
     adapter_mock.get_data_object.return_value = existing_view_obj
 
@@ -6346,16 +6346,10 @@ def test_seed_create_drops_existing_view_in_dev_only_prod(adapter_mock: Mock) ->
     )
     assert events == ["drop_mismatch", "create_table"]
 
-    # 2. Dehydrated SeedModel in DEV_ONLY deployable prod drops mismatched view BEFORE table_exists check
-    events.clear()
+    # 2. Dehydrated SeedModel has no content to rebuild the table from, so the existing object must be kept
     adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
     adapter_mock.create_table.reset_mock()
-
-    def _record_table_exists(name: t.Any) -> bool:
-        events.append("table_exists")
-        return True
-
-    adapter_mock.table_exists.side_effect = _record_table_exists
+    adapter_mock.table_exists.side_effect = lambda name: True
 
     SeedStrategy(adapter_mock).create(
         table_name="test_schema.seed_model",
@@ -6364,13 +6358,11 @@ def test_seed_create_drops_existing_view_in_dev_only_prod(adapter_mock: Mock) ->
         render_kwargs={},
         skip_grants=True,
     )
-    adapter_mock.drop_data_object_on_type_mismatch.assert_called_once_with(
-        existing_view_obj, DataObjectType.TABLE
-    )
-    assert events == ["drop_mismatch", "table_exists"]
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()
+    adapter_mock.drop_data_object.assert_not_called()
+    adapter_mock.create_table.assert_not_called()
 
-    # And if dropping the existing view leaves no table behind, dehydrated seed does not early-return
-    adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
+    # And if nothing exists, a dehydrated seed still fails clearly without touching anything
     adapter_mock.table_exists.side_effect = lambda name: False
     with pytest.raises(SQLMeshError, match="is not hydrated"):
         SeedStrategy(adapter_mock).create(
@@ -6380,9 +6372,23 @@ def test_seed_create_drops_existing_view_in_dev_only_prod(adapter_mock: Mock) ->
             render_kwargs={},
             skip_grants=True,
         )
-    adapter_mock.drop_data_object_on_type_mismatch.assert_called_once_with(
-        existing_view_obj, DataObjectType.TABLE
-    )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()
+
+    # 2b. If the seed content can't be rendered, the existing object is left in place
+    adapter_mock.table_exists.side_effect = None
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.create_table.reset_mock()
+    with patch.object(SeedModel, "render_seed", side_effect=SQLMeshError("render failed")):
+        with pytest.raises(SQLMeshError, match="render failed"):
+            SeedStrategy(adapter_mock).create(
+                table_name="test_schema.seed_model",
+                model=seed_model,
+                is_table_deployable=True,
+                render_kwargs={},
+                skip_grants=True,
+            )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()
+    adapter_mock.create_table.assert_not_called()
 
     # 3. Non-deployable (__dev) seed table creation must NOT call drop_data_object_on_type_mismatch
     adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
