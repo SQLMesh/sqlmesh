@@ -7005,6 +7005,33 @@ def test_end_no_start():
     load_sql_based_model(expressions, defaults={"start": "2023-01-01"})
 
 
+def test_model_defaults_kind():
+    defaults = ModelDefaultsConfig(dialect="duckdb", kind="full").dict()
+
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL (name db.table);
+            SELECT 1 AS a
+            """
+        ),
+        defaults=defaults,
+    )
+    assert model.kind.name == ModelKindName.FULL
+
+    # a kind set on the model itself still takes precedence
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL (name db.table, kind VIEW);
+            SELECT 1 AS a
+            """
+        ),
+        defaults=defaults,
+    )
+    assert model.kind.name == ModelKindName.VIEW
+
+
 def test_variables():
     @macro()
     def test_macro_var(evaluator) -> exp.Expr:
