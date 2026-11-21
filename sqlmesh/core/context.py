@@ -1904,6 +1904,29 @@ class GenericContext(BaseContext, t.Generic[C]):
             and self.config.virtual_environment_mode.is_full
         )
 
+        schema_differ_overrides: t.Dict[t.Optional[str], t.Dict[str, t.Any]] = {}
+        has_schema_differ_overrides = False
+        try:
+            default_overrides = self.connection_config.schema_differ_overrides or {}
+            schema_differ_overrides[None] = default_overrides
+            schema_differ_overrides[self.selected_gateway] = default_overrides
+            if default_overrides:
+                has_schema_differ_overrides = True
+        except ConfigError:
+            pass
+        for cfg in self.configs.values():
+            if isinstance(cfg.gateways, dict):
+                for gw_name in cfg.gateways:
+                    if gw_name not in schema_differ_overrides:
+                        try:
+                            conn = cfg.get_connection(gw_name)
+                        except ConfigError:
+                            continue
+                        gw_overrides = conn.schema_differ_overrides or {}
+                        schema_differ_overrides[gw_name] = gw_overrides
+                        if gw_overrides:
+                            has_schema_differ_overrides = True
+
         return self.PLAN_BUILDER_TYPE(
             context_diff=context_diff,
             start=start,
@@ -1947,6 +1970,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             },
             explain=explain or False,
             ignore_cron=ignore_cron or False,
+            schema_differ_overrides=(
+                schema_differ_overrides if has_schema_differ_overrides else None
+            ),
         )
 
     def apply(

@@ -27,6 +27,7 @@ from sqlmesh.core.schema_diff import (
     get_schema_differ,
     has_drop_alteration,
     has_additive_alteration,
+    prepare_columns_for_static_diff,
     TableAlterOperation,
 )
 from sqlmesh.core.snapshot import (
@@ -36,7 +37,7 @@ from sqlmesh.core.snapshot import (
 )
 from sqlmesh.core.snapshot.categorizer import categorize_change
 from sqlmesh.core.snapshot.definition import Interval, SnapshotDataVersion, SnapshotId
-from sqlmesh.utils import columns_to_types_all_known, random_id
+from sqlmesh.utils import random_id
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
     TimeLike,
@@ -106,6 +107,8 @@ class PlanBuilder:
         end_override_per_model: A mapping of model FQNs to target end dates.
         ignore_cron: Whether to ignore the node's cron schedule when computing missing intervals.
         explain: Whether to explain the plan instead of applying it.
+        schema_differ_overrides: Optional mapping from gateway name (or None for the default
+            gateway) to SchemaDiffer keyword argument overrides for static schema diffing.
     """
 
     def __init__(
@@ -146,6 +149,7 @@ class PlanBuilder:
         console: t.Optional[PlanBuilderConsole] = None,
         user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None,
         selected_models: t.Optional[t.Set[str]] = None,
+        schema_differ_overrides: t.Optional[t.Dict[t.Optional[str], t.Dict[str, t.Any]]] = None,
     ):
         self._context_diff = context_diff
         self._no_gaps = no_gaps
@@ -220,6 +224,10 @@ class PlanBuilder:
             gateway_managed=self._context_diff.gateway_managed_virtual_layer,
         )
 
+        self._schema_differ_overrides: t.Dict[t.Optional[str], t.Dict[str, t.Any]] = (
+            schema_differ_overrides or {}
+        )
+        self._logged_schema_warnings: t.Set[t.Tuple[SnapshotId, bool]] = set()
         self._latest_plan: t.Optional[Plan] = None
 
     @property
@@ -318,8 +326,8 @@ class PlanBuilder:
         dag = self._build_dag()
         directly_modified, indirectly_modified = self._build_directly_and_indirectly_modified(dag)
 
-        self._check_destructive_additive_changes(directly_modified)
         self._categorize_snapshots(dag, indirectly_modified)
+        self._check_destructive_additive_changes(dag)
         self._adjust_snapshot_intervals()
 
         deployability_index = (
@@ -592,68 +600,144 @@ class PlanBuilder:
                     if new.is_forward_only:
                         new.dev_intervals = new.intervals.copy()
 
-    def _check_destructive_additive_changes(self, directly_modified: t.Set[SnapshotId]) -> None:
-        for s_id in sorted(directly_modified):
-            if s_id.name not in self._context_diff.modified_snapshots:
+    def _is_breaking_kind_or_seed_modification(self, s_id: SnapshotId) -> bool:
+        if s_id.name not in self._context_diff.modified_snapshots:
+            return False
+        snapshot = self._context_diff.snapshots[s_id]
+        if snapshot.is_seed:
+            return True
+        new, old = self._context_diff.modified_snapshots[s_id.name]
+        return is_breaking_kind_change(old, new)
+
+    def _compute_snapshot_forward_only(self, s_id: SnapshotId) -> bool:
+        if not (self._forward_only or self._is_forward_only_change(s_id)):
+            return False
+        # Breaking kind changes and seed changes can't be forward-only.
+        return not self._is_breaking_kind_or_seed_modification(s_id)
+
+    def _check_destructive_additive_changes(self, dag: DAG[SnapshotId]) -> None:
+        effective_forward_only: t.Dict[SnapshotId, bool] = {}
+
+        for s_id in dag:
+            snapshot = self._context_diff.snapshots.get(s_id)
+            if not snapshot:
                 continue
 
-            snapshot = self._context_diff.snapshots[s_id]
+            if snapshot.is_seed or self._is_breaking_kind_or_seed_modification(s_id):
+                is_fo = False
+            elif (
+                snapshot.is_forward_only or self._forward_only or self._is_forward_only_change(s_id)
+            ):
+                is_fo = True
+            elif self._context_diff.indirectly_modified(s_id.name):
+                upstream_new_fo = {
+                    effective_forward_only[p_id]
+                    for p_id in dag.upstream(s_id)
+                    if p_id in effective_forward_only
+                    and self._is_new_snapshot(self._context_diff.snapshots[p_id])
+                }
+                is_fo = upstream_new_fo == {True}
+            else:
+                is_fo = False
+            effective_forward_only[s_id] = is_fo
+
+            if s_id.name not in self._context_diff.modified_snapshots:
+                continue
+            if not (
+                self._context_diff.directly_modified(s_id.name)
+                or self._context_diff.indirectly_modified(s_id.name)
+            ):
+                continue
+            if not snapshot.is_model or not snapshot.is_materialized or snapshot.is_seed:
+                continue
+
+            is_final_indirect_non_breaking = (
+                snapshot.categorized
+                and snapshot.is_indirect_non_breaking
+                and all(
+                    self._context_diff.snapshots[p_id].categorized
+                    for p_id in dag.upstream(s_id)
+                    if p_id in self._context_diff.snapshots
+                )
+            )
+            if not (is_fo or is_final_indirect_non_breaking):
+                continue
+
             needs_destructive_check = snapshot.needs_destructive_check(
                 self._allow_destructive_models
             )
             needs_additive_check = snapshot.needs_additive_check(self._allow_additive_models)
-            # should we raise/warn if this snapshot has/inherits a destructive change?
-            should_raise_or_warn = (self._is_forward_only_change(s_id) or self._forward_only) and (
-                needs_destructive_check or needs_additive_check
-            )
-
-            if not should_raise_or_warn or not snapshot.is_model:
+            if not (needs_destructive_check or needs_additive_check):
                 continue
 
             new, old = self._context_diff.modified_snapshots[snapshot.name]
+            comparable = prepare_columns_for_static_diff(
+                old.model.columns_to_types, new.model.columns_to_types
+            )
+            if comparable is None:
+                continue
 
-            # we must know all columns_to_types to determine whether a change is destructive
-            old_columns_to_types = old.model.columns_to_types or {}
-            new_columns_to_types = new.model.columns_to_types or {}
+            old_columns_to_types, new_columns_to_types = comparable
+            if snapshot.model_gateway in self._schema_differ_overrides:
+                differ_overrides = self._schema_differ_overrides[snapshot.model_gateway] or None
+            elif snapshot.model_gateway is None:
+                differ_overrides = self._schema_differ_overrides.get(None) or None
+            else:
+                differ_overrides = None
 
-            if columns_to_types_all_known(old_columns_to_types) and columns_to_types_all_known(
-                new_columns_to_types
-            ):
-                alter_operations = t.cast(
-                    t.List[TableAlterOperation],
-                    get_schema_differ(snapshot.model.dialect).compare_columns(
-                        new.name,
-                        old_columns_to_types,
-                        new_columns_to_types,
-                        ignore_destructive=new.model.on_destructive_change.is_ignore,
-                        ignore_additive=new.model.on_additive_change.is_ignore,
-                    ),
-                )
+            alter_operations = t.cast(
+                t.List[TableAlterOperation],
+                get_schema_differ(
+                    snapshot.model.dialect, overrides=differ_overrides
+                ).compare_columns(
+                    new.name,
+                    old_columns_to_types,
+                    new_columns_to_types,
+                    ignore_destructive=new.model.on_destructive_change.is_ignore,
+                    ignore_additive=new.model.on_additive_change.is_ignore,
+                ),
+            )
 
-                snapshot_name = snapshot.name
-                model_dialect = snapshot.model.dialect
+            snapshot_name = snapshot.name
+            model_dialect = snapshot.model.dialect
 
-                if needs_destructive_check and has_drop_alteration(alter_operations):
+            if needs_destructive_check and has_drop_alteration(alter_operations):
+                if snapshot.model.on_destructive_change.is_warn:
+                    if (s_id, True) not in self._logged_schema_warnings:
+                        self._console.log_destructive_change(
+                            snapshot_name,
+                            alter_operations,
+                            model_dialect,
+                            error=False,
+                        )
+                        self._logged_schema_warnings.add((s_id, True))
+                elif snapshot.model.on_destructive_change.is_error:
                     self._console.log_destructive_change(
                         snapshot_name,
                         alter_operations,
                         model_dialect,
-                        error=not snapshot.model.on_destructive_change.is_warn,
+                        error=True,
                     )
-                    if snapshot.model.on_destructive_change.is_error:
-                        raise PlanError(
-                            "Plan requires a destructive change to a forward-only model."
-                        )
+                    raise PlanError("Plan requires a destructive change to a forward-only model.")
 
-                if needs_additive_check and has_additive_alteration(alter_operations):
+            if needs_additive_check and has_additive_alteration(alter_operations):
+                if snapshot.model.on_additive_change.is_warn:
+                    if (s_id, False) not in self._logged_schema_warnings:
+                        self._console.log_additive_change(
+                            snapshot_name,
+                            alter_operations,
+                            model_dialect,
+                            error=False,
+                        )
+                        self._logged_schema_warnings.add((s_id, False))
+                elif snapshot.model.on_additive_change.is_error:
                     self._console.log_additive_change(
                         snapshot_name,
                         alter_operations,
                         model_dialect,
-                        error=not snapshot.model.on_additive_change.is_warn,
+                        error=True,
                     )
-                    if snapshot.model.on_additive_change.is_error:
-                        raise PlanError("Plan requires an additive change to a forward-only model.")
+                    raise PlanError("Plan requires an additive change to a forward-only model.")
 
     def _categorize_snapshots(
         self, dag: DAG[SnapshotId], indirectly_modified: SnapshotMapping
@@ -671,12 +755,7 @@ class PlanBuilder:
             if not snapshot or not self._is_new_snapshot(snapshot):
                 continue
 
-            forward_only = self._forward_only or self._is_forward_only_change(s_id)
-            if forward_only and s_id.name in self._context_diff.modified_snapshots:
-                new, old = self._context_diff.modified_snapshots[s_id.name]
-                if is_breaking_kind_change(old, new) or snapshot.is_seed:
-                    # Breaking kind changes and seed changes can't be forward-only.
-                    forward_only = False
+            forward_only = self._compute_snapshot_forward_only(s_id)
 
             if s_id in self._choices:
                 snapshot.categorize_as(self._choices[s_id], forward_only)
