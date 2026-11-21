@@ -129,7 +129,6 @@ test('Lineage panel renders correctly - absolute path project outside of workspa
   await testLineageWithProjectPath(page)
 })
 
-// These work on local machine when debuggin but not on CI, so skipping for now
 test('Lineage panel renders correctly - multiworkspace setup', async ({
   page,
   sharedCodeServer,
@@ -174,7 +173,10 @@ test('Lineage panel renders correctly - multiworkspace setup', async ({
   )
 
   await openServerPage(page, workspaceFilePath, sharedCodeServer)
-  await page.reload()
+  // The first load already has both folders. Reloading ?workspace= keeps the
+  // workspace title and clears the folders ("No Folder Opened"), so the LSP
+  // never starts.
+  await page.getByText('sushi1', { exact: true }).waitFor()
   await testLineageWithProjectPath(page)
 })
 
@@ -228,6 +230,6 @@ test('Lineage panel renders correctly - multiworkspace setup reversed', async ({
   )
 
   await openServerPage(page, workspaceFilePath, sharedCodeServer)
-  await page.reload()
+  await page.getByText('sushi2', { exact: true }).waitFor()
   await testLineageWithProjectPath(page)
 })
