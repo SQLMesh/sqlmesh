@@ -159,7 +159,7 @@ class model(registry_decorator):
         variables: t.Optional[t.Dict[str, t.Any]] = None,
         infer_names: t.Optional[bool] = False,
         blueprint_variables: t.Optional[t.Dict[str, t.Any]] = None,
-        virtual_environment_mode: VirtualEnvironmentMode = VirtualEnvironmentMode.default,
+        virtual_environment_mode: t.Optional[VirtualEnvironmentMode] = None,
     ) -> Model:
         """Get the model registered by this function."""
         env: t.Dict[str, t.Tuple[t.Any, t.Optional[bool]]] = {}
@@ -218,6 +218,11 @@ class model(registry_decorator):
         )
 
         rendered_defaults = parse_defaults_properties(rendered_defaults, dialect=dialect)
+        if (
+            virtual_environment_mode is not None
+            and "virtual_environment_mode" not in rendered_defaults
+        ):
+            rendered_defaults["virtual_environment_mode"] = virtual_environment_mode
 
         common_kwargs = {
             "defaults": rendered_defaults,
@@ -236,7 +241,6 @@ class model(registry_decorator):
             "audit_definitions": audit_definitions,
             "signal_definitions": signal_definitions,
             "blueprint_variables": blueprint_variables,
-            "virtual_environment_mode": virtual_environment_mode,
             **rendered_fields,
         }
 

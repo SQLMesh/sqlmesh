@@ -726,6 +726,14 @@ class ModelConfig(BaseModelConfig):
             # Set allow_partials to True for dbt models to preserve the original semantics.
             allow_partials = True
 
+        raw_vde_mode = model_kwargs.pop("virtual_environment_mode", None)
+        resolved_vde_mode = (
+            VirtualEnvironmentMode(raw_vde_mode.lower())
+            if isinstance(raw_vde_mode, str)
+            and not isinstance(raw_vde_mode, VirtualEnvironmentMode)
+            else raw_vde_mode
+        ) or virtual_environment_mode
+
         # pop begin for all models so we don't pass it through for non-incremental materializations
         # (happens if model config is microbatch but project config overrides)
         begin = model_kwargs.pop("begin", None)
@@ -766,7 +774,7 @@ class ModelConfig(BaseModelConfig):
             # Note: any table dependencies that are not referenced using the `ref` macro will not be included.
             extract_dependencies_from_query=False,
             allow_partials=allow_partials,
-            virtual_environment_mode=virtual_environment_mode,
+            virtual_environment_mode=resolved_vde_mode,
             dbt_node_info=self.node_info,
             **optional_kwargs,
             **model_kwargs,

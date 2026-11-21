@@ -3033,3 +3033,176 @@ def test_dbt_hooks_with_transaction_flag_execution(sushi_test_dbt_context: Conte
 
     for i in range(len(shared_table) - 1):
         assert shared_table["created_at"][i] <= shared_table["created_at"][i + 1]
+
+
+def test_dbt_virtual_environment_mode_precedence(tmp_path: Path):
+    from contextlib import ExitStack
+    from sqlmesh.utils import yaml
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    context = DbtContext()
+    context.project_name = "Test"
+    context.target = DuckDbConfig(name="target", schema="foo")
+
+    # 1. ModelConfig.to_sqlmesh precedence: per-model field / meta > passed virtual_environment_mode
+    default_model_cfg = ModelConfig(
+        name="m_default", alias="m_default", schema="foo", sql="SELECT 1 AS a"
+    )
+    assert (
+        default_model_cfg.to_sqlmesh(
+            context, virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+
+    dev_only_model_cfg = ModelConfig(
+        name="m_dev_only",
+        alias="m_dev_only",
+        schema="foo",
+        sql="SELECT 1 AS a",
+        virtual_environment_mode="DEV_ONLY",
+    )
+    assert dev_only_model_cfg.virtual_environment_mode == VirtualEnvironmentMode.DEV_ONLY
+    assert (
+        dev_only_model_cfg.to_sqlmesh(
+            context, virtual_environment_mode=VirtualEnvironmentMode.FULL
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+
+    full_model_cfg = ModelConfig(
+        name="m_full",
+        alias="m_full",
+        schema="foo",
+        sql="SELECT 1 AS a",
+        virtual_environment_mode="full",
+    )
+    assert (
+        full_model_cfg.to_sqlmesh(
+            context, virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+
+    meta_model_cfg = ModelConfig(
+        name="m_meta",
+        alias="m_meta",
+        schema="foo",
+        sql="SELECT 1 AS a",
+        meta={"virtual_environment_mode": "dev_only"},
+    )
+    assert (
+        meta_model_cfg.to_sqlmesh(
+            context, virtual_environment_mode=VirtualEnvironmentMode.FULL
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+
+    # 2. SeedConfig.to_sqlmesh parity
+    seed_csv = Path("examples/sushi_dbt/seeds/waiter_names.csv")
+    seed_dev_only = SeedConfig(
+        name="s_dev_only",
+        package_name="Test",
+        schema="foo",
+        path=seed_csv,
+        virtual_environment_mode="dev_only",
+    )
+    assert (
+        seed_dev_only.to_sqlmesh(
+            context, virtual_environment_mode=VirtualEnvironmentMode.FULL
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+
+    seed_full = SeedConfig(
+        name="s_full",
+        package_name="Test",
+        schema="foo",
+        path=seed_csv,
+        virtual_environment_mode="full",
+    )
+    assert (
+        seed_full.to_sqlmesh(
+            context, virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+
+    # 3. End-to-end dbt project with {{ config(virtual_environment_mode=...) }} and +virtual_environment_mode
+    dbt_project_dir = tmp_path / "dbt_proj"
+    models_dir = dbt_project_dir / "models"
+    seeds_dir = dbt_project_dir / "seeds"
+    models_dir.mkdir(parents=True)
+    seeds_dir.mkdir(parents=True)
+
+    (models_dir / "m_default.sql").write_text("SELECT 1 AS id", encoding="utf-8")
+    (models_dir / "m_jinja_dev_only.sql").write_text(
+        "{{ config(materialized='table', virtual_environment_mode='dev_only') }}\nSELECT 1 AS id",
+        encoding="utf-8",
+    )
+    (models_dir / "m_jinja_full.sql").write_text(
+        "{{ config(materialized='table', virtual_environment_mode='full') }}\nSELECT 1 AS id",
+        encoding="utf-8",
+    )
+    (seeds_dir / "raw_seed.csv").write_text("id,name\n1,alice\n", encoding="utf-8")
+
+    with open(dbt_project_dir / "dbt_project.yml", "w", encoding="utf-8") as f:
+        yaml.dump(
+            {
+                "name": "test_project",
+                "version": "1.0.0",
+                "config-version": 2,
+                "profile": "test",
+                "model-paths": ["models"],
+                "seed-paths": ["seeds"],
+                "seeds": {
+                    "test_project": {
+                        "+virtual_environment_mode": "dev_only",
+                    }
+                },
+            },
+            f,
+        )
+
+    with open(dbt_project_dir / "sqlmesh.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(
+            {
+                "virtual_environment_mode": "full",
+                "model_defaults": {
+                    "start": "2025-01-01",
+                },
+            },
+            f,
+        )
+
+    db_file = tmp_path / "dbt_local.db"
+    with open(dbt_project_dir / "profiles.yml", "w", encoding="utf-8") as f:
+        yaml.dump(
+            {
+                "test": {
+                    "outputs": {"duckdb": {"type": "duckdb", "path": str(db_file)}},
+                    "target": "duckdb",
+                }
+            },
+            f,
+        )
+
+    with ExitStack() as stack:
+        sqlmesh_ctx = Context(paths=dbt_project_dir)
+        stack.callback(sqlmesh_ctx.close)
+        assert (
+            sqlmesh_ctx.get_model("main.m_default").virtual_environment_mode
+            == VirtualEnvironmentMode.FULL
+        )
+        assert (
+            sqlmesh_ctx.get_model("main.m_jinja_dev_only").virtual_environment_mode
+            == VirtualEnvironmentMode.DEV_ONLY
+        )
+        assert (
+            sqlmesh_ctx.get_model("main.m_jinja_full").virtual_environment_mode
+            == VirtualEnvironmentMode.FULL
+        )
+        assert (
+            sqlmesh_ctx.get_model("main.raw_seed").virtual_environment_mode
+            == VirtualEnvironmentMode.DEV_ONLY
+        )

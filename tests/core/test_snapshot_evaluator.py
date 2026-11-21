@@ -25,6 +25,7 @@ from sqlmesh.core.engine_adapter.shared import (
     DataObjectType,
     InsertOverwriteStrategy,
 )
+from sqlmesh.core.config.common import VirtualEnvironmentMode
 from sqlmesh.core.environment import EnvironmentNamingInfo
 from sqlmesh.core.macros import RuntimeStage, macro, MacroEvaluator, MacroFunc
 from sqlmesh.core.model import (
@@ -36,6 +37,8 @@ from sqlmesh.core.model import (
     IncrementalByPartitionKind,
     IncrementalByUniqueKeyKind,
     PythonModel,
+    SeedKind,
+    SeedModel,
     SqlModel,
     TimeColumn,
     ViewKind,
@@ -47,6 +50,7 @@ from sqlmesh.core.model import (
 )
 from sqlmesh.core.model.kind import OnDestructiveChange, ExternalKind, OnAdditiveChange
 from sqlmesh.core.model.meta import GrantsTargetLayer
+from sqlmesh.core.model.seed import Seed
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.snapshot import (
     DeployabilityIndex,
@@ -69,6 +73,7 @@ from sqlmesh.core.snapshot.evaluator import (
     IncrementalUnmanagedStrategy,
     MaterializableStrategy,
     SCDType2Strategy,
+    SeedStrategy,
     SnapshotCreationFailedError,
     ViewStrategy,
 )
@@ -1125,10 +1130,17 @@ def test_pre_hook_forward_only_clone(
     adapter.with_settings = lambda **kwargs: adapter
     adapter.table_exists = lambda _: True  # type: ignore
     adapter.SUPPORTS_CLONING = True
+    source_table_obj = DataObject(
+        schema="sqlmesh__test_schema",
+        name=f"test_schema__test_model__{snapshot.version}",
+        type=DataObjectType.TABLE,
+    )
     mocker.patch.object(
         adapter,
         "get_data_objects",
-        return_value=[],
+        side_effect=lambda schema_name, object_names=None, **kwargs: (
+            [source_table_obj] if object_names and source_table_obj.name in object_names else []
+        ),
     )
     mocker.patch.object(
         adapter,
@@ -1140,6 +1152,7 @@ def test_pre_hook_forward_only_clone(
 
     evaluator.create([snapshot], {}, deployability_index=DeployabilityIndex.none_deployable())
     adapter.cursor.execute.assert_any_call(pre_statement)
+    assert any("CLONE" in str(call_args) for call_args in adapter.cursor.execute.call_args_list)
 
 
 def test_create_only_dev_table_exists(mocker: MockerFixture, adapter_mock, make_snapshot):
@@ -6113,3 +6126,285 @@ def test_observation_propagates_through_snapshot_dispatch(
         consumer.reset(token)
     action = "schema_migration" if operation == "migrate" else operation
     assert events == [("start", action, None), ("finish", action, None)]
+
+
+def test_can_clone_skips_when_prod_object_is_view(
+    adapter_mock: Mock, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    adapter_mock.SUPPORTS_CLONING = True
+    adapter_mock.table_exists.return_value = True
+    adapter_mock.get_alter_operations.return_value = []
+    evaluator = SnapshotEvaluator(adapter_mock)
+
+    model_obj = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        query=parse_one("SELECT 1::INT AS a, ds::DATE AS ds FROM src"),
+        virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+    )
+    snapshot = make_snapshot(model_obj)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    snapshot.previous_versions = snapshot.all_versions
+
+    deployability_index = DeployabilityIndex.none_deployable()
+
+    for non_table_type in (
+        DataObjectType.VIEW,
+        DataObjectType.MATERIALIZED_VIEW,
+        DataObjectType.UNKNOWN,
+    ):
+        adapter_mock.get_data_object.return_value = DataObject(
+            schema="test_schema",
+            name="test_model",
+            type=non_table_type,
+        )
+        assert evaluator._can_clone(snapshot, deployability_index) is False
+
+    adapter_mock.get_data_object.return_value = None
+    assert evaluator._can_clone(snapshot, deployability_index) is False
+
+    for table_type in (DataObjectType.TABLE, DataObjectType.MANAGED_TABLE):
+        adapter_mock.get_data_object.return_value = DataObject(
+            schema="test_schema",
+            name="test_model",
+            type=table_type,
+        )
+        assert evaluator._can_clone(snapshot, deployability_index) is True
+
+    adapter_mock.get_data_object.return_value = DataObject(
+        schema="test_schema",
+        name="test_model",
+        type=DataObjectType.VIEW,
+    )
+    adapter_mock.clone_table.reset_mock()
+    adapter_mock.create_table.reset_mock()
+
+    evaluator.create([snapshot], {}, deployability_index=deployability_index)
+
+    adapter_mock.clone_table.assert_not_called()
+    adapter_mock.create_table.assert_called_once()
+    assert adapter_mock.create_table.call_args[0][0] == snapshot.table_name(is_deployable=False)
+
+
+def test_cleanup_snapshot_dev_only_does_not_drop_prod_table_or_view(
+    duck_conn: t.Any, mocker: MockerFixture, make_snapshot: t.Callable[..., Snapshot]
+) -> None:
+    from sqlmesh.core.engine_adapter import DuckDBEngineAdapter
+
+    adapter = DuckDBEngineAdapter(lambda: duck_conn)
+    duck_conn.execute("CREATE SCHEMA test_schema")
+    duck_conn.execute("CREATE SCHEMA sqlmesh__test_schema")
+
+    dev_only_full_snapshot = make_snapshot(
+        SqlModel(
+            name="test_schema.mat_model",
+            kind=FullKind(),
+            query=parse_one("SELECT 1 AS a"),
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+        )
+    )
+    dev_only_full_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    dev_only_inc_snapshot = make_snapshot(
+        SqlModel(
+            name="test_schema.inc_model",
+            kind=IncrementalByTimeRangeKind(time_column="ds"),
+            query=parse_one("SELECT 1 AS a, '2023-01-01'::DATE AS ds"),
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+        )
+    )
+    dev_only_inc_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    dev_only_view_snapshot = make_snapshot(
+        SqlModel(
+            name="test_schema.view_model",
+            kind=ViewKind(),
+            query=parse_one("SELECT 1 AS a"),
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+        )
+    )
+    dev_only_view_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    full_vde_snapshot = make_snapshot(
+        SqlModel(
+            name="test_schema.full_vde_model",
+            kind=FullKind(),
+            query=parse_one("SELECT 1 AS a"),
+            virtual_environment_mode=VirtualEnvironmentMode.FULL,
+        )
+    )
+    full_vde_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    # Create live prod objects and __dev objects for DEV_ONLY snapshots
+    duck_conn.execute("CREATE TABLE test_schema.mat_model AS SELECT 1 AS a")
+    duck_conn.execute(
+        f"CREATE TABLE {dev_only_full_snapshot.table_name(is_deployable=False)} AS SELECT 1 AS a"
+    )
+    duck_conn.execute(
+        "CREATE TABLE test_schema.inc_model AS SELECT 1 AS a, DATE '2023-01-01' AS ds"
+    )
+    duck_conn.execute(
+        f"CREATE TABLE {dev_only_inc_snapshot.table_name(is_deployable=False)} AS SELECT 1 AS a, DATE '2023-01-01' AS ds"
+    )
+    duck_conn.execute("CREATE VIEW test_schema.view_model AS SELECT 1 AS a")
+    duck_conn.execute(
+        f"CREATE VIEW {dev_only_view_snapshot.table_name(is_deployable=False)} AS SELECT 1 AS a"
+    )
+
+    # Create both deployable and __dev physical tables for FULL VDE snapshot
+    duck_conn.execute(
+        f"CREATE TABLE {full_vde_snapshot.table_name(is_deployable=True)} AS SELECT 1 AS a"
+    )
+    duck_conn.execute(
+        f"CREATE TABLE {full_vde_snapshot.table_name(is_deployable=False)} AS SELECT 1 AS a"
+    )
+
+    drop_table_spy = mocker.spy(DuckDBEngineAdapter, "drop_table")
+    drop_view_spy = mocker.spy(DuckDBEngineAdapter, "drop_view")
+
+    evaluator = SnapshotEvaluator(adapter)
+    evaluator.cleanup(
+        [
+            SnapshotTableCleanupTask(
+                snapshot=dev_only_full_snapshot.table_info, dev_table_only=False
+            ),
+            SnapshotTableCleanupTask(
+                snapshot=dev_only_inc_snapshot.table_info, dev_table_only=False
+            ),
+            SnapshotTableCleanupTask(
+                snapshot=dev_only_view_snapshot.table_info, dev_table_only=False
+            ),
+            SnapshotTableCleanupTask(snapshot=full_vde_snapshot.table_info, dev_table_only=False),
+        ]
+    )
+
+    # Only __dev objects should be dropped for DEV_ONLY models
+    assert adapter.get_data_object(dev_only_full_snapshot.table_name(is_deployable=False)) is None
+    assert adapter.get_data_object(dev_only_inc_snapshot.table_name(is_deployable=False)) is None
+    assert adapter.get_data_object(dev_only_view_snapshot.table_name(is_deployable=False)) is None
+
+    # Live prod objects in <schema>.<model> must remain untouched
+    assert adapter.get_data_object("test_schema.mat_model") is not None
+    assert adapter.get_data_object("test_schema.inc_model") is not None
+    assert adapter.get_data_object("test_schema.view_model") is not None
+    assert duck_conn.execute("SELECT * FROM test_schema.view_model").fetchall() == [(1,)]
+
+    dropped_tables = {str(call_args.args[1]) for call_args in drop_table_spy.call_args_list}
+    dropped_views = {str(call_args.args[1]) for call_args in drop_view_spy.call_args_list}
+    for prod_obj in (
+        dev_only_full_snapshot.table_name(is_deployable=True),
+        dev_only_inc_snapshot.table_name(is_deployable=True),
+        dev_only_view_snapshot.table_name(is_deployable=True),
+    ):
+        assert prod_obj not in dropped_tables
+        assert prod_obj not in dropped_views
+
+    # Both __dev and deployable sqlmesh__<schema>.* tables ARE dropped for FULL VDE models
+    assert adapter.get_data_object(full_vde_snapshot.table_name(is_deployable=False)) is None
+    assert adapter.get_data_object(full_vde_snapshot.table_name(is_deployable=True)) is None
+
+
+def test_seed_create_drops_existing_view_in_dev_only_prod(adapter_mock: Mock) -> None:
+    seed_model = SeedModel(
+        name="test_schema.seed_model",
+        kind=SeedKind(path="./seed.csv"),
+        seed=Seed(content="id,name\n1,alice\n"),
+        column_hashes={"id": "1", "name": "2"},
+        columns={"id": "int", "name": "varchar"},
+        virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+    )
+    dehydrated_seed_model = seed_model.to_dehydrated()
+    existing_view_obj = DataObject(
+        schema="test_schema",
+        name="seed_model",
+        type=DataObjectType.VIEW,
+    )
+
+    # 1. Hydrated SeedModel in DEV_ONLY deployable prod drops mismatched view BEFORE create_table
+    events: t.List[str] = []
+    adapter_mock.get_data_object.return_value = existing_view_obj
+
+    def _record_drop(obj: t.Any, tpe: t.Any) -> bool:
+        events.append("drop_mismatch")
+        return True
+
+    def _record_create_table(*args: t.Any, **kwargs: t.Any) -> None:
+        events.append("create_table")
+
+    adapter_mock.drop_data_object_on_type_mismatch.side_effect = _record_drop
+    adapter_mock.create_table.side_effect = _record_create_table
+
+    SeedStrategy(adapter_mock).create(
+        table_name="test_schema.seed_model",
+        model=seed_model,
+        is_table_deployable=True,
+        render_kwargs={},
+        skip_grants=True,
+    )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_called_once_with(
+        existing_view_obj, DataObjectType.TABLE
+    )
+    assert events == ["drop_mismatch", "create_table"]
+
+    # 2. Dehydrated SeedModel in DEV_ONLY deployable prod drops mismatched view BEFORE table_exists check
+    events.clear()
+    adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
+    adapter_mock.create_table.reset_mock()
+
+    def _record_table_exists(name: t.Any) -> bool:
+        events.append("table_exists")
+        return True
+
+    adapter_mock.table_exists.side_effect = _record_table_exists
+
+    SeedStrategy(adapter_mock).create(
+        table_name="test_schema.seed_model",
+        model=dehydrated_seed_model,
+        is_table_deployable=True,
+        render_kwargs={},
+        skip_grants=True,
+    )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_called_once_with(
+        existing_view_obj, DataObjectType.TABLE
+    )
+    assert events == ["drop_mismatch", "table_exists"]
+
+    # And if dropping the existing view leaves no table behind, dehydrated seed does not early-return
+    adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
+    adapter_mock.table_exists.side_effect = lambda name: False
+    with pytest.raises(SQLMeshError, match="is not hydrated"):
+        SeedStrategy(adapter_mock).create(
+            table_name="test_schema.seed_model",
+            model=dehydrated_seed_model,
+            is_table_deployable=True,
+            render_kwargs={},
+            skip_grants=True,
+        )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_called_once_with(
+        existing_view_obj, DataObjectType.TABLE
+    )
+
+    # 3. Non-deployable (__dev) seed table creation must NOT call drop_data_object_on_type_mismatch
+    adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
+    SeedStrategy(adapter_mock).create(
+        table_name="sqlmesh__test_schema.test_schema__seed_model__1__dev",
+        model=seed_model,
+        is_table_deployable=False,
+        render_kwargs={},
+        skip_grants=True,
+    )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()
+
+    # 4. FULL VDE mode seed table creation must NOT call drop_data_object_on_type_mismatch
+    full_seed_model = seed_model.copy(
+        update={"virtual_environment_mode": VirtualEnvironmentMode.FULL}
+    )
+    adapter_mock.drop_data_object_on_type_mismatch.reset_mock()
+    SeedStrategy(adapter_mock).create(
+        table_name="sqlmesh__test_schema.test_schema__seed_model__1",
+        model=full_seed_model,
+        is_table_deployable=True,
+        render_kwargs={},
+        skip_grants=True,
+    )
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()

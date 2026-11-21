@@ -575,22 +575,65 @@ class PlanBuilder:
             ).sorted
         }
 
+    def _is_breaking_prod_kind_change(self, snapshot: Snapshot) -> bool:
+        if not snapshot.is_model:
+            return False
+        prod_info = self._context_diff.prod_snapshots.get(snapshot.name)
+        if prod_info is None:
+            return False
+        if (
+            snapshot.name in self._context_diff.modified_snapshots
+            and self._context_diff.modified_snapshots[snapshot.name][1].snapshot_id
+            == prod_info.snapshot_id
+        ):
+            return is_breaking_kind_change(
+                self._context_diff.modified_snapshots[snapshot.name][1], snapshot
+            )
+        return is_breaking_kind_change(prod_info, snapshot)
+
+    def _is_snapshot_forward_only(self, s_id: SnapshotId) -> bool:
+        snapshot = self._context_diff.snapshots[s_id]
+        is_snapshot_dev_only = snapshot.is_model and not snapshot.virtual_environment_mode.is_full
+        forward_only = (
+            self._forward_only or is_snapshot_dev_only or self._is_forward_only_change(s_id)
+        )
+        if forward_only and (self._is_breaking_prod_kind_change(snapshot) or snapshot.is_seed):
+            # Breaking kind changes relative to prod and seed changes can't be forward-only.
+            forward_only = False
+        if forward_only and s_id.name in self._context_diff.modified_snapshots:
+            new, old = self._context_diff.modified_snapshots[s_id.name]
+            if is_breaking_kind_change(old, new):
+                # Breaking kind changes can't be forward-only.
+                forward_only = False
+        return forward_only
+
     def _adjust_snapshot_intervals(self) -> None:
         for new, old in self._context_diff.modified_snapshots.values():
             if not new.is_model or not old.is_model:
                 continue
             is_same_version = old.version_get_or_generate() == new.version_get_or_generate()
-            if is_same_version and should_force_rebuild(old, new):
+            is_breaking_prod_change = self._is_breaking_prod_kind_change(new)
+            if (is_same_version or not new.virtual_environment_mode.is_full) and (
+                should_force_rebuild(old, new) or is_breaking_prod_change
+            ):
                 # If the difference between 2 snapshots requires a full rebuild,
                 # then clear the intervals for the new snapshot.
                 self._context_diff.snapshots[new.snapshot_id].intervals = []
             elif new.snapshot_id in self._context_diff.new_snapshots:
                 new.intervals = []
                 new.dev_intervals = []
-                if is_same_version:
+                if is_same_version and not is_breaking_prod_change:
                     new.merge_intervals(old)
                     if new.is_forward_only:
                         new.dev_intervals = new.intervals.copy()
+
+        for snapshot in self._context_diff.snapshots.values():
+            if (
+                snapshot.is_model
+                and not snapshot.virtual_environment_mode.is_full
+                and self._is_breaking_prod_kind_change(snapshot)
+            ):
+                snapshot.intervals = []
 
     def _check_destructive_additive_changes(self, directly_modified: t.Set[SnapshotId]) -> None:
         for s_id in sorted(directly_modified):
@@ -603,7 +646,7 @@ class PlanBuilder:
             )
             needs_additive_check = snapshot.needs_additive_check(self._allow_additive_models)
             # should we raise/warn if this snapshot has/inherits a destructive change?
-            should_raise_or_warn = (self._is_forward_only_change(s_id) or self._forward_only) and (
+            should_raise_or_warn = self._is_snapshot_forward_only(s_id) and (
                 needs_destructive_check or needs_additive_check
             )
 
@@ -671,12 +714,7 @@ class PlanBuilder:
             if not snapshot or not self._is_new_snapshot(snapshot):
                 continue
 
-            forward_only = self._forward_only or self._is_forward_only_change(s_id)
-            if forward_only and s_id.name in self._context_diff.modified_snapshots:
-                new, old = self._context_diff.modified_snapshots[s_id.name]
-                if is_breaking_kind_change(old, new) or snapshot.is_seed:
-                    # Breaking kind changes and seed changes can't be forward-only.
-                    forward_only = False
+            forward_only = self._is_snapshot_forward_only(s_id)
 
             if s_id in self._choices:
                 snapshot.categorize_as(self._choices[s_id], forward_only)
@@ -699,7 +737,7 @@ class PlanBuilder:
         if self._context_diff.directly_modified(s_id.name):
             if self._auto_categorization_enabled:
                 new, old = self._context_diff.modified_snapshots[s_id.name]
-                if is_breaking_kind_change(old, new):
+                if is_breaking_kind_change(old, new) or self._is_breaking_prod_kind_change(new):
                     snapshot.categorize_as(SnapshotChangeCategory.BREAKING, False)
                     return
 
@@ -771,8 +809,14 @@ class PlanBuilder:
                     all_upstream_forward_only if new_upstream_requires_rebuild else set()
                 ) | stored_parent_forward_only
 
-            if all_upstream_forward_only == {True} or (
-                snapshot.is_model and snapshot.model.forward_only
+            _, old = self._context_diff.modified_snapshots[snapshot.name]
+            if (
+                all_upstream_forward_only == {True}
+                or (snapshot.is_model and snapshot.model.forward_only)
+            ) and not (
+                is_breaking_kind_change(old, snapshot)
+                or self._is_breaking_prod_kind_change(snapshot)
+                or snapshot.is_seed
             ):
                 forward_only = True
 
@@ -988,6 +1032,8 @@ class PlanBuilder:
         ) and not self._context_diff.indirectly_modified(s_id.name):
             return False
         snapshot = self._context_diff.snapshots[s_id]
+        if snapshot.is_model and self._is_breaking_prod_kind_change(snapshot):
+            return False
         if snapshot.name in self._context_diff.modified_snapshots:
             _, old = self._context_diff.modified_snapshots[snapshot.name]
             # If the model kind has changed in a breaking way, then we can't consider this to be a forward-only change.
@@ -1067,6 +1113,11 @@ class PlanBuilder:
         """Determines whether the plan should compute previews for forward-only changes (if there are any)."""
         return self._is_dev and (
             self._forward_only
+            or any(
+                not snapshot.virtual_environment_mode.is_full
+                for snapshot in self._modified_and_added_snapshots
+                if snapshot.is_model
+            )
             or (
                 self._enable_preview
                 and any(

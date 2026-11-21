@@ -1134,7 +1134,7 @@ class SnapshotEvaluator:
             logger.info(f"Cloning table '{source_table_name}' into '{target_table_name}'")
             adapter.clone_table(
                 target_table_name,
-                snapshot.table_name(),
+                source_table_name,
                 rendered_physical_properties=rendered_physical_properties,
                 table_format=snapshot.model.table_format,
             )
@@ -1389,7 +1389,7 @@ class SnapshotEvaluator:
         snapshot = snapshot.table_info
 
         table_names = [(False, snapshot.table_name(is_deployable=False))]
-        if not dev_table_only:
+        if not dev_table_only and snapshot.virtual_environment_mode.is_full:
             table_names.append((True, snapshot.table_name(is_deployable=True)))
 
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
@@ -1573,7 +1573,7 @@ class SnapshotEvaluator:
 
     def _can_clone(self, snapshot: Snapshot, deployability_index: DeployabilityIndex) -> bool:
         adapter = self.get_adapter(snapshot.model.gateway)
-        return (
+        if not (
             snapshot.is_forward_only
             and snapshot.is_materialized
             and bool(snapshot.previous_versions)
@@ -1582,8 +1582,12 @@ class SnapshotEvaluator:
             and not snapshot.is_managed
             and not snapshot.is_dbt_custom
             and not deployability_index.is_deployable(snapshot)
-            # If the deployable table is missing we can't clone it
-            and adapter.table_exists(snapshot.table_name())
+        ):
+            return False
+        # If the deployable object is missing or is not a physical table (e.g. a virtual VIEW in prod), we can't clone it
+        source_data_object = adapter.get_data_object(snapshot.table_name(), safe_to_cache=True)
+        return source_data_object is not None and bool(
+            source_data_object.type.is_table or source_data_object.type.is_managed_table
         )
 
     def _get_physical_data_objects(
@@ -2532,6 +2536,11 @@ class SeedStrategy(MaterializableStrategy):
         **kwargs: t.Any,
     ) -> None:
         model = t.cast(SeedModel, model)
+        if is_table_deployable and model.virtual_environment_mode.is_dev_only:
+            self.adapter.drop_data_object_on_type_mismatch(
+                self.adapter.get_data_object(table_name),
+                DataObjectType.TABLE,
+            )
         if not model.is_hydrated and self.adapter.table_exists(table_name):
             # This likely means that the table was created and populated previously, but the evaluation stage
             # failed before the interval could be added for this model.

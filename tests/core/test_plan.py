@@ -1,6 +1,8 @@
 import logging
 import typing as t
+from contextlib import ExitStack
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -5049,3 +5051,180 @@ def test_indirect_change_forward_only_with_stored_forward_only_parent_and_new_pa
     assert child_new.is_forward_only == expected_forward_only
     # A forward-only child keeps its previous version, otherwise it's rebuilt.
     assert (child_new.version == child_old.version) == expected_forward_only
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_restate_prod_uses_state_virtual_environment_mode(tmp_path: Path) -> None:
+    from sqlmesh.core.config import (
+        Config,
+        DuckDBConnectionConfig,
+        GatewayConfig,
+        ModelDefaultsConfig,
+    )
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    model_sql = """
+    MODEL (
+        name db.m,
+        kind INCREMENTAL_BY_TIME_RANGE (
+            time_column ds
+        ),
+        start '2023-01-05'
+    );
+    SELECT 1 AS id, @start_ds AS ds;
+    """
+
+    def make_config(db_file: Path, mode: VirtualEnvironmentMode) -> Config:
+        return Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig(database=str(db_file)))},
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            virtual_environment_mode=mode,
+        )
+
+    with ExitStack() as stack:
+        # 1. Deploy prod in DEV_ONLY mode, then restate prod with local FULL config -> restate_all_snapshots is False
+        proj_dev_only = tmp_path / "proj_dev_only"
+        (proj_dev_only / "models").mkdir(parents=True)
+        (proj_dev_only / "models" / "m.sql").write_text(model_sql, encoding="utf-8")
+        db_dev_only = proj_dev_only / "warehouse.db"
+
+        ctx_deploy_dev_only = Context(
+            paths=proj_dev_only,
+            config=make_config(db_dev_only, VirtualEnvironmentMode.DEV_ONLY),
+        )
+        stack.callback(ctx_deploy_dev_only.close)
+        ctx_deploy_dev_only.plan("prod", auto_apply=True, no_prompts=True)
+        ctx_deploy_dev_only.close()
+
+        ctx_restate_with_full_cfg = Context(
+            paths=proj_dev_only,
+            config=make_config(db_dev_only, VirtualEnvironmentMode.FULL),
+        )
+        stack.callback(ctx_restate_with_full_cfg.close)
+        plan_from_dev_only_state = ctx_restate_with_full_cfg.plan_builder(
+            "prod", restate_models=["db.m"]
+        ).build()
+        assert plan_from_dev_only_state.to_evaluatable().restate_all_snapshots is False
+        ctx_restate_with_full_cfg.close()
+
+        # 2. Deploy prod in FULL mode, then restate prod with local DEV_ONLY config -> restate_all_snapshots is True
+        proj_full = tmp_path / "proj_full"
+        (proj_full / "models").mkdir(parents=True)
+        (proj_full / "models" / "m.sql").write_text(model_sql, encoding="utf-8")
+        db_full = proj_full / "warehouse.db"
+
+        ctx_deploy_full = Context(
+            paths=proj_full,
+            config=make_config(db_full, VirtualEnvironmentMode.FULL),
+        )
+        stack.callback(ctx_deploy_full.close)
+        ctx_deploy_full.plan("prod", auto_apply=True, no_prompts=True)
+        ctx_deploy_full.close()
+
+        ctx_restate_with_dev_only_cfg = Context(
+            paths=proj_full,
+            config=make_config(db_full, VirtualEnvironmentMode.DEV_ONLY),
+        )
+        stack.callback(ctx_restate_with_dev_only_cfg.close)
+        plan_from_full_state = ctx_restate_with_dev_only_cfg.plan_builder(
+            "prod", restate_models=["db.m"]
+        ).build()
+        assert plan_from_full_state.to_evaluatable().restate_all_snapshots is True
+        ctx_restate_with_dev_only_cfg.close()
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_dev_plan_warns_on_virtual_environment_mode_mismatch_with_prod(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    from sqlmesh.core.config import (
+        Config,
+        DuckDBConnectionConfig,
+        GatewayConfig,
+        ModelDefaultsConfig,
+    )
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    model_sql = "MODEL (name db.m, kind FULL); SELECT 1 AS a;\n"
+
+    def make_config(db_file: Path, mode: VirtualEnvironmentMode) -> Config:
+        return Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig(database=str(db_file)))},
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            virtual_environment_mode=mode,
+        )
+
+    with ExitStack() as stack:
+        # 1. Prod deployed in FULL mode
+        proj_full = tmp_path / "proj_full"
+        (proj_full / "models").mkdir(parents=True)
+        (proj_full / "models" / "m.sql").write_text(model_sql, encoding="utf-8")
+        db_full = proj_full / "warehouse.db"
+
+        ctx_full = Context(
+            paths=proj_full,
+            config=make_config(db_full, VirtualEnvironmentMode.FULL),
+        )
+        stack.callback(ctx_full.close)
+        ctx_full.plan("prod", auto_apply=True, no_prompts=True)
+
+        # Matching-mode dev plan does NOT warn
+        matching_warn = mocker.patch.object(ctx_full.console, "log_warning")
+        ctx_full.plan_builder("dev")
+        matching_warn.assert_not_called()
+        ctx_full.close()
+
+        # Switch local config to DEV_ONLY -> dev plan warns once, prod plan does NOT warn
+        ctx_local_dev_only = Context(
+            paths=proj_full,
+            config=make_config(db_full, VirtualEnvironmentMode.DEV_ONLY),
+        )
+        stack.callback(ctx_local_dev_only.close)
+        mismatch_warn_1 = mocker.patch.object(ctx_local_dev_only.console, "log_warning")
+        ctx_local_dev_only.plan_builder("dev")
+        mismatch_warn_1.assert_called_once()
+        msg_1 = mismatch_warn_1.call_args[0][0]
+        assert "virtual_environment_mode" in msg_1
+        assert "'dev_only'" in msg_1
+        assert "'full'" in msg_1
+
+        mismatch_warn_1.reset_mock()
+        ctx_local_dev_only.plan_builder("prod")
+        mismatch_warn_1.assert_not_called()
+        ctx_local_dev_only.close()
+
+        # 2. Reverse: prod deployed in DEV_ONLY mode, local config switched to FULL
+        proj_dev_only = tmp_path / "proj_dev_only"
+        (proj_dev_only / "models").mkdir(parents=True)
+        (proj_dev_only / "models" / "m.sql").write_text(model_sql, encoding="utf-8")
+        db_dev_only = proj_dev_only / "warehouse.db"
+
+        ctx_dev_only = Context(
+            paths=proj_dev_only,
+            config=make_config(db_dev_only, VirtualEnvironmentMode.DEV_ONLY),
+        )
+        stack.callback(ctx_dev_only.close)
+        ctx_dev_only.plan("prod", auto_apply=True, no_prompts=True)
+
+        matching_warn_2 = mocker.patch.object(ctx_dev_only.console, "log_warning")
+        ctx_dev_only.plan_builder("dev")
+        matching_warn_2.assert_not_called()
+        ctx_dev_only.close()
+
+        ctx_local_full = Context(
+            paths=proj_dev_only,
+            config=make_config(db_dev_only, VirtualEnvironmentMode.FULL),
+        )
+        stack.callback(ctx_local_full.close)
+        mismatch_warn_2 = mocker.patch.object(ctx_local_full.console, "log_warning")
+        ctx_local_full.plan_builder("dev")
+        mismatch_warn_2.assert_called_once()
+        msg_2 = mismatch_warn_2.call_args[0][0]
+        assert "virtual_environment_mode" in msg_2
+        assert "'full'" in msg_2
+        assert "'dev_only'" in msg_2
+
+        mismatch_warn_2.reset_mock()
+        ctx_local_full.plan_builder("prod")
+        mismatch_warn_2.assert_not_called()
+        ctx_local_full.close()
