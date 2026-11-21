@@ -6113,3 +6113,249 @@ def test_observation_propagates_through_snapshot_dispatch(
         consumer.reset(token)
     action = "schema_migration" if operation == "migrate" else operation
     assert events == [("start", action, None), ("finish", action, None)]
+
+
+def test_migrate_skips_additive_check_when_snapshot_rebuilds(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+):
+    """Bug D1: SnapshotEvaluator.migrate must NOT raise AdditiveChangeError when snapshot has
+    change_category=BREAKING and forward_only=False (is_no_rebuild == False)."""
+    model = SqlModel(
+        name="test_schema.test_model",
+        kind=IncrementalByTimeRangeKind(time_column="a", on_additive_change=OnAdditiveChange.ERROR),
+        query=parse_one("SELECT c, a, b FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+    )
+    snapshot = make_snapshot(model, version="1")
+    snapshot.change_category = SnapshotChangeCategory.BREAKING
+    snapshot.forward_only = False
+    snapshot.previous_versions = snapshot.all_versions
+    assert not snapshot.is_no_rebuild
+
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    adapter.with_settings = lambda **kwargs: adapter  # type: ignore
+    current_table = snapshot.table_name()
+
+    def columns(table_name):
+        if table_name == current_table:
+            return {
+                "c": exp.DataType.build("int"),
+                "a": exp.DataType.build("int"),
+            }
+        return {
+            "c": exp.DataType.build("int"),
+            "a": exp.DataType.build("int"),
+            "b": exp.DataType.build("int"),
+        }
+
+    adapter.columns = columns  # type: ignore
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.base.EngineAdapter.get_data_objects",
+        return_value=[
+            DataObject(
+                schema="sqlmesh__test_schema",
+                name=f"test_schema__test_model__{snapshot.version}",
+                type=DataObjectType.TABLE,
+            )
+        ],
+    )
+
+    evaluator = SnapshotEvaluator(adapter)
+    evaluator.migrate([snapshot], {})
+
+
+def test_dev_preview_non_cloning_create_checks_schema_and_drops_dev_table(
+    duck_conn,
+    make_snapshot,
+):
+    """SnapshotEvaluator.create on non-cloning engines (SUPPORTS_CLONING=False) must validate the
+    newly created dev preview table against the existing prod table when snapshot.is_no_rebuild and
+    not deployable, raising DestructiveChangeError / AdditiveChangeError and cleaning up __dev."""
+    adapter = create_engine_adapter(lambda: duck_conn, "duckdb")
+    assert adapter.SUPPORTS_CLONING is False
+    evaluator = SnapshotEvaluator(adapter)
+
+    duck_conn.execute("CREATE TABLE raw_tbl AS SELECT 1 AS id, 'x' AS b, DATE '2023-01-01' AS ds")
+
+    base_model = SqlModel(
+        name="test_schema.test_model",
+        dialect="duckdb",
+        kind=IncrementalByUniqueKeyKind(
+            unique_key="id",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ERROR,
+            on_additive_change=OnAdditiveChange.ERROR,
+        ),
+        query=parse_one("SELECT * FROM raw_tbl WHERE ds BETWEEN @start_ds AND @end_ds"),
+    )
+    prod_snapshot = make_snapshot(base_model, version="1")
+    prod_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create_physical_schemas([prod_snapshot], DeployabilityIndex.all_deployable())
+    evaluator.create(
+        [prod_snapshot],
+        {prod_snapshot.snapshot_id: prod_snapshot},
+        deployability_index=DeployabilityIndex.all_deployable(),
+    )
+    prod_table = prod_snapshot.table_name(is_deployable=True)
+    assert set(adapter.columns(prod_table)) == {"id", "b", "ds"}
+
+    dev_snapshot = make_snapshot(base_model.copy(update={"stamp": "dev_v2"}))
+    dev_snapshot.previous_versions = prod_snapshot.all_versions
+    dev_snapshot.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING, forward_only=True)
+    assert dev_snapshot.is_no_rebuild
+    dev_table = dev_snapshot.table_name(is_deployable=False)
+
+    # 1. Destructive drop in raw_tbl -> raises SnapshotCreationFailedError(DestructiveChangeError) and drops __dev
+    duck_conn.execute("ALTER TABLE raw_tbl DROP COLUMN b")
+    with pytest.raises(SnapshotCreationFailedError) as exc_info_drop:
+        evaluator.create(
+            [dev_snapshot],
+            {dev_snapshot.snapshot_id: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+        )
+    assert isinstance(exc_info_drop.value.errors[0].__cause__, DestructiveChangeError)
+    assert not adapter.table_exists(dev_table)
+    assert set(adapter.columns(prod_table)) == {"id", "b", "ds"}
+
+    # Allowing destructive snapshot succeeds
+    evaluator.create(
+        [dev_snapshot],
+        {dev_snapshot.snapshot_id: dev_snapshot},
+        deployability_index=DeployabilityIndex.none_deployable(),
+        allow_destructive_snapshots={dev_snapshot.name},
+    )
+    assert adapter.table_exists(dev_table)
+    adapter.drop_table(dev_table)
+
+    # 2. Additive column in raw_tbl with on_additive_change=ERROR -> raises SnapshotCreationFailedError(AdditiveChangeError) and drops __dev
+    duck_conn.execute(
+        "CREATE OR REPLACE TABLE raw_tbl AS SELECT 1 AS id, 'x' AS b, 2 AS c, DATE '2023-01-01' AS ds"
+    )
+    with pytest.raises(SnapshotCreationFailedError) as exc_info_add:
+        evaluator.create(
+            [dev_snapshot],
+            {dev_snapshot.snapshot_id: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+        )
+    assert isinstance(exc_info_add.value.errors[0].__cause__, AdditiveChangeError)
+    assert not adapter.table_exists(dev_table)
+    assert set(adapter.columns(prod_table)) == {"id", "b", "ds"}
+
+
+def test_dev_preview_non_cloning_evaluate_checks_schema_and_drops_dev_table(
+    duck_conn,
+    make_snapshot,
+):
+    """SnapshotEvaluator.evaluate with target_table_exists=False on non-cloning engines must
+    validate the lazily created dev preview table against the existing prod table and drop __dev on
+    DestructiveChangeError / AdditiveChangeError."""
+    adapter = create_engine_adapter(lambda: duck_conn, "duckdb")
+    assert adapter.SUPPORTS_CLONING is False
+    evaluator = SnapshotEvaluator(adapter)
+
+    duck_conn.execute("CREATE TABLE raw_tbl AS SELECT 1 AS id, 'x' AS b, DATE '2023-01-01' AS ds")
+
+    base_model = SqlModel(
+        name="test_schema.test_model",
+        dialect="duckdb",
+        kind=IncrementalByUniqueKeyKind(
+            unique_key="id",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ERROR,
+            on_additive_change=OnAdditiveChange.ERROR,
+        ),
+        query=parse_one("SELECT * FROM raw_tbl WHERE ds BETWEEN @start_ds AND @end_ds"),
+    )
+    prod_snapshot = make_snapshot(base_model, version="1")
+    prod_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.create_physical_schemas([prod_snapshot], DeployabilityIndex.all_deployable())
+    evaluator.evaluate(
+        prod_snapshot,
+        start="2023-01-01",
+        end="2023-01-02",
+        execution_time="2023-01-02",
+        snapshots={prod_snapshot.name: prod_snapshot},
+        deployability_index=DeployabilityIndex.all_deployable(),
+        target_table_exists=False,
+    )
+    prod_table = prod_snapshot.table_name(is_deployable=True)
+    assert set(adapter.columns(prod_table)) == {"id", "b", "ds"}
+
+    dev_snapshot = make_snapshot(base_model.copy(update={"stamp": "dev_v2"}))
+    dev_snapshot.previous_versions = prod_snapshot.all_versions
+    dev_snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    assert dev_snapshot.is_no_rebuild
+    dev_table = dev_snapshot.table_name(is_deployable=False)
+
+    # 1. Destructive drop -> raises DestructiveChangeError and drops __dev
+    duck_conn.execute("ALTER TABLE raw_tbl DROP COLUMN b")
+    with pytest.raises(DestructiveChangeError):
+        evaluator.evaluate(
+            dev_snapshot,
+            start="2023-01-01",
+            end="2023-01-02",
+            execution_time="2023-01-02",
+            snapshots={dev_snapshot.name: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+            target_table_exists=False,
+        )
+    assert not adapter.table_exists(dev_table)
+    assert set(adapter.columns(prod_table)) == {"id", "b", "ds"}
+
+    # 2. Additive column -> raises AdditiveChangeError and drops __dev
+    duck_conn.execute(
+        "CREATE OR REPLACE TABLE raw_tbl AS SELECT 1 AS id, 'x' AS b, 2 AS c, DATE '2023-01-01' AS ds"
+    )
+    with pytest.raises(AdditiveChangeError):
+        evaluator.evaluate(
+            dev_snapshot,
+            start="2023-01-01",
+            end="2023-01-02",
+            execution_time="2023-01-02",
+            snapshots={dev_snapshot.name: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+            target_table_exists=False,
+        )
+    assert not adapter.table_exists(dev_table)
+    assert set(adapter.columns(prod_table)) == {"id", "b", "ds"}
+
+
+def test_check_destructive_schema_change_ignores_when_on_destructive_is_ignore(make_snapshot):
+    from sqlmesh.core.schema_diff import (
+        TableAlterChangeColumnTypeOperation,
+        TableAlterColumn,
+    )
+    from sqlmesh.core.snapshot.evaluator import _check_destructive_schema_change
+
+    model_ignore = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.IGNORE,
+        ),
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(50) AS val, '2023-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    snapshot = make_snapshot(model_ignore)
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    assert snapshot.is_no_rebuild
+    assert snapshot.needs_destructive_check(set())
+
+    destructive_type_op = TableAlterChangeColumnTypeOperation(
+        target_table=exp.to_table("db.m"),
+        column_parts=[TableAlterColumn.primitive("val")],
+        column_type=exp.DataType.build("VARCHAR(50)", dialect="postgres"),
+        current_type=exp.DataType.build("VARCHAR(10)", dialect="postgres"),
+        expected_table_struct=exp.DataType.build("STRUCT<val VARCHAR(50), ds DATE>"),
+        array_element_selector="",
+        is_part_of_destructive_change=True,
+    )
+    assert destructive_type_op.is_destructive
+    # Must NOT raise DestructiveChangeError when on_destructive_change=IGNORE
+    _check_destructive_schema_change(snapshot, [destructive_type_op], set())

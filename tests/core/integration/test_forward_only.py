@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
 import typing as t
 import numpy as np  # noqa: TID253
 import pandas as pd  # noqa: TID253
 import pytest
+from sqlglot import exp
 import time_machine
 
 from sqlmesh.core import dialect as d
+from sqlmesh.core.config import (
+    Config,
+    DuckDBConnectionConfig,
+    GatewayConfig,
+    ModelDefaultsConfig,
+)
 from sqlmesh.core.context import Context
 from sqlmesh.core.config.categorizer import CategorizerConfig
 from sqlmesh.core.model import (
@@ -19,6 +27,7 @@ from sqlmesh.core.snapshot import (
     SnapshotChangeCategory,
 )
 from sqlmesh.utils.date import to_datetime, to_timestamp
+from sqlmesh.utils.errors import PlanError
 from tests.core.integration.utils import add_projection_to_model
 
 pytestmark = pytest.mark.slow
@@ -1495,3 +1504,264 @@ def test_new_forward_only_model_same_dev_environment(init_and_plan_context: t.Ca
 
     df = context.fetchdf("SELECT * FROM memory.sushi__dev.new_model").replace({np.nan: None})
     assert df.to_dict() == {"ds": {0: "2023-01-07"}, "b": {0: 1}}
+
+
+def _make_duckdb_context(project_path: Path) -> Context:
+    cfg = Config(
+        gateways={"default": GatewayConfig(connection=DuckDBConnectionConfig())},
+        default_gateway="default",
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+    )
+    return Context(paths=[project_path], config=cfg)
+
+
+def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(tmp_path: Path):
+    """Gap S6 (SQL SELECT *): On non-cloning engines (DuckDB, SUPPORTS_CLONING=False), destructive
+    and disallowed additive changes through unannotated SELECT * chains must fail during dev apply,
+    leave prod untouched, and clean up the temporary __dev preview table."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True)
+    (models_dir / "up.sql").write_text(
+        """
+        MODEL (name db.up, kind FULL);
+        SELECT * FROM raw_src;
+        """
+    )
+    (models_dir / "down.sql").write_text(
+        """
+        MODEL (
+            name db.down,
+            kind INCREMENTAL_BY_TIME_RANGE (
+                time_column ds,
+                forward_only true,
+                on_additive_change error
+            ),
+            start '2023-01-01'
+        );
+        SELECT * FROM db.up WHERE ds BETWEEN @start_ds AND @end_ds;
+        """
+    )
+
+    context = _make_duckdb_context(tmp_path)
+    assert context.engine_adapter.SUPPORTS_CLONING is False
+    assert context.get_model("db.up").columns_to_types is None
+    assert context.get_model("db.down").columns_to_types is None
+
+    context.engine_adapter.execute(
+        "CREATE TABLE raw_src AS SELECT 1 AS id, 'x' AS b, '2023-01-01' AS ds"
+    )
+    context.plan("prod", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
+
+    # 1. Drop column 'b' in raw_src and touch db.up -> dev apply fails, prod intact, __dev dropped
+    context.engine_adapter.execute("ALTER TABLE raw_src DROP COLUMN b")
+    (models_dir / "up.sql").write_text(
+        """
+        MODEL (name db.up, kind FULL);
+        SELECT * FROM raw_src WHERE id > 0;
+        """
+    )
+    context.load()
+
+    with pytest.raises(PlanError):
+        context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+
+    down_snapshot = context.get_snapshot("db.down", raise_if_missing=True)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
+    prod_env = context.state_reader.get_environment("prod")
+    assert prod_env is not None and prod_env.finalized_ts is not None
+    assert not context.engine_adapter.table_exists(down_snapshot.table_name(is_deployable=False))
+
+    # 2. Add column 'c' in raw_src with on_additive_change=error -> dev apply fails and drops __dev
+    context.engine_adapter.execute(
+        "CREATE OR REPLACE TABLE raw_src AS SELECT 1 AS id, 'x' AS b, 2 AS c, '2023-01-01' AS ds"
+    )
+    (models_dir / "up.sql").write_text(
+        """
+        MODEL (name db.up, kind FULL);
+        SELECT * FROM raw_src WHERE id >= 1;
+        """
+    )
+    context.load()
+
+    with pytest.raises(PlanError):
+        context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+
+    down_snapshot_add = context.get_snapshot("db.down", raise_if_missing=True)
+    assert not context.engine_adapter.table_exists(
+        down_snapshot_add.table_name(is_deployable=False)
+    )
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
+
+    # 3. Re-apply destructive drop with allow_destructive_models -> succeeds in dev AND prod
+    context.engine_adapter.execute(
+        "CREATE OR REPLACE TABLE raw_src AS SELECT 1 AS id, '2023-01-01' AS ds"
+    )
+    (models_dir / "up.sql").write_text(
+        """
+        MODEL (name db.up, kind FULL);
+        SELECT * FROM raw_src WHERE id = 1;
+        """
+    )
+    context.load()
+
+    context.plan(
+        "dev",
+        execution_time="2023-01-02",
+        auto_apply=True,
+        no_prompts=True,
+        allow_destructive_models=["db.up+"],
+    )
+    assert set(context.engine_adapter.columns("db__dev.down")) == {"id", "ds"}
+
+    context.plan(
+        "prod",
+        execution_time="2023-01-02",
+        auto_apply=True,
+        no_prompts=True,
+        allow_destructive_models=["db.down"],
+    )
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "ds"}
+
+
+def test_unannotated_python_model_downstream_forward_only_destructive_caught_in_dev(
+    tmp_path: Path,
+):
+    """Gap S6 (Python @model without columns metadata): Dynamic Python SQL model upstream of a
+    forward_only=True SELECT * model surfaces destructive column drops during dev apply."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True)
+    (models_dir / "py_up.py").write_text(
+        """
+from sqlglot import parse_one
+from sqlmesh import model
+
+@model("db.py_up", is_sql=True, kind="full")
+def execute(evaluator):
+    if evaluator.runtime_stage == "loading":
+        return parse_one("SELECT * FROM raw_src")
+    return parse_one("SELECT 1 AS id, 'x' AS b, '2023-01-01' AS ds")
+"""
+    )
+    (models_dir / "down.sql").write_text(
+        """
+        MODEL (
+            name db.down,
+            kind INCREMENTAL_BY_TIME_RANGE (time_column ds, forward_only true),
+            start '2023-01-01'
+        );
+        SELECT * FROM db.py_up WHERE ds BETWEEN @start_ds AND @end_ds;
+        """
+    )
+
+    context = _make_duckdb_context(tmp_path)
+    assert context.get_model("db.py_up").columns_to_types is None
+    assert context.get_model("db.down").columns_to_types is None
+
+    context.plan("prod", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
+
+    # Drop column 'b' in db.py_up
+    (models_dir / "py_up.py").write_text(
+        """
+from sqlglot import parse_one
+from sqlmesh import model
+
+@model("db.py_up", is_sql=True, kind="full")
+def execute(evaluator):
+    if evaluator.runtime_stage == "loading":
+        return parse_one("SELECT * FROM raw_src")
+    return parse_one("SELECT 1 AS id, '2023-01-01' AS ds")
+"""
+    )
+    context.load()
+
+    with pytest.raises(PlanError):
+        context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+
+    down_snapshot = context.get_snapshot("db.down", raise_if_missing=True)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
+    assert not context.engine_adapter.table_exists(down_snapshot.table_name(is_deployable=False))
+
+    # Allowing db.down succeeds in both dev and prod
+    context.plan(
+        "dev",
+        execution_time="2023-01-02",
+        auto_apply=True,
+        no_prompts=True,
+        allow_destructive_models=["db.down"],
+    )
+    context.plan(
+        "prod",
+        execution_time="2023-01-02",
+        auto_apply=True,
+        no_prompts=True,
+        allow_destructive_models=["db.down"],
+    )
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "ds"}
+
+
+def test_forward_only_dev_plan_destructive_change_blocks_prod_plan_until_allowed(
+    tmp_path: Path,
+):
+    """Gap S9 end-to-end: Applying a destructive change in dev via --forward-only
+    --allow-destructive-model stores a forward_only=True snapshot in state. A subsequent prod plan
+    without --allow-destructive-model must fail immediately at plan_builder.build() before touching
+    prod, and then succeed once allow_destructive_models is provided."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True)
+    (models_dir / "m.sql").write_text(
+        """
+        MODEL (
+            name db.m,
+            kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+            start '2023-01-01'
+        );
+        SELECT 1::INT AS id, 'x'::TEXT AS val, '2023-01-01'::DATE AS ds;
+        """
+    )
+
+    context = _make_duckdb_context(tmp_path)
+    context.plan("prod", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    assert context.engine_adapter.columns("db.m")["val"] == exp.DataType.build("TEXT")
+
+    # Destructive column type change TEXT -> INT applied to dev as --forward-only
+    (models_dir / "m.sql").write_text(
+        """
+        MODEL (
+            name db.m,
+            kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+            start '2023-01-01'
+        );
+        SELECT 1::INT AS id, 1::INT AS val, '2023-01-01'::DATE AS ds;
+        """
+    )
+    context.load()
+    context.plan(
+        "dev",
+        execution_time="2023-01-02",
+        forward_only=True,
+        allow_destructive_models=["db.m"],
+        auto_apply=True,
+        no_prompts=True,
+    )
+
+    # Prod plan without allow_destructive_models MUST fail at PlanBuilder.build() before touching prod
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        context.plan_builder("prod", execution_time="2023-01-02").build()
+
+    prod_env = context.state_reader.get_environment("prod")
+    assert prod_env is not None and prod_env.finalized_ts is not None
+    assert context.engine_adapter.columns("db.m")["val"] == exp.DataType.build("TEXT")
+
+    # Prod plan WITH allow_destructive_models succeeds
+    context.plan(
+        "prod",
+        execution_time="2023-01-02",
+        allow_destructive_models=["db.m"],
+        auto_apply=True,
+        no_prompts=True,
+    )
+    assert context.engine_adapter.columns("db.m")["val"] == exp.DataType.build("INT")
