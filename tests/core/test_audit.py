@@ -1032,6 +1032,44 @@ def test_not_constant_audit(model: Model):
     )
 
 
+@pytest.mark.parametrize(
+    "non_null_rows, null_rows, threshold, passes",
+    [
+        (10, 0, 1, True),
+        (9, 1, 1, False),
+        (8, 2, 0.8, True),
+        (7, 3, 0.8, False),
+        (0, 10, 0, True),
+        (0, 0, 0.8, True),
+    ],
+)
+def test_not_null_proportion_audit(
+    non_null_rows: int, null_rows: int, threshold: float, passes: bool
+):
+    import duckdb
+
+    model = create_sql_model(
+        "db.test_model", parse_one("SELECT x FROM db.src"), kind=FullKind(), dialect="duckdb"
+    )
+    rendered_query = model.render_audit_query(
+        builtin.not_null_proportion_audit,
+        column=exp.column("x"),
+        threshold=exp.convert(threshold),
+    )
+
+    connection = duckdb.connect()
+    connection.execute("CREATE SCHEMA db; CREATE TABLE db.test_model (x INT)")
+    if non_null_rows or null_rows:
+        connection.execute(
+            "INSERT INTO db.test_model "
+            f"SELECT CASE WHEN i < {non_null_rows} THEN i END FROM range({non_null_rows + null_rows}) AS t(i)"
+        )
+
+    # threshold is the minimum proportion of non-NULL values; the audit returns a row when it fails
+    assert (connection.execute(rendered_query.sql("duckdb")).fetchall() == []) == passes
+    connection.close()
+
+
 def test_valid_uuid_audit(model: Model):
     import duckdb
 

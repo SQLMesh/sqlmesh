@@ -189,7 +189,7 @@ FROM (
   FROM @this_model
   WHERE @condition
 ) AS s
-WHERE s.cnt_not_null <= s.cnt_tot * @threshold
+WHERE s.cnt_not_null < s.cnt_tot * @threshold
     """,
 )
 
