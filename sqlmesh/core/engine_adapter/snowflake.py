@@ -178,7 +178,7 @@ class SnowflakeEngineAdapter(
             .from_(exp.to_table("information_schema.databases"))
             .where(
                 exp.and_(
-                    exp.column("database_name").eq(exp.Literal.string(catalog_name)),
+                    exp.column("database_name").eq(exp.Literal.string(catalog_name.name)),
                     exp.column("comment").eq(exp.Literal.string(c.SQLMESH_MANAGED)),
                 )
             )
@@ -637,12 +637,19 @@ class SnowflakeEngineAdapter(
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
         materialized_view: bool = False,
+        table_format: t.Optional[str] = None,
     ) -> None:
         """
         Reference: https://docs.snowflake.com/en/sql-reference/sql/alter-table-column#syntax
+        Reference: https://docs.snowflake.com/en/sql-reference/sql/alter-iceberg-table#syntax
         """
         if not column_comments:
             return
+
+        # Snowflake rejects `ALTER TABLE` for Iceberg tables, it requires
+        # `ALTER ICEBERG TABLE` instead
+        if table_format and table_kind == "TABLE":
+            table_kind = f"{table_format.upper()} TABLE"
 
         table = exp.to_table(table_name)
         table_sql = self._to_sql(table)
