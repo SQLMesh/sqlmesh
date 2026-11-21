@@ -8,8 +8,10 @@ import click
 paths = click.option(
     "-p",
     "--paths",
+    type=click.Path(readable=False),
     multiple=True,
     default=[os.getcwd()],
+    envvar="SQLMESH_PATHS",
     help="Path(s) to the SQLMesh config/project.",
 )
 
