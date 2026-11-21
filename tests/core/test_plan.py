@@ -6356,3 +6356,79 @@ def test_treat_alter_data_type_as_destructive_with_ignore_policies(
         PlanError, match=r"Plan requires a destructive change to a forward-only model\."
     ):
         PlanBuilder(diff_ignore_add, schema_differ_overrides=overrides).build()
+
+
+def test_scd_type_2_by_time_updated_at_type_follows_time_data_type(make_snapshot):
+    """The physical `updated_at` column is always created with `time_data_type`, so changing the
+    projected type of that column is not a physical schema change."""
+
+    def _scd_model(updated_at_type: str, time_data_type: str = "TIMESTAMP") -> SqlModel:
+        return SqlModel(
+            name="db.scd",
+            dialect="duckdb",
+            kind=SCDType2ByTimeKind(
+                unique_key=["id"], updated_at_name="updated_at", time_data_type=time_data_type
+            ),
+            query=parse_one(
+                f"SELECT 1::INT AS id, 'a'::TEXT AS val, '2022-01-01'::{updated_at_type} AS updated_at",
+                read="duckdb",
+            ),
+        )
+
+    _, _, diff = _build_snapshots_and_diff(
+        make_snapshot, [_scd_model("DATE")], [_scd_model("TIMESTAMP")]
+    )
+    assert PlanBuilder(diff).build()
+
+    # A change of `time_data_type` itself still changes the physical columns and is rejected.
+    _, _, diff = _build_snapshots_and_diff(
+        make_snapshot,
+        [_scd_model("TIMESTAMP", "TIMESTAMP")],
+        [_scd_model("TIMESTAMP", "DATE")],
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff).build()
+
+
+@pytest.mark.parametrize(
+    "old_policies, expect_error",
+    [
+        # The previous definition ignored additions, so its physical table may not contain the
+        # columns that its definition lists. The drop is deferred to physical validation.
+        ({"on_additive_change": OnAdditiveChange.IGNORE}, False),
+        # The previous schema establishes the drop, keep the static error.
+        ({}, True),
+    ],
+)
+def test_forward_only_static_check_defers_when_previous_policy_ignored_changes(
+    make_snapshot, old_policies, expect_error
+):
+    def _model(query: str, **policies: t.Any) -> SqlModel:
+        return SqlModel(
+            name="db.down",
+            dialect="duckdb",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=True,
+                **{
+                    "on_destructive_change": OnDestructiveChange.ERROR,
+                    "on_additive_change": OnAdditiveChange.ERROR,
+                    **policies,
+                },
+            ),
+            query=parse_one(query, read="duckdb"),
+        )
+
+    old = _model("SELECT 1::INT AS id, 'x'::TEXT AS b, '2022-01-01'::DATE AS ds", **old_policies)
+    new = _model("SELECT 1::INT AS id, '2022-01-01'::DATE AS ds")
+    _, _, diff = _build_snapshots_and_diff(make_snapshot, [old], [new])
+
+    if expect_error:
+        with pytest.raises(
+            PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+        ):
+            PlanBuilder(diff).build()
+    else:
+        assert PlanBuilder(diff).build()

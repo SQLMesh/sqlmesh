@@ -843,6 +843,10 @@ def get_additive_column_names(alter_expressions: t.List[TableAlterOperation]) ->
     ]
 
 
+class _UncomparableTypesError(Exception):
+    """Raised when a type pair can't be safely normalized for a name-based static comparison."""
+
+
 def _is_unknown_leaf(dtype: exp.DataType) -> bool:
     return dtype.is_type(exp.DataType.Type.UNKNOWN, exp.DataType.Type.NULL)
 
@@ -925,6 +929,8 @@ def _prepare_type_pair_for_static_diff(
             norm_new_struct = new_type.copy()
             norm_new_struct.set("expressions", norm_new_exprs)
             return norm_old_struct, norm_new_struct
+        # Positional (unnamed) fields can't go through the name-based comparison.
+        raise _UncomparableTypesError()
 
     if old_type.is_type(exp.DataType.Type.ARRAY) and new_type.is_type(exp.DataType.Type.ARRAY):
         if (
@@ -975,7 +981,8 @@ def prepare_columns_for_static_diff(
 ) -> t.Optional[t.Tuple[t.Dict[str, exp.DataType], t.Dict[str, exp.DataType]]]:
     """Prepares old and new column mappings for static schema diffing at plan time.
 
-    Returns None if either mapping is missing or empty (e.g., unexpanded SELECT *).
+    Returns None if either mapping is missing or empty (e.g., unexpanded SELECT *), or if a shared
+    column has a partially-unknown STRUCT with positional fields that can't be compared by name.
     For columns (and nested STRUCT/ARRAY/MAP fields) present in both old and new where either side
     has an unknown or NULL type, normalizes both sides to the same placeholder type so shared
     unknown-type columns/fields do not trigger false-positive destructive type changes while still
@@ -985,14 +992,22 @@ def prepare_columns_for_static_diff(
     if not old_columns_to_types or not new_columns_to_types:
         return None
 
+    # The differ mutates type trees in place, so never hand it the model's own (cached) nodes.
+    old_columns_to_types = {c: d.copy() for c, d in old_columns_to_types.items()}
+    new_columns_to_types = {c: d.copy() for c, d in new_columns_to_types.items()}
+
     comparable_old: t.Dict[str, exp.DataType] = {}
     shared_new: t.Dict[str, exp.DataType] = {}
 
     for col, old_type in old_columns_to_types.items():
         if col in new_columns_to_types:
-            norm_old, norm_new = _prepare_type_pair_for_static_diff(
-                old_type, new_columns_to_types[col]
-            )
+            try:
+                norm_old, norm_new = _prepare_type_pair_for_static_diff(
+                    old_type, new_columns_to_types[col]
+                )
+            except _UncomparableTypesError:
+                # Defer to the physical validation performed at evaluation time.
+                return None
             comparable_old[col] = norm_old
             shared_new[col] = norm_new
         else:

@@ -2505,3 +2505,44 @@ def test_treat_alter_data_type_as_destructive_respects_ignore_flags():
     assert isinstance(ops_keep_destructive[0], TableAlterChangeColumnTypeOperation)
     assert ops_keep_destructive[0].is_destructive
     assert not ops_keep_destructive[0].is_additive
+
+
+def test_prepare_columns_for_static_diff_does_not_alias_input_types():
+    differ = get_schema_differ("databricks")
+    old_cols = {
+        "details": exp.DataType.build("STRUCT<a INT, b STRING>", dialect="databricks"),
+        "u": exp.DataType.build("NULL"),
+    }
+    new_cols = {
+        "details": exp.DataType.build("STRUCT<a INT>", dialect="databricks"),
+        "u": exp.DataType.build("STRING"),
+    }
+    old_sql = {k: v.sql("databricks") for k, v in old_cols.items()}
+    new_sql = {k: v.sql("databricks") for k, v in new_cols.items()}
+
+    for _ in range(2):
+        comp = prepare_columns_for_static_diff(old_cols, new_cols)
+        assert comp is not None
+        ops = differ.compare_columns("tbl", comp[0], comp[1])
+        assert [op.expression.sql("databricks") for op in ops] == [
+            "ALTER TABLE tbl DROP COLUMN details.b"
+        ]
+        # Neither the diff nor the normalization may mutate the caller's type trees.
+        assert {k: v.sql("databricks") for k, v in old_cols.items()} == old_sql
+        assert {k: v.sql("databricks") for k, v in new_cols.items()} == new_sql
+
+
+def test_prepare_columns_for_static_diff_positional_struct_fields():
+    # Positional (unnamed) struct fields, e.g. produced by annotating STRUCT(1, NULL).
+    old_struct = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[exp.DataType.build("INT"), exp.DataType.build("NULL")],
+        nested=True,
+    )
+    new_struct = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[exp.DataType.build("INT"), exp.DataType.build("VARCHAR")],
+        nested=True,
+    )
+    # Positional shapes can't be compared by name, so the comparison is deferred (not a KeyError).
+    assert prepare_columns_for_static_diff({"s": old_struct}, {"s": new_struct}) is None

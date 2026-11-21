@@ -6115,39 +6115,36 @@ def test_observation_propagates_through_snapshot_dispatch(
     assert events == [("start", action, None), ("finish", action, None)]
 
 
-def test_migrate_skips_additive_check_when_snapshot_rebuilds(
+def _migrate_with_extra_column_in_source(
     mocker: MockerFixture,
     make_snapshot,
     make_mocked_engine_adapter,
-):
-    """Bug D1: SnapshotEvaluator.migrate must NOT raise AdditiveChangeError when snapshot has
-    change_category=BREAKING and forward_only=False (is_no_rebuild == False)."""
+    *,
+    physical_version: t.Optional[str],
+) -> Snapshot:
     model = SqlModel(
         name="test_schema.test_model",
         kind=IncrementalByTimeRangeKind(time_column="a", on_additive_change=OnAdditiveChange.ERROR),
         query=parse_one("SELECT c, a, b FROM tbl WHERE ds BETWEEN @start_ds and @end_ds"),
+        physical_version=physical_version,
     )
-    snapshot = make_snapshot(model, version="1")
-    snapshot.change_category = SnapshotChangeCategory.BREAKING
-    snapshot.forward_only = False
-    snapshot.previous_versions = snapshot.all_versions
+    previous_snapshot = make_snapshot(model.copy(update={"stamp": "prev"}), version="0")
+    previous_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    snapshot = make_snapshot(model)
+    snapshot.previous_versions = previous_snapshot.all_versions
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
     assert not snapshot.is_no_rebuild
+    assert snapshot.version == (physical_version or snapshot.fingerprint.to_version())
 
     adapter = make_mocked_engine_adapter(EngineAdapter)
     adapter.with_settings = lambda **kwargs: adapter  # type: ignore
     current_table = snapshot.table_name()
 
     def columns(table_name):
+        existing = {"c": exp.DataType.build("int"), "a": exp.DataType.build("int")}
         if table_name == current_table:
-            return {
-                "c": exp.DataType.build("int"),
-                "a": exp.DataType.build("int"),
-            }
-        return {
-            "c": exp.DataType.build("int"),
-            "a": exp.DataType.build("int"),
-            "b": exp.DataType.build("int"),
-        }
+            return existing
+        return {**existing, "b": exp.DataType.build("int")}
 
     adapter.columns = columns  # type: ignore
     mocker.patch(
@@ -6161,8 +6158,40 @@ def test_migrate_skips_additive_check_when_snapshot_rebuilds(
         ],
     )
 
-    evaluator = SnapshotEvaluator(adapter)
-    evaluator.migrate([snapshot], {})
+    alter_spy = mocker.spy(adapter, "alter_table")
+    SnapshotEvaluator(adapter).migrate([snapshot], {})
+    # Guard against passing vacuously: the extra column must have been added in place.
+    added = [
+        op.expression.sql("duckdb") for call in alter_spy.call_args_list for op in call.args[0]
+    ]
+    assert any("ADD COLUMN b" in sql for sql in added), added
+    return snapshot
+
+
+def test_migrate_skips_additive_check_when_snapshot_rebuilds(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+):
+    """Bug D1: SnapshotEvaluator.migrate must NOT raise AdditiveChangeError when snapshot has
+    change_category=BREAKING and forward_only=False and gets a fresh physical table."""
+    _migrate_with_extra_column_in_source(
+        mocker, make_snapshot, make_mocked_engine_adapter, physical_version=None
+    )
+
+
+def test_migrate_enforces_additive_check_for_pinned_physical_version(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+):
+    """A BREAKING change of a model with a pinned physical_version keeps its table, so the
+    column is added in place and on_additive_change=ERROR must still reject it."""
+    with pytest.raises(NodeExecutionFailedError) as exc_info:
+        _migrate_with_extra_column_in_source(
+            mocker, make_snapshot, make_mocked_engine_adapter, physical_version="v1"
+        )
+    assert isinstance(exc_info.value.__cause__, AdditiveChangeError)
 
 
 def test_dev_preview_non_cloning_create_checks_schema_and_drops_dev_table(
@@ -6359,3 +6388,104 @@ def test_check_destructive_schema_change_ignores_when_on_destructive_is_ignore(m
     assert destructive_type_op.is_destructive
     # Must NOT raise DestructiveChangeError when on_destructive_change=IGNORE
     _check_destructive_schema_change(snapshot, [destructive_type_op], set())
+
+
+def test_dev_preview_schema_introspection_failure_drops_dev_table_and_retry_validates(
+    duck_conn,
+    make_snapshot,
+    mocker: MockerFixture,
+):
+    """If introspecting the schemas of a freshly created dev preview fails, the preview must not be
+    left behind unvalidated, otherwise a retry would skip creation and never validate it."""
+    adapter = create_engine_adapter(lambda: duck_conn, "duckdb")
+    evaluator = SnapshotEvaluator(adapter)
+
+    duck_conn.execute("CREATE TABLE raw_tbl AS SELECT 1 AS id, 'x' AS b, DATE '2023-01-01' AS ds")
+
+    base_model = SqlModel(
+        name="test_schema.test_model",
+        dialect="duckdb",
+        kind=IncrementalByUniqueKeyKind(
+            unique_key="id",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ERROR,
+            on_additive_change=OnAdditiveChange.ERROR,
+        ),
+        query=parse_one("SELECT * FROM raw_tbl WHERE ds BETWEEN @start_ds AND @end_ds"),
+    )
+    prod_snapshot = make_snapshot(base_model, version="1")
+    prod_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    evaluator.create_physical_schemas([prod_snapshot], DeployabilityIndex.all_deployable())
+    evaluator.create(
+        [prod_snapshot],
+        {prod_snapshot.snapshot_id: prod_snapshot},
+        deployability_index=DeployabilityIndex.all_deployable(),
+    )
+
+    dev_snapshot = make_snapshot(base_model.copy(update={"stamp": "dev_v2"}))
+    dev_snapshot.previous_versions = prod_snapshot.all_versions
+    dev_snapshot.categorize_as(SnapshotChangeCategory.INDIRECT_BREAKING, forward_only=True)
+    dev_table = dev_snapshot.table_name(is_deployable=False)
+
+    duck_conn.execute("ALTER TABLE raw_tbl DROP COLUMN b")
+
+    failing = mocker.patch.object(
+        type(adapter), "get_alter_operations", side_effect=RuntimeError("transient")
+    )
+    with pytest.raises(SnapshotCreationFailedError) as exc_info:
+        evaluator.create(
+            [dev_snapshot],
+            {dev_snapshot.snapshot_id: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+        )
+    mocker.stop(failing)
+    assert isinstance(exc_info.value.errors[0].__cause__, RuntimeError)
+    assert not adapter.table_exists(dev_table)
+
+    # A failing existence check on the prod table (after the preview was created) is handled alike.
+    prod_table = prod_snapshot.table_name(is_deployable=True)
+    original_table_exists = type(adapter).table_exists
+
+    def flaky_table_exists(self, table_name, *args, **kwargs):
+        if str(table_name) == prod_table and original_table_exists(self, dev_table):
+            raise RuntimeError("transient exists")
+        return original_table_exists(self, table_name, *args, **kwargs)
+
+    flaky = mocker.patch.object(type(adapter), "table_exists", flaky_table_exists)
+    with pytest.raises(SnapshotCreationFailedError) as exists_info:
+        evaluator.create(
+            [dev_snapshot],
+            {dev_snapshot.snapshot_id: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+        )
+    mocker.stop(flaky)
+    assert "transient exists" in str(exists_info.value.errors[0].__cause__)
+    assert not adapter.table_exists(dev_table)
+
+    # A failing cleanup must not mask the original error.
+    failing = mocker.patch.object(
+        type(adapter), "get_alter_operations", side_effect=RuntimeError("transient")
+    )
+    failing_drop = mocker.patch.object(
+        type(adapter), "drop_table", side_effect=RuntimeError("drop failed")
+    )
+    with pytest.raises(SnapshotCreationFailedError) as drop_info:
+        evaluator.create(
+            [dev_snapshot],
+            {dev_snapshot.snapshot_id: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+        )
+    mocker.stop(failing)
+    mocker.stop(failing_drop)
+    assert str(drop_info.value.errors[0].__cause__) == "transient"
+    adapter.drop_table(dev_table)
+
+    # The retry creates the preview again and now validates it.
+    with pytest.raises(SnapshotCreationFailedError) as retry_info:
+        evaluator.create(
+            [dev_snapshot],
+            {dev_snapshot.snapshot_id: dev_snapshot},
+            deployability_index=DeployabilityIndex.none_deployable(),
+        )
+    assert isinstance(retry_info.value.errors[0].__cause__, DestructiveChangeError)
+    assert not adapter.table_exists(dev_table)

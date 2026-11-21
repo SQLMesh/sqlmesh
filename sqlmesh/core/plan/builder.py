@@ -7,6 +7,8 @@ from collections import defaultdict
 from functools import cached_property
 from datetime import datetime
 
+from sqlglot import exp
+
 
 from sqlmesh.core.console import PlanBuilderConsole, get_console
 from sqlmesh.core.config import (
@@ -16,6 +18,7 @@ from sqlmesh.core.config import (
 )
 from sqlmesh.core.context_diff import ContextDiff
 from sqlmesh.core.environment import EnvironmentNamingInfo
+from sqlmesh.core.model import Model, SCDType2ByTimeKind
 from sqlmesh.core.plan.common import should_force_rebuild, is_breaking_kind_change
 from sqlmesh.core.plan.definition import (
     Plan,
@@ -28,6 +31,7 @@ from sqlmesh.core.schema_diff import (
     has_drop_alteration,
     has_additive_alteration,
     prepare_columns_for_static_diff,
+    TableAlterDropColumnOperation,
     TableAlterOperation,
 )
 from sqlmesh.core.snapshot import (
@@ -59,6 +63,25 @@ DOWNSTREAM_REBUILD_NOT_REQUIRED_CATEGORIES = {
     SnapshotChangeCategory.NON_BREAKING,
     SnapshotChangeCategory.INDIRECT_NON_BREAKING,
 }
+
+
+def _physical_columns_to_types(model: Model) -> t.Optional[t.Dict[str, exp.DataType]]:
+    """Returns the model's columns as they are materialized in the physical table.
+
+    SCD Type 2 by time models always create the `updated_at` column with `time_data_type`,
+    regardless of the type that the model's query projects.
+
+    Table creation only forces this for annotated models. For unannotated ones the comparison is
+    still consistent: both sides are overridden the same way, and `valid_from` / `valid_to` already
+    use `time_data_type`.
+    """
+    columns_to_types = model.columns_to_types
+    if columns_to_types is not None and isinstance(model.kind, SCDType2ByTimeKind):
+        columns_to_types = dict(columns_to_types)
+        updated_at = model.kind.updated_at_name.name
+        if updated_at in columns_to_types:
+            columns_to_types[updated_at] = model.kind.time_data_type
+    return columns_to_types
 
 
 class PlanBuilder:
@@ -667,12 +690,12 @@ class PlanBuilder:
                 self._allow_destructive_models
             )
             needs_additive_check = snapshot.needs_additive_check(self._allow_additive_models)
+            new, old = self._context_diff.modified_snapshots[snapshot.name]
+
             if not (needs_destructive_check or needs_additive_check):
                 continue
-
-            new, old = self._context_diff.modified_snapshots[snapshot.name]
             comparable = prepare_columns_for_static_diff(
-                old.model.columns_to_types, new.model.columns_to_types
+                _physical_columns_to_types(old.model), _physical_columns_to_types(new.model)
             )
             if comparable is None:
                 continue
@@ -697,6 +720,16 @@ class PlanBuilder:
                     ignore_additive=new.model.on_additive_change.is_ignore,
                 ),
             )
+
+            if old.model.on_additive_change.is_ignore:
+                # Columns that the previous definition added under an ignored additive policy may
+                # never have reached its physical table, so the saved definitions can't establish
+                # that dropping them is destructive. That is left to the physical validation.
+                alter_operations = [
+                    op
+                    for op in alter_operations
+                    if not isinstance(op, TableAlterDropColumnOperation)
+                ]
 
             snapshot_name = snapshot.name
             model_dialect = snapshot.model.dialect

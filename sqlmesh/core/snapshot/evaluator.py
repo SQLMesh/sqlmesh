@@ -1217,26 +1217,30 @@ class SnapshotEvaluator:
 
         adapter = self.get_adapter(snapshot.model.gateway)
         prod_table_name = snapshot.table_name(is_deployable=True)
-        if (
-            prod_table_name == dev_table_name
-            or not adapter.table_exists(prod_table_name)
-            or not adapter.table_exists(dev_table_name)
-        ):
-            return
-
-        alter_operations = adapter.get_alter_operations(
-            prod_table_name,
-            dev_table_name,
-            ignore_destructive=snapshot.model.on_destructive_change.is_ignore,
-            ignore_additive=snapshot.model.on_additive_change.is_ignore,
-        )
         try:
+            if (
+                prod_table_name == dev_table_name
+                or not adapter.table_exists(prod_table_name)
+                or not adapter.table_exists(dev_table_name)
+            ):
+                return
+
+            alter_operations = adapter.get_alter_operations(
+                prod_table_name,
+                dev_table_name,
+                ignore_destructive=snapshot.model.on_destructive_change.is_ignore,
+                ignore_additive=snapshot.model.on_additive_change.is_ignore,
+            )
             _check_destructive_schema_change(
                 snapshot, alter_operations, allow_destructive_snapshots
             )
             _check_additive_schema_change(snapshot, alter_operations, allow_additive_snapshots)
-        except (DestructiveChangeError, AdditiveChangeError):
-            adapter.drop_table(dev_table_name)
+        except Exception:
+            # Don't leave an unvalidated preview behind: a retry would skip creating it again.
+            try:
+                adapter.drop_table(dev_table_name)
+            except Exception:
+                logger.exception("Failed to drop the dev preview table '%s'", dev_table_name)
             raise
 
     @observe_snapshot("physical", "schema_migration")
@@ -3502,8 +3506,10 @@ def _check_additive_schema_change(
     if not isinstance(snapshot.model.kind, _Incremental):
         return
 
+    # Snapshots that get a fresh physical table can't have an additive change applied to them.
+    # Pinned physical versions (and non-VDE modes) are migrated in place even when they rebuild.
     if (
-        snapshot.is_no_rebuild
+        (snapshot.is_no_rebuild or snapshot.requires_schema_migration_in_prod)
         and snapshot.needs_additive_check(allow_additive_snapshots)
         and has_additive_alteration(alter_operations)
     ):

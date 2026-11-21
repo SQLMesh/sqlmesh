@@ -7,6 +7,7 @@ import pandas as pd  # noqa: TID253
 import pytest
 from sqlglot import exp
 import time_machine
+from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.core import dialect as d
 from sqlmesh.core.config import (
@@ -27,7 +28,7 @@ from sqlmesh.core.snapshot import (
     SnapshotChangeCategory,
 )
 from sqlmesh.utils.date import to_datetime, to_timestamp
-from sqlmesh.utils.errors import PlanError
+from sqlmesh.utils.errors import AdditiveChangeError, DestructiveChangeError, PlanError
 from tests.core.integration.utils import add_projection_to_model
 
 pytestmark = pytest.mark.slow
@@ -1515,7 +1516,17 @@ def _make_duckdb_context(project_path: Path) -> Context:
     return Context(paths=[project_path], config=cfg)
 
 
-def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(tmp_path: Path):
+def _assert_failed_on_db_down(spy: t.Any, error_type: t.Type[Exception]) -> None:
+    """Asserts that dev apply failed because schema validation of `db.down` raised `error_type`."""
+    errors = [e for call in spy.call_args_list for e in call.args[0]]
+    assert any(
+        isinstance(e.__cause__, error_type) and '"db"."down"' in str(e.__cause__) for e in errors
+    ), [repr(e.__cause__) for e in errors]
+
+
+def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(
+    tmp_path: Path, mocker: MockerFixture
+):
     """Gap S6 (SQL SELECT *): On non-cloning engines (DuckDB, SUPPORTS_CLONING=False), destructive
     and disallowed additive changes through unannotated SELECT * chains must fail during dev apply,
     leave prod untouched, and clean up the temporary __dev preview table."""
@@ -1543,6 +1554,7 @@ def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(tmp_path:
     )
 
     context = _make_duckdb_context(tmp_path)
+    failed_models_spy = mocker.spy(context.console, "log_failed_models")
     assert context.engine_adapter.SUPPORTS_CLONING is False
     assert context.get_model("db.up").columns_to_types is None
     assert context.get_model("db.down").columns_to_types is None
@@ -1563,8 +1575,10 @@ def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(tmp_path:
     )
     context.load()
 
+    failed_models_spy.reset_mock()
     with pytest.raises(PlanError):
         context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    _assert_failed_on_db_down(failed_models_spy, DestructiveChangeError)
 
     down_snapshot = context.get_snapshot("db.down", raise_if_missing=True)
     assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
@@ -1584,8 +1598,10 @@ def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(tmp_path:
     )
     context.load()
 
+    failed_models_spy.reset_mock()
     with pytest.raises(PlanError):
         context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    _assert_failed_on_db_down(failed_models_spy, AdditiveChangeError)
 
     down_snapshot_add = context.get_snapshot("db.down", raise_if_missing=True)
     assert not context.engine_adapter.table_exists(
@@ -1625,7 +1641,7 @@ def test_unannotated_star_destructive_and_additive_caught_in_dev_apply(tmp_path:
 
 
 def test_unannotated_python_model_downstream_forward_only_destructive_caught_in_dev(
-    tmp_path: Path,
+    tmp_path: Path, mocker: MockerFixture
 ):
     """Gap S6 (Python @model without columns metadata): Dynamic Python SQL model upstream of a
     forward_only=True SELECT * model surfaces destructive column drops during dev apply."""
@@ -1655,6 +1671,7 @@ def execute(evaluator):
     )
 
     context = _make_duckdb_context(tmp_path)
+    failed_models_spy = mocker.spy(context.console, "log_failed_models")
     assert context.get_model("db.py_up").columns_to_types is None
     assert context.get_model("db.down").columns_to_types is None
 
@@ -1676,8 +1693,10 @@ def execute(evaluator):
     )
     context.load()
 
+    failed_models_spy.reset_mock()
     with pytest.raises(PlanError):
         context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    _assert_failed_on_db_down(failed_models_spy, DestructiveChangeError)
 
     down_snapshot = context.get_snapshot("db.down", raise_if_missing=True)
     assert set(context.engine_adapter.columns("db.down")) == {"id", "b", "ds"}
@@ -1765,3 +1784,58 @@ def test_forward_only_dev_plan_destructive_change_blocks_prod_plan_until_allowed
         no_prompts=True,
     )
     assert context.engine_adapter.columns("db.m")["val"] == exp.DataType.build("INT")
+
+
+def test_drop_after_ignored_additive_change_still_caught_by_physical_validation(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """The static plan check defers drops when the previous definition ignored additive changes
+    (the physical table may not have those columns), but dropping a column that really exists
+    physically must still be rejected by the physical validation during dev apply."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True)
+
+    def write_model(columns: str, *, on_additive: str) -> None:
+        (models_dir / "down.sql").write_text(
+            f"""
+            MODEL (
+                name db.down,
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds,
+                    forward_only true,
+                    on_destructive_change error,
+                    on_additive_change {on_additive}
+                ),
+                start '2023-01-01'
+            );
+            SELECT {columns} FROM raw_src WHERE ds BETWEEN @start_ds AND @end_ds;
+            """
+        )
+
+    write_model("id::INT AS id, val::TEXT AS val, ds::DATE AS ds", on_additive="error")
+    context = _make_duckdb_context(tmp_path)
+    failed_models_spy = mocker.spy(context.console, "log_failed_models")
+    context.engine_adapter.execute(
+        "CREATE TABLE raw_src AS SELECT 1 AS id, 'x' AS val, 2 AS c, '2023-01-01' AS ds"
+    )
+    context.plan("prod", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "val", "ds"}
+
+    # Adds `c` under on_additive_change=ignore: the physical table never gets it.
+    write_model(
+        "id::INT AS id, val::TEXT AS val, ds::DATE AS ds, c::INT AS c", on_additive="ignore"
+    )
+    context.load()
+    context.plan("prod", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "val", "ds"}
+
+    # Drops `c` (never physical, deferred) and `val` (physical, must be rejected).
+    write_model("id::INT AS id, ds::DATE AS ds", on_additive="ignore")
+    context.load()
+    failed_models_spy.reset_mock()
+    with pytest.raises(PlanError):
+        context.plan("dev", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+    _assert_failed_on_db_down(failed_models_spy, DestructiveChangeError)
+    assert set(context.engine_adapter.columns("db.down")) == {"id", "val", "ds"}
+    down_snapshot = context.get_snapshot("db.down", raise_if_missing=True)
+    assert not context.engine_adapter.table_exists(down_snapshot.table_name(is_deployable=False))
