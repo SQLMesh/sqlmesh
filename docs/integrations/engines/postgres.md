@@ -23,3 +23,16 @@ pip install "sqlmesh[postgres]"
 | `role`             | The role to use for authentication with the Postgres server                     | string | N        |
 | `sslmode`          | The security of the connection to the Postgres server                           | string | N        |
 | `application_name` | The name of the application to use for the connection                           | string | N        |
+
+### DataFrame loading
+
+When using the `psycopg2` driver, SQLMesh loads pandas DataFrames (such as those returned by Python models and used for seeds) with `COPY ... FROM STDIN (FORMAT csv)` instead of batched `INSERT ... VALUES` statements, which is much faster for large DataFrames. The data is copied into a regular schema-qualified staging table (`__temp_...`, rather than a session-local PostgreSQL `TEMP` table) created in the same schema as the target table and then cast into the target table's column types. SQLMesh DataFrame loads run inside a transaction and drop the staging table at the end of the load (or roll back its creation if the load fails inside the transaction); if a staging query is run outside an enclosing transaction, default schema privileges apply while the table exists and an abrupt connection drop or process crash may leave a `__temp_*` table behind that operators can remove. Because the staging table is created in the target's schema, the connecting user needs the `CREATE` privilege on that schema, as for other SQLMesh DDL.
+
+No configuration is required and there is no option to disable this behavior. SQLMesh automatically falls back to `INSERT ... VALUES` when:
+
+- A column has a type or values that cannot be loaded with `COPY` identically. Supported columns are integers (up to 64 bits signed, up to 32 bits unsigned), `float64`, booleans, timestamps (with or without time zone), and strings. Other types, such as `float32`, 64-bit unsigned integers, `Decimal`, dates, bytes, dicts, lists, and categoricals, trigger the fallback.
+- A column's staging type is incompatible with the target column's cast (for example, a non-text DataFrame column targeting `JSON` or `JSONB`, or an integer or numeric column targeting `BOOLEAN`, `BIT`, or `OID`/`REG*`).
+- The DataFrame has a single column and one of its values is `\.`.
+- The driver does not support `copy_expert` (for example, a driver other than `psycopg2`).
+
+The RisingWave engine always uses `INSERT ... VALUES`.
