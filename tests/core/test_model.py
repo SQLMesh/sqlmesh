@@ -13630,3 +13630,283 @@ def test_blueprint_catalog_not_cross_contaminated():
     assert db_model.catalog == "example_catalog", (
         f"Catalog lost for DuckDB blueprint after ClickHouse iteration. Got: {db_model.catalog}"
     )
+
+
+def test_virtual_environment_mode_model_ddl_and_defaults_precedence(tmp_path: Path) -> None:
+    from sqlmesh.core.config import PlanConfig
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    # 1. SQL MODEL DDL: string literal, identifier, and case-insensitive values
+    for raw_mode, expected_mode in (
+        ("'dev_only'", VirtualEnvironmentMode.DEV_ONLY),
+        ("dev_only", VirtualEnvironmentMode.DEV_ONLY),
+        ("'DEV_ONLY'", VirtualEnvironmentMode.DEV_ONLY),
+        ("DEV_ONLY", VirtualEnvironmentMode.DEV_ONLY),
+        ("'full'", VirtualEnvironmentMode.FULL),
+        ("full", VirtualEnvironmentMode.FULL),
+    ):
+        sql_model = load_sql_based_model(
+            d.parse(
+                f"MODEL (name db.m, kind FULL, virtual_environment_mode {raw_mode}); SELECT 1 AS a"
+            )
+        )
+        assert sql_model.virtual_environment_mode == expected_mode
+
+        # Round-trip fidelity via render_definition(include_defaults=True)
+        reloaded = load_sql_based_model(sql_model.render_definition(include_defaults=True))
+        assert reloaded.virtual_environment_mode == expected_mode
+
+    # Dialect fallback in _Node._name_validator when exp.Table lacks meta["sql"] (e.g. BigQuery backticks)
+    previous_model_dialect = model._dialect
+    try:
+        model._dialect = "bigquery"
+        bq_model = SqlModel(
+            name=exp.to_table("`my-proj.my_ds.my_tbl`", dialect="bigquery"),
+            kind="FULL",
+            dialect="bigquery",
+            virtual_environment_mode="dev_only",
+            query=parse_one("SELECT 1 AS a"),
+        )
+        assert bq_model.name == "`my-proj.my_ds.my_tbl`"
+        assert bq_model.fqn == '"my-proj"."my_ds"."my_tbl"'
+        bq_reloaded = load_sql_based_model(bq_model.render_definition(include_defaults=True))
+        assert bq_reloaded.name == bq_model.name
+        assert bq_reloaded.fqn == bq_model.fqn
+        assert bq_reloaded.virtual_environment_mode == VirtualEnvironmentMode.DEV_ONLY
+    finally:
+        model._dialect = previous_model_dialect
+
+    # 2. Python @model decorator
+    from sqlmesh.utils import UniqueKeyDict
+
+    previous_registry = model.get_registry()
+    try:
+        model.set_registry(UniqueKeyDict("models"))
+
+        @model("db.py_m", kind="FULL", columns={"a": "int"}, virtual_environment_mode="dev_only")
+        def py_m(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+            return pd.DataFrame([{"a": 1}])
+
+        py_model = model.get_registry()["db.py_m"].model(
+            module_path=Path("."),
+            path=Path("."),
+        )
+        assert py_model.virtual_environment_mode == VirtualEnvironmentMode.DEV_ONLY
+    finally:
+        model.set_registry(previous_registry)
+
+    # 3. ModelDefaultsConfig accepts both string and VirtualEnvironmentMode enum
+    assert ModelDefaultsConfig().virtual_environment_mode is None
+    assert (
+        ModelDefaultsConfig(virtual_environment_mode="dev_only").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ModelDefaultsConfig(
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        create_external_model(
+            "source_schema.default_source",
+            defaults=ModelDefaultsConfig(virtual_environment_mode="dev_only").dict(),
+        ).virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+
+    # 4. Config validation: use_finalized_state=True + model_defaults.virtual_environment_mode=DEV_ONLY raises ConfigError
+    with pytest.raises(ConfigError, match="virtual_environment_mode"):
+        Config(
+            plan=PlanConfig(use_finalized_state=True),
+            model_defaults=ModelDefaultsConfig(
+                virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
+            ),
+        )
+
+    # 5. Full 3-tier precedence in Context: model-level > model_defaults > root config
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / "sql_default.sql").write_text(
+        "MODEL (name db.sql_default, kind FULL); SELECT 1 AS a;\n",
+        encoding="utf-8",
+    )
+    (models_dir / "sql_full.sql").write_text(
+        "MODEL (name db.sql_full, kind FULL, virtual_environment_mode 'full'); SELECT 1 AS a;\n",
+        encoding="utf-8",
+    )
+    (models_dir / "sql_dev_only.sql").write_text(
+        "MODEL (name db.sql_dev_only, kind FULL, virtual_environment_mode dev_only); SELECT 1 AS a;\n",
+        encoding="utf-8",
+    )
+    (models_dir / "py_models.py").write_text(
+        """import typing as t
+import pandas as pd
+from sqlmesh import ExecutionContext, model
+
+
+@model("db.py_default", kind="FULL", columns={"a": "int"})
+def py_default(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+    return pd.DataFrame([{"a": 1}])
+
+
+@model("db.py_full", kind="FULL", columns={"a": "int"}, virtual_environment_mode="full")
+def py_full(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+    return pd.DataFrame([{"a": 1}])
+
+
+@model("db.py_dev_only", kind="FULL", columns={"a": "int"}, virtual_environment_mode="dev_only")
+def py_dev_only(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+    return pd.DataFrame([{"a": 1}])
+""",
+        encoding="utf-8",
+    )
+
+    # Root FULL + model_defaults DEV_ONLY -> default models get DEV_ONLY, explicit 'full' keeps FULL
+    ctx_defaults_dev_only = Context(
+        paths=tmp_path,
+        config=Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())},
+            virtual_environment_mode=VirtualEnvironmentMode.FULL,
+            model_defaults=ModelDefaultsConfig(
+                dialect="duckdb",
+                virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+            ),
+        ),
+    )
+    assert (
+        ctx_defaults_dev_only.get_model("db.sql_default").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ctx_defaults_dev_only.get_model("db.py_default").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ctx_defaults_dev_only.get_model("db.sql_full").virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+    assert (
+        ctx_defaults_dev_only.get_model("db.py_full").virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+    assert (
+        ctx_defaults_dev_only.get_model("db.sql_dev_only").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ctx_defaults_dev_only.get_model("db.py_dev_only").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    ctx_defaults_dev_only.close()
+
+    # Root DEV_ONLY + model_defaults FULL -> default models get FULL, explicit dev_only keeps DEV_ONLY
+    ctx_defaults_full = Context(
+        paths=tmp_path,
+        config=Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())},
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+            model_defaults=ModelDefaultsConfig(
+                dialect="duckdb",
+                virtual_environment_mode=VirtualEnvironmentMode.FULL,
+            ),
+        ),
+    )
+    assert (
+        ctx_defaults_full.get_model("db.sql_default").virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+    assert (
+        ctx_defaults_full.get_model("db.py_default").virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+    assert (
+        ctx_defaults_full.get_model("db.sql_dev_only").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ctx_defaults_full.get_model("db.py_dev_only").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    ctx_defaults_full.close()
+
+    # Root DEV_ONLY + unset model_defaults -> default models inherit root DEV_ONLY, explicit 'full' keeps FULL
+    ctx_root_dev_only = Context(
+        paths=tmp_path,
+        config=Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())},
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        ),
+    )
+    assert (
+        ctx_root_dev_only.get_model("db.sql_default").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ctx_root_dev_only.get_model("db.py_default").virtual_environment_mode
+        == VirtualEnvironmentMode.DEV_ONLY
+    )
+    assert (
+        ctx_root_dev_only.get_model("db.sql_full").virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+    assert (
+        ctx_root_dev_only.get_model("db.py_full").virtual_environment_mode
+        == VirtualEnvironmentMode.FULL
+    )
+    ctx_root_dev_only.close()
+
+
+def test_per_model_dev_only_with_use_finalized_state_raises_config_error(tmp_path: Path) -> None:
+    from contextlib import ExitStack
+    from sqlmesh.core.config import PlanConfig
+    from sqlmesh.core.config.common import VirtualEnvironmentMode
+
+    expected_msg = "Using the finalized state is only supported when `virtual_environment_mode` is set to `full`."
+
+    with ExitStack() as stack:
+        # 1. Per-model virtual_environment_mode 'dev_only' in MODEL (...) raises ConfigError on Context load
+        proj_bad = tmp_path / "proj_bad"
+        (proj_bad / "models").mkdir(parents=True)
+        (proj_bad / "models" / "m.sql").write_text(
+            "MODEL (name db.m, kind FULL, virtual_environment_mode 'dev_only'); SELECT 1 AS a;\n",
+            encoding="utf-8",
+        )
+
+        finalized_cfg = Config(
+            gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())},
+            virtual_environment_mode=VirtualEnvironmentMode.FULL,
+            model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+            plan=PlanConfig(use_finalized_state=True),
+        )
+
+        with pytest.raises(ConfigError, match=expected_msg):
+            ctx_bad = Context(paths=proj_bad, config=finalized_cfg)
+            stack.callback(ctx_bad.close)
+
+        ctx_no_load = Context(paths=proj_bad, config=finalized_cfg, load=False)
+        stack.callback(ctx_no_load.close)
+        with pytest.raises(ConfigError, match=expected_msg):
+            ctx_no_load.load(update_schemas=False)
+        ctx_no_load.close()
+
+        # 2. Symbolic (EMBEDDED) model does NOT fail, while upsert_model(..., virtual_environment_mode=DEV_ONLY) DOES fail
+        proj_ok = tmp_path / "proj_ok"
+        (proj_ok / "models").mkdir(parents=True)
+        (proj_ok / "models" / "embedded_m.sql").write_text(
+            "MODEL (name db.embedded_m, kind EMBEDDED, virtual_environment_mode 'dev_only'); SELECT 1 AS a;\n",
+            encoding="utf-8",
+        )
+        (proj_ok / "models" / "full_m.sql").write_text(
+            "MODEL (name db.full_m, kind FULL); SELECT a FROM db.embedded_m;\n",
+            encoding="utf-8",
+        )
+
+        ctx_ok = Context(paths=proj_ok, config=finalized_cfg)
+        stack.callback(ctx_ok.close)
+
+        with pytest.raises(ConfigError, match=expected_msg):
+            ctx_ok.upsert_model(
+                "db.full_m", virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY
+            )

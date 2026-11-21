@@ -88,6 +88,8 @@ class ContextDiff(PydanticModel):
     """Environment statements."""
     diff_rendered: bool = False
     """Whether the diff should compare raw vs rendered models"""
+    prod_snapshots: t.Dict[str, SnapshotTableInfo] = {}
+    """Promoted snapshot table infos currently active in the `prod` environment."""
 
     @classmethod
     def create(
@@ -231,6 +233,22 @@ class ContextDiff(PydanticModel):
         else:
             previous_plan_id = env.plan_id if env and not is_new_environment else None
 
+        if environment == c.PROD:
+            prod_env = existing_env
+        elif is_new_environment and create_from.lower() == c.PROD:
+            prod_env = env
+        else:
+            prod_env = state_reader.get_environment(c.PROD)
+
+        prod_snapshots: t.Dict[str, SnapshotTableInfo] = {}
+        if prod_env and not prod_env.expired:
+            prod_snapshot_infos = (
+                prod_env.promoted_snapshots
+                if not ensure_finalized_snapshots
+                else prod_env.finalized_or_current_snapshots
+            )
+            prod_snapshots = {s.name: s for s in prod_snapshot_infos}
+
         return ContextDiff(
             environment=environment,
             is_new_environment=is_new_environment,
@@ -253,6 +271,7 @@ class ContextDiff(PydanticModel):
             environment_statements=environment_statements,
             previous_gateway_managed_virtual_layer=env.gateway_managed if env else False,
             gateway_managed_virtual_layer=gateway_managed_virtual_layer,
+            prod_snapshots=prod_snapshots,
         )
 
     @classmethod
@@ -272,6 +291,12 @@ class ContextDiff(PydanticModel):
 
         environment_statements = state_reader.get_environment_statements(environment)
         snapshots = state_reader.get_snapshots(env.snapshots)
+        prod_env = env if env.name == c.PROD else state_reader.get_environment(c.PROD)
+        prod_snapshots = (
+            {s.name: s for s in prod_env.promoted_snapshots}
+            if prod_env and not prod_env.expired
+            else {}
+        )
 
         return ContextDiff(
             environment=env.name,
@@ -294,6 +319,7 @@ class ContextDiff(PydanticModel):
             environment_statements=environment_statements,
             previous_gateway_managed_virtual_layer=env.gateway_managed,
             gateway_managed_virtual_layer=env.gateway_managed,
+            prod_snapshots=prod_snapshots,
         )
 
     @property

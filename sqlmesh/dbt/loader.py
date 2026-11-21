@@ -173,7 +173,10 @@ class DbtLoader(Loader):
             return config.to_sqlmesh(
                 context,
                 audit_definitions=audits,
-                virtual_environment_mode=self.config.virtual_environment_mode,
+                virtual_environment_mode=(
+                    self.config.model_defaults.virtual_environment_mode
+                    or self.config.virtual_environment_mode
+                ),
             )
 
         for project in self._load_projects():

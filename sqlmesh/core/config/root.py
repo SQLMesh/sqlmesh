@@ -20,7 +20,11 @@ from sqlmesh.core.config.common import (
     VirtualEnvironmentMode,
 )
 from sqlmesh.core.config.base import BaseConfig, UpdateStrategy
-from sqlmesh.core.config.common import variables_validator, compile_regex_mapping
+from sqlmesh.core.config.common import (
+    compile_regex_mapping,
+    variables_validator,
+    virtual_environment_mode_validator,
+)
 from sqlmesh.core.config.connection import (
     ConnectionConfig,
     DuckDBConnectionConfig,
@@ -217,6 +221,7 @@ class Config(BaseConfig):
     _connection_config_validator = connection_config_validator
     _scheduler_config_validator = scheduler_config_validator  # type: ignore
     _variables_validator = variables_validator
+    _virtual_environment_mode_validator = virtual_environment_mode_validator
 
     @model_validator(mode="before")
     def _normalize_and_validate_fields(cls, data: t.Any) -> t.Any:
@@ -273,7 +278,13 @@ class Config(BaseConfig):
                 "Please specify one or the other"
             )
 
-        if self.plan.use_finalized_state and not self.virtual_environment_mode.is_full:
+        if self.plan.use_finalized_state and (
+            not self.virtual_environment_mode.is_full
+            or (
+                self.model_defaults.virtual_environment_mode is not None
+                and not self.model_defaults.virtual_environment_mode.is_full
+            )
+        ):
             raise ConfigError(
                 "Using the finalized state is only supported when `virtual_environment_mode` is set to `full`."
             )

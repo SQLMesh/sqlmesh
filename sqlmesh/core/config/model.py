@@ -5,6 +5,7 @@ import typing as t
 from sqlglot import exp
 from sqlmesh.core.dialect import parse_one, extract_func_call
 from sqlmesh.core.config.base import BaseConfig
+from sqlmesh.core.config.common import VirtualEnvironmentMode, virtual_environment_mode_validator
 from sqlmesh.core.model.kind import (
     ModelKind,
     OnDestructiveChange,
@@ -51,6 +52,7 @@ class ModelDefaultsConfig(BaseConfig):
         post_statements: The list of SQL statements that get executed before a model runs.
         on_virtual_update: The list of SQL statements to be executed after the virtual update.
         gateway: The gateway used by models that do not specify one explicitly.
+        virtual_environment_mode: Indicates how environments should be handled for models that do not specify one explicitly.
 
     """
 
@@ -78,11 +80,13 @@ class ModelDefaultsConfig(BaseConfig):
     post_statements: t.Optional[t.List[t.Union[str, exp.Expr]]] = None
     on_virtual_update: t.Optional[t.List[t.Union[str, exp.Expr]]] = None
     gateway: t.Optional[str] = None
+    virtual_environment_mode: t.Optional[VirtualEnvironmentMode] = None
 
     _model_kind_validator = model_kind_validator
     _on_destructive_change_validator = on_destructive_change_validator
     _on_additive_change_validator = on_additive_change_validator
     _cron_tz_validator = cron_tz_validator
+    _virtual_environment_mode_validator = virtual_environment_mode_validator
 
     @field_validator("audits", mode="before")
     def _audits_validator(cls, v: t.Any) -> t.Any:
