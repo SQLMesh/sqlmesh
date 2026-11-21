@@ -1943,8 +1943,10 @@ class EngineAdapter:
                 f"Column {updated_at_name} not found in {target_table}. Table must contain an `updated_at` timestamp for SCD Type 2"
             )
         time_data_type = target_columns_to_types[valid_from_name]
-        select_source_columns: t.List[t.Union[str, exp.Alias]] = [
-            col for col in unmanaged_columns_to_types if col != updated_at_name
+        select_source_columns: t.List[exp.Expr] = [
+            exp.column(col, quoted=True)
+            for col in unmanaged_columns_to_types
+            if col != updated_at_name
         ]
         table_columns = [exp.column(c, quoted=True) for c in target_columns_to_types]
         if updated_at_name:
@@ -2245,7 +2247,7 @@ class EngineAdapter:
                 .with_(
                     "inserted_rows",
                     exp.select(
-                        *unmanaged_columns_to_types,
+                        *(exp.column(col, quoted=True) for col in unmanaged_columns_to_types),
                         insert_valid_from_start.as_(valid_from_col.this),  # type: ignore
                         to_time_column(exp.null(), time_data_type, self.dialect, nullable=True).as_(
                             valid_to_col.this

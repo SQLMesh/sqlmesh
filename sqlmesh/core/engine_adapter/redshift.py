@@ -103,6 +103,59 @@ class RedshiftEngineAdapter(
             sql = sql.where(exp.column("table_schema").eq(table.args["db"].name))
 
         columns_raw = self.fetchall(sql, quote_identifiers=True)
+        if not columns_raw:
+            # svv_columns can return 0 rows for late-binding views referencing cross-database /
+            # datashare objects or schemas without USAGE metadata visibility. Fall back to
+            # pg_get_late_binding_view_cols() and then pg_catalog.pg_attribute.
+            late_binding_sql = (
+                exp.select("col_name", "col_type")
+                .from_(
+                    exp.Table(
+                        this=exp.func("pg_get_late_binding_view_cols"),
+                        alias=exp.TableAlias(
+                            this=exp.to_identifier("cols"),
+                            columns=[
+                                exp.ColumnDef(
+                                    this=exp.to_identifier("view_schema"),
+                                    kind=exp.DataType.build("NAME", dialect=self.dialect),
+                                ),
+                                exp.ColumnDef(
+                                    this=exp.to_identifier("view_name"),
+                                    kind=exp.DataType.build("NAME", dialect=self.dialect),
+                                ),
+                                exp.ColumnDef(
+                                    this=exp.to_identifier("col_name"),
+                                    kind=exp.DataType.build("NAME", dialect=self.dialect),
+                                ),
+                                exp.ColumnDef(
+                                    this=exp.to_identifier("col_type"),
+                                    kind=exp.DataType.build("VARCHAR", dialect=self.dialect),
+                                ),
+                                exp.ColumnDef(
+                                    this=exp.to_identifier("col_num"),
+                                    kind=exp.DataType.build("INT", dialect=self.dialect),
+                                ),
+                            ],
+                        ),
+                    )
+                )
+                .where(exp.column("view_name").eq(table.alias_or_name))
+                .order_by("col_num", dialect=self.dialect)
+            )
+            if table.args.get("db"):
+                late_binding_sql = late_binding_sql.where(
+                    exp.column("view_schema").eq(table.args["db"].name)
+                )
+            late_binding_cols = self.fetchall(late_binding_sql, quote_identifiers=True)
+            if late_binding_cols:
+                return {
+                    col_name: exp.DataType.build(col_type, dialect=self.dialect, udt=True)
+                    for col_name, col_type in late_binding_cols
+                }
+            try:
+                return super().columns(table_name, include_pseudo_columns=include_pseudo_columns)
+            except SQLMeshError:
+                return {}
 
         def build_var_length_col(
             column_name: str,
@@ -228,13 +281,15 @@ class RedshiftEngineAdapter(
         underlying table without dropping the view first. This is a problem for us since we want to be able to
         swap tables out from under views. Therefore, we create the view as non-binding.
         """
-        no_schema_binding = True
-        if isinstance(query_or_df, exp.Expr):
-            # We can't include NO SCHEMA BINDING if the query has a recursive CTE
-            has_recursive_cte = any(
-                w.args.get("recursive", False) for w in query_or_df.find_all(exp.With)
-            )
-            no_schema_binding = not has_recursive_cte
+        no_schema_binding: t.Optional[bool] = create_kwargs.pop("no_schema_binding", None)
+        if no_schema_binding is None:
+            no_schema_binding = True
+            if isinstance(query_or_df, exp.Expr):
+                # We can't include NO SCHEMA BINDING if the query has a recursive CTE
+                has_recursive_cte = any(
+                    w.args.get("recursive", False) for w in query_or_df.find_all(exp.With)
+                )
+                no_schema_binding = not has_recursive_cte
 
         return super().create_view(
             view_name,
