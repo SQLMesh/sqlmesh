@@ -1069,3 +1069,26 @@ def test_concat_columns_uses_varchar_max(adapter: MSSQLEngineAdapter):
         adapter.concat_columns(columns_to_types).sql(dialect=adapter.dialect)
         == "COALESCE(CAST(id AS VARCHAR(MAX)), '') + ',' + COALESCE(CAST(name AS VARCHAR(MAX)), '')"
     )
+
+
+def test_ctas_varchar_workaround_empty_columns_fallback(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
+    mocker.patch("sqlmesh.core.engine_adapter.base.random_id", return_value="test_random_id")
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.mssql.MSSQLEngineAdapter.table_exists", return_value=False
+    )
+    mocker.patch("sqlmesh.core.engine_adapter.mssql.MSSQLEngineAdapter.columns", return_value={})
+
+    adapter.ctas(
+        table_name="test_schema.test_table",
+        query_or_df=parse_one("SELECT a, b FROM tbl WHERE FALSE LIMIT 0"),
+        exists=False,
+    )
+
+    assert to_sql_calls(adapter) == [
+        "CREATE VIEW [__temp_ctas_test_random_id] AS SELECT [a], [b] FROM [tbl];",
+        "DROP VIEW IF EXISTS [__temp_ctas_test_random_id];",
+        "SELECT * INTO [test_schema].[test_table] FROM (SELECT TOP 0 [a] AS [a], [b] AS [b] FROM [tbl] WHERE (1 = 0)) AS temp;",
+    ]

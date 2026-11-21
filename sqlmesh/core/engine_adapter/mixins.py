@@ -14,6 +14,7 @@ from sqlmesh.core.engine_adapter.shared import DataObjectType
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.dialect import schema_
 from sqlmesh.core.schema_diff import TableAlterOperation
+from sqlmesh.utils import columns_to_types_all_known
 from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
@@ -281,19 +282,22 @@ class VarcharSizeWorkaroundMixin(EngineAdapter):
                     self.columns(temp_view_name)
                 )
 
-                schema = self._build_schema_exp(
-                    exp.to_table(table_name_or_schema),
-                    columns_to_types_from_view,
-                )
-                statement = super()._build_create_table_exp(
-                    schema,
-                    None,
-                    exists=exists,
-                    replace=replace,
-                    target_columns_to_types=columns_to_types_from_view,
-                    table_description=table_description,
-                    **kwargs,
-                )
+                if columns_to_types_from_view and columns_to_types_all_known(
+                    columns_to_types_from_view
+                ):
+                    schema = self._build_schema_exp(
+                        exp.to_table(table_name_or_schema),
+                        columns_to_types_from_view,
+                    )
+                    statement = super()._build_create_table_exp(
+                        schema,
+                        None,
+                        exists=exists,
+                        replace=replace,
+                        target_columns_to_types=columns_to_types_from_view,
+                        table_description=table_description,
+                        **kwargs,
+                    )
             finally:
                 self.drop_view(temp_view_name)
 

@@ -342,8 +342,10 @@ def type_is_known(d_type: t.Union[exp.DataType, exp.ColumnDef]) -> bool:
 
 
 def columns_to_types_all_known(columns_to_types: t.Dict[str, exp.DataType]) -> bool:
-    """Checks that all column types are known and not NULL."""
-    return all(type_is_known(expression) for expression in columns_to_types.values())
+    """Checks that all column types are non-empty, known, and not NULL."""
+    return bool(columns_to_types) and all(
+        type_is_known(expression) for expression in columns_to_types.values()
+    )
 
 
 class Verbosity(IntEnum):

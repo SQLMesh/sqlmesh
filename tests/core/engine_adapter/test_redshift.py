@@ -14,6 +14,7 @@ from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
 from sqlmesh.core.schema_diff import TableAlterDropColumnOperation
 from sqlmesh.core.model import load_sql_based_model
 from sqlmesh.core.model.definition import SqlModel
+from sqlmesh.core.snapshot.evaluator import SCDType2Strategy
 from sqlmesh.utils.errors import SQLMeshError
 from tests.core.engine_adapter import to_sql_calls
 
@@ -956,3 +957,598 @@ def test_redshift_multiple_column_drops_no_clustering_operations(
 
     assert len(operations) == 2
     assert all(isinstance(op, TableAlterDropColumnOperation) for op in operations)
+
+
+@pytest.mark.parametrize(
+    "mocked_columns",
+    [
+        {},
+        {
+            "id": exp.DataType.build("UNKNOWN"),
+            "valid_from": exp.DataType.build("TIMESTAMP"),
+        },
+    ],
+    ids=["empty_columns", "unknown_column_type"],
+)
+def test_ctas_varchar_workaround_empty_or_unknown_columns_fallback(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+    mocked_columns: t.Dict[str, exp.DataType],
+) -> None:
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.base.random_id",
+        return_value="test_random_id",
+    )
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.redshift.RedshiftEngineAdapter.table_exists",
+        return_value=False,
+    )
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.redshift.RedshiftEngineAdapter.columns",
+        return_value=mocked_columns,
+    )
+
+    adapter.ctas(
+        table_name="sqlmesh_xxx.my_example",
+        query_or_df=parse_one(
+            "SELECT id, updated_at, trashed_at, CAST(NULL AS TIMESTAMP) AS valid_from, CAST(NULL AS TIMESTAMP) AS valid_to FROM my_table WHERE FALSE LIMIT 0"
+        ),
+        exists=False,
+    )
+
+    sql_calls = to_sql_calls(adapter)
+    assert 'CREATE TABLE "sqlmesh_xxx"."my_example"' not in sql_calls
+    assert all("UNKNOWN" not in sql for sql in sql_calls)
+    assert sql_calls == [
+        'CREATE VIEW "__temp_ctas_test_random_id" AS SELECT "id", "updated_at", "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "my_table" WITH NO SCHEMA BINDING',
+        'DROP VIEW IF EXISTS "__temp_ctas_test_random_id" CASCADE',
+        'CREATE TABLE "sqlmesh_xxx"."my_example" AS SELECT "id", "updated_at", "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "my_table" WHERE FALSE LIMIT 0',
+    ]
+    for sql in sql_calls:
+        parse_one(sql, read="redshift")
+
+
+def test_columns_late_binding_view_and_pg_catalog_fallback(
+    make_mocked_engine_adapter: t.Callable,
+) -> None:
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    # Subcase 2a: svv_columns returns [] -> fallback to pg_get_late_binding_view_cols() (without schema)
+    adapter.cursor.fetchall.side_effect = [
+        [],
+        [
+            ("id", "character varying(36)"),
+            ("name", "character varying(256)"),
+            ("updated_at", "timestamp without time zone"),
+            ("deleted_at", "timestamp with time zone"),
+        ],
+    ]
+    resp = adapter.columns("__temp_ctas_abc")
+    assert to_sql_calls(adapter) == [
+        """SELECT "column_name", "data_type", "character_maximum_length", "numeric_precision", "numeric_scale" FROM "svv_columns" WHERE "table_name" = '__temp_ctas_abc'""",
+        """SELECT "col_name", "col_type" FROM PG_GET_LATE_BINDING_VIEW_COLS() AS "cols"("view_schema" NAME, "view_name" NAME, "col_name" NAME, "col_type" VARCHAR, "col_num" INTEGER) WHERE "view_name" = '__temp_ctas_abc' ORDER BY "col_num\"""",
+    ]
+    assert list(resp.keys()) == ["id", "name", "updated_at", "deleted_at"]
+    assert resp == {
+        "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+        "name": exp.DataType.build("VARCHAR(256)", dialect="redshift"),
+        "updated_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+        "deleted_at": exp.DataType.build("TIMESTAMPTZ", dialect="redshift"),
+    }
+    assert adapter._default_precision_to_max(resp) == {
+        "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+        "name": exp.DataType.build("VARCHAR(max)", dialect="redshift"),
+        "updated_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+        "deleted_at": exp.DataType.build("TIMESTAMPTZ", dialect="redshift"),
+    }
+
+    # Subcase 2a (with schema): includes AND "view_schema" = 'my_schema'
+    adapter.cursor.execute.reset_mock()
+    adapter.cursor.fetchall.side_effect = [
+        [],
+        [("id", "character varying(36)")],
+    ]
+    resp_schema = adapter.columns("my_schema.my_lbv")
+    assert to_sql_calls(adapter) == [
+        """SELECT "column_name", "data_type", "character_maximum_length", "numeric_precision", "numeric_scale" FROM "svv_columns" WHERE "table_name" = 'my_lbv' AND "table_schema" = 'my_schema'""",
+        """SELECT "col_name", "col_type" FROM PG_GET_LATE_BINDING_VIEW_COLS() AS "cols"("view_schema" NAME, "view_name" NAME, "col_name" NAME, "col_type" VARCHAR, "col_num" INTEGER) WHERE "view_name" = 'my_lbv' AND "view_schema" = 'my_schema' ORDER BY "col_num\"""",
+    ]
+    assert resp_schema == {"id": exp.DataType.build("VARCHAR(36)", dialect="redshift")}
+
+    # Subcase 2b: svv_columns and pg_get_late_binding_view_cols() both return [] -> super().columns() pg_catalog.pg_attribute fallback
+    adapter.cursor.execute.reset_mock()
+    adapter.cursor.fetchall.side_effect = [
+        [],
+        [],
+        [("id", "integer"), ("ts", "timestamp without time zone")],
+    ]
+    resp_pg = adapter.columns("db.local_tbl")
+    sql_calls_pg = to_sql_calls(adapter)
+    assert len(sql_calls_pg) == 3
+    assert '"pg_catalog"."pg_attribute"' in sql_calls_pg[2]
+    assert resp_pg == {
+        "id": exp.DataType.build("INT", dialect="redshift"),
+        "ts": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+    }
+
+    # Subcase 2c: all three catalog queries return [] -> catches SQLMeshError and returns {}
+    adapter.cursor.execute.reset_mock()
+    adapter.cursor.fetchall.side_effect = [[], [], []]
+    assert adapter.columns("db.missing") == {}
+
+
+def test_create_view_explicit_no_schema_binding_override(
+    make_mocked_engine_adapter: t.Callable,
+) -> None:
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+
+    adapter.create_view(
+        view_name="test_view",
+        query_or_df=parse_one("SELECT cola FROM tbl"),
+        no_schema_binding=False,
+    )
+    assert to_sql_calls(adapter) == [
+        'DROP VIEW IF EXISTS "test_view" CASCADE',
+        'CREATE VIEW "test_view" AS SELECT "cola" FROM "tbl"',
+    ]
+
+    adapter.cursor.execute.reset_mock()
+    adapter.create_view(
+        view_name="test_view",
+        query_or_df=parse_one("SELECT cola FROM tbl"),
+    )
+    assert to_sql_calls(adapter) == [
+        'DROP VIEW IF EXISTS "test_view" CASCADE',
+        'CREATE VIEW "test_view" AS SELECT "cola" FROM "tbl" WITH NO SCHEMA BINDING',
+    ]
+
+    adapter.cursor.execute.reset_mock()
+    adapter.create_view(
+        view_name="test_view",
+        query_or_df=parse_one(
+            "WITH RECURSIVE cte AS (SELECT 1 AS cola) SELECT cola FROM cte",
+            dialect="redshift",
+        ),
+    )
+    assert to_sql_calls(adapter) == [
+        'DROP VIEW IF EXISTS "test_view" CASCADE',
+        'CREATE VIEW "test_view" AS WITH RECURSIVE "cte" AS (SELECT 1 AS "cola") SELECT "cola" FROM "cte"',
+    ]
+
+
+def test_scd_type_2_by_time_unannotated_lifecycle_issue_5787(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    model = load_sql_based_model(
+        d.parse(
+            """
+            MODEL (
+              name sqlmesh_xxx.my_example,
+              kind SCD_TYPE_2_BY_TIME (
+                unique_key id
+              )
+            );
+            SELECT
+              id,
+              updated_at,
+              trashed_at
+            FROM my_table
+            """
+        ),
+        dialect="redshift",
+    )
+    assert not model.annotated
+
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter, default_catalog="dev")
+    adapter.cursor.fetchone.side_effect = None
+    adapter.cursor.fetchone.return_value = None
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.base.random_id",
+        return_value="test_random_id",
+    )
+
+    strategy = SCDType2Strategy(adapter)
+    target_table = "sqlmesh__sqlmesh_xxx.sqlmesh_xxx__my_example__1234567890"
+    truncated_ddl = 'CREATE TABLE "sqlmesh__sqlmesh_xxx"."sqlmesh_xxx__my_example__1234567890"'
+
+    # Step 1a: strategy.create when svv_columns returns [] and pg_get_late_binding_view_cols() resolves columns
+    adapter.cursor.fetchall.side_effect = [
+        [],
+        [
+            ("id", "character varying(36)"),
+            ("updated_at", "timestamp without time zone"),
+            ("trashed_at", "timestamp without time zone"),
+            ("valid_from", "timestamp without time zone"),
+            ("valid_to", "timestamp without time zone"),
+        ],
+    ]
+    strategy.create(
+        table_name=target_table,
+        model=model,
+        is_table_deployable=True,
+        render_kwargs={},
+        skip_grants=True,
+    )
+    create_calls_lbv = to_sql_calls(adapter)
+    assert truncated_ddl not in create_calls_lbv
+    assert (
+        'CREATE TABLE "sqlmesh__sqlmesh_xxx"."sqlmesh_xxx__my_example__1234567890" ("id" VARCHAR(36), "updated_at" TIMESTAMP, "trashed_at" TIMESTAMP, "valid_from" TIMESTAMP, "valid_to" TIMESTAMP)'
+        in create_calls_lbv
+    )
+    for sql in create_calls_lbv:
+        parse_one(sql, read="redshift")
+
+    # Step 1b: strategy.create when columns("__temp_ctas_*") returns {} completely (all catalog queries empty)
+    adapter.cursor.execute.reset_mock()
+    adapter.cursor.fetchall.side_effect = [[], [], []]
+    strategy.create(
+        table_name=target_table,
+        model=model,
+        is_table_deployable=True,
+        render_kwargs={},
+        skip_grants=True,
+    )
+    create_calls_fallback = to_sql_calls(adapter)
+    assert truncated_ddl not in create_calls_fallback
+    assert (
+        'CREATE TABLE "sqlmesh__sqlmesh_xxx"."sqlmesh_xxx__my_example__1234567890" AS SELECT "id" AS "id", "updated_at" AS "updated_at", "trashed_at" AS "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "my_table" AS "my_table" WHERE FALSE LIMIT 0'
+        in create_calls_fallback
+    )
+    for sql in create_calls_fallback:
+        parse_one(sql, read="redshift")
+
+    # Step 2 (maiden load: is_first_insert=True) & Step 3 (incremental load: is_first_insert=False)
+    adapter.cursor.fetchone.return_value = ("dev",)
+    mocker.patch.object(
+        adapter,
+        "_get_data_objects",
+        return_value=[
+            DataObject(
+                catalog="dev",
+                schema="sqlmesh__sqlmesh_xxx",
+                name="sqlmesh_xxx__my_example__1234567890",
+                type=DataObjectType.TABLE,
+            )
+        ],
+    )
+    mocker.patch.object(
+        adapter,
+        "columns",
+        return_value={
+            "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+            "updated_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            "trashed_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+        },
+    )
+
+    for is_first_insert in (True, False):
+        adapter.cursor.execute.reset_mock()
+        strategy.insert(
+            table_name=target_table,
+            query_or_df=model.render_query_or_raise(),
+            model=model,
+            is_first_insert=is_first_insert,
+            render_kwargs={},
+            execution_time="2024-01-02 00:00:00",
+        )
+        insert_calls = to_sql_calls(adapter)
+        for sql in insert_calls:
+            parse_one(sql, read="redshift")
+            assert "DISTINCT ON" not in sql
+            assert "TRUNCATE" not in sql
+
+        assert any(
+            sql.startswith(
+                'CREATE TABLE "dev"."sqlmesh__sqlmesh_xxx"."__temp_sqlmesh_xxx__my_example__1234567890_test_random_id" AS SELECT '
+            )
+            for sql in insert_calls
+        )
+        assert (
+            'DELETE FROM "sqlmesh__sqlmesh_xxx"."sqlmesh_xxx__my_example__1234567890" WHERE TRUE'
+            in insert_calls
+        )
+        assert (
+            'DROP TABLE IF EXISTS "sqlmesh__sqlmesh_xxx"."__temp_sqlmesh_xxx__my_example__1234567890_test_random_id"'
+            in insert_calls
+        )
+
+        scd_insert_sql = [
+            sql
+            for sql in insert_calls
+            if sql.startswith(
+                'INSERT INTO "sqlmesh__sqlmesh_xxx"."sqlmesh_xxx__my_example__1234567890" ("id", "updated_at", "trashed_at", "valid_from", "valid_to") WITH "source" AS ('
+            )
+        ]
+        assert len(scd_insert_sql) == 1
+        assert (
+            'ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY "id") AS _row_number'
+            in scd_insert_sql[0]
+        )
+        if is_first_insert:
+            assert 'WHERE NOT "valid_to" IS NULL LIMIT 0' in scd_insert_sql[0]
+            assert 'WHERE "valid_to" IS NULL LIMIT 0' in scd_insert_sql[0]
+        else:
+            assert "LIMIT 0" not in scd_insert_sql[0]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "reserved_from_by_time",
+        "reserved_select_by_time",
+        "hyphenated_col_by_time",
+        "reserved_from_by_column",
+        "reserved_select_by_column",
+        "hyphenated_col_by_column",
+        "composite_key_hard_deletes_timestamptz",
+        "expression_key_no_hard_deletes",
+        "dataframe_source_by_time",
+        "by_column_strategy_star_and_explicit",
+    ],
+)
+def test_scd_type_2_redshift_edge_cases(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+    scenario: str,
+) -> None:
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter, default_catalog="dev")
+    adapter.cursor.fetchone.return_value = ("dev",)
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.base.random_id",
+        return_value="test_random_id",
+    )
+    mocker.patch.object(
+        adapter,
+        "_get_data_objects",
+        return_value=[
+            DataObject(
+                catalog="dev",
+                schema="s",
+                name="t",
+                type=DataObjectType.TABLE,
+            )
+        ],
+    )
+
+    if scenario in (
+        "reserved_from_by_time",
+        "reserved_select_by_time",
+        "hyphenated_col_by_time",
+    ):
+        special_col = {
+            "reserved_from_by_time": "from",
+            "reserved_select_by_time": "select",
+            "hyphenated_col_by_time": "col-name",
+        }[scenario]
+        adapter.scd_type_2_by_time(
+            target_table="s.t",
+            source_table=parse_one(
+                f'SELECT id, "{special_col}", updated_at FROM src',
+                read="redshift",
+            ),
+            unique_key=[exp.column("id")],
+            valid_from_col=exp.column("valid_from", quoted=True),
+            valid_to_col=exp.column("valid_to", quoted=True),
+            execution_time="2024-01-02 00:00:00",
+            updated_at_col=exp.column("updated_at", quoted=True),
+            target_columns_to_types={
+                "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                special_col: exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                "updated_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            },
+        )
+        sql_calls = to_sql_calls(adapter)
+        insert_sql = [s for s in sql_calls if s.startswith('INSERT INTO "s"."t"')][0]
+        assert '"col" - "name"' not in insert_sql
+        assert "AS _col" not in insert_sql
+        assert f'"inserted_rows" AS (SELECT "id", "{special_col}", "updated_at"' in insert_sql
+        assert f'SELECT "_exists", "id", "{special_col}", "updated_at" FROM' in insert_sql
+
+    elif scenario in (
+        "reserved_from_by_column",
+        "reserved_select_by_column",
+        "hyphenated_col_by_column",
+    ):
+        special_col = {
+            "reserved_from_by_column": "from",
+            "reserved_select_by_column": "select",
+            "hyphenated_col_by_column": "col-name",
+        }[scenario]
+        check_cols: t.Union[exp.Star, t.Sequence[exp.Expr]] = (
+            [exp.column(special_col, quoted=True)]
+            if scenario == "reserved_select_by_column"
+            else exp.Star()
+        )
+        adapter.scd_type_2_by_column(
+            target_table="s.t",
+            source_table=parse_one(
+                f'SELECT id, "{special_col}" FROM src',
+                read="redshift",
+            ),
+            unique_key=[exp.column("id")],
+            valid_from_col=exp.column("valid_from", quoted=True),
+            valid_to_col=exp.column("valid_to", quoted=True),
+            execution_time="2024-01-02 00:00:00",
+            check_columns=check_cols,
+            target_columns_to_types={
+                "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                special_col: exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            },
+        )
+        sql_calls = to_sql_calls(adapter)
+        insert_sql = [s for s in sql_calls if s.startswith('INSERT INTO "s"."t"')][0]
+        assert '"col" - "name"' not in insert_sql
+        assert "AS _col" not in insert_sql
+        assert f'"inserted_rows" AS (SELECT "id", "{special_col}",' in insert_sql
+        assert f'SELECT "_exists", "id", "{special_col}" FROM' in insert_sql
+
+    elif scenario == "composite_key_hard_deletes_timestamptz":
+        adapter.scd_type_2_by_time(
+            target_table="s.t",
+            source_table=parse_one("SELECT id, sub_id, val, updated_at FROM src", read="redshift"),
+            unique_key=[exp.column("id"), exp.column("sub_id")],
+            valid_from_col=exp.column("valid_from", quoted=True),
+            valid_to_col=exp.column("valid_to", quoted=True),
+            execution_time="2024-01-02 00:00:00+00:00",
+            updated_at_col=exp.column("updated_at", quoted=True),
+            invalidate_hard_deletes=True,
+            updated_at_as_valid_from=True,
+            target_columns_to_types={
+                "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                "sub_id": exp.DataType.build("INT", dialect="redshift"),
+                "val": exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                "updated_at": exp.DataType.build("TIMESTAMPTZ", dialect="redshift"),
+                "valid_from": exp.DataType.build("TIMESTAMPTZ", dialect="redshift"),
+                "valid_to": exp.DataType.build("TIMESTAMPTZ", dialect="redshift"),
+            },
+        )
+        sql_calls = to_sql_calls(adapter)
+        insert_sql = [s for s in sql_calls if s.startswith('INSERT INTO "s"."t"')][0]
+        assert 'PARTITION BY "id", "sub_id" ORDER BY "id", "sub_id"' in insert_sql
+        assert "TIMESTAMP WITH TIME ZONE" in insert_sql
+        assert 'WHEN "joined"."_exists" IS NULL THEN' in insert_sql
+        assert "1970-01-01" not in insert_sql
+
+    elif scenario == "expression_key_no_hard_deletes":
+        adapter.scd_type_2_by_time(
+            target_table="s.t",
+            source_table=parse_one("SELECT id, val, updated_at FROM src", read="redshift"),
+            unique_key=[parse_one("COALESCE(id, '')", dialect="redshift")],
+            valid_from_col=exp.column("valid_from", quoted=True),
+            valid_to_col=exp.column("valid_to", quoted=True),
+            execution_time="2024-01-02 00:00:00",
+            updated_at_col=exp.column("updated_at", quoted=True),
+            invalidate_hard_deletes=False,
+            updated_at_as_valid_from=False,
+            target_columns_to_types={
+                "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                "val": exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                "updated_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            },
+        )
+        sql_calls = to_sql_calls(adapter)
+        insert_sql = [s for s in sql_calls if s.startswith('INSERT INTO "s"."t"')][0]
+        assert "COALESCE(\"id\", '')" in insert_sql
+        assert 'WHEN "joined"."_exists" IS NULL THEN' not in insert_sql
+        assert "CAST('1970-01-01 00:00:00' AS TIMESTAMP)" in insert_sql
+
+    elif scenario == "dataframe_source_by_time":
+        df = pd.DataFrame(
+            {
+                "id": ["a", "b"],
+                "val": ["x", "y"],
+                "updated_at": ["2024-01-01 00:00:00", "2024-01-01 01:00:00"],
+            }
+        )
+        adapter.scd_type_2_by_time(
+            target_table="s.t",
+            source_table=df,
+            unique_key=[exp.column("id")],
+            valid_from_col=exp.column("valid_from", quoted=True),
+            valid_to_col=exp.column("valid_to", quoted=True),
+            execution_time="2024-01-02 00:00:00",
+            updated_at_col=exp.column("updated_at", quoted=True),
+            target_columns_to_types={
+                "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                "val": exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                "updated_at": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            },
+        )
+        sql_calls = to_sql_calls(adapter)
+        insert_sql = [s for s in sql_calls if s.startswith('INSERT INTO "s"."t"')][0]
+        assert "UNION ALL SELECT" in insert_sql
+        assert "VALUES" not in insert_sql
+
+    elif scenario == "by_column_strategy_star_and_explicit":
+        model_star = load_sql_based_model(
+            d.parse(
+                """
+                MODEL (
+                  name s.t,
+                  kind SCD_TYPE_2_BY_COLUMN (
+                    unique_key id,
+                    columns *,
+                    execution_time_as_valid_from true
+                  )
+                );
+                SELECT id, val FROM src
+                """
+            ),
+            dialect="redshift",
+        )
+        assert not model_star.annotated
+        strategy = SCDType2Strategy(adapter)
+
+        mocker.patch.object(adapter, "table_exists", return_value=False)
+        mocker.patch.object(adapter, "columns", return_value={})
+        strategy.create(
+            table_name="s.t",
+            model=model_star,
+            is_table_deployable=True,
+            render_kwargs={},
+            skip_grants=True,
+        )
+        create_calls = to_sql_calls(adapter)
+        assert 'CREATE TABLE "s"."t"' not in create_calls
+        assert (
+            'CREATE TABLE "s"."t" AS SELECT "id" AS "id", "val" AS "val", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "src" AS "src" WHERE FALSE LIMIT 0'
+            in create_calls
+        )
+
+        mocker.patch.object(
+            adapter,
+            "columns",
+            return_value={
+                "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                "val": exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+            },
+        )
+        for exec_as_valid_from, check_cols_arg in (
+            (True, exp.Star()),
+            (False, [exp.column("val")]),
+        ):
+            adapter.cursor.execute.reset_mock()
+            adapter.scd_type_2_by_column(
+                target_table="s.t",
+                source_table=parse_one("SELECT id, val FROM src", read="redshift"),
+                unique_key=[exp.column("id")],
+                valid_from_col=exp.column("valid_from", quoted=True),
+                valid_to_col=exp.column("valid_to", quoted=True),
+                execution_time="2024-01-02 00:00:00",
+                check_columns=check_cols_arg,
+                execution_time_as_valid_from=exec_as_valid_from,
+                truncate=True,
+                target_columns_to_types={
+                    "id": exp.DataType.build("VARCHAR(36)", dialect="redshift"),
+                    "val": exp.DataType.build("VARCHAR(100)", dialect="redshift"),
+                    "valid_from": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                    "valid_to": exp.DataType.build("TIMESTAMP", dialect="redshift"),
+                },
+            )
+            sub_calls = to_sql_calls(adapter)
+            for sql in sub_calls:
+                parse_one(sql, read="redshift")
+            sub_insert = [s for s in sub_calls if s.startswith('INSERT INTO "s"."t"')][0]
+            if exec_as_valid_from:
+                assert "1970-01-01" not in sub_insert
+            else:
+                assert "CAST('1970-01-01 00:00:00' AS TIMESTAMP)" in sub_insert
+        sql_calls = create_calls
+
+    for sql in sql_calls:
+        parse_one(sql, read="redshift")
