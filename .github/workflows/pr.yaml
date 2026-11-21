@@ -10,9 +10,11 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+# ubuntu-latest is Ubuntu 26.04. That image drops Python 3.9, installs OpenJDK 25
+# (Spark/Hadoop calls the removed Subject.getSubject), and has no Playwright Chromium.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       python: ${{ steps.filter.outputs.python }}
       client: ${{ steps.filter.outputs.client }}
@@ -50,7 +52,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV: '1'
     steps:
@@ -76,7 +78,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +152,10 @@ jobs:
           . ./venv/Scripts/activate
           python.exe -m pip install --upgrade pip
           make install-dev
+      - name: Install DuckLake extension
+        run: |
+          . ./venv/Scripts/activate
+          python -c "import duckdb; duckdb.connect().install_extension('ducklake')"
       - name: Run fast unit tests
         run: |
           . ./venv/Scripts/activate
@@ -169,7 +175,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
       UV: '1'
@@ -198,7 +204,7 @@ jobs:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.vscode ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -225,7 +231,7 @@ jobs:
     if:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: mcr.microsoft.com/playwright:v1.54.1-jammy
     steps:
@@ -253,7 +259,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -308,7 +314,7 @@ jobs:
   engine-tests-cloud:
     needs: engine-tests-docker
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -420,7 +426,7 @@ jobs:
       'true' || github.ref == 'refs/heads/main'
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -439,7 +445,7 @@ jobs:
       needs.changes.outputs.vscode == 'true' || needs.changes.outputs.lsp ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -485,7 +491,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

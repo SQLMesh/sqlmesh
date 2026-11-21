@@ -201,7 +201,7 @@ copyright: Tobiko Data Inc.
 extra:
   social:
     - icon: fontawesome/brands/slack
-      link: https://tobikodata.com/slack
+      link: https://tobiko-data.slack.com/
     - icon: fontawesome/solid/paper-plane
       link: mailto:hello@tobikodata.com
     - icon: fontawesome/brands/github
