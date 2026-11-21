@@ -639,6 +639,12 @@ Options:
   --local              Run tests using only locally loaded project files
                        without loading state. Tests whose model is not loaded
                        are skipped with a warning rather than failing.
+  --use-project-index  Use the persistent project index. With TESTS, only the
+                       models they test and their upstream dependencies are
+                       loaded, so errors in unrelated models are not reported,
+                       and a selected test whose model is not found fails.
+                       Without TESTS, or with --select-model, every model is
+                       still loaded.
   --help               Show this message and exit.
 ```
 

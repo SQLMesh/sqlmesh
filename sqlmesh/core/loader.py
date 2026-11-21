@@ -449,6 +449,16 @@ class Loader(abc.ABC):
         """Loads YAML-based model tests"""
         return []
 
+    def model_names_for_test_selector(
+        self, path: Path, test_name: t.Optional[str] = None
+    ) -> t.Optional[t.Set[str]]:
+        """Resolves a `sqlmesh test` selector to the models it needs, before any model is loaded.
+
+        Returns None if the selector can't be resolved this way, which makes the caller fall
+        back to a full load.
+        """
+        return None
+
     def _glob_paths(
         self,
         path: Path,
@@ -633,9 +643,8 @@ class SqlMeshLoader(Loader):
             )
         return paths
 
-    def _selected_model_paths(
-        self, model_fqns: t.Set[str]
-    ) -> t.Optional[t.Tuple[t.Set[Path], t.Set[str]]]:
+    def _read_model_index(self) -> t.Optional[t.Tuple[t.Any, t.Dict[str, t.Dict[str, t.Any]]]]:
+        """Returns the stored index ID and files, or None if the index is missing or malformed."""
         try:
             index = json.loads(self._model_index_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -644,10 +653,6 @@ class SqlMeshLoader(Loader):
         if not isinstance(index, dict):
             return None
 
-        if index.get("index_id") != self._model_index_id():
-            return None
-
-        current_paths = self._model_paths()
         indexed_files = index.get("files")
         if not isinstance(indexed_files, dict) or not all(
             isinstance(relative_path, str) and isinstance(file_models, dict)
@@ -655,6 +660,65 @@ class SqlMeshLoader(Loader):
         ):
             return None
 
+        return index.get("index_id"), indexed_files
+
+    def model_names_for_test_selector(
+        self, path: Path, test_name: t.Optional[str] = None
+    ) -> t.Optional[t.Set[str]]:
+        """Resolves a `sqlmesh test` selector to the models it needs, before any model is loaded.
+
+        A test file resolves through the `model:` of its tests. A model file resolves through
+        the project index, which can't be validated until the project is loaded, so its result
+        is only a hint: `Context.load` falls back to a full load if the hint turns out stale.
+
+        Args:
+            path: The absolute path of a test file or a model file.
+            test_name: The test to select from a test file, if the selector named one.
+
+        Returns:
+            The model names, or None if the selector can't be resolved this way.
+        """
+        try:
+            relative_path = path.relative_to(os.path.abspath(self.config_path))
+        except ValueError:
+            return None
+
+        if (
+            relative_path.parts[:1] == (c.TESTS,)
+            and path.name.startswith("test")
+            and path.suffix in (".yaml", ".yml")
+            and path.is_file()
+        ):
+            # Same rules as load_model_tests, so an ignored file isn't treated as a test file.
+            if any(path.match(pattern) for pattern in self.config.ignore_patterns or []):
+                return None
+            tests = self._load_model_test_file(path)
+            if test_name is not None:
+                tests = {test_name: tests[test_name]} if test_name in tests else {}
+            model_names = {
+                metadata.model_name for metadata in tests.values() if metadata.model_name
+            }
+            return model_names or None
+
+        if test_name is None and relative_path.parts[:1] == (c.MODELS,):
+            model_index = self._read_model_index()
+            file_models = model_index[1].get(str(relative_path)) if model_index else None
+            return set(file_models) if file_models else None
+
+        return None
+
+    def _selected_model_paths(
+        self, model_fqns: t.Set[str]
+    ) -> t.Optional[t.Tuple[t.Set[Path], t.Set[str]]]:
+        model_index = self._read_model_index()
+        if model_index is None:
+            return None
+
+        index_id, indexed_files = model_index
+        if index_id != self._model_index_id():
+            return None
+
+        current_paths = self._model_paths()
         indexed_paths = {self.config_path / relative_path for relative_path in indexed_files}
         if current_paths != indexed_paths:
             return None
