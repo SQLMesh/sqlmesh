@@ -60,7 +60,7 @@ def generate_dlt_models_and_settings(
 
     # Get the connection credentials
     db_type = pipeline.destination.to_name(pipeline.destination)
-    if db_type == "filesystem":
+    if db_type in ("filesystem", "ducklake"):
         connection_config = None
     else:
         client = pipeline.destination_client()
