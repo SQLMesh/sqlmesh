@@ -11,7 +11,7 @@ from pydantic import Field
 from sqlglot import exp
 from sqlglot.helper import ensure_list, seq_get
 
-from sqlmesh.utils import columns_to_types_to_struct
+from sqlmesh.utils import columns_to_types_to_struct, type_is_known
 from sqlmesh.utils.pydantic import PydanticModel
 from sqlmesh.utils.errors import SQLMeshError
 
@@ -648,7 +648,7 @@ class SchemaDiffer(PydanticModel):
         if self._is_coerceable_type(current_type, new_type):
             return []
         if self._is_compatible_type(current_type, new_type):
-            if ignore_additive:
+            if ignore_destructive if self.treat_alter_data_type_as_destructive else ignore_additive:
                 return []
             struct.expressions.pop(pos)
             struct.expressions.insert(pos, new_kwarg)
@@ -667,7 +667,7 @@ class SchemaDiffer(PydanticModel):
             return []
         return self._drop_operation(
             columns,
-            root_struct,
+            struct,
             pos,
             root_struct,
             table_name,
@@ -841,6 +841,171 @@ def get_additive_column_names(alter_expressions: t.List[TableAlterOperation]) ->
         for op in alter_expressions
         if op.is_additive and isinstance(op, TableAlterColumnOperation)
     ]
+
+
+def _is_unknown_leaf(dtype: exp.DataType) -> bool:
+    return dtype.is_type(exp.DataType.Type.UNKNOWN, exp.DataType.Type.NULL)
+
+
+def _sanitize_unknown_types(dtype: exp.DataType) -> exp.DataType:
+    if type_is_known(dtype):
+        return dtype
+
+    placeholder = exp.DataType.build("INT")
+    if _is_unknown_leaf(dtype):
+        return placeholder
+
+    sanitized = dtype.copy()
+    new_expressions: t.List[exp.Expr] = []
+    for expr in dtype.expressions:
+        if isinstance(expr, exp.ColumnDef):
+            col_copy = expr.copy()
+            col_copy.set(
+                "kind",
+                _sanitize_unknown_types(expr.kind)
+                if isinstance(expr.kind, exp.DataType)
+                else placeholder,
+            )
+            new_expressions.append(col_copy)
+        elif isinstance(expr, exp.DataType):
+            new_expressions.append(_sanitize_unknown_types(expr))
+        else:
+            new_expressions.append(expr.copy())
+    sanitized.set("expressions", new_expressions)
+    return sanitized
+
+
+def _prepare_type_pair_for_static_diff(
+    old_type: exp.DataType, new_type: exp.DataType
+) -> t.Tuple[exp.DataType, exp.DataType]:
+    if type_is_known(old_type) and type_is_known(new_type):
+        return old_type, new_type
+
+    placeholder = exp.DataType.build("INT")
+    if _is_unknown_leaf(old_type) or _is_unknown_leaf(new_type):
+        return placeholder, placeholder
+
+    if old_type.is_type(exp.DataType.Type.STRUCT) and new_type.is_type(exp.DataType.Type.STRUCT):
+        if not old_type.expressions or not new_type.expressions:
+            return placeholder, placeholder
+        if all(
+            isinstance(e, exp.ColumnDef) and e.this is not None for e in old_type.expressions
+        ) and all(
+            isinstance(e, exp.ColumnDef) and e.this is not None for e in new_type.expressions
+        ):
+            old_col_defs = t.cast(t.List[exp.ColumnDef], old_type.expressions)
+            new_col_defs = t.cast(t.List[exp.ColumnDef], new_type.expressions)
+            new_by_name = {f.name: f for f in new_col_defs}
+
+            shared_fields: t.Dict[str, t.Tuple[exp.DataType, exp.DataType]] = {}
+            norm_old_exprs: t.List[exp.ColumnDef] = []
+            for f_old in old_col_defs:
+                old_kind = f_old.kind or placeholder
+                f_old_copy = f_old.copy()
+                if f_old.name in new_by_name:
+                    new_kind = new_by_name[f_old.name].kind or placeholder
+                    norm_old_k, norm_new_k = _prepare_type_pair_for_static_diff(old_kind, new_kind)
+                    shared_fields[f_old.name] = (norm_old_k, norm_new_k)
+                    f_old_copy.set("kind", norm_old_k)
+                else:
+                    f_old_copy.set("kind", _sanitize_unknown_types(old_kind))
+                norm_old_exprs.append(f_old_copy)
+
+            norm_new_exprs: t.List[exp.ColumnDef] = []
+            for f_new in new_col_defs:
+                f_new_copy = f_new.copy()
+                if f_new.name in shared_fields:
+                    f_new_copy.set("kind", shared_fields[f_new.name][1])
+                else:
+                    f_new_copy.set("kind", _sanitize_unknown_types(f_new.kind or placeholder))
+                norm_new_exprs.append(f_new_copy)
+
+            norm_old_struct = old_type.copy()
+            norm_old_struct.set("expressions", norm_old_exprs)
+            norm_new_struct = new_type.copy()
+            norm_new_struct.set("expressions", norm_new_exprs)
+            return norm_old_struct, norm_new_struct
+
+    if old_type.is_type(exp.DataType.Type.ARRAY) and new_type.is_type(exp.DataType.Type.ARRAY):
+        if (
+            not old_type.expressions
+            or not new_type.expressions
+            or not isinstance(old_type.expressions[0], exp.DataType)
+            or not isinstance(new_type.expressions[0], exp.DataType)
+        ):
+            arr_placeholder = exp.DataType.build("ARRAY<INT>")
+            return arr_placeholder, arr_placeholder.copy()
+        norm_old_elem, norm_new_elem = _prepare_type_pair_for_static_diff(
+            old_type.expressions[0], new_type.expressions[0]
+        )
+        norm_old_arr = old_type.copy()
+        norm_old_arr.set("expressions", [norm_old_elem])
+        norm_new_arr = new_type.copy()
+        norm_new_arr.set("expressions", [norm_new_elem])
+        return norm_old_arr, norm_new_arr
+
+    if (
+        old_type.is_type(exp.DataType.Type.MAP)
+        and new_type.is_type(exp.DataType.Type.MAP)
+        and len(old_type.expressions) == 2
+        and len(new_type.expressions) == 2
+        and isinstance(old_type.expressions[0], exp.DataType)
+        and isinstance(old_type.expressions[1], exp.DataType)
+        and isinstance(new_type.expressions[0], exp.DataType)
+        and isinstance(new_type.expressions[1], exp.DataType)
+    ):
+        norm_old_k, norm_new_k = _prepare_type_pair_for_static_diff(
+            old_type.expressions[0], new_type.expressions[0]
+        )
+        norm_old_v, norm_new_v = _prepare_type_pair_for_static_diff(
+            old_type.expressions[1], new_type.expressions[1]
+        )
+        norm_old_map = old_type.copy()
+        norm_old_map.set("expressions", [norm_old_k, norm_old_v])
+        norm_new_map = new_type.copy()
+        norm_new_map.set("expressions", [norm_new_k, norm_new_v])
+        return norm_old_map, norm_new_map
+
+    return _sanitize_unknown_types(old_type), _sanitize_unknown_types(new_type)
+
+
+def prepare_columns_for_static_diff(
+    old_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
+    new_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
+) -> t.Optional[t.Tuple[t.Dict[str, exp.DataType], t.Dict[str, exp.DataType]]]:
+    """Prepares old and new column mappings for static schema diffing at plan time.
+
+    Returns None if either mapping is missing or empty (e.g., unexpanded SELECT *).
+    For columns (and nested STRUCT/ARRAY/MAP fields) present in both old and new where either side
+    has an unknown or NULL type, normalizes both sides to the same placeholder type so shared
+    unknown-type columns/fields do not trigger false-positive destructive type changes while still
+    detecting dropped/added columns/fields and type changes among known-type columns/fields,
+    preserving original projection column order.
+    """
+    if not old_columns_to_types or not new_columns_to_types:
+        return None
+
+    comparable_old: t.Dict[str, exp.DataType] = {}
+    shared_new: t.Dict[str, exp.DataType] = {}
+
+    for col, old_type in old_columns_to_types.items():
+        if col in new_columns_to_types:
+            norm_old, norm_new = _prepare_type_pair_for_static_diff(
+                old_type, new_columns_to_types[col]
+            )
+            comparable_old[col] = norm_old
+            shared_new[col] = norm_new
+        else:
+            comparable_old[col] = _sanitize_unknown_types(old_type)
+
+    comparable_new: t.Dict[str, exp.DataType] = {}
+    for col, new_type in new_columns_to_types.items():
+        if col in shared_new:
+            comparable_new[col] = shared_new[col]
+        else:
+            comparable_new[col] = _sanitize_unknown_types(new_type)
+
+    return comparable_old, comparable_new
 
 
 def get_schema_differ(
