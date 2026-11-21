@@ -18,6 +18,7 @@ from sqlmesh.core.model.kind import SCDType2ByTimeKind
 from sqlmesh.core import dialect as d
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType, SourceQuery
 from sqlmesh.utils.date import to_ds
+from sqlmesh.utils.errors import SQLMeshError
 from tests.core.engine_adapter import to_sql_calls
 
 pytestmark = [pytest.mark.engine, pytest.mark.mssql]
@@ -1081,14 +1082,14 @@ def test_ctas_varchar_workaround_empty_columns_fallback(
     )
     mocker.patch("sqlmesh.core.engine_adapter.mssql.MSSQLEngineAdapter.columns", return_value={})
 
-    adapter.ctas(
-        table_name="test_schema.test_table",
-        query_or_df=parse_one("SELECT a, b FROM tbl WHERE FALSE LIMIT 0"),
-        exists=False,
-    )
+    with pytest.raises(SQLMeshError, match="Could not determine column types"):
+        adapter.ctas(
+            table_name="test_schema.test_table",
+            query_or_df=parse_one("SELECT a, b FROM tbl WHERE FALSE LIMIT 0"),
+            exists=False,
+        )
 
     assert to_sql_calls(adapter) == [
         "CREATE VIEW [__temp_ctas_test_random_id] AS SELECT [a], [b] FROM [tbl];",
         "DROP VIEW IF EXISTS [__temp_ctas_test_random_id];",
-        "SELECT * INTO [test_schema].[test_table] FROM (SELECT TOP 0 [a] AS [a], [b] AS [b] FROM [tbl] WHERE (1 = 0)) AS temp;",
     ]

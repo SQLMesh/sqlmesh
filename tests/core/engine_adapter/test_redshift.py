@@ -990,21 +990,63 @@ def test_ctas_varchar_workaround_empty_or_unknown_columns_fallback(
         return_value=mocked_columns,
     )
 
+    with pytest.raises(SQLMeshError, match="Could not determine column types"):
+        adapter.ctas(
+            table_name="sqlmesh_xxx.my_example",
+            query_or_df=parse_one(
+                "SELECT id, updated_at, trashed_at, CAST(NULL AS TIMESTAMP) AS valid_from, CAST(NULL AS TIMESTAMP) AS valid_to FROM sqlmesh_xxx.my_table WHERE FALSE LIMIT 0"
+            ),
+            exists=False,
+        )
+
+    # The table must never be created from the LIMIT 0 CTAS (VARCHAR widths are non-deterministic)
+    # and the temp view must still be cleaned up.
+    assert to_sql_calls(adapter) == [
+        'CREATE VIEW "__temp_ctas_test_random_id" AS SELECT "id", "updated_at", "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "sqlmesh_xxx"."my_table" WITH NO SCHEMA BINDING',
+        'DROP VIEW IF EXISTS "__temp_ctas_test_random_id" CASCADE',
+    ]
+    for sql in to_sql_calls(adapter):
+        parse_one(sql, read="redshift")
+
+
+def test_ctas_exists_true_derives_varchar_widths_from_view_not_target_types(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+) -> None:
+    adapter = make_mocked_engine_adapter(RedshiftEngineAdapter)
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.base.random_id",
+        return_value="test_random_id",
+    )
+    mocker.patch(
+        "sqlmesh.core.engine_adapter.redshift.RedshiftEngineAdapter.table_exists",
+        return_value=False,
+    )
+    columns_mock = mocker.patch(
+        "sqlmesh.core.engine_adapter.redshift.RedshiftEngineAdapter.columns",
+        return_value={
+            "id": exp.DataType.build("INT"),
+            "name": exp.DataType.build("VARCHAR(2000)", dialect="redshift"),
+        },
+    )
+
+    # Inferred target types can be a plain VARCHAR with no length. They must not be forwarded (default
+    # exists=True path), otherwise a CAST to VARCHAR would truncate; widths come from the temp view.
     adapter.ctas(
         table_name="sqlmesh_xxx.my_example",
-        query_or_df=parse_one(
-            "SELECT id, updated_at, trashed_at, CAST(NULL AS TIMESTAMP) AS valid_from, CAST(NULL AS TIMESTAMP) AS valid_to FROM my_table WHERE FALSE LIMIT 0"
-        ),
-        exists=False,
+        query_or_df=parse_one("SELECT id, name FROM sqlmesh_xxx.my_table WHERE FALSE LIMIT 0"),
+        target_columns_to_types={
+            "id": exp.DataType.build("INT"),
+            "name": exp.DataType.build("VARCHAR"),
+        },
     )
 
     sql_calls = to_sql_calls(adapter)
-    assert 'CREATE TABLE "sqlmesh_xxx"."my_example"' not in sql_calls
-    assert all("UNKNOWN" not in sql for sql in sql_calls)
+    columns_mock.assert_called_once()
     assert sql_calls == [
-        'CREATE VIEW "__temp_ctas_test_random_id" AS SELECT "id", "updated_at", "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "my_table" WITH NO SCHEMA BINDING',
+        'CREATE VIEW "__temp_ctas_test_random_id" AS SELECT "id", "name" FROM "sqlmesh_xxx"."my_table" WITH NO SCHEMA BINDING',
         'DROP VIEW IF EXISTS "__temp_ctas_test_random_id" CASCADE',
-        'CREATE TABLE "sqlmesh_xxx"."my_example" AS SELECT "id", "updated_at", "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "my_table" WHERE FALSE LIMIT 0',
+        'CREATE TABLE "sqlmesh_xxx"."my_example" ("id" INTEGER, "name" VARCHAR(2000))',
     ]
     for sql in sql_calls:
         parse_one(sql, read="redshift")
@@ -1068,6 +1110,7 @@ def test_columns_late_binding_view_and_pg_catalog_fallback(
     sql_calls_pg = to_sql_calls(adapter)
     assert len(sql_calls_pg) == 3
     assert '"pg_catalog"."pg_attribute"' in sql_calls_pg[2]
+    assert 'ORDER BY "attnum"' in sql_calls_pg[2]
     assert resp_pg == {
         "id": exp.DataType.build("INT", dialect="redshift"),
         "ts": exp.DataType.build("TIMESTAMP", dialect="redshift"),
@@ -1135,7 +1178,7 @@ def test_scd_type_2_by_time_unannotated_lifecycle_issue_5787(
               id,
               updated_at,
               trashed_at
-            FROM my_table
+            FROM sqlmesh_xxx.my_table
             """
         ),
         dialect="redshift",
@@ -1181,22 +1224,21 @@ def test_scd_type_2_by_time_unannotated_lifecycle_issue_5787(
     for sql in create_calls_lbv:
         parse_one(sql, read="redshift")
 
-    # Step 1b: strategy.create when columns("__temp_ctas_*") returns {} completely (all catalog queries empty)
+    # Step 1b: columns("__temp_ctas_*") returns {} (all catalog queries empty) -> fail loudly instead of
+    # creating the table from the LIMIT 0 CTAS, which can truncate VARCHARs or lose the schema
     adapter.cursor.execute.reset_mock()
     adapter.cursor.fetchall.side_effect = [[], [], []]
-    strategy.create(
-        table_name=target_table,
-        model=model,
-        is_table_deployable=True,
-        render_kwargs={},
-        skip_grants=True,
-    )
+    with pytest.raises(SQLMeshError, match="Could not determine column types"):
+        strategy.create(
+            table_name=target_table,
+            model=model,
+            is_table_deployable=True,
+            render_kwargs={},
+            skip_grants=True,
+        )
     create_calls_fallback = to_sql_calls(adapter)
-    assert truncated_ddl not in create_calls_fallback
-    assert (
-        'CREATE TABLE "sqlmesh__sqlmesh_xxx"."sqlmesh_xxx__my_example__1234567890" AS SELECT "id" AS "id", "updated_at" AS "updated_at", "trashed_at" AS "trashed_at", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "my_table" AS "my_table" WHERE FALSE LIMIT 0'
-        in create_calls_fallback
-    )
+    assert not any(sql.startswith("CREATE TABLE") for sql in create_calls_fallback)
+    assert create_calls_fallback[-1] == 'DROP VIEW IF EXISTS "__temp_ctas_test_random_id" CASCADE'
     for sql in create_calls_fallback:
         parse_one(sql, read="redshift")
 
@@ -1484,7 +1526,7 @@ def test_scd_type_2_redshift_edge_cases(
                     execution_time_as_valid_from true
                   )
                 );
-                SELECT id, val FROM src
+                SELECT id, val FROM s.src
                 """
             ),
             dialect="redshift",
@@ -1494,19 +1536,16 @@ def test_scd_type_2_redshift_edge_cases(
 
         mocker.patch.object(adapter, "table_exists", return_value=False)
         mocker.patch.object(adapter, "columns", return_value={})
-        strategy.create(
-            table_name="s.t",
-            model=model_star,
-            is_table_deployable=True,
-            render_kwargs={},
-            skip_grants=True,
-        )
-        create_calls = to_sql_calls(adapter)
-        assert 'CREATE TABLE "s"."t"' not in create_calls
-        assert (
-            'CREATE TABLE "s"."t" AS SELECT "id" AS "id", "val" AS "val", CAST(NULL AS TIMESTAMP) AS "valid_from", CAST(NULL AS TIMESTAMP) AS "valid_to" FROM "src" AS "src" WHERE FALSE LIMIT 0'
-            in create_calls
-        )
+        with pytest.raises(SQLMeshError, match="Could not determine column types"):
+            strategy.create(
+                table_name="s.t",
+                model=model_star,
+                is_table_deployable=True,
+                render_kwargs={},
+                skip_grants=True,
+            )
+        assert not any(sql.startswith("CREATE TABLE") for sql in to_sql_calls(adapter))
+        adapter.cursor.execute.reset_mock()
 
         mocker.patch.object(
             adapter,
@@ -1548,7 +1587,7 @@ def test_scd_type_2_redshift_edge_cases(
                 assert "1970-01-01" not in sub_insert
             else:
                 assert "CAST('1970-01-01 00:00:00' AS TIMESTAMP)" in sub_insert
-        sql_calls = create_calls
+        sql_calls = sub_calls
 
     for sql in sql_calls:
         parse_one(sql, read="redshift")

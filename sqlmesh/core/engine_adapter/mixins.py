@@ -282,22 +282,32 @@ class VarcharSizeWorkaroundMixin(EngineAdapter):
                     self.columns(temp_view_name)
                 )
 
-                if columns_to_types_from_view and columns_to_types_all_known(
+                if not (
                     columns_to_types_from_view
+                    and columns_to_types_all_known(columns_to_types_from_view)
                 ):
-                    schema = self._build_schema_exp(
-                        exp.to_table(table_name_or_schema),
-                        columns_to_types_from_view,
+                    # View metadata is unavailable (e.g. a late-binding view the catalog doesn't expose).
+                    # Never fall back to the LIMIT 0 CTAS since its column types (e.g. VARCHAR widths)
+                    # are non-deterministic and the table could silently truncate data.
+                    raise SQLMeshError(
+                        f"Could not determine column types for table "
+                        f"'{exp.to_table(table_name_or_schema).sql(dialect=self.dialect)}' from "
+                        "its query. Specify the column types explicitly, e.g. by annotating the model."
                     )
-                    statement = super()._build_create_table_exp(
-                        schema,
-                        None,
-                        exists=exists,
-                        replace=replace,
-                        target_columns_to_types=columns_to_types_from_view,
-                        table_description=table_description,
-                        **kwargs,
-                    )
+
+                schema = self._build_schema_exp(
+                    exp.to_table(table_name_or_schema),
+                    columns_to_types_from_view,
+                )
+                statement = super()._build_create_table_exp(
+                    schema,
+                    None,
+                    exists=exists,
+                    replace=replace,
+                    target_columns_to_types=columns_to_types_from_view,
+                    table_description=table_description,
+                    **kwargs,
+                )
             finally:
                 self.drop_view(temp_view_name)
 

@@ -55,6 +55,7 @@ class BasePostgresEngineAdapter(EngineAdapter):
         )
         if table.args.get("db"):
             sql = sql.where(exp.column("nspname").eq(table.args["db"].name))
+        sql = sql.order_by("attnum")
 
         self.execute(sql)
         resp = self.cursor.fetchall()

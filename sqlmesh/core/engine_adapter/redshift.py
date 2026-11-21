@@ -253,6 +253,9 @@ class RedshiftEngineAdapter(
             )
         if self.table_exists(table_name):
             return
+        # target_columns_to_types is deliberately not forwarded: inferred types can lack VARCHAR widths, and
+        # casting to them would truncate data. Keeping the LIMIT 0 CTAS lets VarcharSizeWorkaroundMixin derive
+        # the exact widths from a temp view instead.
         super()._create_table_from_source_queries(
             table_name,
             source_queries,
