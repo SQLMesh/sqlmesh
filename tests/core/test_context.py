@@ -17,7 +17,7 @@ from sqlglot.errors import SchemaError
 
 import sqlmesh.core.constants
 from sqlmesh.cli.project_init import init_example_project
-from sqlmesh.core.audit import StandaloneAudit
+from sqlmesh.core.audit import ModelAudit, StandaloneAudit, load_audit
 from sqlmesh.core.console import TerminalConsole
 from sqlmesh.core import dialect as d, constants as c
 from sqlmesh.core.config import (
@@ -42,11 +42,12 @@ from sqlmesh.core.loader import SqlMeshLoader
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.macros import MacroEvaluator, RuntimeStage
 from sqlmesh.core.model import load_sql_based_model, model, SqlModel, Model, update_model_schemas
+from sqlmesh.core.model import create_external_model, create_python_model, create_seed_model
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.cache import OptimizedQueryCache
-from sqlmesh.core.snapshot import SnapshotChangeCategory
+from sqlmesh.core.snapshot import DeployabilityIndex, SnapshotChangeCategory
 from sqlmesh.core.renderer import render_statements
-from sqlmesh.core.model.kind import ModelKindName
+from sqlmesh.core.model.kind import ModelKindName, SeedKind
 from sqlmesh.core.state_sync.cache import CachingStateSync
 from sqlmesh.core.state_sync.db import EngineAdapterStateSync
 from sqlmesh.utils.connection_pool import SingletonConnectionPool, ThreadLocalSharedConnectionPool
@@ -66,6 +67,7 @@ from sqlmesh.utils.errors import (
     NoChangesPlanError,
 )
 from sqlmesh.utils.metaprogramming import Executable
+from sqlmesh.utils.jinja import JinjaMacroRegistry, MacroExtractor
 from sqlmesh.utils.windows import IS_WINDOWS, fix_windows_path
 from tests.utils.test_helpers import use_terminal_console
 from tests.utils.test_filesystem import create_temp_file
@@ -275,6 +277,352 @@ def test_render_seed_model(sushi_context, assert_exp_eq):
           (4, 'Chris')) AS t(id, name)
         """,
     )
+
+
+@pytest.fixture
+def audit_render_context():
+    context = Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb")))
+    audit = ModelAudit(
+        name="minimum_id",
+        query="SELECT id FROM @this_model WHERE id <= @minimum",
+        defaults={"minimum": exp.Literal.number(-1)},
+    )
+    context.upsert_model(
+        load_sql_based_model(
+            parse(
+                """MODEL (
+                  name demo.orders,
+                  kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+                  columns (id INT, region TEXT, ds DATE),
+                  audits (
+                    minimum_id(minimum := 0, blocking := false),
+                    minimum_id(minimum := 10),
+                    not_null(columns := (id), condition := (region = 'us'))
+                  )
+                );
+                SELECT 1 AS id, 'us' AS region, CAST('2026-11-10' AS DATE) AS ds;
+                """,
+                default_dialect="duckdb",
+            ),
+            dialect="duckdb",
+            default_catalog=context.default_catalog,
+            audit_definitions={audit.name: audit},
+        )
+    )
+    context._standalone_audits["minimum_id"] = StandaloneAudit(
+        name="minimum_id", dialect="duckdb", query="SELECT @execution_ds AS rendered_on"
+    )
+    yield context
+    context.close()
+
+
+def test_render_audit_arguments_and_failure_queries(audit_render_context: Context):
+    context = audit_render_context
+    model = context.get_model("demo.orders", raise_if_missing=True)
+    original_audits = model.json()
+    adapter = context.engine_adapter
+    adapter.execute("CREATE SCHEMA demo")
+    adapter.execute("CREATE TABLE demo.orders (id INT, region TEXT, ds DATE)")
+    adapter.execute("""INSERT INTO demo.orders VALUES
+      (-1, 'us', '2026-11-10'), (5, 'eu', '2026-11-10'),
+      (-2, 'us', '2026-11-09'), (NULL, 'us', '2026-11-10'),
+      (NULL, 'eu', '2026-11-10'), (NULL, NULL, '2026-11-10')""")
+    kwargs = dict(start="2026-11-10", end="2026-11-10", execution_time="2026-11-11")
+
+    queries = context.render_audit("demo.orders", audit_name="MINIMUM_ID", **kwargs)
+    assert [adapter.fetchall(query) for query in queries] == [[(-1,)], [(-1,), (5,)]]
+    assert context.render_audit(model, audit_name="minimum_id", **kwargs) == queries
+    assert (
+        context.render_audit(
+            context.get_snapshot(model, raise_if_missing=True), audit_name="minimum_id", **kwargs
+        )
+        == queries
+    )
+    null_queries = context.render_audit("demo.orders", audit_name="not_null", **kwargs)
+    assert adapter.fetchall(null_queries[0]) == [(None, "us", date(2026, 11, 10))]
+    assert model.json() == original_audits
+    assert "blocking" in model.audits[0][1]
+
+
+def test_render_audit_standalone_name_collision(audit_render_context: Context):
+    context = audit_render_context
+    (query,) = context.render_audit(audit_name="MINIMUM_ID", execution_time="2026-11-11")
+    assert context.engine_adapter.fetchall(query) == [("2026-11-11",)]
+    assert len(context.render_audit("demo.orders", audit_name="minimum_id")) == 2
+
+
+@pytest.mark.parametrize("deployable", [True, False])
+def test_render_audit_snapshot_relation(audit_render_context: Context, mocker, deployable):
+    context = audit_render_context
+    model = context.get_model("demo.orders", raise_if_missing=True)
+    snapshots = context.snapshots
+    snapshot = snapshots[model.fqn]
+    assert snapshot.version is None
+    unplanned = context.render_audit(model, audit_name="minimum_id")
+    assert model.fqn in unplanned[0].sql()
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    index = (
+        DeployabilityIndex.all_deployable() if deployable else DeployabilityIndex.none_deployable()
+    )
+    mocker.patch.object(Context, "snapshots", new_callable=PropertyMock, return_value=snapshots)
+    mocker.patch.object(DeployabilityIndex, "create", return_value=index)
+    query, _ = context.render_audit(snapshot, audit_name="minimum_id")
+    expected_table = exp.to_table(snapshot.table_name(deployable))
+    assert any(
+        (table.catalog, table.db, table.name)
+        == (expected_table.catalog, expected_table.db, expected_table.name)
+        for table in query.find_all(exp.Table)
+    )
+    assert query == model.render_audit_query(
+        model.audits_with_args[0][0],
+        snapshots=snapshots,
+        deployability_index=index,
+        engine_adapter=context.engine_adapter,
+        runtime_stage=RuntimeStage.AUDITING,
+        minimum=exp.Literal.number(0),
+    )
+
+
+def test_render_audit_execution_boundary_and_gateway(audit_render_context: Context, mocker):
+    context = audit_render_context
+    context.upsert_model("demo.orders", gateway="other")
+    adapter = mocker.Mock(spec=DuckDBEngineAdapter)
+    adapter.columns.return_value = {"ds": exp.DataType.build("DATE")}
+    context.engine_adapters["other"] = adapter
+    forbidden = [
+        mocker.patch.object(context, "plan"),
+        mocker.patch.object(context, "apply"),
+        mocker.patch.object(context, "evaluate"),
+        mocker.patch.object(context.snapshot_evaluator, "_audit"),
+        mocker.patch.object(context.snapshot_evaluator, "evaluate"),
+    ]
+    model = context.get_model("demo.orders", raise_if_missing=True)
+    for method in ("render_pre_statements", "render_post_statements"):
+        forbidden.append(mocker.patch.object(type(model), method))
+    queries = context.render_audit(model, audit_name="minimum_id")
+    assert len(queries) == 2
+    assert adapter.columns.call_count == 2  # Metadata reads are allowed.
+    adapter.fetchone.assert_not_called()
+    adapter.fetchall.assert_not_called()
+    adapter.execute.assert_not_called()
+    for operation in forbidden:
+        operation.assert_not_called()
+
+
+@pytest.mark.parametrize("skip,blocking", [(False, True), (True, True), (True, False)])
+def test_render_audit_skip_stage_defaults_and_overrides(
+    audit_render_context: Context, skip, blocking
+):
+    context = audit_render_context
+    audit = ModelAudit(
+        name="minimum_id",
+        skip=skip,
+        blocking=blocking,
+        defaults={"minimum": exp.Literal.number(-1)},
+        query="SELECT @minimum AS threshold, @runtime_stage AS stage, @execution_ds AS rendered_on",
+    )
+    context.upsert_model("demo.orders", audit_definitions={audit.name: audit})
+    queries = context.render_audit(
+        "demo.orders", audit_name="minimum_id", execution_time="2026-11-11"
+    )
+    assert [context.engine_adapter.fetchall(query) for query in queries] == [
+        [(0, "auditing", "2026-11-11")],
+        [(10, "auditing", "2026-11-11")],
+    ]
+    # An inline audit without an explicit invocation still uses its defaults.
+    context.upsert_model("demo.orders", audits=[])
+    (query,) = context.render_audit(
+        "demo.orders", audit_name="minimum_id", execution_time="2026-11-11"
+    )
+    assert context.engine_adapter.fetchall(query) == [(-1, "auditing", "2026-11-11")]
+
+
+def test_render_audit_resolves_one_execution_time(audit_render_context: Context, mocker):
+    context = audit_render_context
+    audit = ModelAudit(name="minimum_id", query="SELECT @execution_ds AS rendered_on")
+    context.upsert_model("demo.orders", audit_definitions={audit.name: audit})
+    clock = mocker.patch(
+        "sqlmesh.core.context.now",
+        side_effect=[to_datetime("2026-11-10"), to_datetime("2026-11-11")],
+    )
+    queries = context.render_audit("demo.orders", audit_name="minimum_id")
+    assert [context.engine_adapter.fetchall(query) for query in queries] == [
+        [("2026-11-10",)],
+        [("2026-11-10",)],
+    ]
+    clock.assert_called_once()
+
+
+def test_render_audit_builtin_override(audit_render_context: Context):
+    context = audit_render_context
+    override = ModelAudit(name="not_null", query="SELECT 'custom override' AS failure")
+    model = context.get_model("demo.orders", raise_if_missing=True)
+    context.upsert_model(
+        "demo.orders", audit_definitions={**model.audit_definitions, "not_null": override}
+    )
+    (query,) = context.render_audit("demo.orders", audit_name="not_null")
+    assert context.engine_adapter.fetchall(query) == [("custom override",)]
+
+
+@pytest.mark.parametrize(
+    "model_name,audit_name,message",
+    [
+        ("missing", "minimum_id", "Cannot find model"),
+        ("demo.orders", "missing", "not attached"),
+        (None, "not_null", "requires a model"),
+        (None, "missing", "Cannot find standalone audit"),
+    ],
+)
+def test_render_audit_resolution_errors(
+    audit_render_context: Context, model_name, audit_name, message
+):
+    with pytest.raises(SQLMeshError, match=message):
+        audit_render_context.render_audit(model_name, audit_name=audit_name)
+
+
+@pytest.mark.parametrize("kind", ["full", "external", "seed", "python"])
+def test_render_audit_does_not_evaluate_model(
+    audit_render_context: Context, tmp_path: Path, mocker, kind
+):
+    context = audit_render_context
+    kwargs: t.Dict[str, t.Any] = dict(
+        dialect="duckdb",
+        default_catalog=context.default_catalog,
+        columns={"id": exp.DataType.build("INT")},
+        audits=[("not_null", {"columns": exp.Tuple(expressions=[exp.column("id")])})],
+    )
+    name = f"demo.{kind}"
+    audited_model: Model
+    if kind == "external":
+        audited_model = create_external_model(name, **kwargs)
+    elif kind == "seed":
+        seed = tmp_path / "ids.csv"
+        seed.write_text("id\n1\n")
+        audited_model = create_seed_model(name, SeedKind(path=str(seed)), **kwargs)
+    elif kind == "python":
+        audited_model = create_python_model(
+            name,
+            "data",
+            {
+                "data": Executable(
+                    payload="def data(context, **kwargs):\n    raise AssertionError('must not evaluate model')"
+                )
+            },
+            depends_on=set(),
+            kind="FULL",
+            **kwargs,
+        )
+    else:
+        audited_model = load_sql_based_model(
+            parse(
+                f"MODEL (name {name}, kind FULL, audits (not_null(columns := (id)))); SELECT 1 AS id"
+            ),
+            **kwargs,
+        )
+    context.upsert_model(audited_model)
+    evaluate = mocker.patch.object(
+        type(audited_model), "render", side_effect=AssertionError("must not evaluate model")
+    )
+    (query,) = context.render_audit(name, audit_name="not_null")
+    assert '"id" IS NULL' in query.sql()
+    evaluate.assert_not_called()
+
+
+def test_render_audit_quoted_identifiers(audit_render_context: Context):
+    context = audit_render_context
+    context.upsert_model(
+        load_sql_based_model(
+            parse(
+                '''MODEL (name "CaseSchema"."Orders With Space", kind FULL,
+              audits (not_null(columns := ("MixedCase")))); SELECT 1 AS "MixedCase"''',
+                default_dialect="postgres",
+            ),
+            dialect="postgres",
+            default_catalog=context.default_catalog,
+        )
+    )
+    (query,) = context.render_audit('"CaseSchema"."Orders With Space"', audit_name="not_null")
+    table = next(query.find_all(exp.Table))
+    assert (table.catalog, table.db, table.name) == ("memory", "CaseSchema", "Orders With Space")
+    assert '"MixedCase" IS NULL' in query.sql()
+
+
+@pytest.mark.parametrize("macro_type", ["sql", "python", "jinja"])
+def test_render_audit_macros(audit_render_context: Context, macro_type):
+    context = audit_render_context
+    python_env = {}
+    if macro_type == "sql":
+        audit = load_audit(
+            parse("AUDIT (name macro_audit); @DEF(value, 7); SELECT @value AS result")
+        )
+    elif macro_type == "python":
+        audit = ModelAudit(name="macro_audit", query="SELECT @audit_value() AS result")
+        python_env = {
+            "audit_value": Executable(
+                payload="def audit_value(evaluator):\n    return 7 if evaluator.locals['runtime_stage'] == 'auditing' else 0"
+            )
+        }
+    else:
+        registry = JinjaMacroRegistry()
+        registry.add_macros(MacroExtractor().extract("{% macro audit_value() %}7{% endmacro %}"))
+        audit = load_audit(
+            parse(
+                "AUDIT (name macro_audit);\nJINJA_QUERY_BEGIN;\nSELECT {{ audit_value() }} AS result\nJINJA_END;"
+            ),
+            jinja_macros=registry,
+        )
+        audit = audit.copy(update={"jinja_macros": registry})
+    context.upsert_model(
+        "demo.orders", audits=[], audit_definitions={audit.name: audit}, python_env=python_env
+    )
+    (query,) = context.render_audit("demo.orders", audit_name="macro_audit")
+    assert context.engine_adapter.fetchall(query) == [(7,)]
+
+
+def test_render_audit_timestamp_interval(audit_render_context: Context):
+    context = audit_render_context
+    context.upsert_model(
+        "demo.orders",
+        columns_to_types_={
+            "id": exp.DataType.build("INT"),
+            "region": exp.DataType.build("TEXT"),
+            "ds": exp.DataType.build("TIMESTAMP"),
+        },
+    )
+    query, _ = context.render_audit(
+        "demo.orders",
+        audit_name="minimum_id",
+        start="2026-11-10",
+        end="2026-11-10",
+    )
+    interval = next(query.find_all(exp.Between))
+    assert "2026-11-10 00:00:00" in interval.args["low"].sql()
+    assert "2026-11-10 23:59:59.999999" in interval.args["high"].sql()
+
+
+@pytest.mark.parametrize(
+    "query", ["SELECT @missing AS result", "SELECT @missing_function() AS result"]
+)
+def test_render_audit_missing_macros_keep_file_context(audit_render_context: Context, query):
+    context = audit_render_context
+    audit = ModelAudit(name="broken", query=query)
+    audit._path = Path("audits/broken.sql")
+    context.upsert_model("demo.orders", audits=[], audit_definitions={"broken": audit})
+    with pytest.raises(SQLMeshError, match="audits/broken.sql"):
+        context.render_audit("demo.orders", audit_name="broken")
+
+
+def test_render_audit_empty_render_keeps_audit_context(audit_render_context: Context):
+    context = audit_render_context
+    audit = load_audit(
+        parse(
+            "AUDIT (name empty_audit);\nJINJA_QUERY_BEGIN;\n{% if false %}SELECT 1{% endif %}\nJINJA_END;"
+        )
+    )
+    audit._path = Path("audits/empty_audit.sql")
+    context.upsert_model("demo.orders", audits=[], audit_definitions={audit.name: audit})
+    with pytest.raises(SQLMeshError, match="audit 'empty_audit'.*model 'demo.orders'"):
+        context.render_audit("demo.orders", audit_name="empty_audit")
 
 
 @pytest.mark.slow

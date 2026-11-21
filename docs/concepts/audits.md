@@ -190,6 +190,36 @@ Standalone audits can declare dependencies using the `depends_on` property. SQLM
 !!! note
 
     Standalone audits are non-blocking only. Because they are not associated with a single model, SQLMesh cannot determine which model should be blocked if the audit fails.
+
+## Render audit SQL
+
+Use [`sqlmesh render --audit`](../reference/cli.md#render) to inspect an audit's rendered failure query. Pass the audit's metadata `name`, rather than its SQL filename.
+
+For an audit attached to a model, supply the model name. SQLMesh uses the audit definition and arguments configured on that model, including built-in, user-defined, and inline audits. For the parameterized example above:
+
+```bash
+sqlmesh render sushi.items --audit does_not_exceed_threshold \
+  --start 2024-01-01 --end 2024-01-31 --execution-time 2024-02-01
+```
+
+This renders both invocations in their configured order, keeping their distinct `column` and `threshold` arguments. Each statement has a SQL comment identifying the audit and invocation number, and ends with a semicolon. Blank lines separate the statements. The audit must be attached to the supplied model; SQLMesh does not infer arguments for an unattached audit.
+
+For a standalone audit, omit the model name. For the standalone example above, use `--no-format` to write plain SQL to a file:
+
+```bash
+sqlmesh render --audit assert_item_price_is_not_null \
+  --start 2024-01-01 --end 2024-01-31 --execution-time 2024-02-01 \
+  --no-format > audit.sql
+```
+
+Without a model name, SQLMesh resolves only standalone audits. If an attached and a standalone audit share a name, supplying the model selects the attached audit; omitting the model selects the standalone audit. Explicitly requested audits render even if they have `skip TRUE`, so you can inspect queries that normal execution would skip.
+
+The output uses the audit's declared dialect, falling back to the attached model's dialect or the owning project's dialect. Pass `--dialect` to choose a different output dialect. The audit's input dialect still controls how SQLMesh parses its definition. Formatting options such as `--indent` override the owning project's formatting defaults.
+
+Audit rendering does not support `--expand`. It uses the audit's normal table references and interval filters. Model rendering without `--audit` keeps its existing behavior and requires a model name.
+
+The command does not execute the audit's failure query. Project loading can read state, rendering can inspect column metadata, and user-defined macros can execute database queries as usual.
+
 ## Built-in audits
 SQLMesh comes with a suite of built-in generic audits that cover a broad set of common use cases. Built-in audits are blocking by default, but they all have non-blocking counterparts which you can use by appending `_non_blocking` - see [Non-blocking audits](#non-blocking-audits).
 

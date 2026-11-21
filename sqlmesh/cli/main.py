@@ -4,9 +4,11 @@ import logging
 import os
 import sys
 import typing as t
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import click
+from sqlglot.errors import SqlglotError
 
 from sqlmesh import configure_logging, remove_excess_logs
 from sqlmesh.cli import error_handler
@@ -169,7 +171,11 @@ def cli(
             logger.exception("Failed to initialize SQLMesh context")
         raise
 
-    if load and not context.models:
+    if (
+        load
+        and not context.models
+        and not (ctx.invoked_subcommand == "render" and context.standalone_audits)
+    ):
         raise click.ClickException(
             f"`{paths}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
         )
@@ -279,7 +285,11 @@ Need help?
 
 
 @cli.command("render")
-@click.argument("model")
+@click.argument("model", required=False)
+@click.option(
+    "--audit",
+    help="Render all invocations of this audit on MODEL, or a standalone audit without MODEL. Cannot be used with --expand.",
+)
 @opt.start_time
 @opt.end_time
 @opt.execution_time
@@ -296,16 +306,62 @@ Need help?
 @cli_analytics
 def render(
     ctx: click.Context,
-    model: str,
+    model: t.Optional[str],
     start: TimeLike,
     end: TimeLike,
     execution_time: t.Optional[TimeLike] = None,
     expand: t.Optional[t.Union[bool, t.Iterable[str]]] = None,
     dialect: t.Optional[str] = None,
     no_format: bool = False,
+    audit: t.Optional[str] = None,
     **format_kwargs: t.Any,
 ) -> None:
-    """Render a model's query, optionally expanding referenced models."""
+    """Render a model's query, optionally expanding referenced models, or render audit queries."""
+    if audit is not None:
+        if expand:
+            raise click.UsageError("--audit cannot be used with --expand.", ctx)
+        try:
+            with redirect_stdout(sys.stderr):
+                queries = ctx.obj.render_audit(
+                    model,
+                    audit_name=audit,
+                    start=start,
+                    end=end,
+                    execution_time=execution_time,
+                )
+            owner = (
+                ctx.obj.get_model(model, raise_if_missing=True)
+                if model is not None
+                else ctx.obj.standalone_audits[audit.lower()]
+            )
+            definition = next(a for a, _ in owner.audits_with_args if a.name == audit.lower())
+            config = ctx.obj.config_for_node(owner)
+            options = {
+                **config.format.generator_options,
+                **{k: v for k, v in format_kwargs.items() if v is not None},
+            }
+            output_dialect = (
+                dialect
+                if dialect is not None
+                else definition.dialect or owner.dialect or config.dialect
+            )
+            label = " ".join(definition.name.splitlines())
+            statements = [
+                f"-- Audit: {label}, invocation {index}\n{query.sql(pretty=True, dialect=output_dialect, **options)};"
+                for index, query in enumerate(queries, 1)
+            ]
+        except (SQLMeshError, SqlglotError, ValueError) as ex:
+            # Click reports these errors on stderr, preserving redirectable SQL on stdout.
+            raise click.ClickException(str(ex)) from ex
+        sql = "\n\n".join(statements)
+        if no_format:
+            print(sql)
+        else:
+            ctx.obj.console.show_sql(sql)
+        return
+
+    if model is None:
+        raise click.MissingParameter(param_hint="'MODEL'", param_type="argument", ctx=ctx)
     model = ctx.obj.get_model(model, raise_if_missing=True)
 
     rendered = ctx.obj.render(
