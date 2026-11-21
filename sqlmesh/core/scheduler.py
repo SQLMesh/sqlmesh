@@ -343,6 +343,9 @@ class Scheduler:
         environment_naming_info: EnvironmentNamingInfo,
         dag: t.Optional[DAG[SnapshotId]] = None,
         is_restatement: bool = False,
+        restatements: t.Optional[
+            t.Union[t.Dict[SnapshotId, Interval], t.Dict[str, Interval]]
+        ] = None,
     ) -> t.Dict[Snapshot, Intervals]:
         dag = dag or snapshots_to_dag(merged_intervals)
 
@@ -377,6 +380,10 @@ class Scheduler:
 
                 parent_intervals.extend(snapshot_batches[parent_snapshot])
 
+            restated_interval = None
+            if restatements:
+                restated_interval = restatements.get(snapshot_id) or restatements.get(snapshot.name)  # type: ignore[call-overload]
+
             context = ExecutionContext(
                 adapter,
                 self.snapshots_by_name,
@@ -385,6 +392,7 @@ class Scheduler:
                 default_catalog=self.default_catalog,
                 is_restatement=is_restatement,
                 parent_intervals=parent_intervals,
+                restated_interval=restated_interval,
             )
 
             intervals = self._check_ready_intervals(
@@ -441,6 +449,9 @@ class Scheduler:
         audit_only: bool = False,
         auto_restatement_triggers: t.Dict[SnapshotId, t.List[SnapshotId]] = {},
         is_restatement: bool = False,
+        restatements: t.Optional[
+            t.Union[t.Dict[SnapshotId, Interval], t.Dict[str, Interval]]
+        ] = None,
     ) -> t.Tuple[t.List[NodeExecutionFailedError[SchedulingUnit]], t.List[SchedulingUnit]]:
         """Runs precomputed batches of missing intervals.
 
@@ -480,6 +491,7 @@ class Scheduler:
                 environment_naming_info,
                 dag=snapshot_dag,
                 is_restatement=is_restatement,
+                restatements=restatements,
             )
             self.console.start_evaluation_progress(
                 batched_intervals,

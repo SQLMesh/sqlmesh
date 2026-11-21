@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import typing as t
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 
 from rich.console import Console as RichConsole
@@ -82,7 +82,9 @@ class ExplainableRestatementStage(stages.RestatementStage):
     of what might happen when they ask for the plan to be explained
     """
 
-    snapshot_intervals_to_clear: t.Dict[str, t.List[SnapshotIntervalClearRequest]]
+    snapshot_intervals_to_clear: t.Dict[str, t.List[SnapshotIntervalClearRequest]] = field(
+        default_factory=dict
+    )
     """Which snapshots from other environments would have intervals cleared as part of restatement, grouped by name."""
 
     @classmethod
@@ -107,6 +109,7 @@ class ExplainableRestatementStage(stages.RestatementStage):
         return cls(
             snapshot_intervals_to_clear=snapshot_intervals_to_clear,
             all_snapshots=stage.all_snapshots,
+            expected_previous_snapshots=stage.expected_previous_snapshots,
         )
 
 

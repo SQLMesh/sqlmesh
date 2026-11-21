@@ -261,7 +261,8 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             allow_additive_snapshots=plan.allow_additive_models,
             selected_snapshot_ids=stage.selected_snapshot_ids,
             selected_models=plan.selected_models,
-            is_restatement=bool(plan.restatements),
+            is_restatement=plan.is_restatement,
+            restatements=plan.restatements,
         )
         if errors:
             raise PlanError("Plan application failed.")
@@ -321,19 +322,65 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             str, t.Tuple[SnapshotTableInfo, SnapshotTableInfo]
         ] = {}  # tuple of (restated_snapshot, current_prod_snapshot)
 
-        if deployed_env := self.state_sync.get_environment(plan.environment.name):
-            promoted_snapshots_by_name = {s.name: s for s in deployed_env.snapshots}
+        current_plan_id = getattr(plan, "plan_id", None)
+        if not isinstance(current_plan_id, str):
+            current_plan_id = plan.environment.plan_id
 
-            for name in plan.restatements:
-                snapshot = stage.all_snapshots[name]
-                version = snapshot.table_info.version
-                if (
-                    prod_snapshot := promoted_snapshots_by_name.get(name)
-                ) and prod_snapshot.version != version:
-                    deployed_during_restatement[name] = (
-                        snapshot.table_info,
-                        prod_snapshot.table_info,
-                    )
+        if (
+            (deployed_env := self.state_sync.get_environment(plan.environment.name))
+            and not deployed_env.expired
+            and deployed_env.plan_id != current_plan_id
+        ):
+            ensure_finalized = getattr(plan, "ensure_finalized_snapshots", False) is True
+            if ensure_finalized:
+                if deployed_env.plan_id == plan.environment.previous_plan_id:
+                    snapshot_maps = [
+                        {s.name: s for s in deployed_env.finalized_or_current_snapshots}
+                    ]
+                else:
+                    snapshot_maps = [
+                        {s.name: s for s in deployed_env.snapshots},
+                        {s.name: s for s in deployed_env.finalized_or_current_snapshots},
+                    ]
+            else:
+                snapshot_maps = [{s.name: s for s in deployed_env.snapshots}]
+
+            if stage.expected_previous_snapshots is not None:
+                for name in plan.restatements:
+                    snapshot = stage.all_snapshots[name]
+                    expected_prev = stage.expected_previous_snapshots.get(name)
+
+                    for promoted_snapshots_by_name in snapshot_maps:
+                        prod_snapshot = promoted_snapshots_by_name.get(name)
+                        if expected_prev is not None:
+                            if (
+                                prod_snapshot is None
+                                or prod_snapshot.version != expected_prev.version
+                            ):
+                                deployed_during_restatement[name] = (
+                                    snapshot.table_info,
+                                    prod_snapshot.table_info if prod_snapshot else expected_prev,
+                                )
+                                break
+                        elif prod_snapshot is not None:
+                            deployed_during_restatement[name] = (
+                                snapshot.table_info,
+                                prod_snapshot.table_info,
+                            )
+                            break
+            else:
+                for name in plan.restatements:
+                    snapshot = stage.all_snapshots[name]
+                    version = snapshot.table_info.version
+                    for promoted_snapshots_by_name in snapshot_maps:
+                        if (
+                            prod_snapshot := promoted_snapshots_by_name.get(name)
+                        ) and prod_snapshot.version != version:
+                            deployed_during_restatement[name] = (
+                                snapshot.table_info,
+                                prod_snapshot.table_info,
+                            )
+                            break
 
         # we need to *not* clear the intervals on the snapshots where new versions were deployed while the restatement was running in order to prevent
         # subsequent plans from having unexpected intervals to backfill.
