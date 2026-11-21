@@ -420,6 +420,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        # Whether the last load used the project index to load only some of the models.
+        self._partially_loaded: bool = False
         self._materializations_loaded: bool = False
         self._load_state: bool = load_state
         self._uncached_model_names: t.Set[str] = set()
@@ -808,6 +810,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
         self._loaded = True
+        # Loaders only report indexed models when the index actually scoped the load.
+        self._partially_loaded = bool(indexed_model_fqns)
         self._materializations_loaded = True
         return self
 
@@ -2451,12 +2455,18 @@ class GenericContext(BaseContext, t.Generic[C]):
             pd.set_option("display.max_columns", None)
 
         target_fqns: t.Optional[t.Set[str]] = None
-        # A context that is already loaded is left as is, so callers that go on to use it
-        # don't end up with only part of the project.
-        if use_project_index and not self._loaded:
+        # A fully loaded context is left as is, so callers that go on to use it don't end up
+        # with only part of the project. A partially loaded one may lack the models needed now.
+        if use_project_index and (not self._loaded or self._partially_loaded):
             if tests and model_names is None:
                 target_fqns = self._model_fqns_for_test_selectors(tests)
-            self.load(model_fqns=target_fqns, use_project_index=True)
+            # For a scoped load, schemas are updated below for the models the selected tests
+            # target. Those can differ from the index's hint, e.g. after a model is renamed.
+            self.load(
+                model_fqns=target_fqns,
+                use_project_index=True,
+                update_schemas=target_fqns is None,
+            )
 
         baseline_meta = self.select_tests(
             tests=tests,
@@ -2477,7 +2487,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             tests_skipped = 0
 
         if target_fqns is not None:
-            self._raise_for_tests_without_models(test_meta)
+            self._update_model_schemas_and_validate(self._scoped_test_model_fqns(test_meta))
 
         result = run_tests(
             model_test_metadata=test_meta,
@@ -3773,12 +3783,13 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         return model_fqns or None
 
-    def _raise_for_tests_without_models(self, test_meta: t.Iterable[ModelTestMetadata]) -> None:
-        """Fails a scoped test run when a selected test's model wasn't loaded.
+    def _scoped_test_model_fqns(self, test_meta: t.Iterable[ModelTestMetadata]) -> t.Set[str]:
+        """Returns the FQNs of the models targeted by the tests of a scoped run.
 
-        A full run warns and skips such a test, but a scoped run that does so can pass while
-        testing nothing.
+        Fails if a selected test's model wasn't loaded. A full run warns and skips such a test,
+        but a scoped run that does so can pass while testing nothing.
         """
+        fqns = set()
         errors = []
         for metadata in test_meta:
             if not metadata.model_name:
@@ -3788,13 +3799,16 @@ class GenericContext(BaseContext, t.Generic[C]):
                 default_catalog=self.default_catalog,
                 dialect=self.default_dialect,
             )
-            if fqn not in self._models:
+            if fqn in self._models:
+                fqns.add(fqn)
+            else:
                 errors.append(
                     f"Model '{fqn}' targeted by test '{metadata.fully_qualified_test_name}' was not found."
                 )
 
         if errors:
             raise SQLMeshError("\n".join(errors))
+        return fqns
 
     def _unknown_test_selector_error(self, selector: str) -> str:
         """Explains why a selector matched nothing.

@@ -4004,3 +4004,55 @@ def test_use_project_index_keeps_loaded_context_whole(
     assert result.wasSuccessful(), result.failures + result.errors
     assert result.testsRun == 1
     assert set(context.models) == set(INDEXED_PROJECT_FQNS.values())
+
+
+def test_use_project_index_reloads_partially_loaded_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A context left with only some models by a scoped run must not silently drop tests."""
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    assert context.test(tests=["models/a.sql"], use_project_index=True).testsRun == 1
+
+    # Case: a second scoped run needs a model the first one didn't load.
+    result = context.test(tests=["models/b.sql"], use_project_index=True)
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+
+    # Case: a run without selectors loads everything again.
+    result = context.test(use_project_index=True)
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 2
+    assert set(context.models) == set(INDEXED_PROJECT_FQNS.values())
+
+
+def test_use_project_index_resolves_schemas_after_stale_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Renaming a model in place leaves the index hint stale, which forces a full load."""
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    (tmp_path / "models" / "a.sql").write_text(
+        "MODEL(name demo.renamed, kind FULL); SELECT * FROM demo.src", encoding="utf-8"
+    )
+    test_path = tmp_path / "tests" / "test_a.yaml"
+    test_path.write_text(
+        test_path.read_text(encoding="utf-8").replace("model: demo.a", "model: demo.renamed"),
+        encoding="utf-8",
+    )
+
+    context = Context(paths=tmp_path, load=False)
+    result = context.test(tests=["models/a.sql"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    # The schema is resolved for the model the test targets, not the stale name in the index.
+    assert set(context.get_model("demo.renamed", raise_if_missing=True).columns_to_types or {}) == {
+        "id",
+        "name",
+    }
