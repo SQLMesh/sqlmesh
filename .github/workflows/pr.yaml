@@ -488,7 +488,8 @@ jobs:
         run: pnpm exec playwright install
       - name: Run e2e tests
         working-directory: ./vscode/extension
-        timeout-minutes: 30
+        # CI runs one worker. That needs a longer cap than the old 30 minutes.
+        timeout-minutes: 60
         run: |
           source ../../.venv/bin/activate
           pnpm run test:e2e
