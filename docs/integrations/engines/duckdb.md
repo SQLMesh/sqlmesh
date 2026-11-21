@@ -196,6 +196,12 @@ Some connections, like SQLite, do not support schema names and therefore objects
 
 Example: mounting a SQLite database with the name `sqlite` that has a table `example_table` will be accessible as `sqlite.main.example_table`.
 
+##### Incremental by unique key models
+
+On DuckDB version 1.4 or later, [`INCREMENTAL_BY_UNIQUE_KEY`](../../concepts/models/model_kinds.md#incremental_by_unique_key) models targeting a DuckDB, DuckLake or MotherDuck catalog use a single, atomic `MERGE` statement and support `when_matched` and `merge_filter`. Older DuckDB versions and tables in other attached catalogs (such as PostgreSQL or SQLite) use `DELETE` + `INSERT`, which runs as two statements because DuckDB adapter transactions are disabled, and do not support `when_matched` or `merge_filter`.
+
+Native `MERGE` matches `unique_key` columns using standard SQL `=` equality. As a result, `NULL` key values do not match existing rows (`NULL = NULL` is unknown / evaluates to false in SQL), consistent with all other SQLMesh native `MERGE` engines and preserving dynamic join filter and zone-map pushdown in the DuckDB query optimizer. For models with nullable composite keys where nulls should be treated as matching, pass expressions such as `COALESCE(key_col, '<sentinel>')` in `unique_key`.
+
 ##### Sensitive fields in paths
 
 If a connector, like Postgres, requires sensitive information in the path, it might support defining environment variables instead.

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import typing as t
+from functools import cached_property, partial
 from sqlglot import exp
 from pathlib import Path
+from packaging import version
 
+from sqlmesh.core.engine_adapter.base import MERGE_TARGET_ALIAS
 from sqlmesh.core.engine_adapter.mixins import (
     GetCurrentCatalogFromFunctionMixin,
-    LogicalMergeMixin,
     RowDiffMixin,
+    logical_merge,
 )
 from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
@@ -21,11 +24,11 @@ from sqlmesh.core.engine_adapter.shared import (
 
 if t.TYPE_CHECKING:
     from sqlmesh.core._typing import SchemaName, TableName
-    from sqlmesh.core.engine_adapter._typing import DF
+    from sqlmesh.core.engine_adapter._typing import DF, Query, QueryOrDF
 
 
 @set_catalog(override_mapping={"_get_data_objects": CatalogSupport.REQUIRES_SET_CATALOG})
-class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
+class DuckDBEngineAdapter(GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
     DIALECT = "duckdb"
     SUPPORTS_TRANSACTIONS = False
     SCHEMA_DIFFER_KWARGS = {
@@ -37,6 +40,11 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
     COMMENT_CREATION_VIEW = CommentCreationView.COMMENT_COMMAND_ONLY
     SUPPORTS_CREATE_DROP_CATALOG = True
     SUPPORTED_DROP_CASCADE_OBJECT_KINDS = ["SCHEMA", "TABLE", "VIEW"]
+    # MERGE INTO was added in DuckDB 1.4.0
+    MIN_NATIVE_MERGE_VERSION = version.parse("1.4.0")
+    # Catalog types whose storage extension supports MERGE INTO. Other attached catalogs
+    # (postgres, sqlite, mysql, ...) fall back to DELETE + INSERT.
+    NATIVE_MERGE_CATALOG_TYPES = {"duckdb", "ducklake", "motherduck"}
 
     @property
     def catalog_support(self) -> CatalogSupport:
@@ -71,6 +79,130 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
                     this=exp.Table(this=catalog_name), kind="DATABASE", cascade=True, exists=True
                 )
             )
+
+    @cached_property
+    def _duckdb_supports_merge(self) -> bool:
+        import duckdb
+
+        return version.parse(duckdb.__version__) >= self.MIN_NATIVE_MERGE_VERSION
+
+    def _supports_native_merge(self, target_table: TableName) -> bool:
+        if not self._duckdb_supports_merge:
+            return False
+        # Errors from the catalog lookup propagate on purpose; only a None/unknown type falls back.
+        catalog_type = (self._get_target_catalog_type(target_table) or "").lower()
+        return catalog_type in self.NATIVE_MERGE_CATALOG_TYPES
+
+    def merge(
+        self,
+        target_table: TableName,
+        source_table: QueryOrDF,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]],
+        unique_key: t.Sequence[exp.Expr],
+        when_matched: t.Optional[exp.Whens] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        merge_impl = (
+            super().merge
+            if self._supports_native_merge(target_table)
+            else partial(logical_merge, self)
+        )
+        merge_impl(  # type: ignore
+            target_table,
+            source_table,
+            target_columns_to_types,
+            unique_key,
+            when_matched=when_matched,
+            merge_filter=merge_filter,
+            source_columns=source_columns,
+        )
+
+    def _prepare_merge_source_query(
+        self,
+        query: Query,
+        target_table: TableName,
+        target_columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        unique_key: t.Optional[t.Sequence[exp.Expr]] = None,
+        when_matched: t.Optional[exp.Whens] = None,
+        merge_filter: t.Optional[exp.Expr] = None,
+        source_columns: t.Optional[t.List[str]] = None,
+    ) -> Query:
+        if target_columns_to_types is None:
+            try:
+                target_columns_to_types = self.columns(target_table)
+            except Exception:
+                target_columns_to_types = None
+
+        unique_key = unique_key or []
+
+        if target_columns_to_types:
+            source_columns_set = (
+                {s.lower() for s in source_columns} if source_columns is not None else None
+            )
+            target_cols_to_project = (
+                [col for col in target_columns_to_types if col.lower() in source_columns_set]
+                if source_columns_set is not None
+                else list(target_columns_to_types)
+            )
+            replacements = [
+                exp.alias_(
+                    exp.cast(exp.column(col, quoted=True), to=dtype),
+                    col,
+                    quoted=True,
+                    copy=False,
+                )
+                for col in target_cols_to_project
+                if (dtype := target_columns_to_types[col])
+                and not dtype.is_type(exp.DataType.Type.UNKNOWN)
+            ]
+        else:
+            replacements = []
+
+        select = exp.select("*")
+        if unique_key:
+            select = select.distinct(*unique_key)
+
+        if not replacements:
+            return select.from_(query.subquery("_src"), copy=False)
+
+        coerced = exp.select(exp.Star(replace=replacements)).from_(
+            query.subquery("_raw_src"), copy=False
+        )
+        return select.from_(coerced.subquery("_src", copy=False), copy=False)
+
+    def _merge(
+        self,
+        target_table: TableName,
+        query: Query,
+        on: exp.Expr,
+        whens: exp.Whens,
+    ) -> None:
+        # DuckDB rejects a qualified column on the left-hand side of UPDATE SET and in the INSERT
+        # column list. Conditions and right-hand sides may keep the qualifier.
+        # TODO: sqlglot's DuckDB generator doesn't apply `merge_without_target_sql` yet. Remove this
+        # once the pinned sqlglot version does.
+        whens = whens.copy()
+        target_names = {
+            MERGE_TARGET_ALIAS,
+            exp.to_table(target_table, dialect=self.dialect).name.upper(),
+        }
+        for when in whens.expressions:
+            then = when.args.get("then")
+            targets: t.List[exp.Expr] = []
+            if isinstance(then, exp.Update):
+                targets = [e.this for e in then.expressions if isinstance(e, exp.EQ)]
+            elif isinstance(then, exp.Insert) and isinstance(then.this, exp.Tuple):
+                targets = then.this.expressions
+            for column in targets:
+                if (
+                    isinstance(column, exp.Column)
+                    and column.table
+                    and column.table.upper() in target_names
+                ):
+                    column.set("table", None)
+        super()._merge(target_table, query, on, whens)
 
     def _df_to_source_queries(
         self,
@@ -219,11 +351,20 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         # "Cascade Drop not supported in DuckLake". Views in DuckDB are late-binding, so
         # dropping the underlying table without CASCADE is safe there.
         if cascade and kind.upper() in ("TABLE", "VIEW"):
-            catalog = exp.to_table(name).catalog or self.get_current_catalog()
-            if self._get_catalog_type(catalog) == "ducklake":
+            if (self._get_target_catalog_type(name) or "").lower() == "ducklake":
                 cascade = False
 
         super()._drop_object(name=name, exists=exists, kind=kind, cascade=cascade, **drop_args)
+
+    def _get_target_catalog_type(self, name: TableName) -> t.Optional[str]:
+        table = exp.to_table(name, dialect=self.dialect)
+        if table.catalog:
+            return self._get_catalog_type(table.catalog)
+        if table.db:
+            db_catalog_type = self._get_catalog_type(table.db)
+            if db_catalog_type is not None:
+                return db_catalog_type
+        return self._get_catalog_type(self.get_current_catalog())
 
     def _get_catalog_type(self, catalog: t.Optional[str]) -> t.Optional[str]:
         """Returns the type of the given catalog (e.g. 'duckdb', 'ducklake') as reported by duckdb_databases()."""
