@@ -3,7 +3,7 @@ import typing as t
 from dataclasses import dataclass
 from sqlmesh.core import constants as c
 from sqlmesh.core.environment import EnvironmentStatements, EnvironmentNamingInfo, Environment
-from sqlmesh.core.plan.common import should_force_rebuild
+from sqlmesh.core.plan.common import is_breaking_kind_change, should_force_rebuild
 from sqlmesh.core.plan.definition import EvaluatablePlan
 from sqlmesh.core.state_sync import StateReader
 from sqlmesh.core.scheduler import merged_missing_intervals, SnapshotToIntervals
@@ -658,8 +658,18 @@ class PlanStagesBuilder:
         # Make sure the intervals are up to date and restatements are reflected
         self.state_reader.refresh_snapshot_intervals(snapshots_by_name.values())
 
+        has_dev_only_models = any(
+            s.is_model and not s.virtual_environment_mode.is_full
+            for s in snapshots_by_name.values()
+        )
+        prod_environment: t.Optional[Environment] = None
+        if existing_environment and existing_environment.name == c.PROD:
+            prod_environment = existing_environment
+        elif not existing_environment or has_dev_only_models:
+            prod_environment = self.state_reader.get_environment(c.PROD)
+
         if not existing_environment:
-            existing_environment = self.state_reader.get_environment(c.PROD)
+            existing_environment = prod_environment
 
         if existing_environment:
             new_snapshot_ids = set()
@@ -686,6 +696,57 @@ class PlanStagesBuilder:
                         # If the difference between 2 snapshots requires a full rebuild,
                         # then clear the intervals for the new snapshot.
                         new.intervals = []
+
+        if has_dev_only_models:
+            candidate_envs = [
+                env
+                for env in (existing_environment, prod_environment)
+                if isinstance(env, Environment) and not env.expired
+            ]
+            if candidate_envs:
+                incremental_kind_change_ids: t.Set[SnapshotId] = set()
+                env_promoted_maps = [
+                    {s.name: s for s in env.promoted_snapshots} for env in candidate_envs
+                ]
+                for new in snapshots_by_name.values():
+                    if (
+                        not new.is_model
+                        or new.virtual_environment_mode.is_full
+                        or not new.intervals
+                    ):
+                        continue
+                    for promoted_by_name in env_promoted_maps:
+                        old_info = promoted_by_name.get(new.name)
+                        if old_info is None or old_info.snapshot_id == new.snapshot_id:
+                            continue
+                        if (
+                            old_info.is_incremental
+                            and new.is_incremental
+                            and old_info.virtual_environment_mode == new.virtual_environment_mode
+                            and old_info.model_kind_name != new.model_kind_name
+                        ):
+                            incremental_kind_change_ids.add(old_info.snapshot_id)
+
+                full_old_snapshots = (
+                    self.state_reader.get_snapshots(incremental_kind_change_ids)
+                    if incremental_kind_change_ids
+                    else {}
+                )
+                for new in snapshots_by_name.values():
+                    if (
+                        not new.is_model
+                        or new.virtual_environment_mode.is_full
+                        or not new.intervals
+                    ):
+                        continue
+                    for promoted_by_name in env_promoted_maps:
+                        old_info = promoted_by_name.get(new.name)
+                        if old_info is None or old_info.snapshot_id == new.snapshot_id:
+                            continue
+                        old_target = full_old_snapshots.get(old_info.snapshot_id, old_info)
+                        if is_breaking_kind_change(old_target, new):
+                            new.intervals = []
+                            break
 
         for new_snapshot in plan.new_snapshots:
             if new_snapshot.is_forward_only:

@@ -15,7 +15,9 @@ from sqlmesh.utils.errors import ConfigError
 from sqlmesh.utils.pydantic import (
     PydanticModel,
     SQLGlotCron,
+    ValidationInfo,
     field_validator,
+    get_dialect,
     model_validator,
     PRIVATE_FIELDS,
 )
@@ -348,11 +350,12 @@ class _Node(DbtInfoMixin, PydanticModel):
 
     @field_validator("name", mode="before")
     @classmethod
-    def _name_validator(cls, v: t.Any) -> t.Optional[str]:
+    def _name_validator(cls, v: t.Any, info: ValidationInfo) -> t.Optional[str]:
         if v is None:
             return None
         if isinstance(v, exp.Expr):
-            return v.meta["sql"]
+            dialect = v.meta.get("dialect") or get_dialect(info)
+            return v.meta.get("sql") or v.sql(dialect=dialect)
         return str(v)
 
     @field_validator("start", "end", mode="before")

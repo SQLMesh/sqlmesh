@@ -772,7 +772,10 @@ class SqlMeshLoader(Loader):
                 infer_names=self.config.model_naming.infer_names,
                 signal_definitions=signals,
                 default_catalog_per_gateway=self.context.default_catalog_per_gateway,
-                virtual_environment_mode=self.config.virtual_environment_mode,
+                virtual_environment_mode=(
+                    self.config.model_defaults.virtual_environment_mode
+                    or self.config.virtual_environment_mode
+                ),
             )
 
             with create_process_pool_executor(
@@ -855,7 +858,10 @@ class SqlMeshLoader(Loader):
                             audit_definitions=audits,
                             signal_definitions=signals,
                             default_catalog_per_gateway=self.context.default_catalog_per_gateway,
-                            virtual_environment_mode=self.config.virtual_environment_mode,
+                            virtual_environment_mode=(
+                                self.config.model_defaults.virtual_environment_mode
+                                or self.config.virtual_environment_mode
+                            ),
                         ):
                             if model.enabled:
                                 models[model.fqn] = model

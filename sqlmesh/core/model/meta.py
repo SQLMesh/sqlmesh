@@ -11,7 +11,7 @@ from sqlglot.helper import ensure_collection, ensure_list
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sqlmesh.core import dialect as d
-from sqlmesh.core.config.common import VirtualEnvironmentMode
+from sqlmesh.core.config.common import VirtualEnvironmentMode, virtual_environment_mode_validator
 from sqlmesh.core.constants import LIQUID_CLUSTERING_KEYWORDS
 from sqlmesh.core.config.linter import LinterConfig
 from sqlmesh.core.dialect import normalize_model_name
@@ -125,6 +125,7 @@ class ModelMeta(_Node):
 
     _bool_validator = bool_validator
     _model_kind_validator = model_kind_validator
+    _virtual_environment_mode_validator = virtual_environment_mode_validator
     _properties_validator = properties_validator
     _default_catalog_validator = default_catalog_validator
     _depends_on_validator = depends_on_validator

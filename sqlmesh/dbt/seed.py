@@ -78,6 +78,14 @@ class SeedConfig(BaseModelConfig):
 
         kwargs["columns"] = new_columns
 
+        raw_vde_mode = kwargs.pop("virtual_environment_mode", None)
+        resolved_vde_mode = (
+            VirtualEnvironmentMode(raw_vde_mode.lower())
+            if isinstance(raw_vde_mode, str)
+            and not isinstance(raw_vde_mode, VirtualEnvironmentMode)
+            else raw_vde_mode
+        ) or virtual_environment_mode
+
         # dbt treats single whitespace as a null value
         csv_settings = CsvSettings(
             delimiter=self.delimiter,
@@ -90,7 +98,7 @@ class SeedConfig(BaseModelConfig):
             SeedKind(path=seed_path, csv_settings=csv_settings),
             dialect=self.dialect(context),
             audit_definitions=audit_definitions,
-            virtual_environment_mode=virtual_environment_mode,
+            virtual_environment_mode=resolved_vde_mode,
             start=self.start or context.sqlmesh_config.model_defaults.start,
             dbt_node_info=self.node_info,
             **kwargs,

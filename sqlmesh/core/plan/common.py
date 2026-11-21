@@ -4,7 +4,13 @@ import logging
 from dataclasses import dataclass, field
 
 from sqlmesh.core.state_sync import StateReader
-from sqlmesh.core.snapshot import Snapshot, SnapshotId, SnapshotIdAndVersion, SnapshotNameVersion
+from sqlmesh.core.snapshot import (
+    Snapshot,
+    SnapshotId,
+    SnapshotIdAndVersion,
+    SnapshotInfoLike,
+    SnapshotNameVersion,
+)
 from sqlmesh.core.snapshot.definition import Interval
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import now_timestamp
@@ -27,7 +33,7 @@ def should_force_rebuild(old: Snapshot, new: Snapshot) -> bool:
     return is_breaking_kind_change(old, new)
 
 
-def is_breaking_kind_change(old: Snapshot, new: Snapshot) -> bool:
+def is_breaking_kind_change(old: SnapshotInfoLike, new: SnapshotInfoLike) -> bool:
     if new.is_model != old.is_model:
         # If one is a model and the other isn't, then we need to rebuild
         return True
@@ -38,15 +44,15 @@ def is_breaking_kind_change(old: Snapshot, new: Snapshot) -> bool:
     if old.virtual_environment_mode != new.virtual_environment_mode:
         # If the virtual environment mode has changed, then we need to rebuild
         return True
-    if old.model.kind.name == new.model.kind.name:
+    if old.model_kind_name == new.model_kind_name:
         # If the kind hasn't changed, then we don't need to rebuild
         return False
     if not old.is_incremental or not new.is_incremental:
         # If either is not incremental, then we need to rebuild
         return True
-    if old.model.partitioned_by == new.model.partitioned_by:
+    if isinstance(old, Snapshot) and isinstance(new, Snapshot):
         # If the partitioning hasn't changed, then we don't need to rebuild
-        return False
+        return old.model.partitioned_by != new.model.partitioned_by
     return True
 
 
