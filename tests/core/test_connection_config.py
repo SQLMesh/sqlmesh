@@ -1301,8 +1301,8 @@ def test_clickhouse_insert_quorum_user_setting(make_config):
 
     # A user-provided insert_quorum is respected in cluster mode
     assert config._static_connection_kwargs["insert_quorum"] == "0"
-    # The user's dict is not mutated by building the connection kwargs
-    assert user_settings == {"insert_quorum": "0"}
+    # Building the connection kwargs does not write SQLMesh's settings back into the config
+    assert config.connection_settings == {"insert_quorum": "0"}
 
     # Without a user value, cluster mode still defaults to "auto"
     config_default = make_config(
