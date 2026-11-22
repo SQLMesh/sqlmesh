@@ -10,11 +10,15 @@ from unittest.mock import MagicMock
 
 from click import ClickException
 from click.testing import CliRunner
+from sqlglot import __version__ as SQLGLOT_VERSION
 from sqlmesh import RuntimeEnv
+from sqlmesh._version import __version__ as SQLMESH_VERSION
 from sqlmesh.cli.project_init import ProjectTemplate, init_example_project
 from sqlmesh.cli.main import cli
 from sqlmesh.core.context import Context
+from sqlmesh.core.state_sync.base import SCHEMA_VERSION
 from sqlmesh.integrations.dlt import generate_dlt_models
+from sqlmesh.utils import major_minor
 from sqlmesh.utils.date import now_ds, time_like_to_str, timedelta, to_datetime, yesterday_ds
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
 
@@ -1022,6 +1026,107 @@ def test_info_on_new_project_does_not_create_state_sync(runner, tmp_path):
     assert not context.engine_adapter.table_exists("sqlmesh._environments")
     assert not context.engine_adapter.table_exists("sqlmesh._intervals")
     assert not context.engine_adapter.table_exists("sqlmesh._versions")
+
+
+def test_info_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "info"])
+    assert result.exit_code == 0
+    assert "State backend versions" not in result.output
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "info", "-v"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"Schema version: {SCHEMA_VERSION}" in result.output
+    assert f"SQLGlot version: {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: {SQLMESH_VERSION}" in result.output
+
+
+def test_rollback_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    context = Context(paths=tmp_path)
+    state_sync = context._new_state_sync()
+    # Back up the current state, then pretend the state was migrated by a newer SQLMesh.
+    state_sync.migrator._backup_state()
+    state_sync.version_state.update_versions(
+        schema_version=SCHEMA_VERSION + 1,
+        sqlglot_version="9999.0.0",
+        sqlmesh_version="9999.0.0",
+    )
+    context.close()
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "rollback"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"Schema version: {SCHEMA_VERSION + 1} -> {SCHEMA_VERSION}" in result.output
+    assert f"SQLGlot version: 9999.0.0 -> {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: 9999.0.0 -> {SQLMESH_VERSION}" in result.output
+
+
+def test_migrate_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    context = Context(paths=tmp_path)
+    # Pretend the state was written by an older patch release of the same minor version, which
+    # is the case `migrate` used to leave untouched.
+    major, minor = major_minor(SQLMESH_VERSION)
+    older_sqlmesh = f"{major}.{minor}.dev0"
+    context._new_state_sync().version_state.update_versions(
+        sqlglot_version="0.0.1",
+        sqlmesh_version=older_sqlmesh,
+    )
+    context.close()
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "migrate"])
+    assert result.exit_code == 0
+    assert "State backend versions" in result.output
+    assert f"SQLGlot version: 0.0.1 -> {SQLGLOT_VERSION}" in result.output
+    assert f"SQLMesh version: {older_sqlmesh} -> {SQLMESH_VERSION}" in result.output
+
+
+def test_migrate_updates_versions_after_a_patch_bump(runner, tmp_path):
+    """A patch bump leaves the minor version equal, but the recorded versions must still move.
+
+    Both minor versions have to match the installed ones, otherwise `_apply_migrations` reports
+    rows to migrate and the early return this covers is never reached.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    sqlmesh_major, sqlmesh_minor = major_minor(SQLMESH_VERSION)
+    sqlglot_major, sqlglot_minor = major_minor(SQLGLOT_VERSION)
+    context = Context(paths=tmp_path)
+    context._new_state_sync().version_state.update_versions(
+        sqlglot_version=f"{sqlglot_major}.{sqlglot_minor}.dev0",
+        sqlmesh_version=f"{sqlmesh_major}.{sqlmesh_minor}.dev0",
+    )
+    context.close()
+
+    assert (
+        runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "migrate"]).exit_code
+        == 0
+    )
+
+    context = Context(paths=tmp_path)
+    versions = context._new_state_sync().get_versions(validate=False)
+    context.close()
+    assert versions.sqlmesh_version == SQLMESH_VERSION
+    assert versions.sqlglot_version == SQLGLOT_VERSION
+
+
+def test_rollback_without_backup_does_not_print_state_versions(runner, tmp_path):
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(cli, ["--log-file-dir", tmp_path, "--paths", tmp_path, "rollback"])
+    assert result.exit_code == 1
+    assert "There are no prior migrations to roll back to." in result.output
+    assert "State backend versions" not in result.output
 
 
 def test_dlt_pipeline_errors(runner, tmp_path):
@@ -2164,7 +2269,7 @@ def test_init_project_engine_configs(tmp_path):
         "redshift": "# concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # database: \n      # host: \n      # port: \n      # source_address: \n      # unix_sock: \n      # ssl: \n      # sslmode: \n      # timeout: \n      # tcp_keepalive: \n      # application_name: \n      # preferred_role: \n      # principal_arn: \n      # credentials_provider: \n      # region: \n      # cluster_identifier: \n      # iam: \n      # db_user: \n      # is_serverless: \n      # serverless_acct_id: \n      # serverless_work_group: \n      # enable_merge: ",
         "bigquery": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # method: oauth\n      # project: \n      # execution_project: \n      # quota_project: \n      # location: \n      # keyfile: \n      # keyfile_json: \n      # token: \n      # refresh_token: \n      # client_id: \n      # client_secret: \n      # token_uri: \n      # scopes: \n      # impersonated_service_account: \n      # job_creation_timeout_seconds: \n      # job_execution_timeout_seconds: \n      # job_retries: 1\n      # job_retry_deadline_seconds: \n      # priority: \n      # maximum_bytes_billed: \n      # reservation: ",
         "snowflake": "account: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # warehouse: \n      # database: \n      # role: \n      # authenticator: \n      # token: \n      # host: \n      # port: \n      # application: Tobiko_SQLMesh\n      # private_key: \n      # private_key_path: \n      # private_key_passphrase: \n      # session_parameters: ",
-        "databricks": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # server_hostname: \n      # http_path: \n      # access_token: \n      # auth_type: \n      # oauth_client_id: \n      # oauth_client_secret: \n      # catalog: \n      # http_headers: \n      # session_configuration: \n      # databricks_connect_server_hostname: \n      # databricks_connect_access_token: \n      # databricks_connect_cluster_id: \n      # databricks_connect_use_serverless: False\n      # force_databricks_connect: False\n      # disable_databricks_connect: False\n      # disable_spark_session: False",
+        "databricks": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # server_hostname: \n      # http_path: \n      # access_token: \n      # auth_type: \n      # oauth_client_id: \n      # oauth_client_secret: \n      # catalog: \n      # http_headers: \n      # session_configuration: \n      # databricks_connect_server_hostname: \n      # databricks_connect_access_token: \n      # databricks_connect_cluster_id: \n      # databricks_connect_use_serverless: False\n      # force_databricks_connect: False\n      # disable_databricks_connect: False\n      # disable_spark_session: False\n      # force_shared_connection: False",
         "postgres": "host: \n      user: \n      password: \n      port: \n      database: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: True\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # keepalives_idle: \n      # connect_timeout: 10\n      # role: \n      # sslmode: \n      # application_name: ",
     }
 

@@ -152,7 +152,7 @@ Follow this [example](https://sqlmesh.readthedocs.io/en/stable/examples/incremen
 ## Join Our Community
 Together, we want to build data transformation without the waste. Connect with us in the following ways:
 
-* Join the [Tobiko Slack Community](https://tobikodata.com/slack) to ask questions, or just to say hi!
+* Join the [Tobiko Slack Community](https://tobiko-data.slack.com/) to ask questions, or just to say hi!
 * File an issue on our [GitHub](https://github.com/SQLMesh/sqlmesh/issues/new)
 * Send us an email at [hello@tobikodata.com](mailto:hello@tobikodata.com) with your questions or feedback
 * Read our [blog](https://tobikodata.com/blog)

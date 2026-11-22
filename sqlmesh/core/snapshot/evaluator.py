@@ -29,6 +29,12 @@ import sys
 from collections import defaultdict
 from contextlib import contextmanager
 from functools import reduce
+from sqlmesh.core.execution_observation import (
+    action,
+    observe_snapshot,
+    update_execution,
+    execution_context_factory,
+)
 
 from sqlglot import exp, select
 from sqlglot.executor import execute
@@ -312,6 +318,8 @@ class SnapshotEvaluator:
         self._get_virtual_data_objects(target_snapshots, environment_naming_info)
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
+        # Renderers look snapshots up by model name, not by SnapshotId.
+        snapshots_by_name = {s.name: s for s in (snapshots or {}).values()}
         with self.concurrent_context():
             concurrent_apply_to_snapshots(
                 target_snapshots,
@@ -320,13 +328,14 @@ class SnapshotEvaluator:
                     start=start,
                     end=end,
                     execution_time=execution_time,
-                    snapshots=snapshots,
+                    snapshots=snapshots_by_name,
                     table_mapping=table_mapping,
                     environment_naming_info=environment_naming_info,
                     deployability_index=deployability_index,  # type: ignore
                     on_complete=on_complete,
                 ),
                 self.ddl_concurrent_tasks,
+                context_factory=execution_context_factory(),
             )
 
     def demote(
@@ -355,6 +364,7 @@ class SnapshotEvaluator:
                     table_mapping=table_mapping,
                 ),
                 self.ddl_concurrent_tasks,
+                context_factory=execution_context_factory(),
             )
 
     def create(
@@ -465,6 +475,7 @@ class SnapshotEvaluator:
                     on_complete=on_complete,
                 ),
                 self.ddl_concurrent_tasks,
+                context_factory=execution_context_factory(),
                 raise_on_error=False,
             )
             if errors:
@@ -512,6 +523,7 @@ class SnapshotEvaluator:
                     deployability_index,
                 ),
                 self.ddl_concurrent_tasks,
+                context_factory=execution_context_factory(),
             )
 
     def cleanup(
@@ -556,6 +568,7 @@ class SnapshotEvaluator:
                     on_complete,
                 ),
                 self.ddl_concurrent_tasks,
+                context_factory=execution_context_factory(),
                 reverse_order=True,
                 raise_on_error=False,
             )
@@ -634,8 +647,11 @@ class SnapshotEvaluator:
                 # so that we can fall back to the audit's setting, which we override to blocking: False
                 audit = audit.model_copy(update={"blocking": False})
 
-            results.append(
-                self._audit(
+            # Observe before calling _audit: query exceptions need a terminal
+            # event even when no AuditResult exists. Preserve completed audits
+            # before later aggregate handling or WAP publication can fail.
+            with action("audit", "audit", audit_name=audit.name) as observation:
+                audit_result = self._audit(
                     audit=audit,
                     audit_args=audit_args,
                     snapshot=snapshot,
@@ -646,7 +662,9 @@ class SnapshotEvaluator:
                     deployability_index=deployability_index,
                     **kwargs,
                 )
-            )
+                if observation is not None:
+                    observation["audit_result"] = audit_result
+            results.append(audit_result)
 
         if wap_id is not None:
             logger.info(
@@ -776,6 +794,16 @@ class SnapshotEvaluator:
         )
 
         with (
+            # The first batch may create via CTAS instead of create_snapshot.
+            # Observe the materialization, including its transaction exit, so
+            # lazy creation is not missing from physical-layer history.
+            action(
+                "physical",
+                "materialize",
+                target=target_table_name,
+                creating=not target_table_exists,
+                snapshot=snapshot,
+            ),
             adapter.transaction(),
             adapter.session(snapshot.model.render_session_properties(**render_statements_kwargs)),
         ):
@@ -864,6 +892,7 @@ class SnapshotEvaluator:
 
         return wap_id
 
+    @observe_snapshot("physical", "create")
     def create_snapshot(
         self,
         snapshot: Snapshot,
@@ -887,6 +916,9 @@ class SnapshotEvaluator:
             return
 
         logger.info("Creating a physical table for snapshot %s", snapshot.snapshot_id)
+        update_execution(
+            target=snapshot.table_name(is_deployable=deployability_index.is_deployable(snapshot)),
+        )
 
         adapter = self.get_adapter(snapshot.model.gateway)
         create_render_kwargs: t.Dict[str, t.Any] = dict(
@@ -1122,6 +1154,7 @@ class SnapshotEvaluator:
             adapter.drop_table(target_table_name)
             raise
 
+    @observe_snapshot("physical", "schema_migration")
     def _migrate_snapshot(
         self,
         snapshot: Snapshot,
@@ -1143,6 +1176,7 @@ class SnapshotEvaluator:
             deployability_index=deployability_index,
         )
         target_table_name = snapshot.table_name()
+        update_execution(target=target_table_name, existed=target_data_object is not None)
 
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
         evaluation_strategy.run_pre_statements(
@@ -1251,6 +1285,7 @@ class SnapshotEvaluator:
             if snapshot.is_materialized:
                 adapter.drop_table(tmp_table_name)
 
+    @observe_snapshot("virtual", "promote")
     def _promote_snapshot(
         self,
         snapshot: Snapshot,
@@ -1260,7 +1295,7 @@ class SnapshotEvaluator:
         start: t.Optional[TimeLike] = None,
         end: t.Optional[TimeLike] = None,
         execution_time: t.Optional[TimeLike] = None,
-        snapshots: t.Optional[t.Dict[SnapshotId, Snapshot]] = None,
+        snapshots: t.Optional[t.Dict[str, Snapshot]] = None,
         table_mapping: t.Optional[t.Dict[str, str]] = None,
     ) -> None:
         if not snapshot.is_model:
@@ -1275,6 +1310,7 @@ class SnapshotEvaluator:
         view_name = snapshot.qualified_view_name.for_environment(
             environment_naming_info, dialect=adapter.dialect
         )
+        update_execution(target=view_name, source_table=table_name)
         render_kwargs: t.Dict[str, t.Any] = dict(
             start=start,
             end=end,
@@ -1299,13 +1335,14 @@ class SnapshotEvaluator:
                 **render_kwargs,
             )
 
-            snapshot_by_name = {s.name: s for s in (snapshots or {}).values()}
-            render_kwargs["snapshots"] = snapshot_by_name
-            adapter.execute(snapshot.model.render_on_virtual_update(**render_kwargs))
+            adapter.execute(
+                snapshot.model.render_on_virtual_update(snapshots=snapshots, **render_kwargs)
+            )
 
         if on_complete is not None:
             on_complete(snapshot)
 
+    @observe_snapshot("virtual", "demote")
     def _demote_snapshot(
         self,
         snapshot: Snapshot,
@@ -1325,6 +1362,7 @@ class SnapshotEvaluator:
         view_name = snapshot.qualified_view_name.for_environment(
             environment_naming_info, dialect=adapter.dialect
         )
+        update_execution(target=view_name)
         with (
             adapter.transaction(),
             adapter.session(
@@ -1475,6 +1513,7 @@ class SnapshotEvaluator:
                 list(unique_schemas),
                 lambda item: _create_schema(item[0], item[1], item[2]),
                 self.ddl_concurrent_tasks,
+                context_factory=execution_context_factory(),
             )
 
     def get_adapter(self, gateway: t.Optional[str] = None) -> EngineAdapter:
@@ -1649,6 +1688,7 @@ class SnapshotEvaluator:
                         schema=s, object_names=tables_by_schema.get(s), gateway=gateway
                     ),
                     self.ddl_concurrent_tasks,
+                    context_factory=execution_context_factory(),
                 )
 
                 for schema, objs in zip(schema_list, results):

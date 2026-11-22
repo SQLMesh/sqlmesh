@@ -1,32 +1,11 @@
-import { test, expect } from './fixtures'
+import { test, expect, SharedPythonEnvironment } from './fixtures'
 import {
-  createVirtualEnvironment,
   openServerPage,
-  pipInstall,
-  REPO_ROOT,
   SUSHI_SOURCE_PATH,
   waitForLoadedSQLMesh,
 } from './utils'
 import path from 'path'
 import fs from 'fs-extra'
-
-async function setupPythonEnvironment(tempDir: string): Promise<void> {
-  // Create a temporary directory for the virtual environment
-  const venvDir = path.join(tempDir, '.venv')
-  fs.mkdirSync(venvDir, { recursive: true })
-
-  // Create virtual environment
-  const pythonDetails = await createVirtualEnvironment(venvDir)
-
-  // Install sqlmesh from the local repository with LSP support
-  const customMaterializations = path.join(
-    REPO_ROOT,
-    'examples',
-    'custom_materializations',
-  )
-  const sqlmeshWithExtras = `${REPO_ROOT}[lsp,bigquery]`
-  await pipInstall(pythonDetails, [sqlmeshWithExtras, customMaterializations])
-}
 
 /**
  * Creates an entrypoint file used to test the LSP configuration.
@@ -36,6 +15,7 @@ async function setupPythonEnvironment(tempDir: string): Promise<void> {
 const createEntrypointFile = (
   tempDir: string,
   entrypointFileName: string,
+  pythonEnvironment: SharedPythonEnvironment,
   bitToStripFromArgs = '',
 ): {
   entrypointFile: string
@@ -43,7 +23,10 @@ const createEntrypointFile = (
 } => {
   const entrypointFile = path.join(tempDir, entrypointFileName)
   const fileWhereStoredInputs = path.join(tempDir, 'inputs.txt')
-  const sqlmeshLSPFile = path.join(tempDir, '.venv/bin/sqlmesh_lsp')
+  const sqlmeshLSPFile = path.join(
+    path.dirname(pythonEnvironment.pythonPath),
+    'sqlmesh_lsp',
+  )
 
   // Create the entrypoint file
   fs.writeFileSync(
@@ -69,15 +52,15 @@ test.describe('Test LSP Entrypoint configuration', () => {
   test('specify single entrypoint relative path', async ({
     page,
     sharedCodeServer,
+    sharedPythonEnvironment,
     tempDir,
   }) => {
     await fs.copy(SUSHI_SOURCE_PATH, tempDir)
 
-    await setupPythonEnvironment(tempDir)
-
     const { fileWhereStoredInputs } = createEntrypointFile(
       tempDir,
       'entrypoint.sh',
+      sharedPythonEnvironment,
     )
 
     const settings = {
@@ -116,15 +99,15 @@ test.describe('Test LSP Entrypoint configuration', () => {
   test('specify one entrypoint absolute path', async ({
     page,
     sharedCodeServer,
+    sharedPythonEnvironment,
     tempDir,
   }) => {
     await fs.copy(SUSHI_SOURCE_PATH, tempDir)
 
-    await setupPythonEnvironment(tempDir)
-
     const { entrypointFile, fileWhereStoredInputs } = createEntrypointFile(
       tempDir,
       'entrypoint.sh',
+      sharedPythonEnvironment,
     )
     // Assert that the entrypoint file is an absolute path
     expect(path.isAbsolute(entrypointFile)).toBe(true)
@@ -165,15 +148,15 @@ test.describe('Test LSP Entrypoint configuration', () => {
   test('specify entrypoint with arguments', async ({
     page,
     sharedCodeServer,
+    sharedPythonEnvironment,
     tempDir,
   }) => {
     await fs.copy(SUSHI_SOURCE_PATH, tempDir)
 
-    await setupPythonEnvironment(tempDir)
-
     const { fileWhereStoredInputs } = createEntrypointFile(
       tempDir,
       'entrypoint.sh',
+      sharedPythonEnvironment,
       '--argToIgnore',
     )
 

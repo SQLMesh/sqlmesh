@@ -10,13 +10,16 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+# ubuntu-latest is Ubuntu 26.04. That image drops Python 3.9, installs OpenJDK 25
+# (Spark/Hadoop calls the removed Subject.getSubject), and has no Playwright Chromium.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       python: ${{ steps.filter.outputs.python }}
       client: ${{ steps.filter.outputs.client }}
       vscode: ${{ steps.filter.outputs.vscode }}
+      lsp: ${{ steps.filter.outputs.lsp }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v7
@@ -37,6 +40,8 @@ jobs:
               - 'web/client/**'
             vscode:
               - 'vscode/**'
+            lsp:
+              - 'sqlmesh/lsp/**'
             ci:
               - '.github/**'
               - 'Makefile'
@@ -47,7 +52,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV: '1'
     steps:
@@ -73,7 +78,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -147,6 +152,10 @@ jobs:
           . ./venv/Scripts/activate
           python.exe -m pip install --upgrade pip
           make install-dev
+      - name: Install DuckLake extension
+        run: |
+          . ./venv/Scripts/activate
+          python -c "import duckdb; duckdb.connect().install_extension('ducklake')"
       - name: Run fast unit tests
         run: |
           . ./venv/Scripts/activate
@@ -166,7 +175,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
       UV: '1'
@@ -195,7 +204,7 @@ jobs:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.vscode ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -222,7 +231,7 @@ jobs:
     if:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: mcr.microsoft.com/playwright:v1.54.1-jammy
     steps:
@@ -250,7 +259,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -264,6 +273,7 @@ jobs:
             trino,
             spark,
             clickhouse,
+            clickhouse-datalake,
             risingwave,
             starrocks,
           ]
@@ -290,6 +300,9 @@ jobs:
         run: |
           source .venv/bin/activate
           make ${{ matrix.engine }}-test
+      - name: Stop DataLake services
+        if: ${{ always() && matrix.engine == 'clickhouse-datalake' }}
+        run: make clickhouse-datalake-down
       - name: Upload test results
         uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
@@ -301,7 +314,7 @@ jobs:
   engine-tests-cloud:
     needs: engine-tests-docker
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -413,7 +426,7 @@ jobs:
       'true' || github.ref == 'refs/heads/main'
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -427,10 +440,12 @@ jobs:
       - name: Run CI
         run: pnpm run ci
   test-vscode-e2e:
-    runs-on:
-      labels: [ubuntu-2204-8]
-    # As at 2026-01-12 this job flakes 100% of the time. It needs investigation
-    if: false
+    needs: changes
+    if:
+      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.lsp ==
+      'true' || needs.changes.outputs.ci == 'true' || github.ref ==
+      'refs/heads/main'
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -453,7 +468,9 @@ jobs:
           source .venv/bin/activate
           make install-dev
       - name: Install code-server
-        run: curl -fsSL https://code-server.dev/install.sh | sh
+        # Pinned so that a code-server release cannot change the editor UI the
+        # tests drive without the change showing up here first.
+        run: curl -fsSL https://code-server.dev/install.sh | sh -s -- --version 4.137.0
       - name: Install Playwright browsers
         working-directory: ./vscode/extension
         run: pnpm exec playwright install
@@ -474,7 +491,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -558,7 +575,8 @@ jobs:
         run: |
           source ../../.venv/bin/activate
           sed -i 's/target: in_memory/target: postgres/g' profiles.yml
-          if [[ $(echo -e "${{ matrix.dbt-version }}\n1.5.0" | sort -V | head -n1) == "${{ matrix.dbt-version }}" ]] && [[ "${{ matrix.dbt-version }}" != "1.5.0" ]]; then
+          if [[ "${{ matrix.dbt-version }}" == "1.3" ]] || \
+             [[ "${{ matrix.dbt-version }}" == "1.4" ]]; then
             echo "DBT version is ${{ matrix.dbt-version }} (< 1.5.0), removing version parameters..."
             sed -i -e 's/, version=1) }}/) }}/g' -e 's/, v=1) }}/) }}/g' models/top_waiters.sql
           else

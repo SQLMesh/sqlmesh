@@ -108,6 +108,7 @@ from sqlmesh.core.state_sync import (
     CachingStateSync,
     StateReader,
     StateSync,
+    Versions,
 )
 from sqlmesh.core.janitor import cleanup_expired_views, delete_expired_snapshots
 from sqlmesh.core.table_diff import TableDiff
@@ -419,6 +420,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        self._materializations_loaded: bool = False
         self._load_state: bool = load_state
         self._uncached_model_names: t.Set[str] = set()
         self._selector_cls = selector or NativeSelector
@@ -747,7 +749,25 @@ class GenericContext(BaseContext, t.Generic[C]):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:
-                for snapshot in self.state_reader.get_snapshots(prod.snapshots).values():
+                # Environment snapshot infos already contain the names we need to distinguish
+                # local nodes from nodes owned by another project. Hydrating local snapshots
+                # here is wasteful: their payloads are not used, and a large remote state can
+                # spend most of Context.load() decoding those model object graphs.
+                #
+                # Only hydrate names which are absent locally. These can be deleted nodes from
+                # this project or nodes from another project which must be merged into the
+                # context. The project field on the hydrated node disambiguates the two cases.
+                remote_snapshot_infos = []
+                for snapshot_info in prod.snapshots:
+                    local_store = (
+                        self._standalone_audits if snapshot_info.is_audit else self._models
+                    )
+                    if snapshot_info.name in local_store:
+                        uncached.add(snapshot_info.name)
+                    else:
+                        remote_snapshot_infos.append(snapshot_info)
+
+                for snapshot in self.state_reader.get_snapshots(remote_snapshot_infos).values():
                     if snapshot.node.project in self._projects:
                         uncached.add(snapshot.name)
                     else:
@@ -788,6 +808,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
         self._loaded = True
+        self._materializations_loaded = True
         return self
 
     def _update_model_schemas_and_validate(self, model_fqns: t.Optional[t.Set[str]] = None) -> None:
@@ -998,6 +1019,10 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     @python_api_analytics
     def destroy(self) -> bool:
+        # Load first so snapshot unpickling cannot import a custom-kind module that this load then reimports.
+        # If loading fails, abort before invalidating any environments.
+        self._load_materializations()
+
         success = False
 
         # Collect resources to be deleted
@@ -2610,8 +2635,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         """
         self.notification_target_manager.notify(NotificationEvent.MIGRATION_START)
         self._load_materializations()
+        state_sync = self._new_state_sync()
+        previous_versions = self._state_versions(state_sync)
         try:
-            self._new_state_sync().migrate(
+            state_sync.migrate(
                 promoted_snapshots_only=self.config.migration.promoted_snapshots_only,
             )
         except Exception as e:
@@ -2619,6 +2646,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 NotificationEvent.MIGRATION_FAILURE, traceback.format_exc()
             )
             raise e
+        self._print_state_versions(self._state_versions(state_sync), previous_versions)
         self.notification_target_manager.notify(NotificationEvent.MIGRATION_END)
 
     @python_api_analytics
@@ -2627,7 +2655,10 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         Please contact your SQLMesh administrator before doing this. This action cannot be undone.
         """
-        self._new_state_sync().rollback()
+        state_sync = self._new_state_sync()
+        previous_versions = self._state_versions(state_sync)
+        state_sync.rollback()
+        self._print_state_versions(self._state_versions(state_sync), previous_versions)
 
     @python_api_analytics
     def create_external_models(self, strict: bool = False) -> None:
@@ -2700,6 +2731,12 @@ class GenericContext(BaseContext, t.Generic[C]):
         state_connection = self.config.get_state_connection(self.gateway)
         if state_connection:
             self._try_connection("state backend", state_connection.connection_validator())
+
+        if verbosity >= Verbosity.VERBOSE:
+            try:
+                self._print_state_versions(self._state_versions())
+            except Exception as ex:
+                self.console.log_error(f"Failed to fetch the state backend versions. {ex}")
 
     @python_api_analytics
     def print_environment_names(self) -> None:
@@ -3151,6 +3188,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         current_ts = now_timestamp()
         failures: t.List[str] = []
 
+        self._load_materializations()
+
         # Clean up expired environments by removing their views and schemas
         failures.extend(
             self._cleanup_environments(
@@ -3290,6 +3329,25 @@ class GenericContext(BaseContext, t.Generic[C]):
         except Exception as ex:
             self.console.log_error(f"{connection_name} connection failed. {ex}")
 
+    def _state_versions(self, state_sync: t.Optional[StateSync] = None) -> Versions:
+        """Returns the versions recorded in the state backend without validating them."""
+        return (state_sync or self._new_state_sync()).get_versions(validate=False)
+
+    def _print_state_versions(
+        self, versions: Versions, previous_versions: t.Optional[Versions] = None
+    ) -> None:
+        """Prints the state backend versions, optionally alongside the ones they replaced."""
+        self.console.log_status_update("\nState backend versions:")
+        for label, attribute in (
+            ("Schema version", "schema_version"),
+            ("SQLGlot version", "sqlglot_version"),
+            ("SQLMesh version", "sqlmesh_version"),
+        ):
+            version = getattr(versions, attribute)
+            if previous_versions is not None:
+                version = f"{getattr(previous_versions, attribute)} -> {version}"
+            self.console.log_status_update(f"{label}: {version}")
+
     def _new_state_sync(self) -> StateSync:
         return self._provided_state_sync or self._scheduler.create_state_sync(self)
 
@@ -3323,9 +3381,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     def _load_materializations(self) -> None:
-        if not self._loaded:
+        if not self._materializations_loaded:
             for loader in self._loaders:
                 loader.load_materializations()
+            self._materializations_loaded = True
 
     def _select_models_for_run(
         self,

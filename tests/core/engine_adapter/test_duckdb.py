@@ -126,17 +126,25 @@ def test_drop_catalog_motherduck(make_mocked_engine_adapter: t.Callable) -> None
     assert to_sql_calls(adapter) == ['DROP DATABASE IF EXISTS "foo" CASCADE']
 
 
-def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
+@pytest.fixture
+def ducklake_conn(duck_conn):
+    # Don't call install_extension here: on Windows it fails with "Access is denied"
+    # once an earlier test in this process has loaded DuckLake. LOAD auto-installs it
+    # when missing, and Windows CI pre-installs it before pytest.
+    duck_conn.load_extension("ducklake")
+    return duck_conn
+
+
+@pytest.mark.xdist_group("ducklake_extension")
+def test_ducklake_partitioning(adapter: EngineAdapter, ducklake_conn, tmp_path):
     catalog = "a_ducklake_db"
 
-    duck_conn.install_extension("ducklake")
-    duck_conn.load_extension("ducklake")
-    duck_conn.execute(
+    ducklake_conn.execute(
         f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} (DATA_PATH '{tmp_path}');"
     )
 
     # no partitions on catalog creation
-    partition_info = duck_conn.execute(
+    partition_info = ducklake_conn.execute(
         f"SELECT * FROM __ducklake_metadata_{catalog}.main.ducklake_partition_info"
     ).fetchdf()
     assert partition_info.empty
@@ -150,7 +158,77 @@ def test_ducklake_partitioning(adapter: EngineAdapter, duck_conn, tmp_path):
     )
 
     # 1 partition after table creation
-    partition_info = duck_conn.execute(
+    partition_info = ducklake_conn.execute(
         f"SELECT * FROM __ducklake_metadata_{catalog}.main.ducklake_partition_info"
     ).fetchdf()
     assert partition_info.shape[0] == 1
+
+
+@pytest.mark.xdist_group("ducklake_extension")
+def test_drop_table_ducklake_no_cascade(adapter: EngineAdapter, ducklake_conn, tmp_path):
+    # DuckLake does not implement DROP TABLE/VIEW ... CASCADE, so the adapter must
+    # omit CASCADE for objects in a DuckLake catalog while keeping it for native catalogs.
+    catalog = "a_ducklake_db"
+
+    ducklake_conn.execute(
+        f"ATTACH 'ducklake:{tmp_path}/{catalog}.ducklake' AS {catalog} (DATA_PATH '{tmp_path}');"
+    )
+
+    ducklake_conn.execute(f"CREATE SCHEMA {catalog}.phys")
+    ducklake_conn.execute(f"CREATE SCHEMA {catalog}.virt")
+    ducklake_conn.execute(f"CREATE TABLE {catalog}.phys.t (i INTEGER)")
+    ducklake_conn.execute(f"CREATE VIEW {catalog}.virt.v AS SELECT * FROM {catalog}.phys.t")
+
+    # native catalog, cascade is passed through
+    ducklake_conn.execute("CREATE TABLE memory.main.native_t (i INTEGER)")
+    ducklake_conn.execute("CREATE VIEW memory.main.native_v AS SELECT * FROM memory.main.native_t")
+
+    adapter.drop_table(f"{catalog}.phys.t", cascade=True)
+    adapter.drop_view(f"{catalog}.virt.v", cascade=True)
+    adapter.drop_table("memory.main.native_t", cascade=True)
+    adapter.drop_view("memory.main.native_v", cascade=True)
+
+    assert not adapter.table_exists(f"{catalog}.phys.t")
+    assert not adapter.table_exists(f"{catalog}.virt.v")
+    assert not adapter.table_exists("memory.main.native_t")
+    assert not adapter.table_exists("memory.main.native_v")
+
+
+@pytest.mark.xdist_group("ducklake_extension")
+def test_drop_table_ducklake_no_cascade_mixed_case_alias(
+    adapter: EngineAdapter, ducklake_conn, tmp_path
+):
+    # Catalog aliases keep their case in duckdb_databases(), but SQLMesh normalizes
+    # table names to lowercase, so the catalog type lookup must be case-insensitive.
+    ducklake_conn.execute(
+        f"ATTACH 'ducklake:{tmp_path}/my_lake.ducklake' AS \"MyLake\" (DATA_PATH '{tmp_path}');"
+    )
+    ducklake_conn.execute("CREATE SCHEMA MyLake.phys")
+    ducklake_conn.execute("CREATE TABLE MyLake.phys.t (i INTEGER)")
+    ducklake_conn.execute("CREATE VIEW MyLake.phys.v AS SELECT * FROM MyLake.phys.t")
+
+    adapter.drop_table("mylake.phys.t", cascade=True)
+    adapter.drop_view("mylake.phys.v", cascade=True)
+
+    assert not adapter.table_exists("mylake.phys.t")
+    assert not adapter.table_exists("mylake.phys.v")
+
+
+def test_drop_object_cascade_by_catalog_type(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(DuckDBEngineAdapter)
+    adapter.fetchone = lambda *_args, **_kwargs: ("ducklake",)  # type: ignore
+
+    adapter.drop_table("lake.phys.t", cascade=True)
+    adapter.drop_view("lake.virt.v", cascade=True)
+    # schema cascade is supported by DuckLake and must be preserved
+    adapter.drop_schema("lake.virt", cascade=True)
+
+    adapter.fetchone = lambda *_args, **_kwargs: ("duckdb",)  # type: ignore
+    adapter.drop_table("native.phys.t", cascade=True)
+
+    assert to_sql_calls(adapter) == [
+        'DROP TABLE IF EXISTS "lake"."phys"."t"',
+        'DROP VIEW IF EXISTS "lake"."virt"."v"',
+        'DROP SCHEMA IF EXISTS "lake"."virt" CASCADE',
+        'DROP TABLE IF EXISTS "native"."phys"."t" CASCADE',
+    ]

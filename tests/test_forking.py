@@ -6,7 +6,9 @@ from sqlmesh.core.model import schema
 import concurrent.futures
 
 
-pytestmark = pytest.mark.isolated
+# Run each fork test in a fresh pytest process to avoid inheriting native process state from
+# earlier tests.
+pytestmark = [pytest.mark.isolated, pytest.mark.fork_isolated]
 
 
 def test_parallel_load(assert_exp_eq, mocker):
