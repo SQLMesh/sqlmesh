@@ -477,7 +477,7 @@ MODEL (
 #### valid_uuid, valid_uuid_non_blocking
 Ensures that all non-NULL rows of a column contain a string with the UUID structure.
 
-UUID structure determined by matching regular expression `'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`.
+UUID structure determined by matching regular expression `'^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`.
 
 This example asserts that all `uuid` values have the UUID structure:
 

@@ -17,6 +17,7 @@ from sqlglot.errors import SchemaError
 
 import sqlmesh.core.constants
 from sqlmesh.cli.project_init import init_example_project
+from sqlmesh.core.audit import StandaloneAudit
 from sqlmesh.core.console import TerminalConsole
 from sqlmesh.core import dialect as d, constants as c
 from sqlmesh.core.config import (
@@ -274,6 +275,78 @@ def test_render_seed_model(sushi_context, assert_exp_eq):
           (4, 'Chris')) AS t(id, name)
         """,
     )
+
+
+@pytest.mark.slow
+def test_load_only_hydrates_remote_snapshots_missing_locally(sushi_context: Context) -> None:
+    prod = sushi_context.state_reader.get_environment("prod")
+    assert prod is not None
+    sushi_context._projects = {"local_project"}
+
+    local_node_names = {*sushi_context.models, *sushi_context.standalone_audits}
+    expected_remote_names = {
+        snapshot_info.name
+        for snapshot_info in prod.snapshots
+        if snapshot_info.name not in local_node_names
+    }
+    assert len(expected_remote_names) < len(prod.snapshots)
+
+    with patch.object(
+        sushi_context.state_reader,
+        "get_snapshots",
+        wraps=sushi_context.state_reader.get_snapshots,
+    ) as get_snapshots_mock:
+        sushi_context.load(update_schemas=False)
+
+    load_snapshot_names = {
+        snapshot_info.name
+        for call_args in get_snapshots_mock.call_args_list
+        for snapshot_info in call_args.args[0]
+    }
+    assert load_snapshot_names == expected_remote_names
+
+
+@pytest.mark.slow
+def test_load_hydrates_opposite_type_snapshot_name_collision(
+    sushi_context: Context, make_snapshot: t.Callable
+) -> None:
+    prod = sushi_context.state_reader.get_environment("prod")
+    assert prod is not None
+    sushi_context._projects = {"local_project"}
+
+    local_model = next(iter(sushi_context.models.values()))
+    remote_audit_snapshot = make_snapshot(
+        StandaloneAudit(
+            name=local_model.fqn,
+            query=parse_one("SELECT NULL LIMIT 0"),
+            project="remote_project",
+        )
+    )
+    remote_audit_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    prod_with_collision = prod.copy(
+        update={"snapshots_": [*prod.snapshots, remote_audit_snapshot.table_info]}
+    )
+
+    with (
+        patch.object(
+            sushi_context.state_reader,
+            "get_environment",
+            return_value=prod_with_collision,
+        ),
+        patch.object(
+            sushi_context.state_reader,
+            "get_snapshots",
+            wraps=sushi_context.state_reader.get_snapshots,
+        ) as get_snapshots_mock,
+    ):
+        sushi_context.load(update_schemas=False)
+
+    requested_snapshot_names = {
+        snapshot_info.name
+        for call_args in get_snapshots_mock.call_args_list
+        for snapshot_info in call_args.args[0]
+    }
+    assert remote_audit_snapshot.name in requested_snapshot_names
 
 
 @pytest.mark.slow
@@ -2609,8 +2682,6 @@ def test_requirements(copy_to_temp_path: t.Callable):
         "dev", no_prompts=True, skip_tests=True, skip_backfill=True, auto_apply=True
     ).environment
     requirements = {"ipywidgets", "numpy", "pandas", "test_package"}
-    if IS_WINDOWS:
-        requirements.add("pendulum")
     assert environment.requirements["pandas"] == "2.2.2"
     assert set(environment.requirements) == requirements
 
@@ -2618,10 +2689,7 @@ def test_requirements(copy_to_temp_path: t.Callable):
     context._excluded_requirements = {"ipywidgets", "ruamel.yaml", "ruamel.yaml.clib"}
     diff = context.plan_builder("dev", skip_tests=True, skip_backfill=True).build().context_diff
     assert set(diff.previous_requirements) == requirements
-    reqs = {"numpy", "pandas"}
-    if IS_WINDOWS:
-        reqs.add("pendulum")
-    assert set(diff.requirements) == reqs
+    assert set(diff.requirements) == {"numpy", "pandas"}
 
 
 def test_deactivate_automatic_requirement_inference(copy_to_temp_path: t.Callable):

@@ -734,15 +734,198 @@ PARSERS = {
 }
 
 
+_SQLMESH_META_DIALECT = "sqlmesh_meta_dialect"
+
+
+def _holds_expression(annotation: t.Any, _visited: t.Optional[t.FrozenSet[t.Any]] = None) -> bool:
+    """Whether a declared field type bottoms out in a SQLGlot expression.
+
+    Covers List[exp.Expr], Optional[Dict[str, exp.DataType]], Optional[exp.Tuple], the
+    nested Tuple[str, Dict[str, exp.Expr]] shape used by audits/signals, and nested
+    Pydantic models that themselves wrap an expression field, such as `TimeColumn`
+    (IncrementalByTimeRangeKind.time_column).
+
+    Stops at `_ModelKind` subclasses without recursing into their fields: a `kind`
+    property's own nested properties are independently dialect-tagged via the
+    `ModelKind` expression node's own meta when `_props_sql` recurses into them, so
+    treating the `kind` field itself as "holds an expression" -- true only because some
+    other member of the `ModelKind` union has an expression field, e.g.
+    `IncrementalByTimeRangeKind.time_column` -- would route its entire subtree,
+    including scalar sibling properties like `forward_only`, through a dialect-specific
+    generator and transpile them when they shouldn't be (tsql booleans becoming
+    `(1 = 1)`, which silently reparses as `False`).
+    """
+    from sqlmesh.core.model.kind import _ModelKind
+
+    if isinstance(annotation, type):
+        if issubclass(annotation, exp.Expr):
+            return True
+        if issubclass(annotation, _ModelKind):
+            return False
+        visited = _visited or frozenset()
+        if annotation in visited:
+            return False
+        if hasattr(annotation, "model_fields"):
+            visited = visited | {annotation}
+            return any(
+                _holds_expression(field.annotation, visited)
+                for field in annotation.model_fields.values()
+            )
+        return False
+    return any(_holds_expression(arg, _visited) for arg in t.get_args(annotation))
+
+
+@functools.lru_cache(maxsize=1)
+def _meta_render_policy() -> t.Dict[str, bool]:
+    """Map header property name -> whether its value is warehouse SQL.
+
+    Derived from the field declarations themselves, so it stays correct as properties
+    are added: expression-typed values (columns, audits, physical_properties, ...) are
+    the user's warehouse SQL and must render in the model's dialect, while scalar-typed
+    values (allow_partials, description, kind, ...) are SQLMesh's own semantics and must
+    stay dialect-agnostic -- transpiling those is what corrupts `allow_partials TRUE`
+    into tsql's unparseable `(1 = 1)`.
+    """
+    import inspect
+
+    from sqlmesh.core.audit.definition import ModelAudit
+    from sqlmesh.core.metric.definition import MetricMeta
+    from sqlmesh.core.model import kind as kind_module
+    from sqlmesh.core.model.meta import ModelMeta
+
+    sources: t.List[t.Any] = [ModelMeta, ModelAudit, MetricMeta]
+    sources.extend(
+        obj
+        for name, obj in vars(kind_module).items()
+        if inspect.isclass(obj) and hasattr(obj, "model_fields") and name.endswith("Kind")
+    )
+
+    policy: t.Dict[str, bool] = {}
+    for source in sources:
+        for name, field in source.model_fields.items():
+            policy.setdefault((field.alias or name).lower(), _holds_expression(field.annotation))
+
+    # `ModelMeta._pre_root_validator` (sqlmesh/core/model/meta.py) renames these two
+    # user-facing property names to their target field before Pydantic validation, so
+    # they never surface as a `Field(alias=...)` for the reflection above to find. Give
+    # each the render policy of the field it is renamed to.
+    pre_validator_aliases = {
+        "grain": "grains",
+        "table_properties": "physical_properties",
+    }
+    for alias, target in pre_validator_aliases.items():
+        if target in policy:
+            policy[alias] = policy[target]
+
+    return policy
+
+
+@functools.lru_cache(maxsize=None)
+def _dialect_renders_array_as_brackets(dialect_name: t.Optional[str]) -> bool:
+    """Whether `dialect_name`'s own generator spells an array literal as `[a, b]`.
+
+    Checked by actually rendering a sample `exp.Array` with that dialect, rather than
+    inspecting `Dialect.ARRAY_SIZE_NAME` or similar generator flags, because the
+    generator is the single source of truth for what a dialect's array syntax looks
+    like and there is no single shared flag for it across dialects. This also covers
+    dialects (tsql, sqlite, tableau, exasol, fabric) that reuse `[`/`]` for identifier
+    quoting and therefore render arrays as `ARRAY(...)` instead: rewriting their
+    `tags`/`ignored_rules` value to `[a, b]` would not be an array literal in their
+    grammar at all, so it silently reparses as one bracket-quoted identifier and
+    corrupts the value. An unrecognized dialect name renders with the generic
+    generator, which itself does not use brackets, so it falls back to `False`.
+    """
+    try:
+        sample = exp.Array(expressions=[exp.Literal.string("x")])
+        return sample.sql(dialect=dialect_name).startswith("[")
+    except Exception:
+        return False
+
+
 def _props_sql(self: Generator, expressions: t.List[exp.Expr]) -> str:
     props = []
     size = len(expressions)
 
     for i, prop in enumerate(expressions):
+        parent = prop.parent
+        meta_dialect = parent.meta.get(_SQLMESH_META_DIALECT) if parent else None
+
+        def render_with_model_dialect(node: exp.Expr, **overrides: t.Any) -> str:
+            opts: t.Dict[str, t.Any] = {
+                "dialect": meta_dialect,
+                "pretty": self.pretty,
+                "identify": self.identify,
+                "normalize": self.normalize,
+                "pad": self.pad,
+                "indent": self._indent,
+                "normalize_functions": self.normalize_functions,
+                "leading_comma": self.leading_comma,
+                "max_text_width": self.max_text_width,
+                "comments": self.comments,
+            }
+            opts.update(overrides)
+
+            # Keep boolean literals anywhere in the value (audit args, physical_properties,
+            # merge_filter, ...) as `TRUE`/`FALSE`: tsql would otherwise emit `(1 = 1)`,
+            # which reformats differently on the next pass. The value is transpiled with
+            # the model dialect anyway when it is used, e.g. in the rendered audit query.
+            def keep_boolean_literal(n: exp.Expr) -> exp.Expr:
+                if not isinstance(n, exp.Boolean):
+                    return n
+                literal = exp.var("TRUE" if n.this else "FALSE")
+                literal.comments = n.comments
+                return literal
+
+            return node.transform(keep_boolean_literal).sql(**opts)
+
         if isinstance(prop, MacroFunc):
-            sql = self.indent(self.sql(prop, comment=False))
+            # A macro in property position wraps user-authored arguments, so it carries
+            # warehouse SQL the same way `columns` or `audits` do. Clear the outer node's
+            # own comments (not `.this`'s, which `_macro_func_sql` already attaches)
+            # before rendering with the model dialect, mirroring what `comment=False`
+            # does for the non-dialect path below -- passing `comments=False` here
+            # instead would build a fresh Generator with comments globally disabled,
+            # silently dropping every comment in the subtree rather than just the
+            # redundant outer one.
+            if meta_dialect:
+                prop_for_render = prop.copy()
+                prop_for_render.comments = None
+                sql = self.indent(render_with_model_dialect(prop_for_render))
+            else:
+                sql = self.indent(self.sql(prop, comment=False))
         else:
-            sql = self.indent(f"{prop.name} {self.sql(prop, 'value')}")
+            value = prop.args.get("value")
+
+            if (
+                meta_dialect
+                and isinstance(value, exp.Expr)
+                and _meta_render_policy().get(prop.name.lower())
+            ):
+                value_sql = render_with_model_dialect(value)
+            elif (
+                meta_dialect
+                and isinstance(value, exp.Array)
+                and _dialect_renders_array_as_brackets(meta_dialect)
+            ):
+                # Dialect-agnostic properties (e.g. `tags`, `ignored_rules`) that hold a
+                # list still go through the base (dialect=None) generator, which renders
+                # an `exp.Array` as `ARRAY(...)`. On BigQuery `ARRAY(` is parsed as a
+                # subquery constructor, so a multi-element `ARRAY('a', 'b')` fails to
+                # reparse ("Required keyword: 'value' missing for Property"). Render it
+                # as a bracketed list literal instead -- but only for dialects that
+                # actually spell arrays that way; dialects that reuse `[`/`]` for
+                # identifier quoting (tsql, sqlite, ...) keep the generic `ARRAY(...)`
+                # form, which they parse back correctly. The elements themselves stay on
+                # the dialect-agnostic path (`self.expressions`, not
+                # `render_with_model_dialect`): these are SQLMesh's own scalar values
+                # (tag/rule name strings), not user warehouse SQL, so they must not be
+                # transpiled with the model dialect (e.g. tsql boolean literals turning
+                # into `(1 = 1)`).
+                value_sql = f"[{self.expressions(value, flat=True)}]"
+            else:
+                value_sql = self.sql(prop, "value")
+
+            sql = self.indent(f"{prop.name} {value_sql}")
 
         if i < size - 1:
             sql += ","
@@ -853,11 +1036,29 @@ def format_model_expressions(
     Returns:
         A string representing the formatted model.
     """
+
+    def tag_meta_dialect(expression: exp.Expr) -> exp.Expr:
+        """Record the model dialect on meta nodes so `_props_sql` can render the
+        warehouse-SQL properties (columns, audits, physical_properties, ...) with it
+        while the SQLMesh-owned ones stay dialect-agnostic. Tags nested ModelKind
+        nodes too, since kinds carry expression properties of their own such as
+        `time_data_type` and `unique_key`."""
+        if not dialect or not is_meta_expression(expression):
+            return expression
+
+        expression = expression.copy()
+        for node in expression.find_all(Model, Audit, Metric, ModelKind):
+            node.meta[_SQLMESH_META_DIALECT] = dialect
+        expression.meta[_SQLMESH_META_DIALECT] = dialect
+        return expression
+
     if len(expressions) == 1 and is_meta_expression(expressions[0]):
         # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL, not standard SQL,
         # so they must never be transpiled to the target dialect (e.g. tsql would
         # rewrite a boolean property like `allow_partials TRUE` to `(1 = 1)`).
-        return expressions[0].sql(
+        # Individual properties whose values *are* warehouse SQL still render with
+        # the model dialect -- see `_props_sql` / `_meta_render_policy`.
+        return tag_meta_dialect(expressions[0]).sql(
             pretty=True, dialect=None, normalize_functions=normalize_functions
         )
 
@@ -893,7 +1094,7 @@ def format_model_expressions(
     return ";\n\n".join(
         # Meta expressions (MODEL/AUDIT/METRIC) are SQLMesh DDL and must stay
         # dialect-agnostic; only the actual query/statement expressions transpile.
-        expression.sql(
+        tag_meta_dialect(expression).sql(
             pretty=True,
             dialect=None if is_meta_expression(expression) else dialect,
             normalize_functions=normalize_functions,

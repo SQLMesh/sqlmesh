@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import datetime
+import re
 import typing as t
 import io
+import threading
 from pathlib import Path
 import unittest
 from unittest.mock import call, patch
@@ -1360,6 +1362,68 @@ test_foo:
     )
 
 
+def test_freeze_time_does_not_patch_shared_generator() -> None:
+    from sqlglot.dialects.dialect import Dialect
+    from sqlglot.generator import _DISPATCH_CACHE
+
+    duckdb = Dialect.get_or_raise("duckdb")
+    exp.select("1").sql("duckdb")  # make sure the shared dispatch table exists
+    shared_transforms = dict(duckdb.generator_class.TRANSFORMS)
+    shared_dispatch = dict(_DISPATCH_CACHE[duckdb.generator_class])
+
+    test = _create_test(
+        body=load_yaml(
+            """
+test_foo:
+  model: xyz
+  outputs:
+    query:
+      - cur_date: 2023-01-01
+  vars:
+    execution_time: "2023-01-01 12:05:03+00:00"
+            """
+        ),
+        test_name="test_foo",
+        model=_create_model("SELECT CURRENT_DATE AS cur_date"),
+        context=Context(config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))),
+    )
+    test.concurrency = True
+
+    rendered: t.List[str] = []
+    errors: t.List[BaseException] = []
+
+    def render_ddl_through_shared_dialect() -> None:
+        # Mimics another test creating its fixture views while this test's frozen render
+        # context is active; both go through the dialect's shared generator class.
+        try:
+            for _ in range(200):
+                rendered.append(
+                    exp.Create(
+                        this=exp.to_table("s.v"), kind="VIEW", expression=exp.select("1")
+                    ).sql("duckdb")
+                )
+                rendered.append(exp.CurrentDate().sql("duckdb"))
+        except BaseException as e:  # pragma: no cover
+            errors.append(e)
+
+    with test._concurrent_render_context():
+        other = threading.Thread(target=render_ddl_through_shared_dialect)
+        other.start()
+        other.join()
+
+        # this test renders the frozen time...
+        assert test._generate_sql(exp.CurrentDate()) == "CAST('2023-01-01 12:05:03+00:00' AS DATE)"
+        # ...while the shared dialect is untouched, even inside the frozen context
+        assert exp.CurrentDate().sql("duckdb") == "CURRENT_DATE"
+
+    assert not errors
+    assert set(rendered) == {"CREATE VIEW s.v AS SELECT 1", "CURRENT_DATE"}
+    assert duckdb.generator_class.TRANSFORMS == shared_transforms
+    assert _DISPATCH_CACHE[duckdb.generator_class] == shared_dispatch
+
+    _check_successful_or_raise(test.run())
+
+
 def test_freeze_time(mocker: MockerFixture) -> None:
     mocker.patch("sqlmesh.core.test.definition.random_id", return_value="jzngz56a")
     test = _create_test(
@@ -2685,6 +2749,156 @@ test_example_full_model2:
     # Case 3: The "new_test.yaml::test_example_full_model2" should amount to a single subtest
     results = context.test(tests=[f"{test_file}::test_example_full_model2"])
     assert len(results.successes) == 1
+
+
+def test_model_path_selects_its_tests(tmp_path: Path) -> None:
+    """A model file path selects that model's tests, even though the YAML path wasn't given."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    results = context.test(tests=[str(tmp_path / "models" / "full_model.sql")])
+    assert len(results.successes) == 1
+    assert results.testsRun == 1
+
+
+def test_python_model_path_selects_its_tests(tmp_path: Path) -> None:
+    """Selection is by file path, so a Python model works the same way a SQL one does."""
+    init_example_project(tmp_path, engine_type="duckdb")
+
+    py_model = tmp_path / "models" / "py_model.py"
+    py_model.write_text(
+        """
+import pandas as pd  # noqa: TID253
+from sqlmesh import model, ExecutionContext
+import typing as t
+
+@model(
+  name="sqlmesh_example.py_model",
+  columns={"id": "int"},
+)
+def execute(context: ExecutionContext, **kwargs: t.Any) -> pd.DataFrame:
+  return pd.DataFrame([{"id": 1}])
+"""
+    )
+    (tmp_path / "tests" / "test_py_model.yaml").write_text(
+        """
+test_py_model:
+  model: sqlmesh_example.py_model
+  outputs:
+    query:
+      rows:
+      - id: 1
+"""
+    )
+
+    context = Context(paths=tmp_path)
+
+    results = context.test(tests=[str(py_model)])
+    assert results.testsRun == 1
+    assert len(results.successes) == 1
+
+    # The SQL model's own test is not pulled in by selecting the Python model.
+    assert context.test(tests=[str(tmp_path / "models" / "full_model.sql")]).testsRun == 1
+
+
+def test_model_path_without_tests_selects_nothing(tmp_path: Path) -> None:
+    """A known model that simply has no tests is not an error."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    results = context.test(tests=[str(tmp_path / "models" / "incremental_model.sql")])
+    assert results.testsRun == 0
+    assert results.wasSuccessful()
+
+
+def test_model_and_test_paths_are_unioned_without_duplicates(tmp_path: Path) -> None:
+    """Overlapping selectors must not run the same test twice."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    model_path = str(tmp_path / "models" / "full_model.sql")
+    test_path = str(tmp_path / "tests" / "test_full_model.yaml")
+
+    # The YAML holds full_model's only test, so both selectors resolve to the same test.
+    assert context.test(tests=[model_path]).testsRun == 1
+    assert context.test(tests=[test_path]).testsRun == 1
+    assert context.test(tests=[model_path, test_path]).testsRun == 1
+
+
+def test_overlapping_yaml_and_named_test_are_deduplicated(tmp_path: Path) -> None:
+    """`file.yaml::name` is a subset of `file.yaml`, so together they're still one run."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    test_path = str(tmp_path / "tests" / "test_full_model.yaml")
+    results = context.test(tests=[f"{test_path}::test_example_full_model", test_path])
+    assert results.testsRun == 1
+
+
+def test_relative_paths_select_tests(tmp_path: Path, monkeypatch) -> None:
+    """Pre-commit passes paths relative to the repo root, not absolute ones."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    monkeypatch.chdir(tmp_path)
+    assert context.test(tests=["models/full_model.sql"]).testsRun == 1
+    assert context.test(tests=["tests/test_full_model.yaml"]).testsRun == 1
+
+
+def test_unknown_path_is_ignored_by_default(tmp_path: Path) -> None:
+    """Default behavior is unchanged, so the LSP can keep probing arbitrary documents."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    assert context.select_tests(tests=[str(tmp_path / "models" / "nope.sql")]) == []
+
+
+def test_unknown_path_errors_when_requested(tmp_path: Path) -> None:
+    """A path that is neither a known model nor a known test file must not pass silently."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    missing = tmp_path / "models" / "nope.sql"
+    with pytest.raises(SQLMeshError, match="is not a known model or test file"):
+        context.select_tests(tests=[str(missing)], raise_on_unknown_paths=True)
+
+    with pytest.raises(SQLMeshError, match="is not a known model or test file"):
+        context.test(tests=[str(missing)], raise_on_unknown_paths=True)
+
+
+def test_unknown_test_name_errors_when_requested(tmp_path: Path) -> None:
+    """A known YAML file with an unknown `::test_name` reports the test, not the file."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    test_path = tmp_path / "tests" / "test_full_model.yaml"
+    with pytest.raises(SQLMeshError, match=f"is not a known test in '{re.escape(str(test_path))}'"):
+        context.select_tests(tests=[f"{test_path}::nope"], raise_on_unknown_paths=True)
+
+
+def test_unknown_test_name_in_unknown_file_reports_the_file(tmp_path: Path) -> None:
+    """A `::test_name` on a file that isn't a test file is a path problem, not a name one."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    missing = tmp_path / "tests" / "test_nope.yaml"
+    with pytest.raises(SQLMeshError, match="is not a known model or test file"):
+        context.select_tests(tests=[f"{missing}::nope"], raise_on_unknown_paths=True)
+
+
+def test_select_model_still_filters_path_selection(tmp_path: Path) -> None:
+    """`--select-model` keeps narrowing the selection rather than adding to it."""
+    init_example_project(tmp_path, engine_type="duckdb")
+    context = Context(paths=tmp_path)
+
+    model_path = str(tmp_path / "models" / "full_model.sql")
+    assert (
+        context.test(tests=[model_path], model_names=["sqlmesh_example.full_model"]).testsRun == 1
+    )
+    assert (
+        context.test(tests=[model_path], model_names=["sqlmesh_example.incremental_model"]).testsRun
+        == 0
+    )
 
 
 def test_freeze_time_concurrent(tmp_path: Path) -> None:
