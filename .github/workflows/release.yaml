@@ -5,9 +5,10 @@ on:
       - 'v*.*.*'
 permissions:
   contents: write
+# Pin Ubuntu 24.04. ubuntu-latest now resolves to 26.04.
 jobs:
   ui-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -29,7 +30,7 @@ jobs:
 
   publish:
     needs: ui-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Download UI build artifact
@@ -40,9 +41,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.10'
+          # 3.13.17+ bundles pip 26.2.2+, which no longer trusts the compromised eMudhra/emSign root CA.
+          python-version: '3.13'
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      - name: Check pip includes the eMudhra/emSign CA removal
+        run: |
+          python -c "import sys, pip; v = tuple(int(p) for p in pip.__version__.split('.')[:3]); sys.exit(0 if v >= (26, 2, 2) else f'pip {pip.__version__} predates the eMudhra/emSign CA removal; need >= 26.2.2')"
       - name: Install build dependencies
         run: pip install build twine setuptools_scm
       - name: Publish Python package
@@ -59,7 +64,7 @@ jobs:
         run: unset TWINE_USERNAME TWINE_PASSWORD && make publish-tests
 
   gh-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
