@@ -6,9 +6,10 @@ on:
         description: 'Version to release (e.g., 1.0.0)'
         required: true
         type: string
+# Pin Ubuntu 24.04. ubuntu-latest now resolves to 26.04.
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

@@ -10,15 +10,18 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+# ubuntu-latest is Ubuntu 26.04. That image drops Python 3.9, installs OpenJDK 25
+# (Spark/Hadoop calls the removed Subject.getSubject), and has no Playwright Chromium.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       python: ${{ steps.filter.outputs.python }}
       client: ${{ steps.filter.outputs.client }}
       vscode: ${{ steps.filter.outputs.vscode }}
       lsp: ${{ steps.filter.outputs.lsp }}
       ci: ${{ steps.filter.outputs.ci }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -44,13 +47,17 @@ jobs:
               - '.github/**'
               - 'Makefile'
               - '.pre-commit-config.yaml'
+            docs:
+              - 'docs/**'
+              - 'mkdocs.yml'
+              - '.readthedocs.yaml'
 
   doc-tests:
     needs: changes
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV: '1'
     steps:
@@ -71,12 +78,39 @@ jobs:
           source .venv/bin/activate
           make doc-test
 
+  docs-build:
+    needs: changes
+    if:
+      needs.changes.outputs.docs == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        # Match the Python version Read the Docs builds with (.readthedocs.yaml)
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-doc
+      - name: Build docs
+        run: |
+          source .venv/bin/activate
+          mkdocs build --strict
+
   style-and-cicd-tests:
     needs: changes
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +184,10 @@ jobs:
           . ./venv/Scripts/activate
           python.exe -m pip install --upgrade pip
           make install-dev
+      - name: Install DuckLake extension
+        run: |
+          . ./venv/Scripts/activate
+          python -c "import duckdb; duckdb.connect().install_extension('ducklake')"
       - name: Run fast unit tests
         run: |
           . ./venv/Scripts/activate
@@ -169,7 +207,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
       UV: '1'
@@ -198,7 +236,7 @@ jobs:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.vscode ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -225,7 +263,7 @@ jobs:
     if:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: mcr.microsoft.com/playwright:v1.54.1-jammy
     steps:
@@ -253,7 +291,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -308,7 +346,7 @@ jobs:
   engine-tests-cloud:
     needs: engine-tests-docker
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -420,7 +458,7 @@ jobs:
       'true' || github.ref == 'refs/heads/main'
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -439,7 +477,7 @@ jobs:
       needs.changes.outputs.vscode == 'true' || needs.changes.outputs.lsp ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -485,7 +523,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

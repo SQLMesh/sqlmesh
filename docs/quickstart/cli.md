@@ -161,7 +161,7 @@ https://sqlmesh.readthedocs.io/en/stable/quickstart/cli/
 
 Need help?
 - Docs:   https://sqlmesh.readthedocs.io
-- Slack:  https://www.tobikodata.com/slack
+- Slack:  https://tobiko-data.slack.com/
 - GitHub: https://github.com/SQLMesh/sqlmesh/issues
 ```
 
@@ -737,4 +737,4 @@ From here, you can:
 * [Learn more about SQLMesh CLI commands](../reference/cli.md)
 * [Set up a connection to a database or SQL engine](../guides/connections.md)
 * [Learn more about SQLMesh concepts](../concepts/overview.md)
-* [Join our Slack community](https://tobikodata.com/slack)
+* [Join our Slack community](https://tobiko-data.slack.com/)
