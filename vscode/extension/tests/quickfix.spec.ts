@@ -2,6 +2,7 @@ import fs from 'fs-extra'
 import path from 'path'
 import {
   openProblemsView,
+  saveFile,
   SUSHI_SOURCE_PATH,
   waitForLoadedSQLMesh,
 } from './utils'
@@ -78,13 +79,21 @@ test('noselectstar quickfix', async ({ page, sharedCodeServer, tempDir }) => {
   })
   await replaceSelectStar.first().waitFor({ state: 'visible' })
   await replaceSelectStar.first().click()
+  // The code action edits the open document. It stays unsaved until the
+  // editor writes it, so the on-disk assertion below would keep seeing
+  // SELECT * on a busy CI runner.
+  await quickFixMenu.waitFor({ state: 'hidden' })
+  await saveFile(page)
 
   // Wait for the quick fix to be applied by polling the file content
   await expect
-    .poll(async () => {
-      const content = (await fs.readFile(modelPath)).toString('utf8')
-      return content.includes('SELECT *')
-    })
+    .poll(
+      async () => {
+        const content = (await fs.readFile(modelPath)).toString('utf8')
+        return content.includes('SELECT *')
+      },
+      { timeout: 15_000 },
+    )
     .toBeFalsy()
 
   // Assert that the model no longer contains SELECT * but SELECT id, customer_id, waiter_id, start_ts, end_ts, event_date

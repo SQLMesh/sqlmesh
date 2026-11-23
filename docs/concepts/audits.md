@@ -251,6 +251,8 @@ MODEL (
 #### at_least_one, at_least_one_non_blocking
 Ensures that specified columns contain at least one non-NULL value.
 
+The audit fails when no row has a non-NULL value, including when the table is empty. For `INCREMENTAL_BY_TIME_RANGE` models the audit only sees the interval being processed, so an empty interval also fails. Use `at_least_one_non_blocking` if empty tables or intervals should log a warning instead of stopping the run.
+
 This example asserts that the `zip` column contains at least one non-NULL value:
 
 ```sql linenums="1"
@@ -477,7 +479,7 @@ MODEL (
 #### valid_uuid, valid_uuid_non_blocking
 Ensures that all non-NULL rows of a column contain a string with the UUID structure.
 
-UUID structure determined by matching regular expression `'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`.
+UUID structure determined by matching regular expression `'^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`.
 
 This example asserts that all `uuid` values have the UUID structure:
 

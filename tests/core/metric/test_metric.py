@@ -154,3 +154,11 @@ def test_get_measure_and_dim_tables():
         "a",
         ("b",),
     )
+    assert _get_measure_and_dim_tables(d.parse_one("ARRAY_AGG(a.x ORDER BY a.x)")) == ("a", ())
+    assert _get_measure_and_dim_tables(d.parse_one("ARRAY_AGG(a.x ORDER BY b.y)")) == ("a", ("b",))
+    assert _get_measure_and_dim_tables(
+        d.parse_one("ARRAY_AGG(IF(c.z = 'dim', a.x, NULL) ORDER BY b.y)")
+    ) == ("a", ("b", "c"))
+    # A column that only appears in the ORDER BY clause cannot be the measure.
+    with pytest.raises(ConfigError, match="Could not infer a measures table"):
+        _get_measure_and_dim_tables(d.parse_one("ARRAY_AGG(1 ORDER BY b.y)"))

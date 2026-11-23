@@ -23,7 +23,9 @@ import pytest
 from sqlglot import expressions as exp
 from sqlglot import parse_one
 from pytest_mock.plugin import MockerFixture
-from sqlmesh.core.engine_adapter.shared import DataObjectType
+from sqlmesh.core.engine_adapter.mixins import TableAlterDropClusterKeyOperation
+from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
+from sqlmesh.core.schema_diff import TableAlterDropColumnOperation
 from sqlmesh.utils.errors import SQLMeshError
 
 from tests.core.engine_adapter import to_sql_calls
@@ -2486,3 +2488,60 @@ class TestExcludedTablesResolution:
             "excluded_refresh_tables"
             in StarRocksEngineAdapter.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES
         )
+
+
+class TestClusteringKeyOrdering:
+    """StarRocks uses ClusteredByMixin but must KEEP the historical alter order.
+
+    Dropping a column that belongs to the current clustering key must NOT trigger
+    a reorder.  StarRocks must emit DROP COLUMN first, then the clustering change.
+    """
+
+    def test_column_drop_before_clustering_key_change(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+        mocker: MockerFixture,
+    ) -> None:
+        """DROP COLUMN is emitted before DROP CLUSTERING KEY (historical order)."""
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter, patch_get_data_objects=False)
+
+        current_columns = {"id": "INT", "partition_month": "INT"}
+        target_columns = {"id": "INT"}
+
+        def _columns(table_name: t.Any, **kwargs: t.Any) -> t.Dict[str, exp.DataType]:
+            mapping = current_columns if table_name == "db.current_table" else target_columns
+            return {k: exp.DataType.build(v) for k, v in mapping.items()}
+
+        mocker.patch.object(adapter, "columns", side_effect=_columns)
+
+        current_obj = DataObject(
+            catalog=None,
+            schema="db",
+            name="current_table",
+            type=DataObjectType.TABLE,
+            clustering_key='LINEAR("partition_month")',
+        )
+        target_obj = DataObject(
+            catalog=None,
+            schema="db",
+            name="target_table",
+            type=DataObjectType.TABLE,
+            clustering_key=None,
+        )
+
+        def _mock_get_data_objects(
+            schema_name: t.Any, object_names: t.Optional[t.Set[str]] = None
+        ) -> t.List[DataObject]:
+            results = []
+            for obj in [current_obj, target_obj]:
+                if object_names is None or obj.name in object_names:
+                    results.append(obj)
+            return results
+
+        mocker.patch.object(adapter, "_get_data_objects", side_effect=_mock_get_data_objects)
+
+        operations = adapter.get_alter_operations("db.current_table", "db.target_table")
+
+        assert len(operations) == 2
+        assert isinstance(operations[0], TableAlterDropColumnOperation)
+        assert isinstance(operations[1], TableAlterDropClusterKeyOperation)
