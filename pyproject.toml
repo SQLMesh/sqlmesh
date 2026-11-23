@@ -89,7 +89,6 @@ dev = [
     "PyGithub>=2.6.0",
     "pyodbc>=5.0.0",
     "mssql-python>=1.1.0;python_version>=\"3.10\"",
-    "pymysql",
     "pyperf",
     "pyspark~=3.5.0",
     "pytest",
