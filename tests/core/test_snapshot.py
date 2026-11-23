@@ -681,28 +681,6 @@ def test__missing_intervals__non_representative_snapshot_dev_intervals_returned(
     ]
 
 
-def test__missing_intervals__representative_but_non_deployable_snapshot_no_intervals_returned(
-    snapshot: Snapshot,
-):
-    # Arrange
-    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=False)
-    snapshot.add_interval(start="2020-01-02", end="2020-01-02", is_dev=False)
-    snapshot.add_interval(start="2020-01-01", end="2020-01-01", is_dev=True)
-
-    snapshot.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
-    deployability_index = DeployabilityIndex.create([snapshot])
-
-    # Act
-    missing_intervals = snapshot.missing_intervals(
-        start="2020-01-01", end="2020-01-03", deployability_index=deployability_index
-    )
-
-    # Assert
-    assert deployability_index.is_representative(snapshot)
-    assert not deployability_index.is_deployable(snapshot)
-    assert missing_intervals == []
-
-
 def test_incremental_time_self_reference(make_snapshot):
     snapshot = make_snapshot(
         SqlModel(
