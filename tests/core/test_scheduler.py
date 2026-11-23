@@ -1213,3 +1213,72 @@ def test_dag_upstream_dependency_caching_with_complex_diamond(mocker: MockerFixt
         expected_g_node: {expected_a_node},
         expected_h_node: {expected_a_node},
     }
+
+def test_dev_run_skips_representative_non_deployable_snapshot(mocker: MockerFixture, make_snapshot):
+    r"""
+    Tests that snapshots that are ineligible for the physical layer do not have any missing intervals in dev runs.
+    """
+
+    snapshot_non_breaking = make_snapshot(
+        SqlModel(
+            name="non_breaking",
+            kind=IncrementalByTimeRangeKind(time_column="ds"),
+            cron="@daily",
+            start="2020-01-01",
+            query=parse_one("SELECT 1 AS ds"),
+        )
+    )
+    snapshot_non_breaking.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+
+    snapshot_indirect_non_breaking = make_snapshot(
+        SqlModel(
+            name="indirect_non_breaking",
+            kind=IncrementalByTimeRangeKind(time_column="ds"),
+            cron="@daily",
+            start="2020-01-01",
+            query=parse_one("SELECT ds FROM non_breaking"),
+        ),
+        nodes={'"non_breaking"': snapshot_non_breaking.model},
+    )
+    snapshot_indirect_non_breaking.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
+    snapshot_indirect_non_breaking.add_interval(start="2020-01-01", end="2020-01-01", is_dev=False)
+    snapshot_indirect_non_breaking.add_interval(start="2020-01-02", end="2020-01-02", is_dev=False)
+
+    snapshots = [snapshot_non_breaking, snapshot_indirect_non_breaking]
+    dev_deployability_index = DeployabilityIndex.create(snapshots)
+    prod_deployability_index = DeployabilityIndex.all_deployable()
+
+    scheduler = Scheduler(
+        snapshots=snapshots,
+        snapshot_evaluator=mocker.Mock(),
+        state_sync=mocker.Mock(),
+        default_catalog=None,
+    )
+
+    dev_intervals = scheduler.merged_missing_intervals(
+        start="2020-01-01",
+        end="2020-01-03",
+        execution_time="2020-01-04",
+        deployability_index=dev_deployability_index,
+        ignore_cron=True,
+    )
+
+    prod_intervals = scheduler.merged_missing_intervals(
+        start="2020-01-01",
+        end="2020-01-03",
+        execution_time="2020-01-04",
+        deployability_index=DeployabilityIndex.all_deployable(),
+        ignore_cron=True,
+    )
+
+    assert snapshot_indirect_non_breaking not in dev_intervals
+    assert not dev_deployability_index.is_eligible_for_physical_layer(snapshot_indirect_non_breaking)
+
+    assert snapshot_non_breaking in dev_intervals
+    assert dev_deployability_index.is_eligible_for_physical_layer(snapshot_non_breaking)
+
+    assert snapshot_indirect_non_breaking in prod_intervals
+    assert prod_deployability_index.is_eligible_for_physical_layer(snapshot_indirect_non_breaking)
+
+    assert snapshot_non_breaking in prod_intervals
+    assert prod_deployability_index.is_eligible_for_physical_layer(snapshot_non_breaking)
