@@ -1,9 +1,10 @@
 name: Sanity check
 on: [pull_request]
 
+# Pin Ubuntu 24.04. ubuntu-latest now resolves to 26.04.
 jobs:
   commits_check_job:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Commits Check
     steps:
       - name: Get PR Commits
