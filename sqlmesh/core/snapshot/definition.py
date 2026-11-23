@@ -1739,7 +1739,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                     # model's start, we should consider this snapshot non-deployable.
                     this_deployable = False
                     if not snapshot.is_paused or (
-                        snapshot.is_indirect_non_breaking and bool(snapshot.intervals)
+                        snapshot.is_indirect_non_breaking and snapshot.intervals
                     ):
                         # This snapshot represents what's currently deployed in prod.
                         representative_shared_version_ids.add(node)
