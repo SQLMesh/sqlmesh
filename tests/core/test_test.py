@@ -4084,3 +4084,33 @@ def test_use_project_index_reloads_after_failed_validation(
     assert result.wasSuccessful(), result.failures + result.errors
     assert result.testsRun == 1
     assert not context.get_model("demo.a", raise_if_missing=True).partitioned_by
+
+
+def test_use_project_index_reloads_after_missing_model_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding the missing model and retrying on the same context must run the test."""
+    create_indexed_test_project(tmp_path)
+    (tmp_path / "tests" / "test_missing.yaml").write_text(
+        """test_missing:
+  model: demo.nope
+  outputs:
+    query:
+      rows:
+        - id: 1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    with pytest.raises(SQLMeshError, match="was not found"):
+        context.test(tests=["tests/test_missing.yaml"], use_project_index=True)
+
+    (tmp_path / "models" / "nope.sql").write_text(
+        "MODEL(name demo.nope, kind FULL); SELECT 1 AS id", encoding="utf-8"
+    )
+    result = context.test(tests=["tests/test_missing.yaml"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
