@@ -251,7 +251,7 @@ MODEL (
 #### at_least_one, at_least_one_non_blocking
 Ensures that specified columns contain at least one non-NULL value.
 
-The audit fails when no row has a non-NULL value, including when the table is empty. For incremental models the audit only sees the interval being processed, so an empty interval also fails. Use `at_least_one_non_blocking` if empty tables or intervals should log a warning instead of stopping the run.
+The audit fails when no row has a non-NULL value, including when the table is empty. For `INCREMENTAL_BY_TIME_RANGE` models the audit only sees the interval being processed, so an empty interval also fails. Use `at_least_one_non_blocking` if empty tables or intervals should log a warning instead of stopping the run.
 
 This example asserts that the `zip` column contains at least one non-NULL value:
 
