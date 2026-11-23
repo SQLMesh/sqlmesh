@@ -2487,7 +2487,14 @@ class GenericContext(BaseContext, t.Generic[C]):
             tests_skipped = 0
 
         if target_fqns is not None:
-            self._update_model_schemas_and_validate(self._scoped_test_model_fqns(test_meta))
+            scoped_model_fqns = self._scoped_test_model_fqns(test_meta)
+            try:
+                self._update_model_schemas_and_validate(scoped_model_fqns)
+            except Exception:
+                # Validation was deferred from the load above, so the load didn't complete.
+                # Otherwise, a retry after the file is fixed would reuse the invalid model.
+                self._loaded = False
+                raise
 
         result = run_tests(
             model_test_metadata=test_meta,

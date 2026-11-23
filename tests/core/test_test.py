@@ -4056,3 +4056,31 @@ def test_use_project_index_resolves_schemas_after_stale_hint(
         "id",
         "name",
     }
+
+
+def test_use_project_index_reloads_after_failed_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation that fails after the load must not leave the invalid model in the context."""
+    create_indexed_test_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    model_path = tmp_path / "models" / "a.sql"
+    valid_model = model_path.read_text(encoding="utf-8")
+    # Parses, but fails validation because of the duplicate partition column.
+    model_path.write_text(
+        "MODEL(name demo.a, kind FULL, partitioned_by (id, id)); SELECT * FROM demo.src",
+        encoding="utf-8",
+    )
+
+    # With no index yet, the load is full and validation of the selected model is deferred.
+    context = Context(paths=tmp_path, load=False)
+    with pytest.raises(ConfigError):
+        context.test(tests=["tests/test_a.yaml"], use_project_index=True)
+
+    model_path.write_text(valid_model, encoding="utf-8")
+    result = context.test(tests=["tests/test_a.yaml"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    assert not context.get_model("demo.a", raise_if_missing=True).partitioned_by
