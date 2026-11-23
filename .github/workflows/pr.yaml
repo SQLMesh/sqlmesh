@@ -435,8 +435,24 @@ jobs:
           ./.github/scripts/manage-test-db.sh "${{ matrix.engine }}"
           "$TEST_DB_NAME" up
       - name: Run tests
+        env:
+          # Temporary BigQuery diagnostics: since 2026-10-31 the runner is shut down
+          # ~1 minute into pytest with no test output. Stream test results and log
+          # memory/disk so the next failure shows what was running. Remove once fixed.
+          PYTHONUNBUFFERED: ${{ matrix.engine == 'bigquery' && '1' || '' }}
+          PYTEST_ADDOPTS: ${{ matrix.engine == 'bigquery' && '-v' || '' }}
         run: |
           source .venv/bin/activate
+          if [ "${{ matrix.engine }}" = "bigquery" ]; then
+            (
+              while true; do
+                echo "[resources $(date -u +%T)] $(free -m | awk '/Mem:/{print "mem_used="$3"MB mem_avail="$7"MB"}') $(free -m | awk '/Swap:/{print "swap_used="$3"MB"}') $(df -h / | awk 'NR==2{print "disk_used="$5}')"
+                ps -eo rss=,args= --sort=-rss | head -4 | awk '{rss=$1; $1=""; printf "  rss=%dMB %.120s\n", rss/1024, $0}'
+                sleep 5
+              done
+            ) &
+            trap "kill $! 2>/dev/null || true" EXIT
+          fi
           make ${{ matrix.engine }}-test
       - name: Tear down test database
         if: always()
