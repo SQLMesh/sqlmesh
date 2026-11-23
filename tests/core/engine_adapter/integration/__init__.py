@@ -70,7 +70,7 @@ class IntegrationTestEngine:
 
 
 ENGINES = [
-    # Docker engines that can be locally tested. Ensure that any required dependencies for these are are added to the project.optional-dependencies.dev list in pyproject.toml
+    # Docker engines that can be locally tested
     IntegrationTestEngine("duckdb"),
     IntegrationTestEngine("postgres"),
     IntegrationTestEngine("mysql"),
