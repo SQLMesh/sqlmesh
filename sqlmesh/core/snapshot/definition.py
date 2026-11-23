@@ -1683,7 +1683,6 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         start: t.Optional[TimeLike] = None,  # plan start
         start_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ) -> DeployabilityIndex:
-
         if not isinstance(snapshots, dict):
             snapshots = {s.snapshot_id: s for s in snapshots}
 

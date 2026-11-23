@@ -215,15 +215,17 @@ def pytest_collection_modifyitems(items, *args, **kwargs):
     # These are built in Pytest fixtures that capture output as documented here: https://docs.pytest.org/en/stable/reference/fixtures.html
     # Due to the use of the clear() functionality within the test suite, tests that use these fixtures can collide with each other by
     # clearing each others captured outputs, so the these are marked as isolated.
-    non_thread_safe_fixtures = frozenset({
-        "caplog",
-        "capsys",
-        "capsysbinary",
-        "capfd",
-        "capfdbinary",
-        "capteesys",
-    })
-    
+    non_thread_safe_fixtures = frozenset(
+        {
+            "caplog",
+            "capsys",
+            "capsysbinary",
+            "capfd",
+            "capfdbinary",
+            "capteesys",
+        }
+    )
+
     for item in items:
         if bool(non_thread_safe_fixtures & set(item.fixturenames)):
             # Ensure that any tests using non-threadsafe fixtures are isolated.

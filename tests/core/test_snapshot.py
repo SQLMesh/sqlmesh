@@ -2562,16 +2562,12 @@ def test_deployability_index(make_snapshot):
     all_deployable_index = deployability_index.all_deployable()
     assert all(all_deployable_index.is_deployable(s) for s in snapshots.values())
     assert all(all_deployable_index.is_representative(s) for s in snapshots.values())
-    assert all(
-        all_deployable_index.is_eligible_for_physical_layer(s) for s in snapshots.values()
-    )
+    assert all(all_deployable_index.is_eligible_for_physical_layer(s) for s in snapshots.values())
 
     none_deployable_index = deployability_index.none_deployable()
     assert all(not none_deployable_index.is_deployable(s) for s in snapshots.values())
     assert all(not none_deployable_index.is_representative(s) for s in snapshots.values())
-    assert all(
-        none_deployable_index.is_eligible_for_physical_layer(s) for s in snapshots.values()
-    )
+    assert all(none_deployable_index.is_eligible_for_physical_layer(s) for s in snapshots.values())
 
 
 def test_deployability_index_unpaused_forward_only(make_snapshot):
