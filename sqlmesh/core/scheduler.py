@@ -1103,8 +1103,7 @@ def merged_missing_intervals(
         snapshots_to_intervals = {
             snapshot: interval
             for snapshot, interval in snapshots_to_intervals.items()
-            if snapshot.name in snapshots
-            and deployability_index.is_eligible_for_physical_layer(snapshot)
+            if deployability_index.is_eligible_for_physical_layer(snapshot)
         }
 
     return snapshots_to_intervals

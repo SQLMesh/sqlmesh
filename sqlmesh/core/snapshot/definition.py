@@ -1640,7 +1640,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
             snapshot: The snapshot to check.
 
         Returns:
-            True if the snapshot is not representative, or if it is deployable, False otherwise.
+            True if the snapshot is not representative, or if it is deployable. False otherwise.
         """
         return not self.is_representative(snapshot=snapshot) or self.is_deployable(
             snapshot=snapshot
