@@ -140,18 +140,21 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         warehouse_name = catalog_name.sql(dialect=self.dialect, identify=False)
 
         logger.info(f"Deleting Fabric warehouse: {warehouse_name}")
-        delete_accepted = False
+        # True once delete_warehouse returns (deleted or already absent).
+        # Exceptions before that leave connections alone.
+        delete_returned = False
         try:
-            delete_accepted, location = self.api_client.delete_warehouse(warehouse_name)
+            location = self.api_client.delete_warehouse(warehouse_name)
+            delete_returned = True
             # Wait after acceptance so connection cleanup still runs if polling fails.
             if location:
                 self.api_client._wait_for_completion(location, warehouse_name)
                 logger.info(f"Successfully deleted Fabric warehouse: {warehouse_name}")
         finally:
-            # Failures before acceptance leave connections alone.
-            if delete_accepted:
+            if delete_returned:
                 # Fabric validates DATABASE= and raises 'Authentication Failed'
                 # when it points at a non-existent warehouse, so we close all connections.
+                # Also clear stale connections when the warehouse was already absent.
                 default_db = self._extra_config.get("database")
                 in_use = {
                     self.get_current_catalog() or default_db,
@@ -487,15 +490,13 @@ class FabricHttpClient:
             logger.error(f"Unexpected response from Fabric API: {response}\n{response.text}")
             raise SQLMeshError(f"Unable to create warehouse: {response}")
 
-    def delete_warehouse(
-        self, warehouse_name: str, if_exists: bool = True
-    ) -> t.Tuple[bool, t.Optional[str]]:
+    def delete_warehouse(self, warehouse_name: str, if_exists: bool = True) -> t.Optional[str]:
         """Drop a catalog (warehouse) in Microsoft Fabric via REST API.
 
         Returns:
-            (accepted, location) where accepted is True once Fabric has accepted the
-            DELETE, and location is the async operation URL when status is 202.
-            The caller waits on location so connection cleanup can run even if
+            The async operation Location URL when DELETE returns 202 with a header;
+            None for sync success or when the warehouse is already absent (if_exists).
+            The caller waits on the location so connection cleanup can run even if
             polling fails after acceptance.
         """
         logger.info(f"Deleting Fabric warehouse: {warehouse_name}")
@@ -517,7 +518,7 @@ class FabricHttpClient:
                 f"Fabric warehouse does not exist: {warehouse_name}\n(available warehouses: {', '.join(warehouse_name_to_id)})"
             )
             if if_exists:
-                return False, None
+                return None
 
             raise SQLMeshError(
                 f"Unable to delete Fabric warehouse {warehouse_name} as it doesnt exist"
@@ -540,7 +541,7 @@ class FabricHttpClient:
         else:
             logger.info(f"Successfully deleted Fabric warehouse: {warehouse_name}")
 
-        return True, location
+        return location
 
     @cached_property
     def session(self) -> requests.Session:
