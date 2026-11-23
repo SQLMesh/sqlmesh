@@ -26,6 +26,8 @@ from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils import optional_import
 from tests.core.engine_adapter import to_sql_calls
 from sqlmesh.core.model.kind import ViewKind
+from sqlmesh.core.snapshot import DeployabilityIndex
+from sqlmesh.core.snapshot.evaluator import EngineManagedStrategy
 
 pytestmark = [pytest.mark.engine, pytest.mark.snowflake]
 
@@ -306,6 +308,38 @@ def test_multiple_column_comments(make_mocked_engine_adapter: t.Callable, mocker
         """CREATE OR REPLACE VIEW "test_view" COPY GRANTS AS SELECT "a", "b" FROM "test_table\"""",
         """ALTER VIEW "test_view" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
         """ALTER TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description changed', COLUMN "b" COMMENT 'b column description changed'""",
+    ]
+
+
+def test_column_comments_iceberg(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    adapter._create_column_comments(
+        "test_table",
+        {"a": "a column description", "b": "b column description"},
+        table_format="iceberg",
+    )
+
+    assert to_sql_calls(adapter) == [
+        """ALTER ICEBERG TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
+    ]
+
+
+def test_ctas_column_comments_iceberg(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    # The column types are unknown, so the comments can't be inlined into the CTAS
+    # schema definition and are registered with a post-creation ALTER instead
+    adapter.ctas(
+        "test_table",
+        parse_one("SELECT a, b FROM source_table"),
+        table_format="iceberg",
+        column_descriptions={"a": "a column description"},
+    )
+
+    assert to_sql_calls(adapter) == [
+        """CREATE ICEBERG TABLE IF NOT EXISTS "test_table" AS SELECT "a", "b" FROM "source_table\"""",
+        """ALTER ICEBERG TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description'""",
     ]
 
 
@@ -637,6 +671,31 @@ def test_create_managed_table(make_mocked_engine_adapter: t.Callable, mocker: Mo
     ]
 
 
+@pytest.mark.parametrize("table_format", [None, "iceberg"])
+def test_create_managed_table_column_comments(
+    make_mocked_engine_adapter: t.Callable, table_format: t.Optional[str]
+):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+
+    # Unknown column types require a post-creation comment command.
+    adapter.create_managed_table(
+        table_name="test_table",
+        query=parse_one("SELECT a, b FROM source_table"),
+        table_format=table_format,
+        table_properties={
+            "target_lag": exp.Literal.string("20 minutes"),
+            "warehouse": exp.to_identifier("test_warehouse"),
+        },
+        column_descriptions={"a": "a column description", "b": "b column description"},
+    )
+
+    table_kind = "DYNAMIC ICEBERG TABLE" if table_format else "DYNAMIC TABLE"
+    assert to_sql_calls(adapter) == [
+        f'CREATE OR REPLACE {table_kind} "test_table" TARGET_LAG=\'20 minutes\' WAREHOUSE="test_warehouse" AS SELECT "a", "b" FROM "source_table"',
+        """ALTER TABLE "test_table" ALTER COLUMN "a" COMMENT 'a column description', COLUMN "b" COMMENT 'b column description'""",
+    ]
+
+
 def test_drop_managed_table(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
 
@@ -670,6 +729,85 @@ def test_ctas_skips_dynamic_table_properties(make_mocked_engine_adapter: t.Calla
     assert to_sql_calls(adapter) == [
         'CREATE TABLE IF NOT EXISTS "test_table" AS SELECT CAST("a" AS INT) AS "a", CAST("b" AS INT) AS "b" FROM (SELECT "a", "b" FROM "source_table") AS "_subquery"'
     ]
+
+
+@pytest.mark.parametrize(
+    "operation", ["create_annotated", "create_ctas", "insert", "create_managed"]
+)
+def test_managed_preview_dynamic_table_properties(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, operation: str
+):
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+    model = load_sql_based_model(
+        d.parse("""
+        MODEL (
+            name test_schema.test_model,
+            dialect snowflake,
+            kind MANAGED,
+            physical_properties (
+                warehouse = 'SMALL',
+                target_lag = '10 minutes',
+                refresh_mode = 'AUTO',
+                initialize = 'ON_CREATE',
+                initialization_warehouse = 'INITIAL_WH',
+                data_retention_time_in_days = 1,
+                max_data_extension_time_in_days = 2
+            )
+        );
+        SELECT a FROM source_table;
+    """)
+    )
+    properties = model.physical_properties
+    original_properties = {key: value.copy() for key, value in properties.items()}
+    strategy = EngineManagedStrategy(adapter)
+    mocker.patch.object(adapter, "columns", return_value={"A": exp.DataType.build("INT")})
+    if operation == "create_annotated":
+        model = model.copy(update={"columns_to_types_": {"A": exp.DataType.build("INT")}})
+    if operation == "insert":
+        strategy.insert(
+            "test_table",
+            model.render_query_or_raise(),
+            model,
+            True,
+            {},
+            deployability_index=DeployabilityIndex.none_deployable(),
+            snapshot=mocker.Mock(),
+            physical_properties=properties,
+        )
+    else:
+        strategy.create(
+            "test_table",
+            model,
+            operation == "create_managed",
+            {},
+            skip_grants=True,
+            is_snapshot_deployable=operation == "create_managed",
+            physical_properties=properties,
+        )
+    shared_properties = "DATA_RETENTION_TIME_IN_DAYS=1 MAX_DATA_EXTENSION_TIME_IN_DAYS=2"
+    query = 'SELECT "A" AS "A" FROM "SOURCE_TABLE" AS "SOURCE_TABLE"'
+    if operation == "create_annotated":
+        expected_sql = [
+            f'CREATE TABLE IF NOT EXISTS "test_table" ("A" INT) {shared_properties}',
+            f"{query} WHERE FALSE LIMIT 0",
+        ]
+    elif operation == "create_ctas":
+        expected_sql = [
+            f'CREATE TABLE IF NOT EXISTS "test_table" {shared_properties} AS {query} WHERE FALSE LIMIT 0'
+        ]
+    elif operation == "insert":
+        expected_sql = [
+            f'CREATE OR REPLACE TABLE "test_table" {shared_properties} AS SELECT CAST("A" AS INT) AS "A" FROM ({query}) AS "_subquery"'
+        ]
+    else:
+        expected_sql = [
+            'CREATE OR REPLACE DYNAMIC TABLE "test_table" '
+            "WAREHOUSE='SMALL' TARGET_LAG='10 minutes' REFRESH_MODE='AUTO' "
+            "INITIALIZE='ON_CREATE' INITIALIZATION_WAREHOUSE='INITIAL_WH' "
+            f"{shared_properties} AS {query}"
+        ]
+    assert to_sql_calls(adapter) == expected_sql
+    assert properties == original_properties
 
 
 def test_set_current_catalog(make_mocked_engine_adapter: t.Callable):
@@ -1193,6 +1331,41 @@ def test_drop_catalog(snowflake_mocked_engine_adapter: SnowflakeEngineAdapter) -
         """SELECT 1 FROM "INFORMATION_SCHEMA"."DATABASES" WHERE "DATABASE_NAME" = 'foo' AND "COMMENT" = 'sqlmesh_managed'""",
         'DROP DATABASE IF EXISTS "foo"',
     ]
+
+
+@pytest.mark.parametrize(
+    "catalog_name, expected_name",
+    [
+        # names that need quoting are parsed into quoted identifiers
+        ("my-db__dev", "my-db__dev"),
+        (exp.to_identifier("my db", quoted=True), "my db"),
+        (exp.to_identifier("MyDb", quoted=True), "MyDb"),
+    ],
+)
+def test_drop_catalog_quoted_name(
+    snowflake_mocked_engine_adapter: SnowflakeEngineAdapter,
+    catalog_name: t.Union[str, exp.Identifier],
+    expected_name: str,
+) -> None:
+    adapter = snowflake_mocked_engine_adapter
+    exists_check = f"""SELECT 1 FROM "INFORMATION_SCHEMA"."DATABASES" WHERE "DATABASE_NAME" = '{expected_name}' AND "COMMENT" = 'sqlmesh_managed'"""
+
+    # the existence check finds the sqlmesh_managed database, so it is dropped
+    adapter.cursor.fetchone.return_value = (1,)
+    adapter.drop_catalog(catalog_name)
+
+    # the existence check must compare against the bare database name, without identifier quotes
+    assert to_sql_calls(adapter) == [
+        exists_check,
+        f'DROP DATABASE IF EXISTS "{expected_name}"',
+    ]
+
+    # the existence check finds nothing, so the database is left alone
+    adapter.cursor.execute.reset_mock()
+    adapter.cursor.fetchone.return_value = None
+    adapter.drop_catalog(catalog_name)
+
+    assert to_sql_calls(adapter) == [exists_check]
 
 
 def _make_snowflake_clustering_adapter(
