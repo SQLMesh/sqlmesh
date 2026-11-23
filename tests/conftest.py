@@ -211,9 +211,22 @@ def pytest_collection_modifyitems(items, *args, **kwargs):
         "registry_isolation",
         "dialect_isolated",
     }
+
+    # These are built in Pytest fixtures that capture output as documented here: https://docs.pytest.org/en/stable/reference/fixtures.html
+    # Due to the use of the clear() functionality within the test suite, tests that use these fixtures can collide with each other by
+    # clearing each others captured outputs, so the these are marked as isolated.
+    non_thread_safe_fixtures = frozenset({
+        "caplog",
+        "capsys",
+        "capsysbinary",
+        "capfd",
+        "capfdbinary",
+        "capteesys",
+    })
+    
     for item in items:
-        if "capsys" in item.fixturenames:
-            # capsys is not threadsafe, so the test must be isolated.
+        if bool(non_thread_safe_fixtures & set(item.fixturenames)):
+            # Ensure that any tests using non-threadsafe fixtures are isolated.
             item.add_marker("isolated")
         for marker in item.iter_markers():
             if marker.name in test_type_markers:

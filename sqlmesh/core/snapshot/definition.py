@@ -1048,10 +1048,6 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
             return []
 
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
-        # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
-        # ever refer to the prod physical table, and so should never have any missing intervals.
-        if not deployability_index.is_eligible_for_physical_layer(self):
-            return []
 
         intervals = (
             self.intervals if deployability_index.is_representative(self) else self.dev_intervals
@@ -1644,7 +1640,7 @@ class DeployabilityIndex(PydanticModel, frozen=True):
             snapshot: The snapshot to check.
 
         Returns:
-            True if the snapshot is representative and not deployable, False otherwise.
+            True if the snapshot is not representative, or if it is deployable, False otherwise.
         """
         return not self.is_representative(snapshot=snapshot) or self.is_deployable(
             snapshot=snapshot
@@ -1687,10 +1683,6 @@ class DeployabilityIndex(PydanticModel, frozen=True):
         start: t.Optional[TimeLike] = None,  # plan start
         start_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ) -> DeployabilityIndex:
-        def _snapshot_is_representative(snapshot: Snapshot) -> bool:
-            return not snapshot.is_paused or (
-                snapshot.is_indirect_non_breaking and bool(snapshot.intervals)
-            )
 
         if not isinstance(snapshots, dict):
             snapshots = {s.snapshot_id: s for s in snapshots}
@@ -1747,7 +1739,9 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                     # Similarly, if the model depends on past and the start date is not aligned with the
                     # model's start, we should consider this snapshot non-deployable.
                     this_deployable = False
-                    if _snapshot_is_representative(snapshot):
+                    if not snapshot.is_paused or (
+                        snapshot.is_indirect_non_breaking and bool(snapshot.intervals)
+                    ):
                         # This snapshot represents what's currently deployed in prod.
                         representative_shared_version_ids.add(node)
                     else:
@@ -1755,7 +1749,11 @@ class DeployabilityIndex(PydanticModel, frozen=True):
                         children_deployable = False
             else:
                 children_deployable = False
-                if _snapshot_is_representative(snapshot):
+                if not snapshot.is_paused or (
+                    not snapshot.virtual_environment_mode.is_full
+                    and snapshot.is_indirect_non_breaking
+                    and snapshot.intervals
+                ):
                     representative_shared_version_ids.add(node)
 
             deployability_mapping[node] = this_deployable
@@ -2089,11 +2087,6 @@ def missing_intervals(
 
     for snapshot in snapshots.values():
         if not snapshot.evaluatable:
-            continue
-
-        # If a snapshot is representative but not deployable (e.g. INDIRECT_NON_BREAKING snapshots) then it will only
-        # ever refer to the prod physical table, and so should never have any missing intervals.
-        if not deployability_index.is_eligible_for_physical_layer(snapshot):
             continue
 
         snapshot_start_date = start_override_per_model.get(snapshot.name, start_dt)
