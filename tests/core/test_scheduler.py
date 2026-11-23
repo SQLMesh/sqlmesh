@@ -1214,6 +1214,7 @@ def test_dag_upstream_dependency_caching_with_complex_diamond(mocker: MockerFixt
         expected_h_node: {expected_a_node},
     }
 
+
 def test_dev_run_skips_representative_non_deployable_snapshot(mocker: MockerFixture, make_snapshot):
     r"""
     Tests that snapshots that are ineligible for the physical layer do not have any missing intervals in dev runs.
@@ -1272,7 +1273,9 @@ def test_dev_run_skips_representative_non_deployable_snapshot(mocker: MockerFixt
     )
 
     assert snapshot_indirect_non_breaking not in dev_intervals
-    assert not dev_deployability_index.is_eligible_for_physical_layer(snapshot_indirect_non_breaking)
+    assert not dev_deployability_index.is_eligible_for_physical_layer(
+        snapshot_indirect_non_breaking
+    )
 
     assert snapshot_non_breaking in dev_intervals
     assert dev_deployability_index.is_eligible_for_physical_layer(snapshot_non_breaking)
