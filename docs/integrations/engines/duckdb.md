@@ -3,7 +3,7 @@
 !!! warning "DuckDB state connection limitations"
     DuckDB is a [single user](https://duckdb.org/docs/connect/concurrency.html#writing-to-duckdb-from-multiple-processes) database. Using it for a state connection in your SQLMesh project limits you to a single workstation. This means your project cannot be shared amongst your team members or your CI/CD infrastructure. This is usually fine for proof of concept or test projects but it will not scale to production usage.
 
-    For production projects, use [Tobiko Cloud](https://tobikodata.com/product.html) or a more robust state database such as [Postgres](./postgres.md).
+    For production projects, use a more robust state database such as [Postgres](./postgres.md).
 
 ## Local/Built-in Scheduler
 **Engine Adapter Type**: `duckdb`

@@ -35,37 +35,19 @@ You can make changes quickly and confidently through one simple command: `sqlmes
 
 Note: If you run this without making any changes, SQLMesh will prompt you to make changes or use the `--include-unmodified` flag like this `sqlmesh plan dev --include-unmodified`. We recommend you make changes first before running this command to avoid creating a lot of noise in your dev environment with extraneous virtual layer views.
 
-=== "SQLMesh"
+```bash
+sqlmesh plan dev
+```
 
-    ```bash
-    sqlmesh plan dev
-    ```
+```bash
+sqlmesh plan <environment>
+```
 
-    ```bash
-    sqlmesh plan <environment>
-    ```
+If you want to move faster, you can add the `--auto-apply` flag to skip the manual prompt and apply the plan. You should do this when you're familiar with the plan output, and don't need to see tiny changes in the diff output before applying the plan.
 
-    If you want to move faster, you can add the `--auto-apply` flag to skip the manual prompt and apply the plan. You should do this when you're familiar with the plan output, and don't need to see tiny changes in the diff output before applying the plan.
-
-    ```bash
-    sqlmesh plan <environment> --auto-apply
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh plan dev
-    ```
-
-    ```bash
-    tcloud sqlmesh plan <environment>
-    ```
-
-    If you want to move faster, you can add the `--auto-apply` flag to skip the manual prompt and apply the plan. You should do this when you're familiar with the plan output, and don't need to see tiny changes in the diff output before applying the plan.
-
-    ```bash
-    tcloud sqlmesh plan <environment> --auto-apply
-    ```
+```bash
+sqlmesh plan <environment> --auto-apply
+```
 
 ??? "Example Output"
     I made a breaking change to `incremental_model` and `full_model`.
@@ -167,33 +149,17 @@ Run data diff against prod. This is a good way to verify the changes are behavin
 
 To make this easier and faster, you can run data diff against all models in the environment impacted by plan changes applied using the `-m '*'` flag example below. No need to specify the model name! Read more about options [here](../guides/tablediff.md).
 
-=== "SQLMesh"
+```bash
+sqlmesh table_diff prod:dev sqlmesh_example.full_model --show-sample
+```
 
-    ```bash
-    sqlmesh table_diff prod:dev sqlmesh_example.full_model --show-sample
-    ```
+```bash
+sqlmesh table_diff <environment>:<environment> <model_name> --show-sample
+```
 
-    ```bash
-    sqlmesh table_diff <environment>:<environment> <model_name> --show-sample
-    ```
-
-    ```bash
-    sqlmesh table_diff prod:dev -m '*' --show-sample
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh table_diff prod:dev sqlmesh_example.full_model --show-sample
-    ```
-
-    ```bash
-    tcloud sqlmesh table_diff <environment>:<environment> <model_name> --show-sample
-    ```
-
-    ```bash
-    tcloud sqlmesh table_diff prod:dev -m '*' --show-sample
-    ```
+```bash
+sqlmesh table_diff prod:dev -m '*' --show-sample
+```
 
 ??? "Example Output"
     I compare the `prod` and `dev` environments for `sqlmesh_example.full_model`.
@@ -243,7 +209,6 @@ To make this easier and faster, you can run data diff against all models in the 
     Schema Diff Between 'PROD' and 'DEV' environments for model 'sqlmesh_example.full_model':
     └── Schemas match
 
-
     Row Counts:
     └──  PARTIAL MATCH: 5 rows (100.0%)
 
@@ -251,7 +216,6 @@ To make this easier and faster, you can run data diff against all models in the 
                 pct_match
     num_orders      100.0
     new_column        0.0
-
 
     COMMON ROWS sample data differences:
     Column: new_column
@@ -274,17 +238,9 @@ After you feel confident about the changes, apply them to `prod`.
     We recommend only applying changes to `prod` [**using CI/CD**](../integrations/github.md) as best practice.
     For learning purposes and hot fixes, you can manually apply the changes to prod by entering `y` at the prompt.
 
-=== "SQLMesh"
-
-    ```bash
-    sqlmesh plan
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh plan
-    ```
+```bash
+sqlmesh plan
+```
 
 ??? "Example Output"
     After I feel confident about the changes, I apply them to `prod`.
@@ -376,20 +332,12 @@ Sometimes models `SELECT` from tables/views that are outside of SQLMesh's contro
 
 These "external model" schemas are used for column level lineage. You can also add audits to test data quality. If an audit fails, SQLMesh prevents downstream models from wastefully running.
 
-=== "SQLMesh"
-
-    ```bash
-    sqlmesh create_external_models
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh create_external_models
-    ```
+```bash
+sqlmesh create_external_models
+```
 
 ??? "Example Output"
-    Note: this is an example from a separate Tobiko Cloud project, so you can't follow along in the Github repo.
+    Note: this example comes from a separate project, so the model names differ from the ones in this walkthrough.
 
     - Generated external models from the `bigquery-public-data`.`ga4_obfuscated_sample_ecommerce`.`events_20210131` table parsed in the model's SQL.
     - Added an audit to the external model to ensure `event_date` is not NULL.
@@ -516,36 +464,19 @@ You can ensure business logic is working as expected by running your models agai
 
 Unit tests run *before* a plan is applied automatically. This is great for testing complex business logic (ex: `CASE WHEN` conditions) *before* you backfill data. No need to write them manually, either!
 
-=== "SQLMesh"
+Create a unit test based on 5 rows from the upstream `sqlmesh_example.incremental_model`.
 
-    Create a unit test based on 5 rows from the upstream `sqlmesh_example.incremental_model`.
+```bash
+sqlmesh create_test sqlmesh_example.full_model \
+  --query sqlmesh_example.incremental_model \
+  "select * from sqlmesh_example.incremental_model limit 5"
+```
 
-    ```bash
-    sqlmesh create_test sqlmesh_example.full_model \
-      --query sqlmesh_example.incremental_model \
-      "select * from sqlmesh_example.incremental_model limit 5"
-    ```
-
-    ```bash
-    sqlmesh create_test <model_name> \
-      --query <model_name upstream> \
-      "select * from <model_name upstream> limit 5"
-    ```
-
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh create_test demo.stg_payments \
-      --query demo.seed_raw_payments \
-      "select * from demo.seed_raw_payments limit 5"
-    ```
-
-    ```bash
-    tcloud sqlmesh create_test <model_name> \
-      --query <model_name upstream> \
-      "select * from <model_name upstream> limit 5"
-    ```
+```bash
+sqlmesh create_test <model_name> \
+  --query <model_name upstream> \
+  "select * from <model_name upstream> limit 5"
+```
 
 ??? "Example Output"
 
@@ -633,27 +564,14 @@ You can run live queries directly from the CLI. This is great to validate the lo
 
 Pro tip: run this after `sqlmesh table_diff` to get a full picture of your changes.
 
-=== "SQLMesh"
+```bash
+sqlmesh fetchdf "select * from sqlmesh_example__dev.full_model limit 5"
+```
 
-    ```bash
-    sqlmesh fetchdf "select * from sqlmesh_example__dev.full_model limit 5"
-    ```
-
-    ```bash
-    # construct arbitrary query
-    sqlmesh fetchdf "select * from <schema__environment>.<model_name> limit 5" # double underscore in schema name is important. Not needed for prod.
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh fetchdf "select * from sqlmesh_example__dev.full_model limit 5"
-    ```
-
-    ```bash
-    # construct arbitrary query
-    tcloud sqlmesh fetchdf "select * from <schema__environment>.<model_name> limit 5" # double underscore in schema name is important. Not needed for prod.
-    ```
+```bash
+# construct arbitrary query
+sqlmesh fetchdf "select * from <schema__environment>.<model_name> limit 5" # double underscore in schema name is important. Not needed for prod.
+```
 
 ??? "Example Output"
     ```bash
@@ -671,17 +589,9 @@ If enabled, linting runs automatically during development. The linting rules can
 
 This is a great way to catch SQL issues before wasting runtime in your data warehouse. It runs automatically, or you can run it manually to proactively check for any issues.
 
-=== "SQLMesh"
-
-    ```bash
-    sqlmesh lint
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh lint
-    ```
+```bash
+sqlmesh lint
+```
 
 ??? "Example Output"
 
@@ -738,33 +648,17 @@ You'll use these commands as needed to validate that your changes are behaving a
 
 This is a great way to verify that your model's SQL is looking as expected before applying the changes. It is especially important if you're migrating from one query engine to another (ex: postgres to databricks).
 
-=== "SQLMesh"
+```bash
+sqlmesh render sqlmesh_example.incremental_model
+```
 
-    ```bash
-    sqlmesh render sqlmesh_example.incremental_model
-    ```
+```bash
+sqlmesh render sqlmesh_example.incremental_model --dialect databricks
+```
 
-    ```bash
-    sqlmesh render sqlmesh_example.incremental_model --dialect databricks
-    ```
-
-    ```bash
-    sqlmesh render <model_name> --dialect <dialect>
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh render sqlmesh_example.incremental_model
-    ```
-
-    ```bash
-    tcloud sqlmesh render sqlmesh_example.incremental_model --dialect databricks
-    ```
-
-    ```bash
-    tcloud sqlmesh render <model_name> --dialect <dialect>
-    ```
+```bash
+sqlmesh render <model_name> --dialect <dialect>
+```
 
 ??? "Example Output"
 
@@ -828,25 +722,13 @@ This is a great way to verify that your model's SQL is looking as expected befor
 
 Verbose mode lets you see detailed operations in the physical and virtual layers. This is useful to see exactly what SQLMesh is doing every step. After, you can copy/paste the fully qualified table/view name into your query console to validate the data (if that's your preference).
 
-=== "SQLMesh"
+```bash
+sqlmesh plan dev -vv
+```
 
-    ```bash
-    sqlmesh plan dev -vv
-    ```
-
-    ```bash
-    sqlmesh plan <environment> -vv
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh plan dev -vv
-    ```
-
-    ```bash
-    tcloud sqlmesh plan <environment> -vv
-    ```
+```bash
+sqlmesh plan <environment> -vv
+```
 
 ??? "Example Output"
 
@@ -969,31 +851,18 @@ Example scenario and model DAG:
 
 1. `stg_transactions` runs hourly
 2. `fct_transcations` runs at 12am UTC if `stg_transactions` is fresh and updated since its most recent hour interval
-3. If `stg_transactions` failed from 11pm-11:59:59pm, it will prevent `fct_transcations` from running and put it in a `pending` state
-4. If `fct_transactions` is `pending` past its full interval (1 full day), it will be put in a `late` state
-5. Once `stg_transactions` runs successfully either from a retry or a fix from a pull request, `fct_transactions` will rerun from the point of failure. This is true even if `fct_transactions` has been `late` for several days.
+3. If `stg_transactions` failed from 11pm-11:59:59pm, it will prevent `fct_transcations` from running until its upstream is ready
+4. Once `stg_transactions` runs successfully either from a retry or a fix from a pull request, `fct_transactions` will rerun from the point of failure. This is true even if `fct_transactions` has been blocked for several days.
 
-Note: `pending` and `late` states are only supported in Tobiko Cloud. In SQLMesh, it will only understand if the model is ready or not ready to execute without mention of these states.
-
-If you're using open source SQLMesh, you can run this command in your orchestrator (ex: Dagster, GitHub Actions, etc.) every 5 minutes or at your lowest model cron schedule (ex: every 1 hour). Don't worry! It will only run executions that need to be run.
-
-If you're using Tobiko Cloud, this configures automatically without additional configuration.
+Run this command in your orchestrator (ex: Dagster, GitHub Actions, etc.) every 5 minutes or at your lowest model cron schedule (ex: every 1 hour). Don't worry! It will only run executions that need to be run.
 
 ### Run Models
 
 This command is intended be run on a schedule. It will skip the physical and virtual layer updates and simply execute the model batches.
 
-=== "SQLMesh"
-
-    ```bash
-    sqlmesh run
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh run
-    ```
+```bash
+sqlmesh run
+```
 
 ??? "Example Output"
 
@@ -1043,17 +912,9 @@ You can run models that execute backfills each time you invoke a `run`, whether 
     This only applies to incremental models that have `allow_partials` set to `true`.
     This is generally not recommended for production environments as you risk shipping incomplete data which will be perceived as broken data.
 
-=== "SQLMesh"
-
-    ```bash
-    sqlmesh run --ignore-cron
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh run --ignore-cron
-    ```
+```bash
+sqlmesh run --ignore-cron
+```
 
 ??? "Example Output"
 
@@ -1109,25 +970,13 @@ When you modify a forward-only model and apply the plan to `prod` after the dev 
 
 If you want to see a full walkthrough, [go here](incremental_time_full_walkthrough.md).
 
-=== "SQLMesh"
+```bash
+sqlmesh plan dev --forward-only
+```
 
-    ```bash
-    sqlmesh plan dev --forward-only
-    ```
-
-    ```bash
-    sqlmesh plan <environment> --forward-only
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh plan dev --forward-only
-    ```
-
-    ```bash
-    tcloud sqlmesh plan <environment> --forward-only
-    ```
+```bash
+sqlmesh plan <environment> --forward-only
+```
 
 ??? "Example Output"
 
@@ -1239,19 +1088,10 @@ If you want to see a full walkthrough, [go here](incremental_time_full_walkthrou
     ✔ Virtual layer updated
     ```
 
-
 ## Miscellaneous
 
 If you notice you have a lot of old development schemas/data, you can clean them up with the following command. This process runs automatically during the `sqlmesh run` command. This defaults to deleting data older than 7 days.
 
-=== "SQLMesh"
-
-    ```bash
-    sqlmesh janitor
-    ```
-
-=== "Tobiko Cloud"
-
-    ```bash
-    tcloud sqlmesh janitor
-    ```
+```bash
+sqlmesh janitor
+```

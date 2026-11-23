@@ -416,7 +416,7 @@ And here we see the first three subsections `Project structure`, `Project setup`
 
 ![SQLMesh docs site 2nd level nav - Guides section](./readme/docs-site_2nd-level-nav_guides.png)
 
-You may continue to add subsections as needed. At the time of writing, only the `Tobiko Cloud` section uses a 3rd level of nested sections.
+You may continue to add subsections as needed.
 
 ### Theme and colors
 

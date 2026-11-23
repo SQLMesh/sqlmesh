@@ -41,13 +41,3 @@
 :root {
   --md-primary-fg-color: #3C64E2;
 }
-
-.md-tabs__item:last-child a::before {
-    content: "";
-    background: transparent url("tobiko-logo.svg") center left no-repeat;
-    background-size: contain;
-    width: 18px;
-    height: 18px;
-    display: inline-block;
-    margin-bottom: -4px;
-}

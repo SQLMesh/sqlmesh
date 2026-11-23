@@ -167,17 +167,17 @@
 ## Scheduling
 
 ??? question "How do I run SQLMesh models on a schedule?"
-    You can run SQLMesh models using the [built-in scheduler](../guides/scheduling.md#built-in-scheduler) or using [Tobiko Cloud](../cloud/features/scheduler/scheduler.md)
+    You can run SQLMesh models using the [built-in scheduler](../guides/scheduling.md#built-in-scheduler)
 
-    Both approaches use each model's `cron` parameter to determine when the model should run - see the [question about `cron` above](#cron-question) for more information.
+    It uses each model's `cron` parameter to determine when the model should run - see the [question about `cron` above](#cron-question) for more information.
 
     The built-in scheduler works by executing the command `sqlmesh run`. A sensible approach to running on your project on a schedule is to use Linux’s `cron` tool to execute `sqlmesh run` on a cadence at least as frequent as your briefest SQLMesh model `cron` parameter. For example, if your most frequent model’s `cron` is hour, the `cron` tool should execute `sqlmesh run` at least every hour.
 
 ??? question "How do I use SQLMesh with Airflow?"
-    Tobiko Cloud offers first-class support for Airflow - learn more [here](../cloud/features/scheduler/airflow.md)
+    SQLMesh's built-in scheduler runs `sqlmesh run` on a cadence, so any orchestrator that can run a command on a schedule can drive it. Point an Airflow task at `sqlmesh run` and schedule it at least as often as your briefest model `cron`, as described in the [scheduling guide](../guides/scheduling.md#built-in-scheduler).
 
 ??? question "How do I use SQLMesh with Dagster?"
-    Tobiko Cloud offers first-class support for Dagster - learn more [here](../cloud/features/scheduler/dagster.md)
+    SQLMesh's built-in scheduler runs `sqlmesh run` on a cadence, so any orchestrator that can run a command on a schedule can drive it. Point a Dagster op at `sqlmesh run` and schedule it at least as often as your briefest model `cron`, as described in the [scheduling guide](../guides/scheduling.md#built-in-scheduler).
 
 ## Warnings and Errors
 
@@ -267,7 +267,6 @@
 
 ??? question "How does Tobiko Data make money?"
 
-    - Tobiko Cloud: learn more [here](https://tobikodata.com/product.html)
     - Enterprise Github Actions CI/CD App (in development)
         - Advanced version of [open source CI/CD bot](../integrations/github.md)
     - Providing hands-on support for companies' SQLMesh projects

@@ -42,25 +42,11 @@ Next, activate the virtual environment:
 source .venv/bin/activate
 ```
 
-#### Open-source SQLMesh
-
-If you are using open-source SQLMesh, install SQLMesh with the `lsp` extra that enables the VSCode extension (learn more about SQLMesh extras [here](../installation.md#install-extras)):
+Then install SQLMesh with the `lsp` extra that enables the VSCode extension (learn more about SQLMesh extras [here](../installation.md#install-extras)):
 
 ```bash
 pip install 'sqlmesh[lsp]'
 ```
-
-#### Tobiko Cloud
-
-If you are using Tobiko Cloud, the `tcloud` library will install SQLMesh for you.
-
-First, follow the [Python setup](#python-setup) steps above to create and activate a Python environment. Next, install `tcloud`:
-
-```bash
-pip install tcloud # always make sure to install the latest version of tcloud
-```
-
-Finally, add the `lsp` extra to your `tcloud.yml` configuration file, as described [here](../cloud/tcloud_getting_started.md#connect-tobiko-cloud-to-data-warehouse).
 
 ### VSCode Python interpreter
 
@@ -89,7 +75,6 @@ SQLMesh's VSCode extension makes it easy to edit and understand your SQLMesh pro
     - Inline SQLMesh linter diagnostics
 - VSCode commands
     - Format SQLMesh project files
-    - Sign in/out of Tobiko Cloud (Tobiko Cloud users only)
 
 ### Lineage
 
@@ -136,8 +121,6 @@ SQLMesh's model formatting tool is integrated directly into the editor, so it's 
 The SQLMesh VSCode extension provides the following commands in the VSCode command palette:
 
 - `Format SQLMesh project`
-- `Sign in to Tobiko Cloud` (Tobiko Cloud users only)
-- `Sign out of Tobiko Cloud` (Tobiko Cloud users only)
 
 ## Troubleshooting
 
@@ -193,13 +176,11 @@ If you have checked the VSCode `sqlmesh` output channel and the extension is sti
 
 When installing SQLMesh, some dependencies required by the VSCode extension are not installed unless you specify the `lsp` "extra".
 
-If you are using open-source SQLMesh, install the `lsp` extra by running this command in your terminal:
+Install the `lsp` extra by running this command in your terminal:
 
 ```bash
 pip install 'sqlmesh[lsp]'
 ```
-
-If you are using Tobiko Cloud, make sure `lsp` is included in the list of extras specified in the [`tcloud.yaml` configuration file](../cloud/tcloud_getting_started.md#connect-tobiko-cloud-to-data-warehouse).
 
 ### SQLMesh compatibility
 
