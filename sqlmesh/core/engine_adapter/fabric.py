@@ -513,6 +513,13 @@ class FabricHttpClient:
         response = self.session.delete(self._endpoint_url(f"warehouses/{warehouse_id}"))
         response.raise_for_status()
 
+        # Handle direct success or async deletion (202 + Location), matching create.
+        # Returning before Fabric finishes the delete lets the next ODBC connect
+        # fail with 18456 while the warehouse is still tearing down.
+        if response.status_code == 202 and (location_header := response.headers.get("location")):
+            logger.info(f"Warehouse deletion initiated for: {warehouse_name}")
+            self._wait_for_completion(location_header, warehouse_name)
+
         logger.info(f"Successfully deleted Fabric warehouse: {warehouse_name}")
 
     @cached_property

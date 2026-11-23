@@ -535,6 +535,79 @@ def test_create_warehouse_unrelated_conflict_still_raises(
         fabric_http_client.create_warehouse("my_warehouse")
 
 
+def test_delete_warehouse_waits_for_async_completion(
+    fabric_http_client: FabricHttpClient, mocker: MockerFixture
+) -> None:
+    list_resp = mocker.MagicMock()
+    list_resp.json.return_value = {"value": [{"displayName": "ci_prod__dev", "id": "wh-1"}]}
+    delete_resp = mocker.MagicMock()
+    delete_resp.status_code = 202
+    delete_resp.headers = {"location": "https://api.fabric.microsoft.com/v1/operations/op-1"}
+    fabric_http_client.session.get.return_value = list_resp
+    fabric_http_client.session.delete.return_value = delete_resp
+    wait = mocker.patch.object(fabric_http_client, "_wait_for_completion")
+
+    fabric_http_client.delete_warehouse("ci_prod__dev")
+
+    wait.assert_called_once_with(
+        "https://api.fabric.microsoft.com/v1/operations/op-1", "ci_prod__dev"
+    )
+
+
+def test_delete_warehouse_sync_success_skips_wait(
+    fabric_http_client: FabricHttpClient, mocker: MockerFixture
+) -> None:
+    list_resp = mocker.MagicMock()
+    list_resp.json.return_value = {"value": [{"displayName": "ci_prod__dev", "id": "wh-1"}]}
+    delete_resp = mocker.MagicMock()
+    delete_resp.status_code = 200
+    delete_resp.headers = {}
+    fabric_http_client.session.get.return_value = list_resp
+    fabric_http_client.session.delete.return_value = delete_resp
+    wait = mocker.patch.object(fabric_http_client, "_wait_for_completion")
+
+    fabric_http_client.delete_warehouse("ci_prod__dev")
+
+    wait.assert_not_called()
+
+
+def test_drop_catalog_closes_when_deleted_warehouse_is_connected(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    api_client = mocker.MagicMock()
+    adapter._connection_pool.set_attribute("api_client", api_client)
+    adapter._connection_pool.set_attribute("connected_catalog", "ci_prod__dev")
+    close = mocker.spy(adapter, "close")
+
+    adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_called_once()
+    api_client.delete_warehouse.assert_called_once_with("ci_prod__dev")
+
+
+def test_drop_catalog_keeps_connection_when_deleted_warehouse_is_idle(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    api_client = mocker.MagicMock()
+    adapter._connection_pool.set_attribute("api_client", api_client)
+    close = mocker.spy(adapter, "close")
+
+    adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_not_called()
+    api_client.delete_warehouse.assert_called_once_with("ci_prod__dev")
+
+
 def test_get_data_objects_uses_configured_default_catalog(
     make_mocked_engine_adapter: t.Callable,
     mocker: MockerFixture,
