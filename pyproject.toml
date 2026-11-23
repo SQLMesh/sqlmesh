@@ -133,7 +133,7 @@ slack = ["slack_sdk"]
 snowflake = [
     "cryptography",
     "snowflake-connector-python[pandas,secure-local-storage]",
-    "snowflake-snowpark-python",
+    "snowflake-snowpark-python>=1.0.0",
 ]
 starrocks = ["pymysql"]
 trino = ["trino"]
