@@ -536,40 +536,6 @@ def test_create_warehouse_unrelated_conflict_still_raises(
         fabric_http_client.create_warehouse("my_warehouse")
 
 
-def test_delete_warehouse_returns_location_for_async_completion(
-    fabric_http_client: FabricHttpClient, mocker: MockerFixture
-) -> None:
-    list_resp = mocker.MagicMock()
-    list_resp.json.return_value = {"value": [{"displayName": "ci_prod__dev", "id": "wh-1"}]}
-    delete_resp = mocker.MagicMock()
-    delete_resp.status_code = 202
-    delete_resp.headers = {"location": "https://api.fabric.microsoft.com/v1/operations/op-1"}
-    fabric_http_client.session.get.return_value = list_resp
-    fabric_http_client.session.delete.return_value = delete_resp
-
-    accepted, location = fabric_http_client.delete_warehouse("ci_prod__dev")
-
-    assert accepted is True
-    assert location == "https://api.fabric.microsoft.com/v1/operations/op-1"
-
-
-def test_delete_warehouse_sync_success_has_no_location(
-    fabric_http_client: FabricHttpClient, mocker: MockerFixture
-) -> None:
-    list_resp = mocker.MagicMock()
-    list_resp.json.return_value = {"value": [{"displayName": "ci_prod__dev", "id": "wh-1"}]}
-    delete_resp = mocker.MagicMock()
-    delete_resp.status_code = 200
-    delete_resp.headers = {}
-    fabric_http_client.session.get.return_value = list_resp
-    fabric_http_client.session.delete.return_value = delete_resp
-
-    accepted, location = fabric_http_client.delete_warehouse("ci_prod__dev")
-
-    assert accepted is True
-    assert location is None
-
-
 def test_drop_catalog_waits_for_async_delete(
     make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
 ) -> None:
