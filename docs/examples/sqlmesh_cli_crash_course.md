@@ -852,7 +852,7 @@ Example scenario and model DAG:
 1. `stg_transactions` runs hourly
 2. `fct_transcations` runs at 12am UTC if `stg_transactions` is fresh and updated since its most recent hour interval
 3. If `stg_transactions` failed from 11pm-11:59:59pm, it will prevent `fct_transcations` from running until its upstream is ready
-4. Once `stg_transactions` runs successfully either from a retry or a fix from a pull request, `fct_transactions` will rerun from the point of failure. This is true even if `fct_transactions` has been blocked for several days.
+4. Once `stg_transactions` runs successfully either from a retry or a fix from a pull request, `fct_transactions` will rerun from the point of failure. This holds while the failed interval is inside the search window: a model without an explicit `start` looks back only to the previous cron boundary, so set a `start` on the upstream model if older failures must be recovered automatically.
 
 Run this command in your orchestrator (ex: Dagster, GitHub Actions, etc.) every 5 minutes or at your lowest model cron schedule (ex: every 1 hour). Don't worry! It will only run executions that need to be run.
 
