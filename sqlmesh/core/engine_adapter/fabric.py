@@ -140,20 +140,25 @@ class FabricEngineAdapter(MSSQLEngineAdapter):
         warehouse_name = catalog_name.sql(dialect=self.dialect, identify=False)
 
         logger.info(f"Deleting Fabric warehouse: {warehouse_name}")
-        self.api_client.delete_warehouse(warehouse_name)
-
-        # Close all connections if any thread may be using the dropped warehouse.
-        # We must check both the logical target and the physical connection catalog
-        # (falling back to the configured default when either is neutral) because
-        # Fabric validates the DATABASE= connection argument and raises
-        # 'Authentication Failed' when it points at a non-existent warehouse.
-        default_db = self._extra_config.get("database")
-        in_use = {
-            self.get_current_catalog() or default_db,
-            self._normalize_catalog(self._connected_catalog) or default_db,
-        }
-        if warehouse_name in in_use:
-            self.close()
+        delete_accepted = False
+        try:
+            delete_accepted, location = self.api_client.delete_warehouse(warehouse_name)
+            # Wait after acceptance so connection cleanup still runs if polling fails.
+            if location:
+                self.api_client._wait_for_completion(location, warehouse_name)
+                logger.info(f"Successfully deleted Fabric warehouse: {warehouse_name}")
+        finally:
+            # Failures before acceptance leave connections alone.
+            if delete_accepted:
+                # Fabric validates DATABASE= and raises 'Authentication Failed'
+                # when it points at a non-existent warehouse, so we close all connections.
+                default_db = self._extra_config.get("database")
+                in_use = {
+                    self.get_current_catalog() or default_db,
+                    self._normalize_catalog(self._connected_catalog) or default_db,
+                }
+                if warehouse_name in in_use:
+                    self.close()
 
     def _get_current_catalog_for_set_catalog(self) -> t.Optional[str]:
         """Override of EngineAdapter._get_current_catalog_for_set_catalog.
@@ -482,8 +487,17 @@ class FabricHttpClient:
             logger.error(f"Unexpected response from Fabric API: {response}\n{response.text}")
             raise SQLMeshError(f"Unable to create warehouse: {response}")
 
-    def delete_warehouse(self, warehouse_name: str, if_exists: bool = True) -> None:
-        """Drop a catalog (warehouse) in Microsoft Fabric via REST API."""
+    def delete_warehouse(
+        self, warehouse_name: str, if_exists: bool = True
+    ) -> t.Tuple[bool, t.Optional[str]]:
+        """Drop a catalog (warehouse) in Microsoft Fabric via REST API.
+
+        Returns:
+            (accepted, location) where accepted is True once Fabric has accepted the
+            DELETE, and location is the async operation URL when status is 202.
+            The caller waits on location so connection cleanup can run even if
+            polling fails after acceptance.
+        """
         logger.info(f"Deleting Fabric warehouse: {warehouse_name}")
 
         # Get the warehouse ID by listing warehouses
@@ -503,7 +517,7 @@ class FabricHttpClient:
                 f"Fabric warehouse does not exist: {warehouse_name}\n(available warehouses: {', '.join(warehouse_name_to_id)})"
             )
             if if_exists:
-                return
+                return False, None
 
             raise SQLMeshError(
                 f"Unable to delete Fabric warehouse {warehouse_name} as it doesnt exist"
@@ -513,14 +527,20 @@ class FabricHttpClient:
         response = self.session.delete(self._endpoint_url(f"warehouses/{warehouse_id}"))
         response.raise_for_status()
 
-        # Handle direct success or async deletion (202 + Location), matching create.
-        # Returning before Fabric finishes the delete lets the next ODBC connect
-        # fail with 18456 while the warehouse is still tearing down.
-        if response.status_code == 202 and (location_header := response.headers.get("location")):
-            logger.info(f"Warehouse deletion initiated for: {warehouse_name}")
-            self._wait_for_completion(location_header, warehouse_name)
+        location: t.Optional[str] = None
+        if response.status_code == 202:
+            location = response.headers.get("location")
+            if location:
+                logger.info(f"Warehouse deletion initiated for: {warehouse_name}")
+            else:
+                logger.warning(
+                    "Fabric warehouse delete returned 202 without a Location header for %s",
+                    warehouse_name,
+                )
+        else:
+            logger.info(f"Successfully deleted Fabric warehouse: {warehouse_name}")
 
-        logger.info(f"Successfully deleted Fabric warehouse: {warehouse_name}")
+        return True, location
 
     @cached_property
     def session(self) -> requests.Session:
