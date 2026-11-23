@@ -436,24 +436,42 @@ jobs:
           "$TEST_DB_NAME" up
       - name: Run tests
         env:
-          # Temporary BigQuery diagnostics: since 2026-10-31 the runner is shut down
-          # ~1 minute into pytest with no test output. Stream test results and log
-          # memory/disk so the next failure shows what was running. Remove once fixed.
+          # Temporary BigQuery diagnostics: since 2026-10-31 the BigQuery runner either shuts
+          # down or stops responding mid-pytest, and its log is never uploaded. Keep the
+          # evidence in files, stop pytest before the job limit so the runner can recover,
+          # and upload the files in the steps below. Remove once fixed.
           PYTHONUNBUFFERED: ${{ matrix.engine == 'bigquery' && '1' || '' }}
           PYTEST_ADDOPTS: ${{ matrix.engine == 'bigquery' && '-v' || '' }}
         run: |
           source .venv/bin/activate
-          if [ "${{ matrix.engine }}" = "bigquery" ]; then
-            (
-              while true; do
-                echo "[resources $(date -u +%T)] $(free -m | awk '/Mem:/{print "mem_used="$3"MB mem_avail="$7"MB"}') $(free -m | awk '/Swap:/{print "swap_used="$3"MB"}') $(df -h / | awk 'NR==2{print "disk_used="$5}')"
-                ps -eo rss=,args= --sort=-rss | head -4 | awk '{rss=$1; $1=""; printf "  rss=%dMB %.120s\n", rss/1024, $0}'
-                sleep 5
-              done
-            ) &
-            trap "kill $! 2>/dev/null || true" EXIT
+          if [ "${{ matrix.engine }}" != "bigquery" ]; then
+            make ${{ matrix.engine }}-test
+            exit
           fi
-          make ${{ matrix.engine }}-test
+          mkdir -p test-results
+          (
+            while true; do
+              echo "[resources $(date -u +%T)] $(free -m | awk '/Mem:/{print "mem_used="$3"MB mem_avail="$7"MB"}') $(free -m | awk '/Swap:/{print "swap_used="$3"MB"}') $(df -h / | awk 'NR==2{print "disk_used="$5}')"
+              ps -eo rss=,args= --sort=-rss | head -4 | awk '{rss=$1; $1=""; printf "  rss=%dMB %.120s\n", rss/1024, $0}'
+              sleep 5
+            done
+          ) >> test-results/bigquery-resources.log 2>&1 &
+          trap "kill $! 2>/dev/null || true" EXIT
+          make engine-bigquery-install
+          uv pip install -e ".[bigframes]"
+          # Same commands as the Makefile's bigquery-test target, under a timeout so
+          # pytest itself (not just make) is stopped before the 25 minute job limit.
+          set -o pipefail
+          timeout --kill-after=60s 18m pytest -n auto -m "bigquery" --reruns 3 \
+            --junitxml=test-results/junit-bigquery.xml 2>&1 | tee test-results/bigquery-pytest.log
+      - name: Collect BigQuery diagnostics
+        if: ${{ always() && matrix.engine == 'bigquery' }}
+        run: |
+          mkdir -p test-results
+          sudo dmesg -T | grep -iE 'out of memory|oom|killed process' > test-results/bigquery-dmesg.log || true
+          echo "== kernel OOM messages"; cat test-results/bigquery-dmesg.log
+          echo "== last resource samples"; tail -n 60 test-results/bigquery-resources.log || true
+          echo "== last pytest output"; tail -n 60 test-results/bigquery-pytest.log || true
       - name: Tear down test database
         if: always()
         run:
