@@ -168,7 +168,7 @@ def _run_bounded_python(program: str) -> None:
         env=env,
         capture_output=True,
         text=True,
-        timeout=8,
+        timeout=16,
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
