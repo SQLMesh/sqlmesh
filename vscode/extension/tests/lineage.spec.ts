@@ -195,6 +195,10 @@ test('Lineage panel renders correctly - multiworkspace setup', async ({
   )
 
   await openServerPage(page, workspaceFilePath, sharedCodeServer)
+  // The first load already has both folders. Reloading ?workspace= keeps the
+  // workspace title and clears the folders ("No Folder Opened"), so the LSP
+  // never starts.
+  await page.getByText('sushi1', { exact: true }).waitFor()
   await expect(
     page.getByRole('treeitem', { name: 'sushi1', exact: true }),
   ).toBeVisible()
@@ -254,6 +258,7 @@ test('Lineage panel renders correctly - multiworkspace setup reversed', async ({
   )
 
   await openServerPage(page, workspaceFilePath, sharedCodeServer)
+  await page.getByText('sushi2', { exact: true }).waitFor()
   await expect(
     page.getByRole('treeitem', { name: 'sushi1', exact: true }),
   ).toBeVisible()
