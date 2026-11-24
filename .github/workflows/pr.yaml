@@ -345,23 +345,15 @@ jobs:
 
   engine-tests-cloud:
     needs: engine-tests-docker
-    if: github.ref == 'refs/heads/main'
+    # TEMPORARY (do not merge): run on this experiment branch's PR too.
+    if: github.ref == 'refs/heads/main' || github.head_ref == 'ci/bigquery-pins'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        engine:
-          [
-            snowflake,
-            databricks,
-            redshift,
-            bigquery,
-            clickhouse-cloud,
-            athena,
-            fabric,
-            gcp-postgres,
-          ]
+        # TEMPORARY (do not merge): BigQuery only for the experiment.
+        engine: [bigquery]
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: 4
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
@@ -451,14 +443,19 @@ jobs:
           mkdir -p test-results
           (
             while true; do
+              {
               echo "[resources $(date -u +%T)] $(free -m | awk '/Mem:/{print "mem_used="$3"MB mem_avail="$7"MB"}') $(free -m | awk '/Swap:/{print "swap_used="$3"MB"}') $(df -h / | awk 'NR==2{print "disk_used="$5}')"
               ps -eo rss=,args= --sort=-rss | head -4 | awk '{rss=$1; $1=""; printf "  rss=%dMB %.120s\n", rss/1024, $0}'
+              } 2>&1 | tee -a test-results/bigquery-resources.log
               sleep 5
             done
-          ) >> test-results/bigquery-resources.log 2>&1 &
+          ) &
           trap "kill $! 2>/dev/null || true" EXIT
           make engine-bigquery-install
           uv pip install -e ".[bigframes]"
+          # Experiment: pin these to test whether a dependency bump causes the runner death.
+          uv pip install "google-cloud-bigquery==3.46.2" "grpcio==1.84.0" "pytest==9.1.1"
+          uv pip list | grep -iE '^(google-cloud-bigquery|grpcio|pytest) '
           # Same commands as the Makefile's bigquery-test target, under a timeout so
           # pytest itself (not just make) is stopped before the 25 minute job limit.
           set -o pipefail
