@@ -536,13 +536,26 @@ jobs:
       - name: Install code-server
         # Pinned so that a code-server release cannot change the editor UI the
         # tests drive without the change showing up here first.
-        run: curl -fsSL https://code-server.dev/install.sh | sh -s -- --version 4.137.0
+        # The installer curls the .deb once. A reset (curl exit 56) fails the
+        # job. A repeat resumes the partial file the installer leaves behind.
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL https://code-server.dev/install.sh | sh -s -- --version 4.137.0; then
+              exit 0
+            fi
+            echo "code-server install failed (attempt ${attempt}); retrying"
+            sleep $((attempt * 5))
+          done
+          echo "code-server install failed after 5 attempts"
+          exit 1
       - name: Install Playwright browsers
         working-directory: ./vscode/extension
         run: pnpm exec playwright install
       - name: Run e2e tests
         working-directory: ./vscode/extension
-        timeout-minutes: 30
+        # CI runs one worker. That needs a longer cap than the old 30 minutes.
+        timeout-minutes: 60
         run: |
           source ../../.venv/bin/activate
           pnpm run test:e2e
