@@ -3227,7 +3227,7 @@ class StarRocksEngineAdapter(
         self,
         table_properties: t.Dict[str, t.Any],
         clustered_by: t.Optional[t.List[exp.Expr]],
-    ) -> t.Optional[exp.Cluster]:
+    ) -> t.Optional[exp.Order]:
         """
         Build ORDER BY (clustering) property.
 
@@ -3264,7 +3264,7 @@ class StarRocksEngineAdapter(
                 clustered_by = list(normalized)
 
         if clustered_by:
-            result = exp.Cluster(expressions=clustered_by)
+            result = exp.Order(expressions=[exp.Tuple(expressions=clustered_by)])
             return result
         else:  # noqa: RET505
             return None
