@@ -137,14 +137,16 @@ WHERE
 )
 
 # at_least_one(column=column_name)
+# The aggregate is computed over the whole table rather than per group: grouping by the constant
+# produces no groups at all when the table is empty or @condition filters out every row, which
+# would make the audit pass even though no row has a non-NULL value.
 at_least_one_audit = ModelAudit(
     name="at_least_one",
     defaults={"condition": exp.true()},
     query="""
-SELECT 1
+SELECT COUNT(@column) AS cnt_not_null
 FROM @this_model
 WHERE @condition
-GROUP BY 1
 HAVING COUNT(@column) = 0
     """,
 )
