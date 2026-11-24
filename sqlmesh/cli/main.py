@@ -44,9 +44,19 @@ SKIP_CONTEXT_COMMANDS = ("init", "ui")
 LOCAL_ONLY_COMMANDS = ("format",)
 # Commands that are local-only when they're passed --local.
 OPTIONAL_LOCAL_COMMANDS = ("lint", "test")
-# Flags that, when passed to `plan`, make the command restatement-only and allow
-# running without local model definitions, since restatements operate against state.
-_RESTATE_ONLY_PLAN_FLAGS = ("--restate-model", "-r")
+
+
+def _is_restate_arg(arg: str) -> bool:
+    """Whether ``arg`` is a ``--restate-model`` / ``-r`` option token.
+
+    Covers the four spellings Click accepts: ``--restate-model VALUE``,
+    ``--restate-model=VALUE``, ``-r VALUE`` and ``-rVALUE``.
+    """
+    if arg == "--restate-model" or arg.startswith("--restate-model="):
+        return True
+    if arg == "-r" or (arg.startswith("-r") and not arg.startswith("--")):
+        return True
+    return False
 
 
 class _SQLMeshGroup(click.Group):
@@ -154,12 +164,13 @@ def cli(
     if ctx.invoked_subcommand == "lint":
         load = False
 
-    # `plan --restate-model` works entirely against state, so missing local model
-    # files shouldn't block it (parity with `run`).
-    if ctx.invoked_subcommand == "plan" and any(
-        arg in _RESTATE_ONLY_PLAN_FLAGS for arg in ctx.meta["subcommand_args"]
-    ):
-        load = False
+    # `plan --restate-model` operates entirely against state, so a project with no
+    # local model definitions should still be allowed to run (parity with `run`).
+    # Local loading itself stays on so that backfill expansion, unit tests, and the
+    # linter continue to work when model files are present.
+    restating = ctx.invoked_subcommand == "plan" and any(
+        _is_restate_arg(arg) for arg in ctx.meta["subcommand_args"]
+    )
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
     log_limit = list(configs.values())[0].log_limit
@@ -179,7 +190,7 @@ def cli(
             logger.exception("Failed to initialize SQLMesh context")
         raise
 
-    if load and not context.models:
+    if load and not context.models and not restating:
         raise click.ClickException(
             f"`{paths}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
         )
