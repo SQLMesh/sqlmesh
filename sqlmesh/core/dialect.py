@@ -1124,7 +1124,14 @@ def text_diff(
     return "\n".join(unified_diff(a_sql, b_sql))
 
 
-WS_OR_COMMENT = r"(?:\s|--[^\n]*\n|/\*.*?\*/)"
+# Each '*/' closes exactly one '/*', so a run of comments matches in exactly one way. A lazy
+# '/\*.*?\*/' under DOTALL can stretch across several comments, and a failed search then
+# backtracks through every grouping of them. SQLGlot reads block comments as nested, so this
+# matches nesting up to three levels deep; a regex cannot match arbitrary depth.
+BLOCK_COMMENT = r"/\*(?:[^*]|\*(?!/))*\*/"
+for _ in range(2):
+    BLOCK_COMMENT = rf"/\*(?:[^*/]|\*(?!/)|/(?!\*)|{BLOCK_COMMENT})*\*/"
+WS_OR_COMMENT = rf"(?:\s|--[^\n]*\n|{BLOCK_COMMENT})"
 HEADER = r"\b(?:model|audit)\b(?=\s*\()"
 KEY_BOUNDARY = r"(?:\(|,)"  # key is preceded by either '(' or ','
 DIALECT_VALUE = r"['\"]?(?P<dialect>[a-z][a-z0-9]*)['\"]?"
