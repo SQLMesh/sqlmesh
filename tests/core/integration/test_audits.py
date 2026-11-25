@@ -4,6 +4,7 @@ import typing as t
 from textwrap import dedent
 import pytest
 from pathlib import Path
+from pytest_mock.plugin import MockerFixture
 import time_machine
 from sqlglot import exp
 from IPython.utils.capture import capture_output
@@ -13,6 +14,8 @@ from sqlmesh.core.config import (
     ModelDefaultsConfig,
 )
 from sqlmesh.core.context import Context
+from sqlmesh.core.plan.evaluator import BuiltInPlanEvaluator
+from sqlmesh.core.snapshot.evaluator import SnapshotEvaluator
 from sqlmesh.utils.errors import (
     PlanError,
 )
@@ -346,3 +349,616 @@ def test_default_audits_with_custom_audit_definitions(tmp_path: Path):
         if audit_name == "positive_amount":
             assert "column" in audit_args
             assert audit_args["column"].name == "amount"
+
+
+_MATCHES_PARENT_AUDIT = """
+    AUDIT (
+        name matches_parent
+    );
+
+    SELECT a.id
+    FROM @this_model AS a
+    LEFT JOIN @parent_model AS b
+        ON a.id = b.id
+    WHERE b.id IS NULL
+"""
+
+_EXPECT_VAL_AUDIT = """
+    AUDIT (
+        name expect_val
+    );
+
+    SELECT *
+    FROM @this_model
+    WHERE val != @expected
+"""
+
+
+def _write_files(root: Path, files: t.Dict[str, str]) -> None:
+    for rel_path, content in files.items():
+        create_temp_file(root, Path(rel_path), dedent(content))
+
+
+def test_audit_only_resolves_new_parent_after_failed_prod_plan(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Issue #6256: Pure metadata audit-only plan resolves a NEW parent whose prod view was not promoted."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/matches_parent.sql": _MATCHES_PARENT_AUDIT,
+            "models/base.sql": """
+                MODEL (name test.base, kind FULL);
+                SELECT 1 AS id
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    with time_machine.travel("2024-01-02 00:00:00 UTC"):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+        # Plan 1: backfills new test.p -> test.c in before_promote, runs
+        # EnvironmentRecordUpdateStage, then fails in after_promote on new forward-only model
+        # test.fo before VirtualLayerUpdateStage creates views.
+        _write_files(
+            tmp_path,
+            {
+                "models/p.sql": """
+                    MODEL (name test.p, kind FULL);
+                    SELECT id FROM test.base
+                """,
+                "models/c.sql": """
+                    MODEL (name test.c, kind FULL);
+                    SELECT id FROM test.p
+                """,
+                "models/fo.sql": """
+                    MODEL (
+                        name test.fo,
+                        kind INCREMENTAL_BY_TIME_RANGE (time_column ds, forward_only true),
+                        start '2024-01-01',
+                        cron '@daily',
+                        audits (not_null(columns := [id]))
+                    );
+                    SELECT NULL AS id, @start_ds::DATE AS ds
+                """,
+            },
+        )
+        context.load()
+
+        with pytest.raises(PlanError):
+            context.plan("prod", no_prompts=True, auto_apply=True)
+
+        assert not context.engine_adapter.table_exists("test.p")
+
+        # Plan 2: remove failing test.fo and add a metadata-only audit on test.c referencing its
+        # parent test.p -> pure metadata audit plan with zero backfill.
+        (tmp_path / "models" / "fo.sql").unlink()
+        _write_files(
+            tmp_path,
+            {
+                "models/c.sql": """
+                    MODEL (
+                        name test.c,
+                        kind FULL,
+                        audits (matches_parent(parent_model := test.p))
+                    );
+                    SELECT id FROM test.p
+                """,
+            },
+        )
+        context.load()
+
+        audit_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_audit_only_run_stage")
+        backfill_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_backfill_stage")
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+        assert audit_stage_spy.call_count == 1
+        assert backfill_stage_spy.call_count == 1
+        assert not backfill_stage_spy.call_args.args[1].snapshot_to_intervals
+        assert context.engine_adapter.fetchall("SELECT id FROM test.p") == [(1,)]
+
+
+def test_audit_only_resolves_changed_parent_after_failed_prod_plan(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Issue #6256: Pure metadata audit-only plan resolves a CHANGED parent instead of its stale prod view."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/matches_parent.sql": _MATCHES_PARENT_AUDIT,
+            "models/p.sql": """
+                MODEL (name test.p, kind FULL);
+                SELECT 1 AS id
+            """,
+            "models/c.sql": """
+                MODEL (name test.c, kind FULL);
+                SELECT id FROM test.p
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    with time_machine.travel("2024-01-02 00:00:00 UTC"):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+        # Plan 1: breaking change to test.p (id=2) backfills test.p and test.c in before_promote,
+        # promotes environment record, then fails in after_promote on new forward-only model
+        # test.fo before VirtualLayerUpdateStage updates prod views.
+        _write_files(
+            tmp_path,
+            {
+                "models/p.sql": """
+                    MODEL (name test.p, kind FULL);
+                    SELECT 2 AS id
+                """,
+                "models/fo.sql": """
+                    MODEL (
+                        name test.fo,
+                        kind INCREMENTAL_BY_TIME_RANGE (time_column ds, forward_only true),
+                        start '2024-01-01',
+                        cron '@daily',
+                        audits (not_null(columns := [id]))
+                    );
+                    SELECT NULL AS id, @start_ds::DATE AS ds
+                """,
+            },
+        )
+        context.load()
+
+        with pytest.raises(PlanError):
+            context.plan("prod", no_prompts=True, auto_apply=True)
+
+        # Prod view test.p is still stale (id=1) while physical tables for test.p and test.c have id=2.
+        assert context.engine_adapter.fetchall("SELECT id FROM test.p") == [(1,)]
+
+        # Plan 2: remove failing test.fo and add a metadata-only audit on test.c referencing test.p
+        # (no backfill). Reading stale view test.p (id=1) would fail against test.c (id=2);
+        # resolving physical table passes.
+        (tmp_path / "models" / "fo.sql").unlink()
+        _write_files(
+            tmp_path,
+            {
+                "models/c.sql": """
+                    MODEL (
+                        name test.c,
+                        kind FULL,
+                        audits (matches_parent(parent_model := test.p))
+                    );
+                    SELECT id FROM test.p
+                """,
+            },
+        )
+        context.load()
+
+        audit_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_audit_only_run_stage")
+        backfill_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_backfill_stage")
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+        assert audit_stage_spy.call_count == 1
+        assert backfill_stage_spy.call_count == 1
+        assert not backfill_stage_spy.call_args.args[1].snapshot_to_intervals
+        assert context.engine_adapter.fetchall("SELECT id FROM test.p") == [(2,)]
+
+
+@pytest.mark.parametrize("select_models", [None, ["test.target"]])
+def test_audit_only_dev_breaking_parent(tmp_path: Path, select_models: t.Optional[t.List[str]]):
+    """Audit-only change in dev referencing a parent with a breaking change in dev (with & without --select-model)."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/matches_parent.sql": _MATCHES_PARENT_AUDIT,
+            "models/parent.sql": """
+                MODEL (name test.parent, kind FULL);
+                SELECT 1 AS id
+            """,
+            "models/target.sql": """
+                MODEL (name test.target, kind FULL);
+                SELECT id FROM test.parent
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # Breaking change to test.parent in dev -> dev tables for test.parent and test.target have id=2,
+    # while prod view test.parent still has id=1.
+    _write_files(
+        tmp_path,
+        {
+            "models/parent.sql": """
+                MODEL (name test.parent, kind FULL);
+                SELECT 2 AS id
+            """,
+        },
+    )
+    context.load()
+    context.plan("dev", no_prompts=True, auto_apply=True)
+
+    # Metadata-only audit on test.target referencing test.parent must resolve dev's physical table (id=2).
+    _write_files(
+        tmp_path,
+        {
+            "models/target.sql": """
+                MODEL (
+                    name test.target,
+                    kind FULL,
+                    audits (matches_parent(parent_model := test.parent))
+                );
+                SELECT id FROM test.parent
+            """,
+        },
+    )
+    context.load()
+    context.plan("dev", select_models=select_models, no_prompts=True, auto_apply=True)
+
+
+def test_audit_only_dev_paused_forward_only_grandparent_preview(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Audit-only change in dev when grandparent is a paused forward-only model must audit dev preview tables."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/expect_val.sql": _EXPECT_VAL_AUDIT,
+            "models/grandparent.sql": """
+                MODEL (name test.grandparent, kind FULL);
+                SELECT 1 AS val
+            """,
+            "models/parent.sql": """
+                MODEL (name test.parent, kind FULL);
+                SELECT val FROM test.grandparent
+            """,
+            "models/child.sql": """
+                MODEL (name test.child, kind FULL);
+                SELECT val FROM test.parent
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # Forward-only change to grandparent in dev populates non-deployable dev preview tables (val=2)
+    # while prod tables retain val=1.
+    _write_files(
+        tmp_path,
+        {
+            "models/grandparent.sql": """
+                MODEL (name test.grandparent, kind FULL);
+                SELECT 2 AS val
+            """,
+        },
+    )
+    context.load()
+    context.plan("dev", forward_only=True, no_prompts=True, auto_apply=True)
+    assert context.engine_adapter.fetchall("SELECT val FROM test__dev.child") == [(2,)]
+    assert context.engine_adapter.fetchall("SELECT val FROM test.child") == [(1,)]
+
+    # Metadata-only audit on test.child in dev must audit its populated dev preview table (val=2).
+    _write_files(
+        tmp_path,
+        {
+            "models/child.sql": """
+                MODEL (
+                    name test.child,
+                    kind FULL,
+                    audits (expect_val(expected := 2, blocking := true))
+                );
+                SELECT val FROM test.parent
+            """,
+        },
+    )
+    context.load()
+
+    audit_spy = mocker.spy(SnapshotEvaluator, "_audit")
+    context.plan("dev", forward_only=True, no_prompts=True, auto_apply=True)
+
+    assert audit_spy.call_count == 1
+    audit_kwargs = audit_spy.call_args.kwargs
+    child_snapshot = audit_kwargs["snapshot"]
+    deployability_index = audit_kwargs["deployability_index"]
+    assert not deployability_index.is_deployable(child_snapshot)
+    audit_result = audit_spy.spy_return
+    assert audit_result.count == 0
+    expected_dev_table = exp.to_table(
+        child_snapshot.table_name(is_deployable=False), dialect="duckdb"
+    ).sql(dialect="duckdb", identify=True)
+    assert expected_dev_table in audit_result.query.sql(dialect="duckdb")
+
+
+def test_audit_only_embedded_parent(tmp_path: Path):
+    """Audit-only change referencing an embedded parent (with transitive embedded parent)."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/matches_parent.sql": _MATCHES_PARENT_AUDIT,
+            "models/emb_parent.sql": """
+                MODEL (name test.emb_parent, kind EMBEDDED);
+                SELECT 1 AS id
+            """,
+            "models/emb_mid.sql": """
+                MODEL (name test.emb_mid, kind EMBEDDED);
+                SELECT id FROM test.emb_parent
+            """,
+            "models/full_child.sql": """
+                MODEL (name test.full_child, kind FULL);
+                SELECT id FROM test.emb_mid
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    _write_files(
+        tmp_path,
+        {
+            "models/full_child.sql": """
+                MODEL (
+                    name test.full_child,
+                    kind FULL,
+                    audits (matches_parent(parent_model := test.emb_mid))
+                );
+                SELECT id FROM test.emb_mid
+            """,
+        },
+    )
+    context.load()
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+
+def test_audit_only_external_model(tmp_path: Path):
+    """Audit-only change on an EXTERNAL model runs its updated audit."""
+    _write_files(
+        tmp_path,
+        {
+            "models/ext_source.sql": """
+                MODEL (
+                    name test.ext_source,
+                    kind EXTERNAL,
+                    columns (id INT),
+                    audits (not_null(columns := [id]))
+                );
+                SELECT 1;
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    context.engine_adapter.create_schema("test")
+    context.engine_adapter.execute("CREATE TABLE test.ext_source AS SELECT 1 AS id")
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    context.engine_adapter.execute("INSERT INTO test.ext_source VALUES (1)")
+    _write_files(
+        tmp_path,
+        {
+            "models/ext_source.sql": """
+                MODEL (
+                    name test.ext_source,
+                    kind EXTERNAL,
+                    columns (id INT),
+                    audits (
+                        not_null(columns := [id]),
+                        unique_values(columns := [id])
+                    )
+                );
+                SELECT 1;
+            """,
+        },
+    )
+    context.load()
+
+    with pytest.raises(PlanError):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+
+def test_audit_only_preserves_incremental_by_unique_key_historical_rows(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Running AuditOnlyRunStage + BackfillStage in the same plan must not wipe historical rows."""
+    _write_files(
+        tmp_path,
+        {
+            "models/inc_unique.sql": """
+                MODEL (
+                    name test.inc_unique,
+                    kind INCREMENTAL_BY_UNIQUE_KEY (unique_key id),
+                    start '2024-01-01',
+                    cron '@daily'
+                );
+                SELECT @start_ds::TEXT AS id, @start_ds::DATE AS ds
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    with time_machine.travel("2024-01-02 00:00:00 UTC"):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+    assert sorted(context.engine_adapter.fetchall("SELECT id FROM test.inc_unique")) == [
+        ("2024-01-01",)
+    ]
+
+    _write_files(
+        tmp_path,
+        {
+            "models/inc_unique.sql": """
+                MODEL (
+                    name test.inc_unique,
+                    kind INCREMENTAL_BY_UNIQUE_KEY (unique_key id),
+                    start '2024-01-01',
+                    cron '@daily',
+                    audits (not_null(columns := [id]))
+                );
+                SELECT @start_ds::TEXT AS id, @start_ds::DATE AS ds
+            """,
+        },
+    )
+    context.load()
+
+    audit_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_audit_only_run_stage")
+    backfill_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_backfill_stage")
+    with time_machine.travel("2024-01-03 00:00:00 UTC"):
+        context.plan("prod", run=True, no_prompts=True, auto_apply=True)
+
+    assert audit_stage_spy.call_count == 1
+    assert backfill_stage_spy.call_count == 1
+    assert backfill_stage_spy.call_args.args[1].snapshot_to_intervals
+    assert sorted(context.engine_adapter.fetchall("SELECT id FROM test.inc_unique")) == [
+        ("2024-01-01",),
+        ("2024-01-02",),
+    ]
+
+
+def test_audit_only_does_not_resolve_uncreated_sibling_table(tmp_path: Path, mocker: MockerFixture):
+    """AuditOnlyRunStage before BackfillStage must not resolve a non-parent breaking sibling to its uncreated table."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/matches_parent.sql": _MATCHES_PARENT_AUDIT,
+            "models/other.sql": """
+                MODEL (name test.other, kind FULL);
+                SELECT 1 AS id
+            """,
+            "models/target.sql": """
+                MODEL (name test.target, kind FULL);
+                SELECT 1 AS id
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # Single plan: breaking change to unrelated sibling test.other (needs backfill, physical table
+    # not yet created during AuditOnlyRunStage) + metadata audit on test.target referencing test.other.
+    _write_files(
+        tmp_path,
+        {
+            "models/other.sql": """
+                MODEL (name test.other, kind FULL);
+                SELECT 2 AS id
+            """,
+            "models/target.sql": """
+                MODEL (
+                    name test.target,
+                    kind FULL,
+                    audits (matches_parent(parent_model := test.other))
+                );
+                SELECT 1 AS id
+            """,
+        },
+    )
+    context.load()
+
+    audit_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_audit_only_run_stage")
+    backfill_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_backfill_stage")
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    assert audit_stage_spy.call_count == 1
+    assert backfill_stage_spy.call_count == 1
+    assert backfill_stage_spy.call_args.args[1].snapshot_to_intervals
+    assert context.engine_adapter.fetchall("SELECT id FROM test.other") == [(2,)]
+
+
+def test_audit_only_dev_non_representative_without_dev_intervals(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Non-representative dev METADATA models without dev_intervals skip AuditOnlyRunStage and audit in BackfillStage."""
+    _write_files(
+        tmp_path,
+        {
+            "audits/expect_val.sql": _EXPECT_VAL_AUDIT,
+            "models/p.sql": """
+                MODEL (
+                    name test.p,
+                    kind INCREMENTAL_BY_TIME_RANGE (
+                        time_column ds,
+                        auto_restatement_cron '@daily'
+                    ),
+                    start '2024-01-01'
+                );
+                SELECT 1 AS val, '2024-01-01'::DATE AS ds
+            """,
+            "models/c_full.sql": """
+                MODEL (name test.c_full, kind FULL, start '2024-01-01');
+                SELECT val, ds FROM test.p
+            """,
+            "models/c_inc.sql": """
+                MODEL (
+                    name test.c_inc,
+                    kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+                    start '2024-01-01'
+                );
+                SELECT val, ds FROM test.p WHERE ds BETWEEN @start_ds AND @end_ds
+            """,
+        },
+    )
+
+    context = Context(paths=tmp_path, config=Config())
+    with time_machine.travel("2024-01-02 00:00:00 UTC"):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+        # Dev plan 1: add metadata-only audits to c_full and c_inc (both non-representative because
+        # test.p has auto_restatement_cron, and neither has dev_intervals yet).
+        _write_files(
+            tmp_path,
+            {
+                "models/c_full.sql": """
+                    MODEL (
+                        name test.c_full,
+                        kind FULL,
+                        start '2024-01-01',
+                        audits (expect_val(expected := 1, blocking := true))
+                    );
+                    SELECT val, ds FROM test.p
+                """,
+                "models/c_inc.sql": """
+                    MODEL (
+                        name test.c_inc,
+                        kind INCREMENTAL_BY_TIME_RANGE (time_column ds),
+                        start '2024-01-01',
+                        audits (expect_val(expected := 1, blocking := true))
+                    );
+                    SELECT val, ds FROM test.p WHERE ds BETWEEN @start_ds AND @end_ds
+                """,
+            },
+        )
+        context.load()
+
+        audit_stage_spy = mocker.spy(BuiltInPlanEvaluator, "visit_audit_only_run_stage")
+        audit_spy = mocker.spy(SnapshotEvaluator, "_audit")
+        context.plan("dev", no_prompts=True, auto_apply=True)
+
+        assert audit_stage_spy.call_count == 0
+        assert audit_spy.call_count == 2
+        assert context.engine_adapter.fetchall("SELECT val FROM test__dev.c_full") == [(1,)]
+        assert context.engine_adapter.fetchall("SELECT val FROM test__dev.c_inc") == [(1,)]
+
+        # Dev plan 2: c_full now has populated dev_intervals, so a subsequent audit-only change
+        # runs in AuditOnlyRunStage against its existing __dev table.
+        _write_files(
+            tmp_path,
+            {
+                "models/c_full.sql": """
+                    MODEL (
+                        name test.c_full,
+                        kind FULL,
+                        start '2024-01-01',
+                        audits (
+                            expect_val(expected := 1, blocking := true),
+                            not_null(columns := [val])
+                        )
+                    );
+                    SELECT val, ds FROM test.p
+                """,
+            },
+        )
+        context.load()
+
+        audit_stage_spy.reset_mock()
+        context.plan("dev", no_prompts=True, auto_apply=True)
+        assert audit_stage_spy.call_count == 1

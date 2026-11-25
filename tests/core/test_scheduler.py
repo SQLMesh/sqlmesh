@@ -1213,3 +1213,166 @@ def test_dag_upstream_dependency_caching_with_complex_diamond(mocker: MockerFixt
         expected_g_node: {expected_a_node},
         expected_h_node: {expected_a_node},
     }
+
+
+def test_scheduler_audit_selected_snapshots_and_no_interval_mutation(
+    mocker: MockerFixture, make_snapshot: t.Callable
+) -> None:
+    parent_model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name db.parent,
+                kind FULL,
+                start '2023-01-01'
+            );
+            SELECT 1 AS id;
+            """
+        )
+    )
+    embedded_model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name db.embedded_no_audits,
+                kind EMBEDDED
+            );
+            SELECT id FROM db.parent;
+            """
+        )
+    )
+    child_model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name db.child,
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds
+                ),
+                start '2023-01-01',
+                audits (not_null(columns := [id]))
+            );
+            SELECT id, '2023-01-05'::DATE AS ds FROM db.embedded_no_audits;
+            """
+        )
+    )
+
+    parent_snapshot = make_snapshot(parent_model)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    parent_snapshot.add_interval("2023-01-01", "2023-01-06")
+
+    embedded_snapshot = make_snapshot(
+        embedded_model,
+        nodes={parent_model.fqn: parent_model},
+    )
+    embedded_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    child_snapshot = make_snapshot(
+        child_model,
+        nodes={
+            parent_model.fqn: parent_model,
+            embedded_model.fqn: embedded_model,
+        },
+    )
+    child_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    child_snapshot.add_interval("2023-01-01", "2023-01-06")
+    child_snapshot.add_interval("2023-01-01", "2023-01-06", is_dev=True)
+
+    sibling_model = load_sql_based_model(
+        parse(  # type: ignore
+            """
+            MODEL (
+                name db.sibling,
+                kind FULL,
+                start '2023-01-01'
+            );
+            SELECT 1 AS id;
+            """
+        )
+    )
+    sibling_snapshot = make_snapshot(sibling_model)
+    sibling_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    original_parent_intervals = parent_snapshot.intervals.copy()
+    original_child_intervals = child_snapshot.intervals.copy()
+    original_child_dev_intervals = child_snapshot.dev_intervals.copy()
+
+    evaluator = mocker.MagicMock()
+    evaluator.get_snapshots_to_create.return_value = []
+    evaluator.audit.return_value = []
+    evaluator.execution_tracker.get_execution_stats.return_value = None
+
+    state_sync = mocker.MagicMock()
+
+    scheduler = Scheduler(
+        snapshots=[parent_snapshot, embedded_snapshot, child_snapshot, sibling_snapshot],
+        snapshot_evaluator=evaluator,
+        state_sync=state_sync,
+        default_catalog=None,
+    )
+
+    deployability_index = DeployabilityIndex.create(
+        [parent_snapshot, embedded_snapshot, child_snapshot, sibling_snapshot]
+    )
+
+    # Unselected FULL parent has depends_on_past=True; execution_time < start must not raise ValueError
+    early_status = scheduler.audit(
+        EnvironmentNamingInfo(name="dev"),
+        start="2023-01-05",
+        end="2023-01-06",
+        execution_time="2023-01-02",
+        selected_snapshots={child_snapshot.name},
+        deployability_index=deployability_index,
+        ignore_cron=True,
+    )
+    assert early_status.is_nothing_to_do
+
+    status = scheduler.audit(
+        EnvironmentNamingInfo(name="dev"),
+        start="2023-01-05",
+        end="2023-01-06",
+        execution_time="2023-01-07",
+        selected_snapshots={child_snapshot.name},
+        deployability_index=deployability_index,
+        ignore_cron=True,
+    )
+
+    assert status.is_success
+    evaluator.get_snapshots_to_create.assert_not_called()
+    evaluator.audit.assert_called_once()
+    audit_kwargs = evaluator.audit.call_args.kwargs
+    assert audit_kwargs["snapshot"] == child_snapshot
+    # Only the audited snapshot and its parents (including transitive embedded parents) are passed;
+    # unrelated sibling snapshots must be excluded.
+    assert set(audit_kwargs["snapshots"].keys()) == {
+        parent_snapshot.name,
+        embedded_snapshot.name,
+        child_snapshot.name,
+    }
+    assert sibling_snapshot.name not in audit_kwargs["snapshots"]
+    assert audit_kwargs["deployability_index"] == deployability_index
+
+    # Auditing must not mutate in-memory intervals on scheduler.snapshots
+    assert parent_snapshot.intervals == original_parent_intervals
+    assert child_snapshot.intervals == original_child_intervals
+    assert child_snapshot.dev_intervals == original_child_dev_intervals
+
+    # Direct Scheduler.audit() with only a subset of snapshots (missing parents) must not raise KeyError
+    evaluator.audit.reset_mock()
+    subset_scheduler = Scheduler(
+        snapshots=[child_snapshot],
+        snapshot_evaluator=evaluator,
+        state_sync=state_sync,
+        default_catalog=None,
+    )
+    subset_status = subset_scheduler.audit(
+        EnvironmentNamingInfo(name="dev"),
+        start="2023-01-05",
+        end="2023-01-06",
+        execution_time="2023-01-07",
+        deployability_index=deployability_index,
+        ignore_cron=True,
+    )
+    assert subset_status.is_success
+    evaluator.get_snapshots_to_create.assert_not_called()
+    assert set(evaluator.audit.call_args.kwargs["snapshots"].keys()) == {child_snapshot.name}

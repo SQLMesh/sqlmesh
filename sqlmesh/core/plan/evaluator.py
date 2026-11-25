@@ -273,16 +273,48 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         if not audit_snapshots:
             return
 
+        all_snapshots_by_id = {
+            **{s.snapshot_id: s for s in stage.all_snapshots.values()},
+            **{s.snapshot_id: s for s in audit_snapshots},
+        }
+        relevant_snapshots: t.Dict[SnapshotId, Snapshot] = {}
+        queue = [s.snapshot_id for s in audit_snapshots]
+        while queue:
+            s_id = queue.pop()
+            if s_id in relevant_snapshots or s_id not in all_snapshots_by_id:
+                continue
+            snapshot = all_snapshots_by_id[s_id]
+            relevant_snapshots[s_id] = snapshot
+            queue.extend(snapshot.parents)
+
+        # Copy only the audited snapshots and their upstream ancestors so scheduler.audit's state
+        # refresh cannot mutate shared Snapshot objects held by subsequent stages or
+        # CachingStateSync, and avoids refreshing unrelated project snapshots.
+        snapshots = [
+            s.copy(
+                update={
+                    "intervals": s.intervals.copy(),
+                    "dev_intervals": s.dev_intervals.copy(),
+                    "pending_restatement_intervals": s.pending_restatement_intervals.copy(),
+                }
+            )
+            for s in relevant_snapshots.values()
+        ]
+
         # If there are any snapshots to be audited, we'll reuse the scheduler's internals to audit them
-        scheduler = self.create_scheduler(audit_snapshots, self.snapshot_evaluator)
+        scheduler = self.create_scheduler(snapshots, self.snapshot_evaluator)
         completion_status = scheduler.audit(
             plan.environment,
             plan.start,
             plan.end,
             execution_time=plan.execution_time,
             end_bounded=plan.end_bounded,
+            ignore_cron=plan.ignore_cron,
             start_override_per_model=plan.start_override_per_model,
             end_override_per_model=plan.end_override_per_model,
+            selected_snapshots={s.name for s in audit_snapshots},
+            deployability_index=stage.deployability_index,
+            circuit_breaker=self._circuit_breaker,
         )
 
         if completion_status.is_failure:
