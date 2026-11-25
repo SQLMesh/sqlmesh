@@ -26,12 +26,15 @@ class SnapshotCache:
         self,
         snapshot_ids: t.Set[SnapshotId],
         loader: t.Callable[[t.Set[SnapshotId]], t.Collection[Snapshot]],
+        *,
+        load_optimized_queries: bool = True,
     ) -> t.Tuple[t.Dict[SnapshotId, Snapshot], t.Set[SnapshotId]]:
         """Fetches the target snapshots from cache or loads them using the provided loader on cache miss.
 
         Args:
             snapshot_ids: Target snapshot IDs to fetch.
             loader: The loader to load snapshot records that are missing in the cache.
+            load_optimized_queries: Whether to prepare optimized queries for model snapshots.
 
         Returns:
             A tuple where the first value represents the fetched snapshots, and the second value is a set of
@@ -55,24 +58,25 @@ class SnapshotCache:
             for snapshot in loaded_snapshots:
                 snapshots[snapshot.snapshot_id] = snapshot
 
-        with optimized_query_cache_pool(self._optimized_query_cache) as executor:
-            for key, entry_name in executor.map(
-                load_optimized_query,
-                (
-                    (snapshot.model, s_id)
-                    for s_id, snapshot in snapshots.items()
-                    if snapshot.is_model
-                ),
-            ):
-                if entry_name:
-                    self._optimized_query_cache.with_optimized_query(
-                        snapshots[key].model, entry_name
-                    )
+        if load_optimized_queries:
+            with optimized_query_cache_pool(self._optimized_query_cache) as executor:
+                for key, entry_name in executor.map(
+                    load_optimized_query,
+                    (
+                        (snapshot.model, s_id)
+                        for s_id, snapshot in snapshots.items()
+                        if snapshot.is_model
+                    ),
+                ):
+                    if entry_name:
+                        self._optimized_query_cache.with_optimized_query(
+                            snapshots[key].model, entry_name
+                        )
 
         for snapshot in snapshots.values():
             self._update_node_hash_cache(snapshot)
 
-            if snapshot.is_model and c.MAX_FORK_WORKERS == 1:
+            if load_optimized_queries and snapshot.is_model and c.MAX_FORK_WORKERS == 1:
                 try:
                     self._optimized_query_cache.with_optimized_query(snapshot.model)
                 except Exception:
