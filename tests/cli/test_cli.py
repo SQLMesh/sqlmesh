@@ -370,6 +370,141 @@ def test_plan_restate_model(runner, tmp_path):
     assert "Virtual layer updated" not in result.output
 
 
+@pytest.mark.parametrize(
+    "restate_args",
+    [
+        pytest.param(["--restate-model", "sqlmesh_example.full_model"], id="long-space"),
+        pytest.param(["--restate-model=sqlmesh_example.full_model"], id="long-equals"),
+        pytest.param(["-r", "sqlmesh_example.full_model"], id="short-space"),
+        pytest.param(["-rsqlmesh_example.full_model"], id="short-attached"),
+    ],
+)
+def test_plan_restate_model_without_local_definitions(runner, tmp_path, restate_args):
+    """`plan --restate-model` should work against state alone, like `run`.
+
+    Reproduces https://github.com/SQLMesh/sqlmesh/issues/3260. Each
+    parametrization covers one of the spellings Click accepts for the
+    option so the empty-project bypass tracks whatever form the user types.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    # Wipe every local project directory, keeping only config.yaml + db.db.
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+    assert not (tmp_path / "models").exists()
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            *restate_args,
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "doesn't seem to have any models" not in result.output
+    assert "Models selected for restatement" in result.output
+    assert "sqlmesh_example.full_model" in result.output
+    assert_model_batches_executed(result)
+
+
+def test_plan_without_restate_and_no_local_models_still_errors(runner, tmp_path):
+    """A non-restatement plan against an empty project must still error out."""
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan"],
+    )
+    assert result.exit_code == 1
+    assert "doesn't seem to have any models" in result.output
+
+
+def test_plan_restate_upstream_models_without_local_definitions(runner, tmp_path):
+    """``-r '+<model>'`` should restate upstream deployed models even without local files."""
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--restate-model",
+            "+sqlmesh_example.full_model",
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Models selected for restatement" in result.output
+    # full_model depends on incremental_model, which depends on seed_model;
+    # a `+` selector must pick both upstream dependencies from state.
+    assert "sqlmesh_example.full_model" in result.output
+    assert "sqlmesh_example.incremental_model" in result.output
+    assert_model_batches_executed(result)
+
+
+def test_plan_restate_model_with_backfill_model_and_skip_linter(runner, tmp_path):
+    """Restatements with local models and ``--backfill-model`` must still expand selectors.
+
+    With local model files present, ``plan --skip-linter --restate-model X
+    --backfill-model Y`` has to run both selector expansions against the
+    local project. Keeping local loading enabled for restate plans is what
+    makes this case work.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--skip-linter",
+            "--restate-model",
+            "sqlmesh_example.full_model",
+            "--backfill-model",
+            "sqlmesh_example.*",
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Selector did not return any models" not in result.output
+    assert "Models selected for restatement" in result.output
+    assert "sqlmesh_example.full_model" in result.output
+    assert_model_batches_executed(result)
+
+
 @pytest.mark.parametrize("flag", ["--skip-backfill", "--dry-run"])
 def test_plan_skip_backfill(runner, tmp_path, flag):
     create_example_project(tmp_path)

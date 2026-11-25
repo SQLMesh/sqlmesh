@@ -11,6 +11,7 @@ import {
 import { getWorkspaceFolders } from '../utilities/common/vscodeapi'
 import { LSPClient } from '../lsp/lsp'
 import { isErr } from '@bus/result'
+import { IS_WINDOWS } from '../utilities/isWindows'
 
 export class LineagePanel implements WebviewViewProvider, Disposable {
   public static readonly viewType = 'sqlmesh.lineage'
@@ -47,7 +48,10 @@ export class LineagePanel implements WebviewViewProvider, Disposable {
             key: 'vscode_send',
             payload: {
               key: 'changeFocusOnFile',
-              payload: { path: editor.document.uri.fsPath },
+              payload: {
+                path: editor.document.uri.fsPath,
+                isWindows: IS_WINDOWS,
+              },
             },
           })
         }
@@ -144,6 +148,7 @@ export class LineagePanel implements WebviewViewProvider, Disposable {
                     requestId,
                     result: {
                       fileUri: active_file,
+                      isWindows: IS_WINDOWS,
                     },
                   },
                 }

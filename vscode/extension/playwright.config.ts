@@ -8,7 +8,10 @@ export default defineConfig({
   timeout: 180_000,
   // TODO: When stable, allow retries in CI
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 2 : 4,
+  // One worker on CI. Two workers each start code-server, Chromium, and a
+  // SQLMesh virtualenv, which starved a GitHub-hosted runner until it lost
+  // communication with the service.
+  workers: process.env.CI ? 1 : 4,
   reporter: [['html', { outputFolder: 'playwright-report' }], ['list']],
   projects: [
     {
