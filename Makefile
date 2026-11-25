@@ -96,9 +96,6 @@ publish: package
 package-tests:
 	$(PIP) install build && cp pyproject.toml tests/sqlmesh_pyproject.toml && python3 -m build tests/
 
-publish-tests: package-tests
-	$(PIP) install twine && python3 -m twine upload -r tobiko-private tests/dist/*
-
 docs-serve:
 	mkdocs serve
 
