@@ -18,7 +18,17 @@ from sqlglot import parse, parse_one, select
 from sqlmesh.core.audit import ModelAudit, StandaloneAudit
 from sqlmesh.core import dialect as d
 from sqlmesh.core.dialect import schema_, to_schema
-from sqlmesh.core.engine_adapter import EngineAdapter, create_engine_adapter, BigQueryEngineAdapter
+from sqlmesh.core.engine_adapter import (
+    BigQueryEngineAdapter,
+    DatabricksEngineAdapter,
+    DuckDBEngineAdapter,
+    EngineAdapter,
+    PostgresEngineAdapter,
+    RisingwaveEngineAdapter,
+    SnowflakeEngineAdapter,
+    StarRocksEngineAdapter,
+    create_engine_adapter,
+)
 from sqlmesh.core.engine_adapter.base import MERGE_SOURCE_ALIAS, MERGE_TARGET_ALIAS
 from sqlmesh.core.engine_adapter.shared import (
     DataObject,
@@ -45,6 +55,7 @@ from sqlmesh.core.model import (
     model,
     create_sql_model,
 )
+from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.model.kind import OnDestructiveChange, ExternalKind, OnAdditiveChange
 from sqlmesh.core.model.meta import GrantsTargetLayer
 from sqlmesh.core.node import IntervalUnit
@@ -6113,3 +6124,392 @@ def test_observation_propagates_through_snapshot_dispatch(
         consumer.reset(token)
     action = "schema_migration" if operation == "migrate" else operation
     assert events == [("start", action, None), ("finish", action, None)]
+
+
+@pytest.mark.parametrize(
+    "adapter_cls",
+    [
+        RisingwaveEngineAdapter,
+        PostgresEngineAdapter,
+        SnowflakeEngineAdapter,
+        BigQueryEngineAdapter,
+        DatabricksEngineAdapter,
+        StarRocksEngineAdapter,
+        DuckDBEngineAdapter,
+    ],
+)
+@pytest.mark.parametrize("explicit_ids", [True, False], ids=["explicit_ids", "direct_none"])
+def test_migrate_metadata_only_mv_skips_ddl_and_pre_post_statements(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+    adapter_cls: t.Type[EngineAdapter],
+    explicit_ids: bool,
+) -> None:
+    adapter = make_mocked_engine_adapter(adapter_cls)
+    dialect = adapter.dialect
+
+    old_model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (
+                name test_schema.test_mv,
+                kind VIEW (materialized true),
+                dialect {dialect}
+            );
+            CREATE TABLE IF NOT EXISTS pre_tbl (x INT);
+            SELECT 1 AS a;
+            CREATE TABLE IF NOT EXISTS post_tbl (x INT);
+            """
+        )
+    ).copy(
+        update={
+            "pre_statements_": [
+                ParsableSql(
+                    sql="CREATE TABLE IF NOT EXISTS pre_outside_tx (x INT)", transaction=False
+                ),
+                ParsableSql(sql="CREATE TABLE IF NOT EXISTS pre_tbl (x INT)", transaction=True),
+            ],
+            "post_statements_": [
+                ParsableSql(
+                    sql="CREATE TABLE IF NOT EXISTS post_outside_tx (x INT)", transaction=False
+                ),
+                ParsableSql(sql="CREATE TABLE IF NOT EXISTS post_tbl (x INT)", transaction=True),
+            ],
+        }
+    )
+    old_snapshot = make_snapshot(old_model)
+    old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    new_model = old_model.copy(update={"tags": ["updated"]})
+    new_snapshot = make_snapshot(new_model)
+    new_snapshot.previous_versions = old_snapshot.all_versions
+    new_snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+
+    evaluator = SnapshotEvaluator(adapter)
+    target_table = exp.to_table(new_snapshot.table_name(), dialect=dialect)
+    mocker.patch.object(
+        evaluator.adapter,
+        "get_data_objects",
+        return_value=[
+            DataObject(
+                catalog=target_table.catalog or None,
+                schema=target_table.db,
+                name=target_table.name,
+                type=DataObjectType.MATERIALIZED_VIEW,
+            )
+        ],
+    )
+    create_view_spy = mocker.spy(evaluator.adapter, "create_view")
+    drop_view_spy = mocker.spy(evaluator.adapter, "drop_view")
+    execute_spy = mocker.spy(evaluator.adapter, "execute")
+
+    if explicit_ids:
+        evaluator.migrate([new_snapshot], {}, metadata_only_snapshot_ids={new_snapshot.snapshot_id})
+    else:
+        evaluator.migrate([new_snapshot], {})
+
+    create_view_spy.assert_not_called()
+    drop_view_spy.assert_not_called()
+    execute_spy.assert_not_called()
+    evaluator.adapter.cursor.execute.assert_not_called()
+
+
+@pytest.mark.parametrize("adapter_cls", [PostgresEngineAdapter, SnowflakeEngineAdapter])
+def test_migrate_metadata_only_mv_syncs_grants_in_place(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+    adapter_cls: t.Type[EngineAdapter],
+) -> None:
+    adapter = make_mocked_engine_adapter(adapter_cls)
+    dialect = adapter.dialect
+
+    old_model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (
+                name test_schema.test_mv,
+                kind VIEW (materialized true),
+                dialect {dialect},
+                grants ('select' = ['role_old']),
+                grants_target_layer 'all'
+            );
+            CREATE TABLE IF NOT EXISTS pre_tbl (x INT);
+            SELECT 1 AS a;
+            CREATE TABLE IF NOT EXISTS post_tbl (x INT);
+            """
+        )
+    )
+    old_snapshot = make_snapshot(old_model)
+    old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    new_model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (
+                name test_schema.test_mv,
+                kind VIEW (materialized true),
+                dialect {dialect},
+                grants ('select' = ['role_new']),
+                grants_target_layer 'all'
+            );
+            CREATE TABLE IF NOT EXISTS pre_tbl (x INT);
+            SELECT 1 AS a;
+            CREATE TABLE IF NOT EXISTS post_tbl (x INT);
+            """
+        )
+    ).copy(
+        update={
+            "pre_statements_": [
+                ParsableSql(
+                    sql="CREATE TABLE IF NOT EXISTS pre_outside_tx (x INT)", transaction=False
+                ),
+            ],
+            "post_statements_": [
+                ParsableSql(
+                    sql="CREATE TABLE IF NOT EXISTS post_outside_tx (x INT)", transaction=False
+                ),
+            ],
+        }
+    )
+    new_snapshot = make_snapshot(new_model)
+    new_snapshot.previous_versions = old_snapshot.all_versions
+    new_snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+
+    evaluator = SnapshotEvaluator(adapter)
+    target_table = exp.to_table(new_snapshot.table_name(), dialect=dialect)
+    mocker.patch.object(
+        evaluator.adapter,
+        "get_data_objects",
+        return_value=[
+            DataObject(
+                catalog=target_table.catalog or None,
+                schema=target_table.db,
+                name=target_table.name,
+                type=DataObjectType.MATERIALIZED_VIEW,
+            )
+        ],
+    )
+    sync_grants_mock = mocker.patch.object(evaluator.adapter, "sync_grants_config")
+    create_view_spy = mocker.spy(evaluator.adapter, "create_view")
+    drop_view_spy = mocker.spy(evaluator.adapter, "drop_view")
+    execute_spy = mocker.spy(evaluator.adapter, "execute")
+
+    evaluator.migrate([new_snapshot], {}, metadata_only_snapshot_ids={new_snapshot.snapshot_id})
+
+    sync_grants_mock.assert_called_once_with(
+        exp.to_table(new_snapshot.table_name(), dialect=dialect),
+        {"select": ["role_new"]},
+        DataObjectType.MATERIALIZED_VIEW,
+    )
+    create_view_spy.assert_not_called()
+    drop_view_spy.assert_not_called()
+    execute_spy.assert_not_called()
+
+
+def test_migrate_metadata_only_table_syncs_grants_without_schema_tmp(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+) -> None:
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    dialect = adapter.dialect
+
+    old_model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (
+                name test_schema.test_tbl,
+                kind FULL,
+                dialect {dialect},
+                grants ('select' = ['role_old']),
+                grants_target_layer 'all'
+            );
+            CREATE TABLE IF NOT EXISTS pre_tbl (x INT);
+            SELECT 1 AS a;
+            CREATE TABLE IF NOT EXISTS post_tbl (x INT);
+            """
+        )
+    )
+    old_snapshot = make_snapshot(old_model)
+    old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    new_model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (
+                name test_schema.test_tbl,
+                kind FULL,
+                dialect {dialect},
+                grants ('select' = ['role_new']),
+                grants_target_layer 'all'
+            );
+            CREATE TABLE IF NOT EXISTS pre_tbl (x INT);
+            SELECT 1 AS a;
+            CREATE TABLE IF NOT EXISTS post_tbl (x INT);
+            """
+        )
+    )
+    new_snapshot = make_snapshot(new_model)
+    new_snapshot.previous_versions = old_snapshot.all_versions
+    new_snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+
+    evaluator = SnapshotEvaluator(adapter)
+    target_table = exp.to_table(new_snapshot.table_name(), dialect=dialect)
+    mocker.patch.object(
+        evaluator.adapter,
+        "get_data_objects",
+        return_value=[
+            DataObject(
+                catalog=target_table.catalog or None,
+                schema=target_table.db,
+                name=target_table.name,
+                type=DataObjectType.TABLE,
+            )
+        ],
+    )
+    sync_grants_mock = mocker.patch.object(evaluator.adapter, "sync_grants_config")
+    create_table_spy = mocker.spy(evaluator.adapter, "create_table")
+    ctas_spy = mocker.spy(evaluator.adapter, "ctas")
+    drop_table_spy = mocker.spy(evaluator.adapter, "drop_table")
+    alter_table_spy = mocker.spy(evaluator.adapter, "alter_table")
+    execute_spy = mocker.spy(evaluator.adapter, "execute")
+
+    evaluator.migrate([new_snapshot], {}, metadata_only_snapshot_ids={new_snapshot.snapshot_id})
+
+    sync_grants_mock.assert_called_once_with(
+        exp.to_table(new_snapshot.table_name(), dialect=dialect),
+        {"select": ["role_new"]},
+        DataObjectType.TABLE,
+    )
+    create_table_spy.assert_not_called()
+    ctas_spy.assert_not_called()
+    drop_table_spy.assert_not_called()
+    alter_table_spy.assert_not_called()
+    execute_spy.assert_not_called()
+
+
+@pytest.mark.parametrize("metadata_only_snapshot_ids", [set(), None], ids=["empty_set", "none"])
+@pytest.mark.parametrize(
+    "reverted_to_v1", [False, True], ids=["fo_then_meta", "fo_revert_then_meta"]
+)
+def test_migrate_view_recreates_when_explicitly_not_metadata_only(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+    metadata_only_snapshot_ids: t.Optional[t.Set[t.Any]],
+    reverted_to_v1: bool,
+) -> None:
+    old_model = SqlModel(
+        name="test_schema.test_view",
+        kind=ViewKind(),
+        query=parse_one("SELECT 1 AS a"),
+    )
+    old_snapshot = make_snapshot(old_model)
+    old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    fo_model = SqlModel(
+        name="test_schema.test_view",
+        kind=ViewKind(),
+        query=parse_one("SELECT 1 AS a, 2 AS b"),
+    )
+    fo_snapshot = make_snapshot(fo_model)
+    fo_snapshot.previous_versions = old_snapshot.all_versions
+    fo_snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+
+    prev_snapshot = fo_snapshot
+    base_model = fo_model
+    if reverted_to_v1:
+        revert_snapshot = make_snapshot(old_model.copy())
+        revert_snapshot.previous_versions = fo_snapshot.all_versions
+        revert_snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+        prev_snapshot = revert_snapshot
+        base_model = old_model
+
+    meta_model = base_model.copy(update={"owner": "new_owner"})
+    meta_snapshot = make_snapshot(meta_model)
+    meta_snapshot.previous_versions = prev_snapshot.all_versions
+    meta_snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    evaluator = SnapshotEvaluator(adapter)
+    target_table = exp.to_table(meta_snapshot.table_name())
+    mocker.patch.object(
+        evaluator.adapter,
+        "get_data_objects",
+        return_value=[
+            DataObject(
+                schema=target_table.db,
+                name=target_table.name,
+                type=DataObjectType.VIEW,
+            )
+        ],
+    )
+    create_view_spy = mocker.spy(evaluator.adapter, "create_view")
+
+    evaluator.migrate([meta_snapshot], {}, metadata_only_snapshot_ids=metadata_only_snapshot_ids)
+
+    create_view_spy.assert_called_once()
+
+
+def test_migrate_metadata_only_mv_recreates_when_target_missing(
+    mocker: MockerFixture,
+    make_snapshot,
+    make_mocked_engine_adapter,
+) -> None:
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
+    dialect = adapter.dialect
+
+    existing_old = make_snapshot(
+        SqlModel(
+            name="test_schema.existing_mv",
+            kind=ViewKind(materialized=True),
+            dialect=dialect,
+            query=parse_one("SELECT 1 AS a"),
+        )
+    )
+    existing_old.categorize_as(SnapshotChangeCategory.BREAKING)
+    existing_new = make_snapshot(existing_old.model.copy(update={"tags": ["t1"]}))
+    existing_new.previous_versions = existing_old.all_versions
+    existing_new.categorize_as(SnapshotChangeCategory.METADATA)
+
+    missing_old = make_snapshot(
+        SqlModel(
+            name="test_schema.missing_mv",
+            kind=ViewKind(materialized=True),
+            dialect=dialect,
+            query=parse_one("SELECT 2 AS b"),
+        )
+    )
+    missing_old.categorize_as(SnapshotChangeCategory.BREAKING)
+    missing_new = make_snapshot(missing_old.model.copy(update={"tags": ["t1"]}))
+    missing_new.previous_versions = missing_old.all_versions
+    missing_new.categorize_as(SnapshotChangeCategory.METADATA)
+
+    evaluator = SnapshotEvaluator(adapter)
+    existing_table = exp.to_table(existing_new.table_name(), dialect=dialect)
+    # Only existing_mv is present in warehouse; missing_mv was dropped (target_data_object is None)
+    mocker.patch.object(
+        evaluator.adapter,
+        "get_data_objects",
+        return_value=[
+            DataObject(
+                catalog=existing_table.catalog or None,
+                schema=existing_table.db,
+                name=existing_table.name,
+                type=DataObjectType.MATERIALIZED_VIEW,
+            )
+        ],
+    )
+    mocker.patch.object(evaluator.adapter, "table_exists", return_value=False)
+    create_view_spy = mocker.spy(evaluator.adapter, "create_view")
+
+    evaluator.migrate(
+        [existing_new, missing_new],
+        {},
+        metadata_only_snapshot_ids={existing_new.snapshot_id, missing_new.snapshot_id},
+    )
+
+    create_view_spy.assert_called_once()
+    assert create_view_spy.call_args.args[0] == missing_new.table_name(is_deployable=True)

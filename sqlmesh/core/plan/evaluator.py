@@ -382,6 +382,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
                 allow_destructive_snapshots=plan.allow_destructive_models,
                 allow_additive_snapshots=plan.allow_additive_models,
                 deployability_index=stage.deployability_index,
+                metadata_only_snapshot_ids=stage.metadata_only_snapshot_ids,
             )
         except NodeExecutionFailedError as ex:
             raise PlanError(str(ex.__cause__) if ex.__cause__ else str(ex))

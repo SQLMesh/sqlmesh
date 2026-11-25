@@ -1,8 +1,11 @@
 import typing as t
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from sqlglot import exp
 from sqlmesh.core import constants as c
+from sqlmesh.core import dialect as d
 from sqlmesh.core.environment import EnvironmentStatements, EnvironmentNamingInfo, Environment
+from sqlmesh.core.model import Model
 from sqlmesh.core.plan.common import should_force_rebuild
 from sqlmesh.core.plan.definition import EvaluatablePlan
 from sqlmesh.core.state_sync import StateReader
@@ -14,6 +17,7 @@ from sqlmesh.core.snapshot.definition import (
     SnapshotId,
     snapshots_to_dag,
 )
+from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.errors import PlanError
 
 
@@ -154,11 +158,14 @@ class MigrateSchemasStage:
         snapshots: Snapshots to migrate schemas for.
         all_snapshots: All snapshots in the plan by snapshot ID.
         deployability_index: Deployability index for this stage.
+        metadata_only_snapshot_ids: Snapshot IDs requiring in-place metadata updates (e.g., physical grants)
+            without DDL migration or view/materialized-view recreation.
     """
 
     snapshots: t.List[Snapshot]
     all_snapshots: t.Dict[SnapshotId, Snapshot]
     deployability_index: DeployabilityIndex
+    metadata_only_snapshot_ids: t.Set[SnapshotId] = field(default_factory=set)
 
 
 @dataclass
@@ -257,7 +264,11 @@ class PlanStagesBuilder:
         }
         existing_environment = self.state_reader.get_environment(plan.environment.name)
 
-        self._adjust_intervals(snapshots_by_name, plan, existing_environment)
+        old_snapshots = self._adjust_intervals(snapshots_by_name, plan, existing_environment)
+
+        has_data_or_upstream_change: t.Set[SnapshotId] = set()
+        full_migration_ids: t.Set[SnapshotId] = set()
+        metadata_only_migration_ids: t.Set[SnapshotId] = set()
 
         deployability_index = DeployabilityIndex.create(snapshots, start=plan.start)
         if plan.is_dev:
@@ -274,28 +285,48 @@ class PlanStagesBuilder:
             after_promote_snapshots = all_selected_for_backfill_snapshots - before_promote_snapshots
             deployability_index = DeployabilityIndex.all_deployable()
 
-            snapshot_ids_with_schema_migration = [
+            has_data_or_upstream_change, metadata_only_grants_snapshot_ids = (
+                self._classify_prod_snapshot_changes(
+                    snapshots, dag, existing_environment, old_snapshots
+                )
+            )
+            raw_schema_migration_ids = {
                 s.snapshot_id for s in snapshots.values() if s.requires_schema_migration_in_prod
+            }
+            snapshot_ids_with_schema_migration = [
+                s_id for s_id in raw_schema_migration_ids if s_id in has_data_or_upstream_change
             ]
-            # Include all upstream dependencies of snapshots that require schema migration to make sure
-            # the upstream tables are created before the schema updates are applied
-            snapshot_ids_to_migrate = set(dag.subdag(*snapshot_ids_with_schema_migration))
+            # Include upstream dependencies with data/DDL changes to make sure the upstream tables
+            # are created before the schema updates are applied
+            full_migration_ids = {
+                s_id
+                for s_id in dag.subdag(*snapshot_ids_with_schema_migration)
+                if s_id in has_data_or_upstream_change
+                and snapshots[s_id].supports_schema_migration_in_prod
+            }
             # Migrating a view replaces it, and engines like Postgres drop its dependent views with CASCADE,
-            # so those are migrated too to be recreated
-            for s_id in dag:
-                snapshot = snapshots[s_id]
-                if snapshot.is_view and any(
-                    p_id in snapshot_ids_to_migrate
-                    and snapshots[p_id].is_view
-                    and snapshots[p_id].supports_schema_migration_in_prod
-                    for p_id in snapshot.parents
+            # so propagate ONLY from views receiving full DDL migration (not metadata-only grants updates)
+            for s_id in dag.sorted:
+                snapshot = snapshots.get(s_id)
+                if (
+                    snapshot
+                    and snapshot.is_view
+                    and snapshot.supports_schema_migration_in_prod
+                    and any(
+                        p_id in full_migration_ids and snapshots[p_id].is_view
+                        for p_id in snapshot.parents
+                    )
                 ):
-                    snapshot_ids_to_migrate.add(s_id)
+                    full_migration_ids.add(s_id)
+
+            metadata_only_migration_ids = (
+                raw_schema_migration_ids & metadata_only_grants_snapshot_ids
+            ) - full_migration_ids
+            all_migration_ids = full_migration_ids | metadata_only_migration_ids
             snapshots_with_schema_migration = [
                 snapshots[s_id]
-                for s_id in dag
-                if s_id in snapshot_ids_to_migrate
-                and snapshots[s_id].supports_schema_migration_in_prod
+                for s_id in dag.sorted
+                if s_id in all_migration_ids and snapshots[s_id].supports_schema_migration_in_prod
             ]
 
         snapshots_to_intervals = self._missing_intervals(
@@ -393,6 +424,7 @@ class PlanStagesBuilder:
                     snapshots=snapshots_with_schema_migration,
                     all_snapshots=snapshots,
                     deployability_index=deployability_index,
+                    metadata_only_snapshot_ids=metadata_only_migration_ids,
                 )
             )
 
@@ -432,6 +464,12 @@ class PlanStagesBuilder:
             snapshots | full_demoted_snapshots,
             deployability_index,
             plan.is_dev,
+            existing_environment=existing_environment,
+            plan=plan,
+            old_snapshots=old_snapshots,
+            has_data_or_upstream_change=has_data_or_upstream_change,
+            full_migration_ids=full_migration_ids,
+            snapshots_with_backfill={s.snapshot_id for s in snapshots_to_intervals},
         )
         if virtual_layer_update_stage:
             stages.append(virtual_layer_update_stage)
@@ -515,13 +553,94 @@ class PlanStagesBuilder:
         all_snapshots: t.Dict[SnapshotId, Snapshot],
         deployability_index: DeployabilityIndex,
         is_dev: bool,
+        *,
+        existing_environment: t.Optional[Environment] = None,
+        plan: t.Optional[EvaluatablePlan] = None,
+        old_snapshots: t.Optional[t.Dict[SnapshotId, Snapshot]] = None,
+        has_data_or_upstream_change: t.Optional[t.Set[SnapshotId]] = None,
+        full_migration_ids: t.Optional[t.Set[SnapshotId]] = None,
+        snapshots_with_backfill: t.Optional[t.Set[SnapshotId]] = None,
     ) -> t.Optional[VirtualLayerUpdateStage]:
         def _should_update_virtual_layer(snapshot: SnapshotTableInfo) -> bool:
             # Skip virtual layer update for snapshots with virtual environment support disabled
             virtual_environment_enabled = is_dev or snapshot.virtual_environment_mode.is_full
             return snapshot.is_model and not snapshot.is_symbolic and virtual_environment_enabled
 
-        promoted_snapshots = {s for s in promoted_snapshots if _should_update_virtual_layer(s)}
+        can_skip_unchanged_virtual = (
+            not is_dev
+            and existing_environment is not None
+            and plan is not None
+            and plan.environment.can_partially_promote(existing_environment)
+        )
+        existing_promoted_by_name = (
+            {s.name: s for s in existing_environment.promoted_snapshots}
+            if can_skip_unchanged_virtual and existing_environment is not None
+            else {}
+        )
+        old_snapshots_map = old_snapshots or {}
+        data_changed_ids = has_data_or_upstream_change or set()
+        migrated_ids = full_migration_ids or set()
+        backfill_ids = snapshots_with_backfill or set()
+
+        def _has_virtual_grants(model: Model) -> bool:
+            return model.grants is not None and (
+                model.grants_target_layer.is_all or model.grants_target_layer.is_virtual
+            )
+
+        def _has_dynamic_virtual_property(expr: exp.Expr) -> bool:
+            return bool(expr.find(d.MacroFunc, d.MacroVar, d.Jinja)) or any(
+                "@" in ident.name for ident in expr.find_all(exp.Identifier)
+            )
+
+        def _is_unchanged_in_virtual_layer(s_info: SnapshotTableInfo) -> bool:
+            if not can_skip_unchanged_virtual or plan is None:
+                return False
+            old_info = existing_promoted_by_name.get(s_info.name)
+            if (
+                old_info is None
+                or old_info in demoted_snapshots
+                or old_info.model_gateway != s_info.model_gateway
+                or old_info.virtual_environment_mode != s_info.virtual_environment_mode
+                or not old_info.is_model
+                or old_info.is_symbolic
+                or s_info.snapshot_id in data_changed_ids
+                or s_info.snapshot_id in migrated_ids
+                or s_info.name in plan.restatements
+            ):
+                return False
+
+            new_snapshot = all_snapshots.get(s_info.snapshot_id)
+            old_snapshot = old_snapshots_map.get(old_info.snapshot_id)
+            if new_snapshot is None or old_snapshot is None:
+                return False
+            if s_info.snapshot_id in backfill_ids and not old_snapshot.intervals:
+                return False
+            if new_snapshot.table_name(True) != old_snapshot.table_name(True):
+                return False
+
+            new_model = new_snapshot.model
+            old_model = old_snapshot.model
+            if (
+                new_model.description != old_model.description
+                or new_model.column_descriptions != old_model.column_descriptions
+                or new_model.virtual_properties != old_model.virtual_properties
+                or any(
+                    _has_dynamic_virtual_property(v) for v in new_model.virtual_properties.values()
+                )
+                or bool(new_model.on_virtual_update_)
+            ):
+                return False
+            if _has_virtual_grants(new_model) and (
+                not _has_virtual_grants(old_model) or new_model.grants != old_model.grants
+            ):
+                return False
+            return True
+
+        promoted_snapshots = {
+            s
+            for s in promoted_snapshots
+            if _should_update_virtual_layer(s) and not _is_unchanged_in_virtual_layer(s)
+        }
         demoted_snapshots = {s for s in demoted_snapshots if _should_update_virtual_layer(s)}
         if not promoted_snapshots and not demoted_snapshots:
             return None
@@ -662,18 +781,134 @@ class PlanStagesBuilder:
 
         return [s for s in snapshots.values() if _should_create(s)]
 
+    @staticmethod
+    def _normalized_columns_to_types(model: Model) -> t.Optional[t.List[t.Tuple[str, str]]]:
+        columns_to_types = model.columns_to_types
+        if columns_to_types is None:
+            return None
+        return [(col, dtype.sql(dialect=model.dialect)) for col, dtype in columns_to_types.items()]
+
+    @classmethod
+    def _has_schema_or_migration_policy_change(
+        cls, old_snapshot: Snapshot, new_snapshot: Snapshot
+    ) -> bool:
+        if not old_snapshot.is_model or not new_snapshot.is_model:
+            return False
+        old_model = old_snapshot.model
+        new_model = new_snapshot.model
+        return (
+            old_model.on_destructive_change != new_model.on_destructive_change
+            or old_model.on_additive_change != new_model.on_additive_change
+            or cls._normalized_columns_to_types(old_model)
+            != cls._normalized_columns_to_types(new_model)
+        )
+
+    @staticmethod
+    def _has_physical_grants_in_prod(snapshot: Snapshot) -> bool:
+        if not snapshot.is_model:
+            return False
+        model = snapshot.model
+        return model.grants is not None and (
+            model.grants_target_layer.is_all
+            or model.grants_target_layer.is_physical
+            or model.virtual_environment_mode.is_dev_only
+        )
+
+    @classmethod
+    def _needs_physical_grants_sync(cls, old_snapshot: Snapshot, new_snapshot: Snapshot) -> bool:
+        if not cls._has_physical_grants_in_prod(new_snapshot):
+            return False
+        if not cls._has_physical_grants_in_prod(old_snapshot):
+            return True
+        return old_snapshot.model.grants != new_snapshot.model.grants
+
+    def _classify_prod_snapshot_changes(
+        self,
+        snapshots: t.Dict[SnapshotId, Snapshot],
+        dag: DAG[SnapshotId],
+        existing_environment: t.Optional[Environment],
+        old_snapshots: t.Dict[SnapshotId, Snapshot],
+    ) -> t.Tuple[t.Set[SnapshotId], t.Set[SnapshotId]]:
+        """Classifies prod snapshots into those with data/DDL/upstream changes vs physical-grants-only metadata changes."""
+        if (
+            existing_environment is None
+            or not existing_environment.finalized_ts
+            or existing_environment.expired
+        ):
+            return set(snapshots), set()
+
+        existing_env_by_name = {s.name: s for s in existing_environment.snapshots}
+        has_data_or_upstream_change: t.Set[SnapshotId] = set()
+        metadata_only_grants_snapshot_ids: t.Set[SnapshotId] = set()
+
+        for s_id in dag.sorted:
+            snapshot = snapshots.get(s_id)
+            if not snapshot:
+                continue
+
+            old_info = existing_env_by_name.get(snapshot.name)
+            if old_info is None:
+                has_data_or_upstream_change.add(s_id)
+                continue
+
+            if old_info.snapshot_id == s_id:
+                continue
+
+            old_parents_by_name = {p.name: p for p in old_info.parents}
+            has_parent_change = len(old_parents_by_name) != len(snapshot.parents) or any(
+                p_id not in snapshots
+                or p_id in has_data_or_upstream_change
+                or (old_p_id := old_parents_by_name.get(p_id.name)) is None
+                or (existing_p := existing_env_by_name.get(p_id.name)) is None
+                or old_p_id != existing_p.snapshot_id
+                for p_id in snapshot.parents
+            )
+            if (
+                old_info.version != snapshot.version
+                or old_info.is_model != snapshot.is_model
+                or old_info.is_symbolic != snapshot.is_symbolic
+                or (
+                    snapshot.is_model
+                    and not snapshot.is_symbolic
+                    and old_info.table_name(True) != snapshot.table_name(True)
+                )
+                or has_parent_change
+            ):
+                has_data_or_upstream_change.add(s_id)
+                continue
+
+            old_snapshot = old_snapshots.get(old_info.snapshot_id)
+            if old_snapshot is not None:
+                if snapshot.is_directly_modified(
+                    old_snapshot
+                ) or self._has_schema_or_migration_policy_change(old_snapshot, snapshot):
+                    has_data_or_upstream_change.add(s_id)
+                elif self._needs_physical_grants_sync(old_snapshot, snapshot):
+                    metadata_only_grants_snapshot_ids.add(s_id)
+            elif snapshot.is_model:
+                has_data_or_upstream_change.add(s_id)
+            elif (
+                snapshot.fingerprint.data_hash != old_info.fingerprint.data_hash
+                or snapshot.fingerprint.parent_data_hash != old_info.fingerprint.parent_data_hash
+            ):
+                has_data_or_upstream_change.add(s_id)
+
+        return has_data_or_upstream_change, metadata_only_grants_snapshot_ids
+
     def _adjust_intervals(
         self,
         snapshots_by_name: t.Dict[str, Snapshot],
         plan: EvaluatablePlan,
         existing_environment: t.Optional[Environment],
-    ) -> None:
+    ) -> t.Dict[SnapshotId, Snapshot]:
         # Make sure the intervals are up to date and restatements are reflected
         self.state_reader.refresh_snapshot_intervals(snapshots_by_name.values())
 
+        has_target_env = existing_environment is not None
         if not existing_environment:
             existing_environment = self.state_reader.get_environment(c.PROD)
 
+        old_snapshots: t.Dict[SnapshotId, Snapshot] = {}
         if existing_environment:
             new_snapshot_ids = set()
             new_snapshot_versions = set()
@@ -706,6 +941,8 @@ class PlanStagesBuilder:
                 new_snapshot.dev_intervals = new_snapshot.intervals.copy()
         for s_name, interval in plan.restatements.items():
             snapshots_by_name[s_name].remove_interval(interval)
+
+        return old_snapshots if has_target_env else {}
 
 
 def build_plan_stages(

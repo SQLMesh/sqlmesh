@@ -1854,3 +1854,157 @@ def test_stored_forward_only_parent_with_new_forward_only_and_other_parent(
     assert not child_after.is_forward_only
     assert child_after.version != child_before.version
     assert any(i.snapshot_id == child_after.snapshot_id for i in plan.missing_intervals)
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_metadata_change_on_materialized_view_does_not_recreate_in_prod(tmp_path: Path, mocker):
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+
+    (models_dir / "table_a.sql").write_text(
+        """
+        MODEL (
+            name db.table_a,
+            kind FULL
+        );
+        SELECT 1 AS a
+        """
+    )
+    (models_dir / "mv_b.sql").write_text(
+        """
+        MODEL (
+            name db.mv_b,
+            kind VIEW (materialized true)
+        );
+        SELECT a FROM db.table_a
+        """
+    )
+    (models_dir / "mv_c.sql").write_text(
+        """
+        MODEL (
+            name db.mv_c,
+            kind VIEW (materialized true)
+        );
+        SELECT a FROM db.mv_b
+        """
+    )
+
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    ctx = Context(paths=[tmp_path], config=config)
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert ctx.engine_adapter.fetchall("SELECT a FROM db.mv_c") == [(1,)]
+
+    create_view_spy = mocker.spy(DuckDBEngineAdapter, "create_view")
+    drop_view_spy = mocker.spy(DuckDBEngineAdapter, "drop_view")
+
+    # 1. Add tags on mv_b -> zero create_view / drop_view calls, both snapshots unpaused
+    mv_b = ctx.get_model("db.mv_b")
+    ctx.upsert_model(mv_b.copy(update={"tags": ["mytag=a"]}))
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    assert create_view_spy.call_count == 0
+    assert drop_view_spy.call_count == 0
+    mv_b_snap = ctx.get_snapshot("db.mv_b", raise_if_missing=True)
+    mv_c_snap = ctx.get_snapshot("db.mv_c", raise_if_missing=True)
+    stored = ctx.state_reader.get_snapshots([mv_b_snap.snapshot_id, mv_c_snap.snapshot_id])
+    assert not stored[mv_b_snap.snapshot_id].is_paused
+    assert not stored[mv_c_snap.snapshot_id].is_paused
+    assert ctx.engine_adapter.fetchall("SELECT a FROM db.mv_c") == [(1,)]
+
+    # 2. Change owner on upstream table_a -> zero create_view / drop_view calls
+    create_view_spy.reset_mock()
+    drop_view_spy.reset_mock()
+    table_a = ctx.get_model("db.table_a")
+    ctx.upsert_model(table_a.copy(update={"owner": "team_data"}))
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    assert create_view_spy.call_count == 0
+    assert drop_view_spy.call_count == 0
+    assert ctx.engine_adapter.fetchall("SELECT a FROM db.mv_c") == [(1,)]
+
+    # 3. Change description on mv_b -> physical MV NOT recreated, virtual view mv_b updated
+    create_view_spy.reset_mock()
+    drop_view_spy.reset_mock()
+    mv_b = ctx.get_model("db.mv_b")
+    ctx.upsert_model(mv_b.copy(update={"description": "Updated MV description"}))
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    assert drop_view_spy.call_count == 0
+    assert create_view_spy.call_count == 1
+    assert not create_view_spy.call_args.kwargs.get("materialized", False)
+    assert "mv_b" in str(create_view_spy.call_args.args[1])
+    assert "sqlmesh__" not in str(create_view_spy.call_args.args[1])
+
+    # 4. Dev forward-only column add -> dev metadata tag -> prod deploy -> view IS migrated
+    create_view_spy.reset_mock()
+    ctx.upsert_model(
+        load_sql_based_model(
+            d.parse(
+                """
+                MODEL (
+                    name db.mv_b,
+                    kind VIEW (materialized true),
+                    tags ('mytag=a'),
+                    description 'Updated MV description'
+                );
+                SELECT a, 2 AS b FROM db.table_a
+                """
+            ),
+            default_catalog=ctx.default_catalog,
+        )
+    )
+    ctx.plan("dev", forward_only=True, auto_apply=True, no_prompts=True, skip_tests=True)
+
+    mv_b_dev = ctx.get_model("db.mv_b")
+    ctx.upsert_model(mv_b_dev.copy(update={"tags": ["mytag=b"]}))
+    ctx.plan("dev", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    create_view_spy.reset_mock()
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert create_view_spy.call_count >= 1
+    assert ctx.engine_adapter.fetchall("SELECT a, b FROM db.mv_b") == [(1, 2)]
+
+    # 5. Dev partial select_models=['db.table_a'] on a breaking change followed by full prod plan
+    #    + janitor -> mv_b and mv_c are updated to point to the new table_a physical table
+    #    (prod stale-parent classification after partial prod deploy is tested directly in test_plan_stages.py)
+    ctx.upsert_model(
+        load_sql_based_model(
+            d.parse(
+                """
+                MODEL (
+                    name db.table_a,
+                    kind FULL,
+                    owner 'team_data'
+                );
+                SELECT 10 AS a
+                """
+            ),
+            default_catalog=ctx.default_catalog,
+        )
+    )
+    ctx.plan(
+        "dev",
+        select_models=["db.table_a"],
+        auto_apply=True,
+        no_prompts=True,
+        skip_tests=True,
+    )
+
+    create_view_spy.reset_mock()
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert create_view_spy.call_count >= 1
+    ctx.run_janitor(ignore_ttl=True)
+    assert ctx.engine_adapter.fetchall("SELECT a FROM db.table_a") == [(10,)]
+    assert ctx.engine_adapter.fetchall("SELECT a FROM db.mv_c") == [(10,)]
+
+    # 6. Follow-up metadata-only change after migration -> zero create_view / drop_view calls
+    create_view_spy.reset_mock()
+    drop_view_spy.reset_mock()
+    mv_b = ctx.get_model("db.mv_b")
+    ctx.upsert_model(mv_b.copy(update={"tags": ["mytag=c"]}))
+    ctx.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert create_view_spy.call_count == 0
+    assert drop_view_spy.call_count == 0
+    assert ctx.engine_adapter.fetchall("SELECT a FROM db.mv_c") == [(10,)]
