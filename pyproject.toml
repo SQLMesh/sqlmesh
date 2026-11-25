@@ -91,8 +91,9 @@ dev = [
     "mssql-python>=1.1.0;python_version>=\"3.10\"",
     "pyperf",
     "pyspark~=3.5.0",
-    # pytest 9.2.0 uses about 3.8 GB per xdist worker while collecting tests, which runs the
-    # 16 GB CI runners out of memory (see #6254). Remove once a fixed release is out.
+    # In the BigQuery cloud engine job, pytest 9.2.0 grows each xdist worker to about 3.8 GB
+    # while collecting tests and runs the CI runner out of memory (see #6254). Other jobs on
+    # 9.2.0 are fine. Remove once the trigger is found or a newer pytest passes that job.
     "pytest<9.2",
     "pytest-asyncio",
     "pytest-mock",
