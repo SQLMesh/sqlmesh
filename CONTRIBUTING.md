@@ -96,7 +96,7 @@ entry in the release notes. Titles must follow this format, which CI checks:
 type(scope): description
 ```
 
-- `type` is one of `feat`, `fix`, `perf`, `docs`, `refactor`, `chore`, `build`, `revert`, `ci` or `test`.
+- `type` is one of `feat`, `fix`, `perf`, `docs`, `refactor`, `chore`, `build`, `revert`, `ci` or `test`. Lowercase is preferred, but `Fix:` is treated like `fix:`.
 - `scope` is optional and names the area changed, e.g. `snowflake`, `plan`, `dbt` or `vscode`.
 - Add `!` after the type or scope for a breaking change, e.g. `feat(plan)!: drop support for X`.
 - Write the description for users: say what changed for them, not how the code changed.
@@ -105,8 +105,8 @@ Titles created by GitHub's "Revert" button (`Revert "..."`) are also accepted. I
 title check fails, edit the title: re-running the failed job checks the old title again.
 
 Release notes are grouped using labels that are applied automatically from the title
-and the files changed. The title decides the `feature`, `bug`, `performance`,
-`documentation`, `maintenance`, `ci`, `test` and `breaking-change` labels, so to
+and the files changed. The title decides the `Feature`, `Bug`, `performance`,
+`Documentation`, `maintenance`, `ci`, `test` and `breaking-change` labels, so to
 recategorize a PR, change its title rather than its labels. Use `ci` or `test` as the type
 or scope for internal-only changes (e.g. `fix(ci): ...`) so they are left out of the
 release notes. A maintainer can add the `skip-changelog` label to leave out any other PR.
