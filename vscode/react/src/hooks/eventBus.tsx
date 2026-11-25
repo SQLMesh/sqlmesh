@@ -14,6 +14,7 @@ import {
 export type EventMap = {
   changeFocusedFile: {
     fileUri: string
+    isWindows?: boolean
   }
   savedFile: {
     fileUri: string

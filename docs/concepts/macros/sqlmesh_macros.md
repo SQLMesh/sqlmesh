@@ -887,7 +887,7 @@ would be rendered as:
 
 ```sql linenums="1"
 SELECT
-  CASE WHEN a IS NULL AND b IS NULL AND c IS NULL THEN NULL ELSE COALESCE(a, 0) + COALESCE(b, 0) + COALESCE(c, 0) END
+  CASE WHEN a IS NULL AND b IS NULL AND c IS NULL THEN NULL ELSE (COALESCE(a, 0) + COALESCE(b, 0) + COALESCE(c, 0)) END
 FROM foo
 ```
 
@@ -906,7 +906,7 @@ would be rendered as:
 
 ```sql linenums="1"
 SELECT
-  CASE WHEN a IS NULL AND b IS NULL AND c IS NULL THEN NULL ELSE COALESCE(a, 0) - COALESCE(b, 0) - COALESCE(c, 0) END
+  CASE WHEN a IS NULL AND b IS NULL AND c IS NULL THEN NULL ELSE (COALESCE(a, 0) - COALESCE(b, 0) - COALESCE(c, 0)) END
 FROM foo
 ```
 
@@ -925,7 +925,7 @@ would be rendered as:
 
 ```sql linenums="1"
 SELECT
-  a / NULLIF(b, 0)
+  (a / NULLIF(b, 0))
 FROM foo
 ```
 

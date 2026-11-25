@@ -9,9 +9,10 @@ on:
 permissions:
   id-token: write
   contents: read
+# Pin Ubuntu 24.04. ubuntu-latest now resolves to 26.04.
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

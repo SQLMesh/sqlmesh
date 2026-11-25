@@ -11,7 +11,7 @@ import time_machine
 from pytest_mock.plugin import MockerFixture
 from sqlglot import exp
 
-from sqlmesh.core import constants as c
+from sqlmesh.core import constants as c, renderer
 from sqlmesh.core.config import EnvironmentSuffixTarget
 from sqlmesh.core.dialect import parse_one
 from sqlmesh.core.engine_adapter import create_engine_adapter
@@ -1383,6 +1383,58 @@ def test_delete_expired_snapshots(state_sync: EngineAdapterStateSync, make_snaps
     state_sync.delete_expired_snapshots(batch_range=ExpiredBatchRange.all_batch_range())
 
     assert not state_sync.get_snapshots(all_snapshots)
+
+
+def test_get_expired_snapshots_does_not_optimize_queries(
+    state_sync: EngineAdapterStateSync,
+    make_snapshot: t.Callable,
+) -> None:
+    snapshot = make_snapshot(
+        SqlModel(
+            name="demo.retired",
+            dialect="duckdb",
+            query=parse_one("select 1 as id"),
+        ),
+    )
+    snapshot.ttl = "in 1 day"
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    state_sync.push_snapshots([snapshot])
+
+    now_ts = now_timestamp()
+    with patch.object(renderer, "qualify", wraps=renderer.qualify) as qualify:
+        unexpired = state_sync.get_expired_snapshots(
+            batch_range=ExpiredBatchRange.all_batch_range(),
+            current_ts=now_ts,
+        )
+        assert unexpired is None
+        assert qualify.call_count == 0
+
+        expired = state_sync.get_expired_snapshots(
+            batch_range=ExpiredBatchRange.all_batch_range(),
+            current_ts=now_ts + 2 * 24 * 60 * 60 * 1000,
+        )
+
+        assert expired is not None
+        assert expired.expired_snapshot_ids == {snapshot.snapshot_id}
+        assert len(expired.cleanup_tasks) == 1
+        cleanup_task = expired.cleanup_tasks[0]
+        assert cleanup_task.dev_table_only is False
+        assert cleanup_task.snapshot.model_dump() == snapshot.table_info.model_dump()
+        assert cleanup_task.snapshot.table_name() == snapshot.table_info.table_name()
+        assert cleanup_task.snapshot.table_name(
+            is_deployable=False
+        ) == snapshot.table_info.table_name(is_deployable=False)
+        assert qualify.call_count == 0
+
+        # Warm snapshot metadata should not trigger optimization either.
+        state_sync.get_expired_snapshots(
+            batch_range=ExpiredBatchRange.all_batch_range(),
+            current_ts=now_ts + 2 * 24 * 60 * 60 * 1000,
+        )
+        assert qualify.call_count == 0
+
+        state_sync.get_snapshots([snapshot.snapshot_id])
+        assert qualify.call_count > 0
 
 
 def test_get_expired_snapshot_batch(state_sync: EngineAdapterStateSync, make_snapshot: t.Callable):
@@ -3555,6 +3607,32 @@ def test_max_interval_end_per_model_ensure_finalized_snapshots(
     assert state_sync.max_interval_end_per_model(environment_name, set()) == {}
 
 
+def test_cache_ttl_starts_after_slow_fetch(mocker, make_snapshot):
+    snapshot = make_snapshot(SqlModel(name="a", query=parse_one("select 1")))
+    missing = make_snapshot(SqlModel(name="b", query=parse_one("select 2")))
+
+    start = to_timestamp("2023-01-01 00:00:00")
+    clock = [start]
+    mocker.patch("sqlmesh.core.state_sync.cache.now_timestamp", side_effect=lambda: clock[0])
+
+    def slow_get_snapshots(snapshot_ids):
+        clock[0] += 11 * 1000
+        return {snapshot.snapshot_id: snapshot}
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_snapshots.side_effect = slow_get_snapshots
+    cache = CachingStateSync(state_sync, ttl=10)
+
+    expected = {snapshot.snapshot_id: snapshot}
+    assert cache.get_snapshots([snapshot, missing]) == expected
+    assert cache.get_snapshots([snapshot, missing]) == expected
+    assert state_sync.get_snapshots.call_count == 1
+
+    clock[0] += 11 * 1000
+    assert cache.get_snapshots([snapshot, missing]) == expected
+    assert state_sync.get_snapshots.call_count == 2
+
+
 def test_get_snapshots(mocker):
     mock = mocker.MagicMock()
     cache = CachingStateSync(mock)
@@ -3692,7 +3770,9 @@ def test_snapshot_cache(
     state_sync.snapshot_state.push_snapshots([snapshot])
 
     assert state_sync.get_snapshots([snapshot.snapshot_id]) == {snapshot.snapshot_id: snapshot}
-    cache_mock.get_or_load.assert_called_once_with({snapshot.snapshot_id}, mocker.ANY)
+    cache_mock.get_or_load.assert_called_once_with(
+        {snapshot.snapshot_id}, mocker.ANY, load_optimized_queries=True
+    )
 
     # Update the snapshot in the state and make sure this update is reflected on the cached instance.
     assert snapshot.unpaused_ts is None

@@ -3151,6 +3151,26 @@ def test_dialect_pattern():
         """
     )
 
+    # a run of block comments before the dialect key
+    comments = "\n".join(f"/* note {i} */" for i in range(40))
+    assert_match(make_test_sql(f"tag my_tag, {comments}\ndialect duckdb"))
+
+    # a run of block comments and no dialect key: the search fails without backtracking
+    # through every grouping of the comments
+    test_sql = make_test_sql(f"tag my_tag, {comments}\ncron '@daily'")
+    matches = list(d.DIALECT_PATTERN.finditer(test_sql))
+    assert not matches
+
+    # nested block comments before the dialect key
+    assert_match(
+        make_test_sql(
+            """
+            tag my_tag, /* outer /* inner /* innermost */ */ still outer */
+            dialect duckdb
+            """
+        )
+    )
+
     # full parse
     sql = """
     MODEL (
