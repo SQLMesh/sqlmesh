@@ -7,12 +7,14 @@ from pathlib import Path
 import time_machine
 from sqlglot import exp
 from IPython.utils.capture import capture_output
+from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.core.config import (
     Config,
     ModelDefaultsConfig,
 )
 from sqlmesh.core.context import Context
+from sqlmesh.core.snapshot import SnapshotEvaluator
 from sqlmesh.utils.errors import (
     PlanError,
 )
@@ -346,3 +348,171 @@ def test_default_audits_with_custom_audit_definitions(tmp_path: Path):
         if audit_name == "positive_amount":
             assert "column" in audit_args
             assert audit_args["column"].name == "amount"
+
+
+@pytest.mark.parametrize("forward_only", [False, True])
+def test_audit_only_change_reads_parent_tables_of_dev_environment(
+    tmp_path: Path, mocker: MockerFixture, forward_only: bool
+):
+    def write(path: str, contents: str) -> None:
+        create_temp_file(tmp_path, Path(path), contents)
+
+    def write_parent(tag: str) -> None:
+        kind = "INCREMENTAL_BY_UNIQUE_KEY (unique_key id)"
+        write("models/p.sql", f"MODEL (name db.p, kind {kind}); SELECT 1 AS id, '{tag}' AS tag")
+
+    write_parent("p0")
+    write("models/c.sql", "MODEL (name db.c, kind FULL); SELECT id FROM db.p")
+    context = Context(
+        paths=tmp_path, config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    )
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    write_parent("p1")
+    context.load()
+    context.plan("dev", no_prompts=True, auto_apply=True, forward_only=forward_only)
+
+    # An audit-only change to the child, whose audit reads the parent
+    write(
+        "audits/reads_parent.sql", "AUDIT (name reads_parent); SELECT * FROM db.p WHERE tag <> 'p1'"
+    )
+    write(
+        "models/c.sql", "MODEL (name db.c, kind FULL, audits (reads_parent)); SELECT id FROM db.p"
+    )
+    context.load()
+    plan = context.plan_builder("dev").build()
+    assert [s.name for s in plan.new_snapshots] == ['"memory"."db"."c"']
+    assert plan.new_snapshots[0].is_metadata
+
+    audit_spy = mocker.spy(SnapshotEvaluator, "audit")
+    evaluate_spy = mocker.spy(SnapshotEvaluator, "evaluate")
+    context.apply(plan)
+
+    # Only the child is audited, and it reads the parent's dev snapshot rather than the prod view
+    assert [call.kwargs["snapshot"].name for call in audit_spy.call_args_list] == [
+        '"memory"."db"."c"'
+    ]
+    assert not evaluate_spy.call_args_list
+    assert not any(result.count for result in audit_spy.spy_return)
+    dev_p = context.get_snapshot("db.p", raise_if_missing=True)
+    audit_kwargs = audit_spy.call_args.kwargs
+    assert audit_kwargs["snapshots"]['"memory"."db"."p"'].snapshot_id == dev_p.snapshot_id
+    assert audit_kwargs["deployability_index"].is_deployable(dev_p) is not forward_only
+
+
+def test_audit_only_change_with_non_parent_changed_in_same_plan(
+    tmp_path: Path, mocker: MockerFixture
+):
+    def write(path: str, contents: str) -> None:
+        create_temp_file(tmp_path, Path(path), contents)
+
+    write("models/p.sql", "MODEL (name db.p, kind FULL); SELECT 1 AS id")
+    write("models/s.sql", "MODEL (name db.s, kind FULL); SELECT 1 AS id, 's0' AS tag")
+    write("models/c.sql", "MODEL (name db.c, kind FULL); SELECT id FROM db.p")
+    context = Context(
+        paths=tmp_path, config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    )
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # The audit reads s, which isn't a parent of c, so s's new table doesn't exist until the backfill
+    write("models/s.sql", "MODEL (name db.s, kind FULL); SELECT 1 AS id, 's1' AS tag")
+    write("audits/reads_s.sql", "AUDIT (name reads_s); SELECT * FROM db.s WHERE id IS NULL")
+    write("models/c.sql", "MODEL (name db.c, kind FULL, audits (reads_s)); SELECT id FROM db.p")
+    context.load()
+    plan = context.plan_builder("dev").build()
+    assert {s.name: s.is_metadata for s in plan.new_snapshots}['"memory"."db"."c"']
+
+    audit_spy = mocker.spy(SnapshotEvaluator, "audit")
+    context.apply(plan)
+
+    # c is audited once and its audit finds nothing. spy_return would be s's, from the backfill
+    c_results = [
+        results
+        for call, results in zip(audit_spy.call_args_list, audit_spy.spy_return_list)
+        if call.kwargs["snapshot"].name == '"memory"."db"."c"'
+    ]
+    assert [[result.count for result in results] for results in c_results] == [[0]]
+
+
+@pytest.mark.parametrize("variant", ["new_parent", "changed_parent"])
+def test_audit_only_change_after_failed_prod_plan(tmp_path: Path, variant: str):
+    def write(path: str, contents: str) -> None:
+        create_temp_file(tmp_path, Path(path), contents)
+
+    def fo(tag: str) -> None:
+        write(
+            "models/fo.sql",
+            "MODEL (name db.fo, kind INCREMENTAL_BY_UNIQUE_KEY (unique_key id, forward_only true));"
+            f" SELECT 1 AS id, '{tag}' AS tag",
+        )
+
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb", start="2024-01-01"))
+    write("audits/always_fails.sql", "AUDIT (name always_fails); SELECT 1 AS x")
+    fo("v0")
+    write("models/p.sql", "MODEL (name db.p, kind FULL); SELECT id, 'p0' AS tag FROM db.fo")
+    write("models/c.sql", "MODEL (name db.c, kind FULL); SELECT id FROM db.p")
+    context = Context(paths=tmp_path, config=config)
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # The forward-only change makes the backfill run after the environment record is updated, and
+    # the failing audit stops the plan before the virtual layer is updated
+    fo("v1")
+    parent, new_tag = ("q", "q1") if variant == "new_parent" else ("p", "p1")
+    write(
+        f"models/{parent}.sql",
+        f"MODEL (name db.{parent}, kind FULL); SELECT id, '{new_tag}' AS tag FROM db.fo",
+    )
+    write(
+        "models/c.sql",
+        f"MODEL (name db.c, kind FULL, audits (always_fails)); SELECT id FROM db.{parent}",
+    )
+    context.load()
+    with pytest.raises(PlanError):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+    # The audit must read the parent version named by the environment record
+    write(
+        "audits/reads_parent.sql",
+        f"AUDIT (name reads_parent); SELECT * FROM db.{parent} WHERE tag <> '{new_tag}'",
+    )
+    write(
+        "models/c.sql",
+        f"MODEL (name db.c, kind FULL, audits (reads_parent)); SELECT id FROM db.{parent}",
+    )
+    context.load()
+    context.plan("prod", no_prompts=True, auto_apply=True)
+
+    assert context.engine_adapter.fetchall(f"SELECT tag FROM db.{parent}") == [(new_tag,)]
+
+
+def test_audit_only_change_keeps_intervals_of_snapshots_backfilled_in_same_plan(tmp_path: Path):
+    def write_models(start: str, audits: str = "") -> None:
+        # Both models replace their whole table when they think it's their first insert
+        kind = f"INCREMENTAL_BY_UNIQUE_KEY (unique_key ds), start '{start}', cron '@daily'"
+        create_temp_file(
+            tmp_path,
+            Path("models/p.sql"),
+            f"MODEL (name db.p, kind {kind}); SELECT @start_ds AS ds",
+        )
+        create_temp_file(
+            tmp_path,
+            Path("models/c.sql"),
+            f"MODEL (name db.c, kind {kind}{audits}); SELECT DISTINCT @start_ds AS ds FROM db.p",
+        )
+
+    write_models(start="2023-01-02")
+    context = Context(
+        paths=tmp_path, config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    )
+    with time_machine.travel("2023-01-03 00:00:00 UTC"):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+        # Moving the start back is a metadata change that backfills the earlier day in the same
+        # plan that audits the child
+        write_models(start="2023-01-01", audits=", audits (not_null(columns := (ds)))")
+        context.load()
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+    expected = [("2023-01-01",), ("2023-01-02",)]
+    assert sorted(context.engine_adapter.fetchall("SELECT ds FROM db.p")) == expected
+    assert sorted(context.engine_adapter.fetchall("SELECT ds FROM db.c")) == expected
