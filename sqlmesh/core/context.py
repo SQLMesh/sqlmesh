@@ -1775,7 +1775,23 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         expanded_restate_models = None
         if restate_models is not None:
-            expanded_restate_models = model_selector.expand_model_selections(restate_models)
+            # Restatements operate entirely against state. Build a dedicated
+            # selector over the union of local and environment models so that
+            # both name lookup and upstream expansion (e.g. ``-r '+model'``)
+            # reach dependencies that only exist in the target environment.
+            env_models_for_restate = model_selector._load_env_models(
+                environment,
+                fallback_env_name=create_from or c.PROD,
+                ensure_finalized_snapshots=self.config.plan.use_finalized_state,
+            )
+            restate_models_combined: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+            for fqn, model in {**env_models_for_restate, **self._models}.items():
+                restate_models_combined[fqn] = model
+            restate_dag: DAG[str] = DAG()
+            for fqn, model in restate_models_combined.items():
+                restate_dag.add(fqn, model.depends_on)
+            restate_selector = self._new_selector(models=restate_models_combined, dag=restate_dag)
+            expanded_restate_models = restate_selector.expand_model_selections(restate_models)
 
         if (restate_models is not None and not expanded_restate_models) or (
             backfill_models is not None and not backfill_models and not selected_deletion_fqns

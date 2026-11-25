@@ -3555,6 +3555,32 @@ def test_max_interval_end_per_model_ensure_finalized_snapshots(
     assert state_sync.max_interval_end_per_model(environment_name, set()) == {}
 
 
+def test_cache_ttl_starts_after_slow_fetch(mocker, make_snapshot):
+    snapshot = make_snapshot(SqlModel(name="a", query=parse_one("select 1")))
+    missing = make_snapshot(SqlModel(name="b", query=parse_one("select 2")))
+
+    start = to_timestamp("2023-01-01 00:00:00")
+    clock = [start]
+    mocker.patch("sqlmesh.core.state_sync.cache.now_timestamp", side_effect=lambda: clock[0])
+
+    def slow_get_snapshots(snapshot_ids):
+        clock[0] += 11 * 1000
+        return {snapshot.snapshot_id: snapshot}
+
+    state_sync = mocker.MagicMock()
+    state_sync.get_snapshots.side_effect = slow_get_snapshots
+    cache = CachingStateSync(state_sync, ttl=10)
+
+    expected = {snapshot.snapshot_id: snapshot}
+    assert cache.get_snapshots([snapshot, missing]) == expected
+    assert cache.get_snapshots([snapshot, missing]) == expected
+    assert state_sync.get_snapshots.call_count == 1
+
+    clock[0] += 11 * 1000
+    assert cache.get_snapshots([snapshot, missing]) == expected
+    assert state_sync.get_snapshots.call_count == 2
+
+
 def test_get_snapshots(mocker):
     mock = mocker.MagicMock()
     cache = CachingStateSync(mock)
