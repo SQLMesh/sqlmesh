@@ -274,7 +274,10 @@ class SnapshotState:
                 cleanup_targets.append((snapshot.snapshot_id, dev_table_only))
 
         snapshot_ids_to_cleanup = [snapshot_id for snapshot_id, _ in cleanup_targets]
-        full_snapshots = self._get_snapshots(snapshot_ids_to_cleanup)
+        full_snapshots = self._get_snapshots(
+            snapshot_ids_to_cleanup,
+            load_optimized_queries=False,
+        )
         for snapshot_id, dev_table_only in cleanup_targets:
             if snapshot_id in full_snapshots:
                 cleanup_tasks.append(
@@ -509,12 +512,14 @@ class SnapshotState:
         self,
         snapshot_ids: t.Iterable[SnapshotIdLike],
         lock_for_update: bool = False,
+        load_optimized_queries: bool = True,
     ) -> t.Dict[SnapshotId, Snapshot]:
         """Fetches specified snapshots or all snapshots.
 
         Args:
             snapshot_ids: The collection of snapshot like objects to fetch.
             lock_for_update: Lock the snapshot rows for future update
+            load_optimized_queries: Whether to prepare optimized queries for model snapshots.
 
         Returns:
             A dictionary of snapshot ids to snapshots for ones that could be found.
@@ -555,7 +560,9 @@ class SnapshotState:
             return fetched_snapshots.values()
 
         snapshots, cached_snapshots = self._snapshot_cache.get_or_load(
-            {s.snapshot_id for s in snapshot_ids}, _loader
+            {s.snapshot_id for s in snapshot_ids},
+            _loader,
+            load_optimized_queries=load_optimized_queries,
         )
 
         if cached_snapshots:

@@ -3403,24 +3403,28 @@ def test_table_diff_grain_check_multiple_keys(ctx: TestContext):
 
     columns_to_types = {
         "key1": exp.DataType.build("int"),
-        "key2": exp.DataType.build("varchar"),
+        # text is VARCHAR(MAX) in T-SQL, where a plain VARCHAR column only holds one character
+        "key2": exp.DataType.build("text"),
         "value": exp.DataType.build("varchar"),
     }
 
     ctx.engine_adapter.create_table(src_table, columns_to_types)
     ctx.engine_adapter.create_table(target_table, columns_to_types)
 
+    # The key2 values only differ after the 30th character, so they collide if the
+    # join key truncates them (CAST(x AS VARCHAR) in T-SQL keeps 30 characters)
+    prefix = "a_key_part_longer_than_30_chars_"
     src_data = [
-        (1, 1, 1),
-        (7, 4, 2),
-        (None, 3, 3),
+        (1, f"{prefix}1", 1),
+        (7, f"{prefix}4", 2),
+        (None, f"{prefix}3", 3),
         (None, None, 3),
-        (1, 2, 2),
+        (1, f"{prefix}2", 2),
         (4, None, 3),
-        (2, 3, 2),
+        (2, f"{prefix}3", 2),
     ]
 
-    target_data = src_data + [(1, 6, 1), (1, 5, 3), (None, 2, 3)]
+    target_data = src_data + [(1, f"{prefix}6", 1), (1, f"{prefix}5", 3), (None, f"{prefix}2", 3)]
 
     ctx.engine_adapter.insert_append(
         src_table, next(select_from_values(src_data, columns_to_types)), columns_to_types

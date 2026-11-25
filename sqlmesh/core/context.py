@@ -420,6 +420,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        self._materializations_loaded: bool = False
         self._load_state: bool = load_state
         self._uncached_model_names: t.Set[str] = set()
         self._selector_cls = selector or NativeSelector
@@ -748,7 +749,25 @@ class GenericContext(BaseContext, t.Generic[C]):
             prod = self.state_reader.get_environment(c.PROD)
 
             if prod:
-                for snapshot in self.state_reader.get_snapshots(prod.snapshots).values():
+                # Environment snapshot infos already contain the names we need to distinguish
+                # local nodes from nodes owned by another project. Hydrating local snapshots
+                # here is wasteful: their payloads are not used, and a large remote state can
+                # spend most of Context.load() decoding those model object graphs.
+                #
+                # Only hydrate names which are absent locally. These can be deleted nodes from
+                # this project or nodes from another project which must be merged into the
+                # context. The project field on the hydrated node disambiguates the two cases.
+                remote_snapshot_infos = []
+                for snapshot_info in prod.snapshots:
+                    local_store = (
+                        self._standalone_audits if snapshot_info.is_audit else self._models
+                    )
+                    if snapshot_info.name in local_store:
+                        uncached.add(snapshot_info.name)
+                    else:
+                        remote_snapshot_infos.append(snapshot_info)
+
+                for snapshot in self.state_reader.get_snapshots(remote_snapshot_infos).values():
                     if snapshot.node.project in self._projects:
                         uncached.add(snapshot.name)
                     else:
@@ -789,6 +808,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
         self._loaded = True
+        self._materializations_loaded = True
         return self
 
     def _update_model_schemas_and_validate(self, model_fqns: t.Optional[t.Set[str]] = None) -> None:
@@ -999,6 +1019,10 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     @python_api_analytics
     def destroy(self) -> bool:
+        # Load first so snapshot unpickling cannot import a custom-kind module that this load then reimports.
+        # If loading fails, abort before invalidating any environments.
+        self._load_materializations()
+
         success = False
 
         # Collect resources to be deleted
@@ -1747,7 +1771,23 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         expanded_restate_models = None
         if restate_models is not None:
-            expanded_restate_models = model_selector.expand_model_selections(restate_models)
+            # Restatements operate entirely against state. Build a dedicated
+            # selector over the union of local and environment models so that
+            # both name lookup and upstream expansion (e.g. ``-r '+model'``)
+            # reach dependencies that only exist in the target environment.
+            env_models_for_restate = model_selector._load_env_models(
+                environment,
+                fallback_env_name=create_from or c.PROD,
+                ensure_finalized_snapshots=self.config.plan.use_finalized_state,
+            )
+            restate_models_combined: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+            for fqn, model in {**env_models_for_restate, **self._models}.items():
+                restate_models_combined[fqn] = model
+            restate_dag: DAG[str] = DAG()
+            for fqn, model in restate_models_combined.items():
+                restate_dag.add(fqn, model.depends_on)
+            restate_selector = self._new_selector(models=restate_models_combined, dag=restate_dag)
+            expanded_restate_models = restate_selector.expand_model_selections(restate_models)
 
         if (restate_models is not None and not expanded_restate_models) or (
             backfill_models is not None and not backfill_models and not selected_deletion_fqns
@@ -3164,6 +3204,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         current_ts = now_timestamp()
         failures: t.List[str] = []
 
+        self._load_materializations()
+
         # Clean up expired environments by removing their views and schemas
         failures.extend(
             self._cleanup_environments(
@@ -3355,9 +3397,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
     def _load_materializations(self) -> None:
-        if not self._loaded:
+        if not self._materializations_loaded:
             for loader in self._loaders:
                 loader.load_materializations()
+            self._materializations_loaded = True
 
     def _select_models_for_run(
         self,

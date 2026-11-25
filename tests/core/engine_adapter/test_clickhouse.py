@@ -1118,7 +1118,7 @@ def test_insert_overwrite_by_condition_replace(
         columns_to_types,
     )
 
-    to_sql_calls(adapter) == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
@@ -1133,7 +1133,10 @@ def test_insert_overwrite_by_condition_where_partitioned(
 
     temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table")
     table_name = "target"
-    temp_table_mock.return_value = make_temp_table_name(table_name, "abcd")
+    temp_table_mock.side_effect = lambda table, *args, **kwargs: make_temp_table_name(
+        "affected_partitions" if exp.to_table(table).name == "_affected_partitions" else table_name,
+        "abcd",
+    )
 
     fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
     fetchone_mock.return_value = "dateTrunc('WEEK', ds)"
@@ -1141,7 +1144,7 @@ def test_insert_overwrite_by_condition_where_partitioned(
     fetchall_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchall")
     fetchall_mock.side_effect = [
         [("1",), ("2",), ("3",), ("4",)],
-        ["1", "2", "4"],
+        [("1",), ("2",), ("4",)],
     ]
 
     insert_table_name = make_temp_table_name("new_records", "abcd")
@@ -1167,11 +1170,12 @@ def test_insert_overwrite_by_condition_where_partitioned(
         ),
     )
 
-    to_sql_calls(adapter) == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         """INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30'""",
-        """CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30' UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions\"""",
-        """INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("ds" BETWEEN '2024-02-15' AND '2024-04-30') AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")""",
+        '''CREATE TABLE IF NOT EXISTS "__temp_affected_partitions_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "ds" BETWEEN '2024-02-15' AND '2024-04-30' UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"''',
+        """INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("ds" BETWEEN '2024-02-15' AND '2024-04-30') AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_affected_partitions_abcd")""",
+        'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"',
         """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
@@ -1218,7 +1222,7 @@ def test_insert_overwrite_by_condition_by_key(
         dynamic_key_unique=False,
     )
 
-    to_sql_calls(adapter) == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
         'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd"))',
@@ -1226,7 +1230,7 @@ def test_insert_overwrite_by_condition_by_key(
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
-        'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd"))',
+        'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT DISTINCT "id" FROM "__temp_target_abcd"))',
         'EXCHANGE TABLES "__temp_existing_records_abcd" AND "__temp_target_abcd"',
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
@@ -1239,7 +1243,10 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
 
     temp_table_mock = mocker.patch("sqlmesh.core.engine_adapter.EngineAdapter._get_temp_table")
     table_name = "target"
-    temp_table_mock.return_value = make_temp_table_name(table_name, "abcd")
+    temp_table_mock.side_effect = lambda table, *args, **kwargs: make_temp_table_name(
+        "affected_partitions" if exp.to_table(table).name == "_affected_partitions" else table_name,
+        "abcd",
+    )
 
     fetchone_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchone")
     fetchone_mock.side_effect = ["dateTrunc('WEEK', ds)", "dateTrunc('WEEK', ds)"]
@@ -1247,9 +1254,9 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
     fetchall_mock = mocker.patch("sqlmesh.core.engine_adapter.ClickhouseEngineAdapter.fetchall")
     fetchall_mock.side_effect = [
         [("1",), ("2",), ("3",), ("4",)],
-        ["1", "2", "4"],
+        [("1",), ("2",), ("4",)],
         [("1",), ("2",), ("3",), ("4",)],
-        ["1", "2", "4"],
+        [("1",), ("2",), ("4",)],
     ]
 
     insert_table_name = make_temp_table_name("new_records", "abcd")
@@ -1281,18 +1288,20 @@ def test_insert_overwrite_by_condition_by_key_partitioned(
         dynamic_key_unique=False,
     )
 
-    to_sql_calls(adapter) == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT DISTINCT ON ("id") * FROM "__temp_new_records_abcd") AS "_subquery"',
-        'CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
-        'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")',
-        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
+        'CREATE TABLE IF NOT EXISTS "__temp_affected_partitions_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
+        'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_affected_partitions_abcd")',
+        'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"',
+        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
-        'CREATE TABLE IF NOT EXISTS "__temp_target_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
-        'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_target_abcd")',
-        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
+        'CREATE TABLE IF NOT EXISTS "__temp_affected_partitions_abcd" ENGINE=MergeTree ORDER BY () AS SELECT DISTINCT "partition_id" FROM (SELECT "_partition_id" AS "partition_id" FROM "__temp_existing_records_abcd" WHERE "id" IN (SELECT DISTINCT "id" FROM "__temp_target_abcd") UNION DISTINCT SELECT "_partition_id" AS "partition_id" FROM "__temp_target_abcd") AS "_affected_partitions"',
+        'INSERT INTO "__temp_target_abcd" SELECT "id", "ds" FROM "__temp_existing_records_abcd" WHERE NOT ("id" IN (SELECT DISTINCT "id" FROM "__temp_target_abcd")) AND "_partition_id" IN (SELECT "partition_id" FROM "__temp_affected_partitions_abcd")',
+        'DROP TABLE IF EXISTS "__temp_affected_partitions_abcd"',
+        """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd", DROP PARTITION ID '3'""",
         'DROP TABLE IF EXISTS "__temp_target_abcd"',
     ]
 
@@ -1330,7 +1339,7 @@ def test_insert_overwrite_by_condition_inc_by_partition(
         keep_existing_partition_rows=False,
     )
 
-    to_sql_calls(adapter) == [
+    assert to_sql_calls(adapter) == [
         'CREATE TABLE "__temp_target_abcd" AS "__temp_existing_records_abcd"',
         'INSERT INTO "__temp_target_abcd" ("id", "ds") SELECT "id", "ds" FROM (SELECT * FROM "__temp_new_records_abcd") AS "_subquery"',
         """ALTER TABLE "__temp_existing_records_abcd" REPLACE PARTITION ID '1' FROM "__temp_target_abcd", REPLACE PARTITION ID '2' FROM "__temp_target_abcd", REPLACE PARTITION ID '4' FROM "__temp_target_abcd\"""",
@@ -1656,6 +1665,11 @@ def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapte
         "__ch_gw__.mydb.target",
         "__ch_gw__.mydb.target.id IN (SELECT id FROM __ch_gw__.mydb.source)",
     )
+    adapter.delete_from(
+        "__ch_gw__.mydb.target",
+        "EXISTS (SELECT 1 FROM __ch_gw__.mydb.source "
+        "WHERE __ch_gw__.mydb.target.id = __ch_gw__.mydb.source.id)",
+    )
 
     assert to_sql_calls(adapter) == [
         'CREATE TABLE IF NOT EXISTS "mydb"."target" ENGINE=MergeTree ORDER BY () AS '
@@ -1663,6 +1677,8 @@ def test_virtual_catalog_stripped_from_ctas_and_delete(make_mocked_engine_adapte
         '(SELECT "mydb"."source"."id" FROM "mydb"."source") AS "_subquery"',
         'DELETE FROM "mydb"."target" WHERE "mydb"."target"."id" IN '
         '(SELECT "id" FROM "mydb"."source")',
+        'DELETE FROM "mydb"."target" WHERE EXISTS(SELECT 1 FROM "mydb"."source" WHERE '
+        '"mydb"."target"."id" = "mydb"."source"."id")',
     ]
 
 
@@ -2092,3 +2108,545 @@ def test_creating_a_database_invalidates_the_engine_cache(
 
     assert "new_db" not in adapter._database_engine_cache
     assert "_has_replicated_database" not in adapter.__dict__
+
+
+def test_clickhouse_datalake_catalog_mapping_config_is_forwarded():
+    from sqlmesh.core.config.connection import ClickhouseConnectionConfig
+
+    mapping = {"lake": "iceberg"}
+    config = ClickhouseConnectionConfig(
+        host="localhost", username="user", datalake_catalog_mapping=mapping
+    )
+
+    assert config._extra_engine_config["datalake_catalog_mapping"] == mapping
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"": "iceberg"},
+        {"lake.schema": "iceberg"},
+        {"lake": ""},
+        {"lake": "iceberg.db"},
+    ],
+)
+def test_clickhouse_datalake_catalog_mapping_rejects_invalid_identifiers(
+    mapping: t.Dict[str, str],
+):
+    from sqlmesh.core.config.connection import ClickhouseConnectionConfig
+    from sqlmesh.utils.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="datalake_catalog_mapping"):
+        ClickhouseConnectionConfig(
+            host="localhost", username="user", datalake_catalog_mapping=mapping
+        )
+
+
+@pytest.mark.parametrize("inject_catalog", [False, True])
+@pytest.mark.parametrize(
+    "query_sql, expected_sql",
+    [
+        (
+            "SELECT e.id FROM lake.source.events AS e",
+            'SELECT "e"."id" FROM "iceberg"."source.events" AS "e"',
+        ),
+        (
+            "SELECT lake.source.events.id FROM lake.source.events",
+            'SELECT "iceberg"."source.events"."id" FROM "iceberg"."source.events"',
+        ),
+        (
+            "WITH events AS (SELECT id FROM lake.source.events) "
+            "SELECT id FROM events UNION ALL SELECT id FROM lake.source.other",
+            'WITH "events" AS (SELECT "id" FROM "iceberg"."source.events") '
+            'SELECT "id" FROM "events" UNION ALL SELECT "id" FROM '
+            '"iceberg"."source.other"',
+        ),
+        (
+            "SELECT nested.id FROM (SELECT id FROM lake.source.events) AS nested",
+            'SELECT "nested"."id" FROM (SELECT "id" FROM "iceberg"."source.events") AS "nested"',
+        ),
+        (
+            "SELECT lake.source.events.* FROM lake.source.events",
+            'SELECT "iceberg"."source.events".* FROM "iceberg"."source.events"',
+        ),
+    ],
+)
+def test_clickhouse_datalake_mapping_rewrites_direct_query_sources(
+    make_mocked_engine_adapter: t.Callable,
+    inject_catalog: bool,
+    query_sql: str,
+    expected_sql: str,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    if inject_catalog:
+        adapter.inject_virtual_catalog("clickhouse_gw")
+
+    query = parse_one(query_sql, dialect="clickhouse")
+    original = query.copy()
+    adapter.fetchall(query, quote_identifiers=True)
+
+    assert to_sql_calls(adapter) == [expected_sql]
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    ("target", "target_alias", "predicate_sql", "expected_sql"),
+    [
+        (
+            "db.target",
+            None,
+            "id IN (SELECT id FROM lake.analytics.events)",
+            'DELETE FROM "db"."target" WHERE "id" IN '
+            '(SELECT "id" FROM "iceberg"."analytics.events")',
+        ),
+        (
+            "lake.analytics.target",
+            None,
+            "id IN (SELECT id FROM lake.analytics.events)",
+            'DELETE FROM "lake"."analytics"."target" WHERE "id" IN '
+            '(SELECT "id" FROM "iceberg"."analytics.events")',
+        ),
+        (
+            "db.target",
+            None,
+            "id IN (SELECT id FROM lake.analytics.events "
+            "UNION ALL SELECT id FROM lake.analytics.archive)",
+            'DELETE FROM "db"."target" WHERE "id" IN '
+            '(SELECT "id" FROM "iceberg"."analytics.events" UNION ALL '
+            'SELECT "id" FROM "iceberg"."analytics.archive")',
+        ),
+        (
+            "db.target",
+            None,
+            "id IN (SELECT nested.id FROM (SELECT id FROM lake.analytics.events) AS nested)",
+            'DELETE FROM "db"."target" WHERE "id" IN '
+            '(SELECT "nested"."id" FROM (SELECT "id" FROM '
+            '"iceberg"."analytics.events") AS "nested")',
+        ),
+        (
+            "db.target",
+            "lake",
+            "EXISTS (SELECT lake.analytics.events.id FROM lake.analytics.events)",
+            'DELETE FROM "db"."target" AS "lake" WHERE EXISTS(SELECT '
+            '"iceberg"."analytics.events"."id" FROM "iceberg"."analytics.events")',
+        ),
+        (
+            "db.target",
+            "lake",
+            "EXISTS (SELECT lake.payload.user.id FROM lake.analytics.events AS lake)",
+            'DELETE FROM "db"."target" AS "lake" WHERE EXISTS(SELECT '
+            '"lake"."payload"."user"."id" FROM "iceberg"."analytics.events" AS "lake")',
+        ),
+    ],
+)
+def test_clickhouse_datalake_mapping_rewrites_delete_subquery_sources(
+    make_mocked_engine_adapter: t.Callable,
+    target: str,
+    target_alias: t.Optional[str],
+    predicate_sql: str,
+    expected_sql: str,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    predicate = parse_one(predicate_sql, dialect="clickhouse")
+    original_predicate = predicate.copy()
+    delete_target = exp.to_table(target)
+    if target_alias:
+        delete_target.set("alias", exp.TableAlias(this=exp.to_identifier(target_alias)))
+
+    adapter.delete_from(delete_target, predicate)
+
+    assert to_sql_calls(adapter) == [expected_sql]
+    assert predicate == original_predicate
+
+
+def test_clickhouse_datalake_mapping_leaves_raw_delete_sql_unchanged(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    statement = "DELETE FROM db.target WHERE id IN (SELECT id FROM lake.analytics.events)"
+
+    adapter.execute(statement)
+
+    assert to_sql_calls(adapter) == [statement]
+
+
+@pytest.mark.parametrize("mapping", [{}, {"lake": "iceberg"}])
+def test_clickhouse_datalake_mapping_preserves_unmapped_foreign_read_catalogs(
+    make_mocked_engine_adapter: t.Callable, mapping: t.Dict[str, str]
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter, datalake_catalog_mapping=mapping)
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one(
+        "SELECT foreign_catalog.source.events.id FROM foreign_catalog.source.events",
+        dialect="clickhouse",
+    )
+    original = query.copy()
+
+    adapter.fetchall(query, quote_identifiers=True)
+
+    assert to_sql_calls(adapter) == [
+        'SELECT "foreign_catalog"."source"."events"."id" FROM "foreign_catalog"."source"."events"'
+    ]
+    assert query == original
+
+
+@pytest.mark.parametrize("fetch_method", ["fetchall", "fetchdf"])
+def test_clickhouse_datalake_mapping_leaves_raw_sql_strings_unchanged(
+    make_mocked_engine_adapter: t.Callable, fetch_method: str
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    query = "SELECT id, value FROM lake.analytics.events ORDER BY id"
+
+    if fetch_method == "fetchall":
+        adapter.fetchall(query)
+        adapter.cursor.execute.assert_called_once_with(query)
+    else:
+        import pandas as pd
+
+        adapter.cursor.client.query_df.return_value = pd.DataFrame()
+        adapter.fetchdf(query)
+        adapter.cursor.client.query_df.assert_called_once_with(query, use_extended_dtypes=True)
+
+
+@pytest.mark.parametrize("inject_catalog", [False, True])
+def test_clickhouse_datalake_mapping_rewrites_insert_select_source(
+    make_mocked_engine_adapter: t.Callable, inject_catalog: bool
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    if inject_catalog:
+        adapter.inject_virtual_catalog("clickhouse_gw")
+    target = "lake.analytics.target"
+    statement = parse_one(
+        f"INSERT INTO {target} (id) SELECT lake.source.events.id FROM lake.source.events",
+        dialect="clickhouse",
+    )
+    original = statement.copy()
+
+    adapter.execute(statement)
+
+    assert to_sql_calls(adapter) == [
+        'INSERT INTO "lake"."analytics"."target" ("id") '
+        'SELECT "iceberg"."source.events"."id" FROM "iceberg"."source.events"'
+    ]
+    assert statement == original
+
+
+def test_clickhouse_insert_values_keeps_generic_virtual_catalog_rendering(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    statement = parse_one(
+        "INSERT INTO __clickhouse_gw__.analytics.target (id) VALUES (1)",
+        dialect="clickhouse",
+    )
+    original = statement.copy()
+
+    adapter.execute(statement)
+
+    assert to_sql_calls(adapter) == ['INSERT INTO "analytics"."target" ("id") VALUES ((1))']
+    assert statement == original
+
+
+@pytest.mark.parametrize("inject_catalog", [False, True])
+@pytest.mark.parametrize("operation", ["ctas", "insert", "replace"])
+def test_clickhouse_datalake_mapping_rewrites_materialized_query_sources(
+    make_mocked_engine_adapter: t.Callable, inject_catalog: bool, operation: str
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    if inject_catalog:
+        adapter.inject_virtual_catalog("clickhouse_gw")
+    target = "__clickhouse_gw__.analytics.target" if inject_catalog else "analytics.target"
+    query = parse_one("SELECT lake.source.events.id FROM lake.source.events", dialect="clickhouse")
+    original = query.copy()
+    columns_to_types = {"id": exp.DataType.build("Int64", dialect="clickhouse")}
+
+    if operation == "ctas":
+        adapter.ctas(target, query, columns_to_types)
+    elif operation == "insert":
+        adapter.insert_append(target, query, columns_to_types, track_rows_processed=False)
+    else:
+        adapter.get_data_object = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        adapter.replace_query(target, query, columns_to_types)
+
+    rendered = "\n".join(to_sql_calls(adapter))
+    assert '"iceberg"."source.events"' in rendered
+    assert '"lake"."source"."events"' not in rendered
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    "alias,virtual_catalog",
+    [
+        ("t", None),
+        ("lake", None),
+        ("t", "t"),
+        ("__clickhouse_gw__", None),
+    ],
+)
+def test_clickhouse_datalake_mapping_preserves_nested_fields_qualified_by_alias(
+    make_mocked_engine_adapter: t.Callable,
+    alias: str,
+    virtual_catalog: t.Optional[str],
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog=virtual_catalog,
+        datalake_catalog_mapping={"lake": "iceberg"},
+    )
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one(
+        f"SELECT {alias}.payload.user.id FROM db.src AS {alias}", dialect="clickhouse"
+    )
+    original = query.copy()
+
+    adapter.insert_append(
+        "analytics.target",
+        query,
+        {"id": exp.DataType.build("Int64", dialect="clickhouse")},
+        track_rows_processed=False,
+    )
+
+    assert any(
+        f'SELECT "{alias}"."payload"."user"."id" FROM "db"."src" AS "{alias}"' in call
+        for call in to_sql_calls(adapter)
+    )
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    "virtual_catalog,alias",
+    [
+        ("t", "t"),
+        ("__clickhouse_gw__", "__clickhouse_gw__"),
+    ],
+)
+def test_clickhouse_virtual_catalog_keeps_direct_read_alias_nested_fields(
+    make_mocked_engine_adapter: t.Callable,
+    virtual_catalog: str,
+    alias: str,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog=virtual_catalog,
+        datalake_catalog_mapping={"lake": "iceberg"},
+    )
+    query = parse_one(
+        f"SELECT {alias}.payload.user.id FROM db.src AS {alias}", dialect="clickhouse"
+    )
+    original = query.copy()
+
+    adapter.fetchall(query, quote_identifiers=True)
+
+    assert to_sql_calls(adapter) == [
+        f'SELECT "{alias}"."payload"."user"."id" FROM "db"."src" AS "{alias}"'
+    ]
+    assert query == original
+
+
+@pytest.mark.parametrize(
+    "query_sql,expected_sql",
+    [
+        (
+            "WITH t AS (SELECT payload FROM db.src) SELECT t.payload.user.id FROM t",
+            'INSERT INTO "analytics"."target" ("id") WITH "t" AS '
+            '(SELECT "payload" FROM "db"."src") SELECT '
+            '"t"."payload"."user"."id" FROM "t"',
+        ),
+        (
+            "SELECT sub.payload.user.id FROM (SELECT payload FROM db.src) AS sub",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"sub"."payload"."user"."id" FROM '
+            '(SELECT "payload" FROM "db"."src") AS "sub"',
+        ),
+        (
+            "SELECT t.payload.user.id FROM db.src AS t WHERE EXISTS ("
+            "SELECT 1 FROM db.other WHERE t.payload.user.id = 1)",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"t"."payload"."user"."id" FROM "db"."src" AS "t" '
+            'WHERE EXISTS(SELECT 1 FROM "db"."other" WHERE '
+            '"t"."payload"."user"."id" = 1)',
+        ),
+        (
+            "SELECT lake.source.events.id FROM lake.source.events WHERE EXISTS ("
+            "SELECT 1 FROM db.src AS lake WHERE lake.payload.user.id = 1)",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"iceberg"."source.events"."id" FROM "iceberg"."source.events" '
+            'WHERE EXISTS(SELECT 1 FROM "db"."src" AS "lake" WHERE '
+            '"lake"."payload"."user"."id" = 1)',
+        ),
+        (
+            "SELECT lake.id FROM db.src AS lake WHERE EXISTS ("
+            "SELECT lake.source.events.id FROM lake.source.events)",
+            'INSERT INTO "analytics"."target" ("id") SELECT "lake"."id" '
+            'FROM "db"."src" AS "lake" WHERE EXISTS(SELECT '
+            '"iceberg"."source.events"."id" FROM "iceberg"."source.events")',
+        ),
+        (
+            "SELECT payload.user.event.id FROM db.src",
+            'INSERT INTO "analytics"."target" ("id") SELECT '
+            '"payload"."user"."event"."id" FROM "db"."src"',
+        ),
+    ],
+)
+def test_clickhouse_datalake_mapping_resolves_nested_paths_in_query_scope(
+    make_mocked_engine_adapter: t.Callable, query_sql: str, expected_sql: str
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    query = parse_one(query_sql, dialect="clickhouse")
+    original = query.copy()
+
+    adapter.insert_append(
+        "analytics.target",
+        query,
+        {"id": exp.DataType.build("Int64", dialect="clickhouse")},
+        track_rows_processed=False,
+    )
+
+    assert to_sql_calls(adapter) == [expected_sql]
+    assert query == original
+
+
+@pytest.mark.parametrize("operation", ["insert", "ctas", "replace", "view"])
+def test_clickhouse_datalake_mapping_rejects_unconfigured_write_sources(
+    make_mocked_engine_adapter: t.Callable, operation: str
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    query = parse_one("SELECT id FROM foreign_catalog.source.events", dialect="clickhouse")
+    columns_to_types = {"id": exp.DataType.build("Int64", dialect="clickhouse")}
+
+    with pytest.raises(SQLMeshError, match="Provided catalog: foreign_catalog"):
+        if operation == "insert":
+            adapter.insert_append(
+                "analytics.target", query, columns_to_types, track_rows_processed=False
+            )
+        elif operation == "ctas":
+            adapter.ctas("analytics.target", query, columns_to_types)
+        elif operation == "replace":
+            adapter.get_data_object = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            adapter.replace_query("analytics.target", query, columns_to_types)
+        else:
+            adapter.create_view("analytics.target", query)
+
+
+def test_clickhouse_datalake_mapping_rejects_foreign_write_source_when_virtual_catalog_exists(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one("SELECT id FROM foreign_catalog.source.events", dialect="clickhouse")
+
+    with pytest.raises(SQLMeshError, match="Provided catalog: foreign_catalog"):
+        adapter._get_source_queries(query, None, "analytics.target")
+
+
+def test_clickhouse_without_mapping_or_virtual_catalog_preserves_query_source(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(ClickhouseEngineAdapter)
+    query = parse_one("SELECT id FROM foreign_catalog.source.events", dialect="clickhouse")
+    original = query.copy()
+
+    source_queries = adapter._get_source_queries(query, None, "analytics.target")
+
+    assert source_queries[0].query_factory() == original
+    assert query == original
+
+
+def test_clickhouse_datalake_mapping_gives_virtual_catalog_precedence_over_mapping_key(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="css_data",
+        datalake_catalog_mapping={"css_data": "iceberg"},
+    )
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one("SELECT id FROM css_data.source.events", dialect="clickhouse")
+
+    source_queries = adapter._get_source_queries(query, None, "analytics.target")
+    rendered = adapter._to_sql(source_queries[0].query_factory())
+
+    assert rendered == 'SELECT "id" FROM "source"."events"'
+
+
+def test_clickhouse_datalake_mapping_rewrites_create_view_query_source(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    query = parse_one("SELECT id FROM lake.source.events", dialect="clickhouse")
+    original = query.copy()
+
+    adapter.create_view("analytics.events_view", query)
+
+    assert any('"iceberg"."source.events"' in call for call in to_sql_calls(adapter))
+    assert query == original
+
+
+def test_clickhouse_datalake_mapping_does_not_bypass_injected_create_view_catalog_validation(
+    make_mocked_engine_adapter: t.Callable,
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter, datalake_catalog_mapping={"lake": "iceberg"}
+    )
+    adapter.inject_virtual_catalog("clickhouse_gw")
+    query = parse_one("SELECT id FROM lake.source.events", dialect="clickhouse")
+    original = query.copy()
+
+    with pytest.raises(
+        SQLMeshError,
+        match="requires that all catalog operations be against a single catalog: __clickhouse_gw__",
+    ):
+        adapter.create_view("analytics.events_view", query)
+
+    assert to_sql_calls(adapter) == []
+    assert query == original
+
+
+@pytest.mark.parametrize("mapping", [{}, {"configured_catalog": "iceberg"}])
+def test_virtual_catalog_execute_uses_configured_catalog_fallback(
+    make_mocked_engine_adapter: t.Callable, mapping: t.Dict[str, str]
+):
+    adapter = make_mocked_engine_adapter(
+        ClickhouseEngineAdapter,
+        virtual_catalog="configured_catalog",
+        datalake_catalog_mapping=mapping,
+    )
+    query = parse_one(
+        "SELECT configured_catalog.mydb.source.id, other_catalog.otherdb.source.id, "
+        "'configured_catalog.literal' FROM configured_catalog.mydb.source "
+        "JOIN other_catalog.otherdb.source ON configured_catalog.mydb.source.id = "
+        "other_catalog.otherdb.source.id",
+        dialect="clickhouse",
+    )
+    original = query.copy()
+
+    adapter.execute(query)
+
+    assert to_sql_calls(adapter) == [
+        'SELECT "mydb"."source"."id", "other_catalog"."otherdb"."source"."id", '
+        '\'configured_catalog.literal\' FROM "mydb"."source" JOIN '
+        '"other_catalog"."otherdb"."source" ON "mydb"."source"."id" = '
+        '"other_catalog"."otherdb"."source"."id"'
+    ]
+    assert query == original

@@ -65,7 +65,12 @@ class CachingStateSync(DelegatingStateSync):
                 existing[snapshot_id] = snapshot
 
         if missing:
-            existing.update(self.state_sync.get_snapshots(missing))
+            fetched = self.state_sync.get_snapshots(missing)
+            # The fetch can take longer than the TTL, so the TTL of what it returned starts now.
+            expire_at = now_timestamp() + self.ttl * 1000
+            for snapshot_id in missing.difference(fetched):
+                self.snapshot_cache[snapshot_id] = (False, expire_at)
+            existing.update(fetched)
 
         for snapshot_id, snapshot in existing.items():
             cached = self._from_cache(snapshot_id, now)
