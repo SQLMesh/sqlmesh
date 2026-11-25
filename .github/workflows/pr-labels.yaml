@@ -27,13 +27,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v8
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
         with:
           script: |
-            const title = process.env.PR_TITLE;
             const issue_number = context.payload.pull_request.number;
             const { owner, repo } = context.repo;
+            // Read the current title. The event payload keeps the title from when the
+            // run started, so a re-run of an old run would otherwise apply old labels.
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
+            const title = pr.title;
 
             // Creates the label if it doesn't exist. A 422 means another run created
             // it first, which is fine.
@@ -94,8 +95,7 @@ jobs:
                   `PR title "${title}" must look like "type(scope): description" or ` +
                   `"type: description", where type is one of: ` +
                   `${[...typeLabels.keys()].join(', ')}. Add "!" after the type or scope ` +
-                  `for a breaking change, e.g. "feat(plan)!: ...". See CONTRIBUTING.md. ` +
-                  `Re-running this job checks the old title again: edit the title instead.`
+                  `for a breaking change, e.g. "feat(plan)!: ...". See CONTRIBUTING.md.`
                 );
                 return;
               }

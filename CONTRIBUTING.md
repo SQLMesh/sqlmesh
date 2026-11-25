@@ -102,7 +102,7 @@ type(scope): description
 - Write the description for users: say what changed for them, not how the code changed.
 
 Titles created by GitHub's "Revert" button (`Revert "..."`) are also accepted. If the
-title check fails, edit the title: re-running the failed job checks the old title again.
+title check fails, edit the title. Editing it runs the check again.
 
 Release notes are grouped using labels that are applied automatically from the title
 and the files changed. The title decides the `Feature`, `Bug`, `performance`,
