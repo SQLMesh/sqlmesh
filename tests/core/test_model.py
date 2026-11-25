@@ -2971,6 +2971,51 @@ def test_convert_to_time_column():
     )
 
 
+def test_convert_to_time_column_case_insensitive_normalization():
+    # engine_adapter.columns() returns the engine's native casing, e.g. UPPERCASE
+    # for Snowflake, while normalization_strategy=case_insensitive lowercases the
+    # model's time column identifier
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind INCREMENTAL_BY_TIME_RANGE(
+                time_column CreatedAtUtc
+            ),
+            dialect 'tsql,normalization_strategy=case_insensitive'
+        );
+
+        SELECT CreatedAtUtc::TIMESTAMP_NTZ
+    """
+    )
+    model = load_sql_based_model(expressions)
+    columns_to_types = {"CREATEDATUTC": exp.DataType.build("TIMESTAMP_NTZ")}
+    assert model.convert_to_time_column(
+        "2022-01-01", columns_to_types
+    ) == model.convert_to_time_column("2022-01-01")
+
+
+def test_convert_to_time_column_case_sensitive_mismatch():
+    # for dialects that compare identifiers case-sensitively, a differently cased
+    # column name must still fail
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            kind INCREMENTAL_BY_TIME_RANGE(
+                time_column ds
+            )
+        );
+
+        SELECT ds::timestamp
+    """
+    )
+    model = load_sql_based_model(expressions)
+    columns_to_types = {"DS": exp.DataType.build("TIMESTAMP")}
+    with pytest.raises(ConfigError, match="not found in model"):
+        model.convert_to_time_column("2022-01-01", columns_to_types)
+
+
 def test_parse(assert_exp_eq):
     expressions = d.parse(
         """

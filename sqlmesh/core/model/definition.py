@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import Field
 from sqlglot import exp
+from sqlglot.dialects.dialect import NormalizationStrategy
 from sqlglot.helper import seq_get
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 from sqlglot.optimizer.simplify import gen
@@ -850,12 +851,30 @@ class _Model(ModelMeta, frozen=True):
             if columns_to_types is None:
                 columns_to_types = self.columns_to_types_or_raise
 
-            if self.time_column.column.name not in columns_to_types:
+            time_column_name = self.time_column.column.name
+            if time_column_name not in columns_to_types:
+                # columns_to_types may come from engine_adapter.columns(), which returns
+                # the engine's native casing rather than normalized column names
+                dialect = d.Dialect.get_or_raise(self.dialect)
+                if dialect.normalization_strategy in (
+                    NormalizationStrategy.CASE_INSENSITIVE,
+                    NormalizationStrategy.CASE_INSENSITIVE_UPPERCASE,
+                ):
+                    time_column_name = next(
+                        (
+                            column
+                            for column in columns_to_types
+                            if column.lower() == time_column_name.lower()
+                        ),
+                        time_column_name,
+                    )
+
+            if time_column_name not in columns_to_types:
                 raise ConfigError(
                     f"Time column '{self.time_column.column.sql(dialect=self.dialect)}' not found in model '{self.name}'."
                 )
 
-            time_column_type = columns_to_types[self.time_column.column.name]
+            time_column_type = columns_to_types[time_column_name]
 
             return to_time_column(
                 time,
