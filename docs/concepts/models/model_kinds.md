@@ -974,6 +974,21 @@ TABLE db.menu_items (
 );
 ```
 
+After the initial plan has been applied, use `sqlmesh run` to process the next
+eligible interval when the source data changes. A source data change does not
+require another model plan. Update the source's `updated_at` value when a
+record changes so the model can track the new version.
+
+For example, suppose a source row for ID 1 has an `updated_at` of
+`2025-01-01 09:00:00` on the initial run. Update that row's non-key data and set
+its `updated_at` to `2025-01-02 12:00:00` before the next run. After that run,
+querying the timestamp columns for ID 1 shows both versions:
+
+| updated_at | valid_to |
+| --- | --- |
+| 2025-01-01 09:00:00 | 2025-01-02 12:00:00 |
+| 2025-01-02 12:00:00 | NULL |
+
 The `updated_at` column name can also be changed by adding the following to your model definition:
 ```sql linenums="1" hl_lines="5"
 MODEL (
