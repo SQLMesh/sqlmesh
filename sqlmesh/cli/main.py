@@ -46,6 +46,19 @@ LOCAL_ONLY_COMMANDS = ("format",)
 OPTIONAL_LOCAL_COMMANDS = ("lint", "test")
 
 
+def _is_restate_arg(arg: str) -> bool:
+    """Whether ``arg`` is a ``--restate-model`` / ``-r`` option token.
+
+    Covers the four spellings Click accepts: ``--restate-model VALUE``,
+    ``--restate-model=VALUE``, ``-r VALUE`` and ``-rVALUE``.
+    """
+    if arg == "--restate-model" or arg.startswith("--restate-model="):
+        return True
+    if arg == "-r" or (arg.startswith("-r") and not arg.startswith("--")):
+        return True
+    return False
+
+
 class _SQLMeshGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: t.List[str]) -> t.List[str]:
         rest = super().parse_args(ctx, args)
@@ -151,6 +164,14 @@ def cli(
     if ctx.invoked_subcommand == "lint":
         load = False
 
+    # `plan --restate-model` operates entirely against state, so a project with no
+    # local model definitions should still be allowed to run (parity with `run`).
+    # Local loading itself stays on so that backfill expansion, unit tests, and the
+    # linter continue to work when model files are present.
+    restating = ctx.invoked_subcommand == "plan" and any(
+        _is_restate_arg(arg) for arg in ctx.meta["subcommand_args"]
+    )
+
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
     log_limit = list(configs.values())[0].log_limit
 
@@ -169,7 +190,7 @@ def cli(
             logger.exception("Failed to initialize SQLMesh context")
         raise
 
-    if load and not context.models:
+    if load and not context.models and not restating:
         raise click.ClickException(
             f"`{paths}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
         )
@@ -273,7 +294,7 @@ Next steps:
 
 Need help?
 • Docs:   https://sqlmesh.readthedocs.io
-• Slack:  https://www.tobikodata.com/slack
+• Slack:  https://tobiko-data.slack.com/
 • GitHub: https://github.com/SQLMesh/sqlmesh/issues
 """)
 

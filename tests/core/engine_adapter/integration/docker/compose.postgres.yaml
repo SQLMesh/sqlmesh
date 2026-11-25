@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres
+    # Pin the major version; a new Postgres release must not change CI silently.
+    image: postgres:18
     ports:
       - '5432:5432'
     environment:

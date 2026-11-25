@@ -1,4 +1,6 @@
 import json
+import typing as t
+
 import pytest
 from sqlglot import exp, parse_one
 
@@ -712,8 +714,38 @@ def test_at_least_one_audit(model: Model):
     )
     assert (
         rendered_query.sql()
-        == 'SELECT 1 AS "1" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN \'1970-01-01\' AND \'1970-01-01\') AS "_0" WHERE TRUE GROUP BY 1 HAVING COUNT("a") = 0'
+        == 'SELECT COUNT("a") AS "cnt_not_null" FROM (SELECT * FROM "db"."test_model" AS "test_model" WHERE "ds" BETWEEN \'1970-01-01\' AND \'1970-01-01\') AS "_0" WHERE TRUE HAVING COUNT("a") = 0'
     )
+
+
+def test_at_least_one_audit_fails_when_no_row_has_a_value():
+    import duckdb
+
+    model = load_sql_based_model(
+        parse("MODEL (name db.t, kind FULL); SELECT 1 AS a, TRUE AS flag", default_dialect="duckdb")
+    )
+    conn = duckdb.connect()
+    conn.execute("CREATE SCHEMA db")
+    conn.execute("CREATE TABLE db.t (a INT, flag BOOLEAN)")
+
+    def audit_rows(**kwargs: exp.Expr) -> t.List[t.Tuple[int]]:
+        query = model.render_audit_query(
+            builtin.at_least_one_audit, column=exp.to_column("a"), **kwargs
+        )
+        return conn.execute(query.sql("duckdb")).fetchall()
+
+    # An empty table has no row with a non-NULL value, so the audit must fail
+    assert audit_rows() == [(0,)]
+
+    conn.execute("INSERT INTO db.t VALUES (NULL, TRUE), (NULL, FALSE)")
+    assert audit_rows() == [(0,)]
+
+    conn.execute("INSERT INTO db.t VALUES (1, FALSE)")
+    assert audit_rows() == []
+
+    # The only non-NULL value is excluded by the condition, so the audit must fail
+    assert audit_rows(condition=exp.column("flag")) == [(0,)]
+    assert audit_rows(condition=exp.not_(exp.column("flag"))) == []
 
 
 def test_mutually_exclusive_ranges_audit(model: Model):

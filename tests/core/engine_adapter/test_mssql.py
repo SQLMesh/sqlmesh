@@ -1055,3 +1055,17 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
         adapter._build_create_comment_table_exp(table, comment),
         adapter._build_create_comment_column_exp(table, "a", comment),
     ]
+
+
+def test_concat_columns_uses_varchar_max(adapter: MSSQLEngineAdapter):
+    # CAST(x AS VARCHAR) without a length truncates to 30 characters in T-SQL, which
+    # breaks the table_diff join key for long or UNIQUEIDENTIFIER key columns
+    columns_to_types = {
+        "id": exp.DataType.build("UNIQUEIDENTIFIER", dialect=adapter.dialect),
+        "name": exp.DataType.build("NVARCHAR(100)", dialect=adapter.dialect),
+    }
+
+    assert (
+        adapter.concat_columns(columns_to_types).sql(dialect=adapter.dialect)
+        == "COALESCE(CAST(id AS VARCHAR(MAX)), '') + ',' + COALESCE(CAST(name AS VARCHAR(MAX)), '')"
+    )
