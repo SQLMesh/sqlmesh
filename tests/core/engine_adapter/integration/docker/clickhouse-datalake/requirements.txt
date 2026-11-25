@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
+pyiceberg==0.8.1
+pyarrow==17.0.0
+minio==7.2.3

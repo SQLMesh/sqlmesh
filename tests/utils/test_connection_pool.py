@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import get_ident
 
+import pytest
 from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.utils.connection_pool import (
@@ -323,3 +324,27 @@ def test_thread_local_shared_connection_pool_close(mocker: MockerFixture):
     assert cursor_mock.close.call_count == 2
     assert connection_factory_mock.call_count == 2
     assert connection_mock.close.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "pool_class",
+    [SingletonConnectionPool, ThreadLocalConnectionPool, ThreadLocalSharedConnectionPool],
+)
+@pytest.mark.parametrize("method", ["commit", "rollback"])
+def test_connection_pool_failed_commit_or_rollback_ends_transaction(
+    mocker: MockerFixture, pool_class, method: str
+):
+    cursor_mock = mocker.Mock()
+    connection_mock = mocker.Mock()
+    connection_mock.cursor.return_value = cursor_mock
+    pool = pool_class(mocker.Mock(return_value=connection_mock))
+
+    pool.begin()
+    assert pool.is_transaction_active
+
+    getattr(cursor_mock, method).side_effect = RuntimeError("serializable isolation violation")
+    with pytest.raises(RuntimeError):
+        getattr(pool, method)()
+
+    # a later transaction must start with a BEGIN, not be taken for part of the failed one
+    assert not pool.is_transaction_active

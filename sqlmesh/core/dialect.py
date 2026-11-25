@@ -569,6 +569,27 @@ def _parse_alter_table_alter(self: Parser) -> t.Optional[exp.Expr]:
     return alter_column
 
 
+# Snowflake session parameter names in ALTER SESSION SET / UNSET (e.g. TIMEZONE or QUERY_TAG) are
+# keywords, not identifiers, so Snowflake rejects them when quoted: ALTER SESSION SET "TIMEZONE" = 'UTC'
+# is a syntax error. sqlglot parses them as identifiers, which means they get normalized and quoted
+# along with the rest of the statement, so we turn them into vars instead. Vars are also left out of
+# case normalization, so a parameter written as query_tag stays lowercase; Snowflake treats parameter
+# names case-insensitively, so this is intentional.
+# The parsing bug is in sqlglot itself (https://github.com/tobymao/sqlglot/issues/9336). Remove this
+# override once the sqlglot version SQLMesh pins includes the fix.
+def _parse_alter_session(self: Snowflake.Parser) -> exp.AlterSession:
+    alter_session = self.__parse_alter_session()  # type: ignore
+
+    for item in alter_session.expressions:
+        name = item.this.this if isinstance(item.this, exp.EQ) else item.this
+        if isinstance(name, exp.Column) and not name.table:
+            name = name.this
+        if isinstance(name, exp.Identifier) and not name.quoted:
+            name.replace(exp.var(name.name))
+
+    return alter_session
+
+
 def altercolumn_sql(self: Generator, expression: exp.AlterColumn) -> str:
     sql = self._altercolumn_sql(expression)  # type: ignore
 
@@ -1124,7 +1145,14 @@ def text_diff(
     return "\n".join(unified_diff(a_sql, b_sql))
 
 
-WS_OR_COMMENT = r"(?:\s|--[^\n]*\n|/\*.*?\*/)"
+# Each '*/' closes exactly one '/*', so a run of comments matches in exactly one way. A lazy
+# '/\*.*?\*/' under DOTALL can stretch across several comments, and a failed search then
+# backtracks through every grouping of them. SQLGlot reads block comments as nested, so this
+# matches nesting up to three levels deep; a regex cannot match arbitrary depth.
+BLOCK_COMMENT = r"/\*(?:[^*]|\*(?!/))*\*/"
+for _ in range(2):
+    BLOCK_COMMENT = rf"/\*(?:[^*/]|\*(?!/)|/(?!\*)|{BLOCK_COMMENT})*\*/"
+WS_OR_COMMENT = rf"(?:\s|--[^\n]*\n|{BLOCK_COMMENT})"
 HEADER = r"\b(?:model|audit)\b(?=\s*\()"
 KEY_BOUNDARY = r"(?:\(|,)"  # key is preceded by either '(' or ','
 DIALECT_VALUE = r"['\"]?(?P<dialect>[a-z][a-z0-9]*)['\"]?"
@@ -1430,6 +1458,7 @@ def extend_sqlglot() -> None:
     _override(Parser, _parse_interval_span)
     _override(Parser, _warn_unsupported)
     _override(Snowflake.Parser, _parse_table_parts)
+    _override(Snowflake.Parser, _parse_alter_session)
     _override(TSQL.Parser, _parse_alter_table_alter)
     _override(TSQL.Generator, altercolumn_sql)
 

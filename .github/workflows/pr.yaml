@@ -10,14 +10,18 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+# ubuntu-latest is Ubuntu 26.04. That image drops Python 3.9, installs OpenJDK 25
+# (Spark/Hadoop calls the removed Subject.getSubject), and has no Playwright Chromium.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       python: ${{ steps.filter.outputs.python }}
       client: ${{ steps.filter.outputs.client }}
       vscode: ${{ steps.filter.outputs.vscode }}
+      lsp: ${{ steps.filter.outputs.lsp }}
       ci: ${{ steps.filter.outputs.ci }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -37,17 +41,23 @@ jobs:
               - 'web/client/**'
             vscode:
               - 'vscode/**'
+            lsp:
+              - 'sqlmesh/lsp/**'
             ci:
               - '.github/**'
               - 'Makefile'
               - '.pre-commit-config.yaml'
+            docs:
+              - 'docs/**'
+              - 'mkdocs.yml'
+              - '.readthedocs.yaml'
 
   doc-tests:
     needs: changes
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV: '1'
     steps:
@@ -68,12 +78,39 @@ jobs:
           source .venv/bin/activate
           make doc-test
 
+  docs-build:
+    needs: changes
+    if:
+      needs.changes.outputs.docs == 'true' || needs.changes.outputs.ci ==
+      'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      UV: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        # Match the Python version Read the Docs builds with (.readthedocs.yaml)
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          make install-doc
+      - name: Build docs
+        run: |
+          source .venv/bin/activate
+          mkdocs build --strict
+
   style-and-cicd-tests:
     needs: changes
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -147,6 +184,10 @@ jobs:
           . ./venv/Scripts/activate
           python.exe -m pip install --upgrade pip
           make install-dev
+      - name: Install DuckLake extension
+        run: |
+          . ./venv/Scripts/activate
+          python -c "import duckdb; duckdb.connect().install_extension('ducklake')"
       - name: Run fast unit tests
         run: |
           . ./venv/Scripts/activate
@@ -166,7 +207,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SQLMESH__DISABLE_ANONYMIZED_ANALYTICS: '1'
       UV: '1'
@@ -195,7 +236,7 @@ jobs:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.vscode ==
       'true' || needs.changes.outputs.ci == 'true' || github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -222,7 +263,7 @@ jobs:
     if:
       needs.changes.outputs.client == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: mcr.microsoft.com/playwright:v1.54.1-jammy
     steps:
@@ -250,7 +291,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -264,6 +305,7 @@ jobs:
             trino,
             spark,
             clickhouse,
+            clickhouse-datalake,
             risingwave,
             starrocks,
           ]
@@ -290,6 +332,9 @@ jobs:
         run: |
           source .venv/bin/activate
           make ${{ matrix.engine }}-test
+      - name: Stop DataLake services
+        if: ${{ always() && matrix.engine == 'clickhouse-datalake' }}
+        run: make clickhouse-datalake-down
       - name: Upload test results
         uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
@@ -301,7 +346,7 @@ jobs:
   engine-tests-cloud:
     needs: engine-tests-docker
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -390,9 +435,43 @@ jobs:
           ./.github/scripts/manage-test-db.sh "${{ matrix.engine }}"
           "$TEST_DB_NAME" up
       - name: Run tests
+        env:
+          # Temporary BigQuery diagnostics: since 2026-10-31 the BigQuery runner either shuts
+          # down or stops responding mid-pytest, and its log is never uploaded. Keep the
+          # evidence in files, stop pytest before the job limit so the runner can recover,
+          # and upload the files in the steps below. Remove once fixed.
+          PYTHONUNBUFFERED: ${{ matrix.engine == 'bigquery' && '1' || '' }}
+          PYTEST_ADDOPTS: ${{ matrix.engine == 'bigquery' && '-v' || '' }}
         run: |
           source .venv/bin/activate
-          make ${{ matrix.engine }}-test
+          if [ "${{ matrix.engine }}" != "bigquery" ]; then
+            make ${{ matrix.engine }}-test
+            exit
+          fi
+          mkdir -p test-results
+          (
+            while true; do
+              echo "[resources $(date -u +%T)] $(free -m | awk '/Mem:/{print "mem_used="$3"MB mem_avail="$7"MB"}') $(free -m | awk '/Swap:/{print "swap_used="$3"MB"}') $(df -h / | awk 'NR==2{print "disk_used="$5}')"
+              ps -eo rss=,args= --sort=-rss | head -4 | awk '{rss=$1; $1=""; printf "  rss=%dMB %.120s\n", rss/1024, $0}'
+              sleep 5
+            done
+          ) >> test-results/bigquery-resources.log 2>&1 &
+          trap "kill $! 2>/dev/null || true" EXIT
+          make engine-bigquery-install
+          uv pip install -e ".[bigframes]"
+          # Same commands as the Makefile's bigquery-test target, under a timeout so
+          # pytest itself (not just make) is stopped before the 25 minute job limit.
+          set -o pipefail
+          timeout --kill-after=60s 18m pytest -n auto -m "bigquery" --reruns 3 \
+            --junitxml=test-results/junit-bigquery.xml 2>&1 | tee test-results/bigquery-pytest.log
+      - name: Collect BigQuery diagnostics
+        if: ${{ always() && matrix.engine == 'bigquery' }}
+        run: |
+          mkdir -p test-results
+          sudo dmesg -T | grep -iE 'out of memory|oom|killed process' > test-results/bigquery-dmesg.log || true
+          echo "== kernel OOM messages"; cat test-results/bigquery-dmesg.log
+          echo "== last resource samples"; tail -n 60 test-results/bigquery-resources.log || true
+          echo "== last pytest output"; tail -n 60 test-results/bigquery-pytest.log || true
       - name: Tear down test database
         if: always()
         run:
@@ -413,7 +492,7 @@ jobs:
       'true' || github.ref == 'refs/heads/main'
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -427,10 +506,12 @@ jobs:
       - name: Run CI
         run: pnpm run ci
   test-vscode-e2e:
-    runs-on:
-      labels: [ubuntu-2204-8]
-    # As at 2026-01-12 this job flakes 100% of the time. It needs investigation
-    if: false
+    needs: changes
+    if:
+      needs.changes.outputs.vscode == 'true' || needs.changes.outputs.lsp ==
+      'true' || needs.changes.outputs.ci == 'true' || github.ref ==
+      'refs/heads/main'
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -453,13 +534,28 @@ jobs:
           source .venv/bin/activate
           make install-dev
       - name: Install code-server
-        run: curl -fsSL https://code-server.dev/install.sh | sh
+        # Pinned so that a code-server release cannot change the editor UI the
+        # tests drive without the change showing up here first.
+        # The installer curls the .deb once. A reset (curl exit 56) fails the
+        # job. A repeat resumes the partial file the installer leaves behind.
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL https://code-server.dev/install.sh | sh -s -- --version 4.137.0; then
+              exit 0
+            fi
+            echo "code-server install failed (attempt ${attempt}); retrying"
+            sleep $((attempt * 5))
+          done
+          echo "code-server install failed after 5 attempts"
+          exit 1
       - name: Install Playwright browsers
         working-directory: ./vscode/extension
         run: pnpm exec playwright install
       - name: Run e2e tests
         working-directory: ./vscode/extension
-        timeout-minutes: 30
+        # CI runs one worker. That needs a longer cap than the old 30 minutes.
+        timeout-minutes: 60
         run: |
           source ../../.venv/bin/activate
           pnpm run test:e2e
@@ -474,7 +570,7 @@ jobs:
     if:
       needs.changes.outputs.python == 'true' || needs.changes.outputs.ci ==
       'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

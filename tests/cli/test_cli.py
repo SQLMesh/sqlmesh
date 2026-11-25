@@ -370,6 +370,141 @@ def test_plan_restate_model(runner, tmp_path):
     assert "Virtual layer updated" not in result.output
 
 
+@pytest.mark.parametrize(
+    "restate_args",
+    [
+        pytest.param(["--restate-model", "sqlmesh_example.full_model"], id="long-space"),
+        pytest.param(["--restate-model=sqlmesh_example.full_model"], id="long-equals"),
+        pytest.param(["-r", "sqlmesh_example.full_model"], id="short-space"),
+        pytest.param(["-rsqlmesh_example.full_model"], id="short-attached"),
+    ],
+)
+def test_plan_restate_model_without_local_definitions(runner, tmp_path, restate_args):
+    """`plan --restate-model` should work against state alone, like `run`.
+
+    Reproduces https://github.com/SQLMesh/sqlmesh/issues/3260. Each
+    parametrization covers one of the spellings Click accepts for the
+    option so the empty-project bypass tracks whatever form the user types.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    # Wipe every local project directory, keeping only config.yaml + db.db.
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+    assert not (tmp_path / "models").exists()
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            *restate_args,
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "doesn't seem to have any models" not in result.output
+    assert "Models selected for restatement" in result.output
+    assert "sqlmesh_example.full_model" in result.output
+    assert_model_batches_executed(result)
+
+
+def test_plan_without_restate_and_no_local_models_still_errors(runner, tmp_path):
+    """A non-restatement plan against an empty project must still error out."""
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+
+    result = runner.invoke(
+        cli,
+        ["--log-file-dir", tmp_path, "--paths", tmp_path, "plan"],
+    )
+    assert result.exit_code == 1
+    assert "doesn't seem to have any models" in result.output
+
+
+def test_plan_restate_upstream_models_without_local_definitions(runner, tmp_path):
+    """``-r '+<model>'`` should restate upstream deployed models even without local files."""
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    for subdir in ("models", "seeds", "tests", "audits", "macros", ".cache"):
+        rmtree(tmp_path / subdir, ignore_errors=True)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--restate-model",
+            "+sqlmesh_example.full_model",
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Models selected for restatement" in result.output
+    # full_model depends on incremental_model, which depends on seed_model;
+    # a `+` selector must pick both upstream dependencies from state.
+    assert "sqlmesh_example.full_model" in result.output
+    assert "sqlmesh_example.incremental_model" in result.output
+    assert_model_batches_executed(result)
+
+
+def test_plan_restate_model_with_backfill_model_and_skip_linter(runner, tmp_path):
+    """Restatements with local models and ``--backfill-model`` must still expand selectors.
+
+    With local model files present, ``plan --skip-linter --restate-model X
+    --backfill-model Y`` has to run both selector expansions against the
+    local project. Keeping local loading enabled for restate plans is what
+    makes this case work.
+    """
+    create_example_project(tmp_path)
+    init_prod_and_backfill(runner, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--log-file-dir",
+            tmp_path,
+            "--paths",
+            tmp_path,
+            "plan",
+            "--skip-linter",
+            "--restate-model",
+            "sqlmesh_example.full_model",
+            "--backfill-model",
+            "sqlmesh_example.*",
+            "--start",
+            "",
+            "--end",
+            "",
+            "--auto-apply",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Selector did not return any models" not in result.output
+    assert "Models selected for restatement" in result.output
+    assert "sqlmesh_example.full_model" in result.output
+    assert_model_batches_executed(result)
+
+
 @pytest.mark.parametrize("flag", ["--skip-backfill", "--dry-run"])
 def test_plan_skip_backfill(runner, tmp_path, flag):
     create_example_project(tmp_path)
@@ -2269,7 +2404,7 @@ def test_init_project_engine_configs(tmp_path):
         "redshift": "# concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # database: \n      # host: \n      # port: \n      # source_address: \n      # unix_sock: \n      # ssl: \n      # sslmode: \n      # timeout: \n      # tcp_keepalive: \n      # application_name: \n      # preferred_role: \n      # principal_arn: \n      # credentials_provider: \n      # region: \n      # cluster_identifier: \n      # iam: \n      # db_user: \n      # is_serverless: \n      # serverless_acct_id: \n      # serverless_work_group: \n      # enable_merge: ",
         "bigquery": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # method: oauth\n      # project: \n      # execution_project: \n      # quota_project: \n      # location: \n      # keyfile: \n      # keyfile_json: \n      # token: \n      # refresh_token: \n      # client_id: \n      # client_secret: \n      # token_uri: \n      # scopes: \n      # impersonated_service_account: \n      # job_creation_timeout_seconds: \n      # job_execution_timeout_seconds: \n      # job_retries: 1\n      # job_retry_deadline_seconds: \n      # priority: \n      # maximum_bytes_billed: \n      # reservation: ",
         "snowflake": "account: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # user: \n      # password: \n      # warehouse: \n      # database: \n      # role: \n      # authenticator: \n      # token: \n      # host: \n      # port: \n      # application: Tobiko_SQLMesh\n      # private_key: \n      # private_key_path: \n      # private_key_passphrase: \n      # session_parameters: ",
-        "databricks": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # server_hostname: \n      # http_path: \n      # access_token: \n      # auth_type: \n      # oauth_client_id: \n      # oauth_client_secret: \n      # catalog: \n      # http_headers: \n      # session_configuration: \n      # databricks_connect_server_hostname: \n      # databricks_connect_access_token: \n      # databricks_connect_cluster_id: \n      # databricks_connect_use_serverless: False\n      # force_databricks_connect: False\n      # disable_databricks_connect: False\n      # disable_spark_session: False",
+        "databricks": "# concurrent_tasks: 1\n      # register_comments: True\n      # pre_ping: False\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # server_hostname: \n      # http_path: \n      # access_token: \n      # auth_type: \n      # oauth_client_id: \n      # oauth_client_secret: \n      # catalog: \n      # http_headers: \n      # session_configuration: \n      # databricks_connect_server_hostname: \n      # databricks_connect_access_token: \n      # databricks_connect_cluster_id: \n      # databricks_connect_use_serverless: False\n      # force_databricks_connect: False\n      # disable_databricks_connect: False\n      # disable_spark_session: False\n      # force_shared_connection: False",
         "postgres": "host: \n      user: \n      password: \n      port: \n      database: \n      # concurrent_tasks: 4\n      # register_comments: True\n      # pre_ping: True\n      # pretty_sql: False\n      # schema_differ_overrides: \n      # catalog_type_overrides: \n      # keepalives_idle: \n      # connect_timeout: 10\n      # role: \n      # sslmode: \n      # application_name: ",
     }
 
