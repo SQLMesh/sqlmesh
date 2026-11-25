@@ -282,3 +282,34 @@ def test_sync_grants_config_with_default_schema(
         "WHERE table_schema = 'public' AND table_name = 'test_table' "
         "AND grantor = current_role AND grantee <> current_role"
     )
+
+
+def test_pre_ping_ends_implicit_transaction(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter, pre_ping=True)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = False
+    cursor = conn.cursor.return_value
+    # Real psycopg2 cursors/connections do not expose begin(), and commit/rollback live on conn.
+    del cursor.begin
+    del cursor.commit
+    del cursor.rollback
+    del conn.begin
+
+    events: t.List[str] = []
+    cursor.execute.side_effect = lambda sql, *args, **kwargs: events.append(f"execute:{sql}")
+    cursor.close.side_effect = lambda: events.append("close_cursor")
+    conn.rollback.side_effect = lambda: events.append("rollback")
+    conn.commit.side_effect = lambda: events.append("commit")
+
+    with adapter.transaction():
+        # Before running user SQL inside the transaction, ping must have already rolled back
+        assert events == ["execute:SELECT 1", "close_cursor", "rollback"]
+        adapter.execute("SELECT 2")
+
+    assert events == [
+        "execute:SELECT 1",
+        "close_cursor",
+        "rollback",
+        "execute:SELECT 2",
+        "commit",
+    ]

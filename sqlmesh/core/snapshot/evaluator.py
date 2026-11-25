@@ -812,6 +812,7 @@ class SnapshotEvaluator:
                 render_kwargs={**render_statements_kwargs, "inside_transaction": True},
             )
 
+            create_table_fn: t.Optional[t.Callable[[], None]] = None
             if not target_table_exists or (model.is_seed and not snapshot.intervals):
                 # Only create the empty table if the columns were provided explicitly by the user
                 should_create_empty_table = (
@@ -835,18 +836,27 @@ class SnapshotEvaluator:
                     runtime_stage = RuntimeStage.EVALUATING
                     target_table_exists = True
                 elif should_create_empty_table or model.is_seed or model.kind.is_scd_type_2:
-                    self._execute_create(
-                        snapshot=snapshot,
-                        table_name=target_table_name,
-                        is_table_deployable=is_snapshot_deployable,
-                        deployability_index=deployability_index,
-                        create_render_kwargs=create_render_kwargs,
-                        rendered_physical_properties=rendered_physical_properties.copy(),
-                        dry_run=False,
-                        run_pre_post_statements=False,
-                    )
+
+                    def _create_table(table_name: str = target_table_name) -> None:
+                        self._execute_create(
+                            snapshot=snapshot,
+                            table_name=table_name,
+                            is_table_deployable=is_snapshot_deployable,
+                            deployability_index=deployability_index,
+                            create_render_kwargs=create_render_kwargs,
+                            rendered_physical_properties=rendered_physical_properties.copy(),
+                            dry_run=False,
+                            run_pre_post_statements=False,
+                        )
+
+                    if model.is_python and not model.depends_on_self and not adapter.wap_enabled:
+                        # Defer table creation until the Python model yields its first batch so we
+                        # do not open a transaction or hold a table lock during Python execution.
+                        create_table_fn = _create_table
+                    else:
+                        _create_table()
+                        target_table_exists = True
                     runtime_stage = RuntimeStage.EVALUATING
-                    target_table_exists = True
 
             evaluate_render_kwargs = {
                 **common_render_kwargs,
@@ -878,6 +888,7 @@ class SnapshotEvaluator:
                 target_table_name=target_table_name,
                 is_first_insert=is_first_insert,
                 batch_index=batch_index,
+                create_table_fn=create_table_fn,
             )
 
             evaluation_strategy.run_post_statements(
@@ -996,6 +1007,7 @@ class SnapshotEvaluator:
         target_table_name: str,
         is_first_insert: bool,
         batch_index: int,
+        create_table_fn: t.Optional[t.Callable[[], None]] = None,
     ) -> None:
         if not snapshot.is_model or snapshot.is_seed:
             return
@@ -1007,11 +1019,30 @@ class SnapshotEvaluator:
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
         is_snapshot_deployable = deployability_index.is_deployable(snapshot)
 
+        created = create_table_fn is None
+
+        def ensure_created() -> None:
+            nonlocal created
+            if not created:
+                assert create_table_fn is not None
+                create_table_fn()
+                created = True
+
+        on_table_resolve: t.Optional[t.Callable[[str], None]] = None
+        if create_table_fn is not None:
+
+            def _on_table_resolve(resolved_model_name: str) -> None:
+                if resolved_model_name == snapshot.name:
+                    ensure_created()
+
+            on_table_resolve = _on_table_resolve
+
         queries_or_dfs = self._render_snapshot_for_evaluation(
             snapshot,
             snapshots,
             deployability_index,
             render_kwargs,
+            on_table_resolve=on_table_resolve,
         )
 
         def apply(query_or_df: QueryOrDF, index: int = 0) -> None:
@@ -1075,6 +1106,7 @@ class SnapshotEvaluator:
             try:
                 first_query_or_df = next(queries_or_dfs)
             except StopIteration:
+                ensure_created()
                 return
 
             query_or_df = reduce(
@@ -1086,10 +1118,13 @@ class SnapshotEvaluator:
                 queries_or_dfs,
                 first_query_or_df,
             )
+            ensure_created()
             apply(query_or_df, index=0)
         else:
             for index, query_or_df in enumerate(queries_or_dfs):
+                ensure_created()
                 apply(query_or_df, index)
+            ensure_created()
 
     def _render_snapshot_for_evaluation(
         self,
@@ -1097,6 +1132,7 @@ class SnapshotEvaluator:
         snapshots: t.Dict[str, Snapshot],
         deployability_index: DeployabilityIndex,
         render_kwargs: t.Dict[str, t.Any],
+        on_table_resolve: t.Optional[t.Callable[[str], None]] = None,
     ) -> t.Iterator[QueryOrDF]:
         from sqlmesh.core.context import ExecutionContext
 
@@ -1110,6 +1146,7 @@ class SnapshotEvaluator:
                 deployability_index,
                 default_dialect=model.dialect,
                 default_catalog=model.default_catalog,
+                on_table_resolve=on_table_resolve,
             ),
             **render_kwargs,
         )

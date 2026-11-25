@@ -3522,6 +3522,122 @@ def test_pre_ping(mocker: MockerFixture, make_mocked_engine_adapter: t.Callable)
     adapter._connection_pool.get().close.assert_called_once()
 
 
+def test_ping_rolls_back_after_closing_cursor(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = False
+    cursor = conn.cursor.return_value
+
+    events: t.List[str] = []
+    cursor.execute.side_effect = lambda sql, *args, **kwargs: events.append(f"execute:{sql}")
+    cursor.close.side_effect = lambda: events.append("close_cursor")
+    conn.rollback.side_effect = lambda: events.append("rollback")
+
+    adapter.ping()
+
+    assert events == ["execute:SELECT 1", "close_cursor", "rollback"]
+
+
+def test_ping_does_not_rollback_on_failure(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = False
+    cursor = conn.cursor.return_value
+    cursor.execute.side_effect = RuntimeError("connection lost")
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        adapter.ping()
+
+    cursor.close.assert_called_once()
+    conn.rollback.assert_not_called()
+
+
+def test_ping_skips_rollback_when_autocommit_true(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = True
+
+    adapter.ping()
+
+    conn.cursor.return_value.close.assert_called_once()
+    conn.rollback.assert_not_called()
+
+
+def test_ping_handles_pymssql_autocommit_state(make_mocked_engine_adapter: t.Callable):
+    # pymssql exposes autocommit as a method and autocommit_state as a bool
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = lambda value: None
+    conn.autocommit_state = True
+
+    adapter.ping()
+    conn.rollback.assert_not_called()
+
+    conn.autocommit_state = False
+    adapter.ping()
+    conn.rollback.assert_called_once()
+
+
+def test_ping_skips_rollback_inside_active_transaction(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = False
+
+    with adapter.transaction():
+        adapter.ping()
+        conn.rollback.assert_not_called()
+
+
+def test_ping_skips_rollback_when_transactions_unsupported(
+    make_mocked_engine_adapter: t.Callable,
+):
+    from sqlmesh.core.config import DuckDBConnectionConfig
+
+    class NonTransactionalAdapter(EngineAdapter):
+        SUPPORTS_TRANSACTIONS = False
+
+    adapter = make_mocked_engine_adapter(NonTransactionalAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = False
+
+    adapter.ping()
+    conn.rollback.assert_not_called()
+
+    # Real DuckDB (:memory:) should not raise TransactionException on ping()
+    duckdb_adapter = DuckDBConnectionConfig().create_engine_adapter()
+    try:
+        duckdb_adapter.ping()
+    finally:
+        duckdb_adapter.close()
+
+
+def test_ping_skips_rollback_on_snowflake(make_mocked_engine_adapter: t.Callable):
+    from sqlmesh.core.engine_adapter import SnowflakeEngineAdapter
+
+    adapter = make_mocked_engine_adapter(SnowflakeEngineAdapter)
+    conn = adapter._connection_pool.get()
+    conn.autocommit = False
+
+    adapter.ping()
+
+    assert to_sql_calls(adapter) == ["SELECT 1"]
+    conn.cursor.return_value.close.assert_called_once()
+    conn.rollback.assert_not_called()
+
+
+def test_ping_skips_rollback_when_connection_has_no_rollback(mocker: MockerFixture):
+    cursor = mocker.Mock()
+    conn = mocker.NonCallableMock(spec=["cursor", "autocommit", "close"])
+    conn.autocommit = False
+    conn.cursor.return_value = cursor
+    adapter = EngineAdapter(lambda *args, **kwargs: conn, dialect="duckdb")
+
+    adapter.ping()
+
+    cursor.execute.assert_called_once_with("SELECT 1")
+    cursor.close.assert_called_once()
+
+
 def test_with_settings_preserves_pre_ping(make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(EngineAdapter, pre_ping=True)
     assert adapter.with_settings()._pre_ping is True

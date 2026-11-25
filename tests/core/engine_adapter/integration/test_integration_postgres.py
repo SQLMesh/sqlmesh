@@ -1230,3 +1230,122 @@ def test_grants_plan_scd_type_2_with_vde_dev_only(
         )
         assert roles["analyst"]["username"] in dev_physical_grants.get("SELECT", [])
         assert roles["etl_user"]["username"] in dev_physical_grants.get("INSERT", [])
+
+
+def test_pre_ping_no_idle_in_transaction(engine_adapter: PostgresEngineAdapter) -> None:
+    import time
+    from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+
+    engine_adapter.ping()
+    assert engine_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+    pre_ping_adapter = engine_adapter.with_settings(pre_ping=True)
+    with pre_ping_adapter.transaction():
+        assert pre_ping_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+    # Verify idle_in_transaction_session_timeout does not kill a session between
+    # pre_ping and the first SQL statement inside transaction() (e.g., Python model execution).
+    pre_ping_adapter.execute("SET idle_in_transaction_session_timeout = '1s'")
+    try:
+        with pre_ping_adapter.transaction():
+            assert pre_ping_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+            time.sleep(1.5)
+            assert pre_ping_adapter.fetchone("SELECT 1") == (1,)
+    finally:
+        pre_ping_adapter.execute("RESET idle_in_transaction_session_timeout")
+
+
+def test_python_model_first_build_no_idle_in_transaction_timeout(
+    ctx: TestContext, engine_adapter: PostgresEngineAdapter
+) -> None:
+    from sqlmesh.core.model import FullKind, PythonModel
+    from sqlmesh.core.snapshot import Snapshot, SnapshotChangeCategory, SnapshotEvaluator
+    from sqlmesh.utils.metaprogramming import Executable
+
+    pre_ping_adapter = engine_adapter.with_settings(pre_ping=True)
+    schema = exp.to_table(ctx.schema(TEST_SCHEMA)).name
+    model = PythonModel(
+        name=f"{schema}.py_model",
+        entrypoint="python_func",
+        kind=FullKind(),
+        columns={"a": "INT"},
+        physical_schema_override=schema,
+        dialect="postgres",
+        default_catalog=pre_ping_adapter.default_catalog,
+        python_env={
+            "python_func": Executable(
+                name="python_func",
+                alias="python_func",
+                path="test_integration_postgres.py",
+                payload="""import time
+import pandas as pd
+from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+
+def python_func(context, **kwargs):
+    assert context.engine_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+    time.sleep(1.5)
+    return pd.DataFrame([{"a": 1}])""",
+            )
+        },
+    )
+    snapshot = Snapshot.from_node(model, nodes={})
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    evaluator = SnapshotEvaluator(pre_ping_adapter)
+
+    pre_ping_adapter.execute("SET idle_in_transaction_session_timeout = '1s'")
+    try:
+        evaluator.evaluate(
+            snapshot,
+            start="2023-01-01",
+            end="2023-01-01",
+            execution_time="2023-01-01",
+            snapshots={snapshot.name: snapshot},
+        )
+        assert pre_ping_adapter.fetchall(exp.select("a").from_(snapshot.table_name())) == [(1,)]
+    finally:
+        pre_ping_adapter.execute("RESET idle_in_transaction_session_timeout")
+
+
+def test_postgres_role_persists_across_pre_ping(
+    ctx: TestContext, engine_adapter: PostgresEngineAdapter, config: Config
+) -> None:
+    from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+    from sqlmesh.core.config import PostgresConnectionConfig
+
+    gateway = ctx.gateway
+    assert gateway in config.gateways
+    connection_config = config.gateways[gateway].connection
+    assert isinstance(connection_config, PostgresConnectionConfig)
+
+    with create_users(engine_adapter, "pre_ping_role") as roles:
+        role_name = roles["pre_ping_role"]["username"]
+        role_connection_config = PostgresConnectionConfig(
+            host=connection_config.host,
+            port=connection_config.port,
+            database=connection_config.database,
+            user=connection_config.user,
+            password=connection_config.password,
+            keepalives_idle=connection_config.keepalives_idle,
+            connect_timeout=connection_config.connect_timeout,
+            role=role_name,
+            sslmode=connection_config.sslmode,
+            application_name=connection_config.application_name,
+            pre_ping=True,
+        )
+        role_adapter = t.cast(PostgresEngineAdapter, role_connection_config.create_engine_adapter())
+        try:
+            assert role_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+            role_adapter.ping()
+            assert role_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+            with role_adapter.transaction():
+                assert role_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+                assert role_adapter.fetchone("SELECT current_user") == (role_name,)
+
+            assert role_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+            role_adapter.ping()
+            assert role_adapter.connection.info.transaction_status == TRANSACTION_STATUS_IDLE
+            assert role_adapter.fetchone("SELECT current_user") == (role_name,)
+        finally:
+            role_adapter.close()
