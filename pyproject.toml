@@ -91,7 +91,9 @@ dev = [
     "mssql-python>=1.1.0;python_version>=\"3.10\"",
     "pyperf",
     "pyspark~=3.5.0",
-    "pytest",
+    # pytest 9.2.0 uses about 3.8 GB per xdist worker while collecting tests, which runs the
+    # 16 GB CI runners out of memory (see #6254). Remove once a fixed release is out.
+    "pytest<9.2",
     "pytest-asyncio",
     "pytest-mock",
     "pytest-rerunfailures",
