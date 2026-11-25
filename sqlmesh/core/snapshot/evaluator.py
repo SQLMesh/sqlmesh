@@ -488,6 +488,8 @@ class SnapshotEvaluator:
         allow_destructive_snapshots: t.Optional[t.Set[str]] = None,
         allow_additive_snapshots: t.Optional[t.Set[str]] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
+        grants_only_snapshot_ids: t.Optional[t.Set[SnapshotId]] = None,
+        create_only_snapshot_ids: t.Optional[t.Set[SnapshotId]] = None,
     ) -> None:
         """Alters a physical snapshot table to match its snapshot's schema for the given collection of snapshots.
 
@@ -497,30 +499,48 @@ class SnapshotEvaluator:
             allow_destructive_snapshots: Set of snapshots that are allowed to have destructive schema changes.
             allow_additive_snapshots: Set of snapshots that are allowed to have additive schema changes.
             deployability_index: Determines snapshots that are deployable in the context of this evaluation.
+            grants_only_snapshot_ids: Snapshot IDs for which only physical grants should be synced if
+                the physical object already exists.
+            create_only_snapshot_ids: Snapshot IDs that should only be created if their physical
+                object does not yet exist.
         """
+        allow_destructive_snapshots = allow_destructive_snapshots or set()
+        allow_additive_snapshots = allow_additive_snapshots or set()
+        grants_only_snapshot_ids = grants_only_snapshot_ids or set()
+        create_only_snapshot_ids = create_only_snapshot_ids or set()
+
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         target_data_objects = self._get_physical_data_objects(target_snapshots, deployability_index)
-        if not target_data_objects:
+        if (
+            not target_data_objects
+            and not create_only_snapshot_ids
+            and not grants_only_snapshot_ids
+        ):
             return
 
         if not snapshots:
             snapshots = {s.snapshot_id: s for s in target_snapshots}
 
-        allow_destructive_snapshots = allow_destructive_snapshots or set()
-        allow_additive_snapshots = allow_additive_snapshots or set()
         snapshots_by_name = {s.name: s for s in snapshots.values()}
         with self.concurrent_context():
             # Only migrate snapshots for which there's an existing data object
             concurrent_apply_to_snapshots(
                 target_snapshots,
-                lambda s: self._migrate_snapshot(
-                    s,
-                    snapshots_by_name,
-                    target_data_objects.get(s.snapshot_id),
-                    allow_destructive_snapshots,
-                    allow_additive_snapshots,
-                    self.get_adapter(s.model_gateway),
-                    deployability_index,
+                lambda s: (
+                    None
+                    if s.snapshot_id in create_only_snapshot_ids
+                    and s.snapshot_id in target_data_objects
+                    else self._migrate_snapshot(
+                        s,
+                        snapshots_by_name,
+                        target_data_objects.get(s.snapshot_id),
+                        allow_destructive_snapshots,
+                        allow_additive_snapshots,
+                        self.get_adapter(s.model_gateway),
+                        deployability_index,
+                        grants_only=s.snapshot_id in grants_only_snapshot_ids,
+                        create_only=s.snapshot_id in create_only_snapshot_ids,
+                    )
                 ),
                 self.ddl_concurrent_tasks,
                 context_factory=execution_context_factory(),
@@ -1164,6 +1184,8 @@ class SnapshotEvaluator:
         allow_additive_snapshots: t.Set[str],
         adapter: EngineAdapter,
         deployability_index: DeployabilityIndex,
+        grants_only: bool = False,
+        create_only: bool = False,
     ) -> None:
         if not snapshot.is_model or snapshot.is_symbolic:
             return
@@ -1179,6 +1201,22 @@ class SnapshotEvaluator:
         update_execution(target=target_table_name, existed=target_data_object is not None)
 
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
+        if target_data_object is not None:
+            if grants_only:
+                with (
+                    adapter.transaction(),
+                    adapter.session(snapshot.model.render_session_properties(**render_kwargs)),
+                ):
+                    evaluation_strategy._apply_grants(
+                        snapshot.model,
+                        target_table_name,
+                        GrantsTargetLayer.PHYSICAL,
+                        is_snapshot_deployable=True,
+                    )
+                return
+            if create_only:
+                return
+
         evaluation_strategy.run_pre_statements(
             snapshot=snapshot, render_kwargs={**render_kwargs, "inside_transaction": False}
         )

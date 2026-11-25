@@ -6113,3 +6113,165 @@ def test_observation_propagates_through_snapshot_dispatch(
         consumer.reset(token)
     action = "schema_migration" if operation == "migrate" else operation
     assert events == [("start", action, None), ("finish", action, None)]
+
+
+@pytest.mark.parametrize(
+    "grants_config",
+    [
+        {"select": ["user1"]},
+        {},
+    ],
+)
+def test_migrate_grants_only_snapshot_ids(
+    mocker: MockerFixture, adapter_mock, make_snapshot, grants_config
+):
+    from sqlmesh.core.model.meta import GrantsTargetLayer
+
+    adapter_mock.SUPPORTS_GRANTS = True
+    sync_grants_mock = mocker.patch.object(adapter_mock, "sync_grants_config")
+
+    model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        grants=grants_config,
+        grants_target_layer=GrantsTargetLayer.PHYSICAL,
+        pre_statements=[parse_one("SELECT 'pre'")],
+        post_statements=[parse_one("SELECT 'post'")],
+    )
+    snapshot = make_snapshot(model, version="1")
+    snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    mocker.patch.object(
+        evaluator,
+        "_get_physical_data_objects",
+        return_value={
+            snapshot.snapshot_id: DataObject(
+                schema="sqlmesh__db",
+                name="db__mv__1",
+                type=DataObjectType.MATERIALIZED_VIEW,
+            )
+        },
+    )
+
+    evaluator.migrate(
+        [snapshot],
+        {snapshot.snapshot_id: snapshot},
+        grants_only_snapshot_ids={snapshot.snapshot_id},
+    )
+
+    sync_grants_mock.assert_called_once_with(
+        exp.to_table(snapshot.table_name(), dialect=adapter_mock.dialect),
+        grants_config,
+        DataObjectType.MATERIALIZED_VIEW,
+    )
+    adapter_mock.create_view.assert_not_called()
+    adapter_mock.drop_view.assert_not_called()
+    adapter_mock.drop_table.assert_not_called()
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()
+    adapter_mock.execute.assert_not_called()
+
+
+def test_migrate_create_only_snapshot_ids_skips_when_exists_creates_when_missing(
+    mocker: MockerFixture, adapter_mock, make_snapshot
+):
+    mv_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        pre_statements=[parse_one("SELECT 'pre'")],
+        post_statements=[parse_one("SELECT 'post'")],
+    )
+    mv_snapshot = make_snapshot(mv_model, version="1")
+    mv_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    migrate_snapshot_spy = mocker.spy(evaluator, "_migrate_snapshot")
+
+    # Case 1: Physical MV already exists -> complete no-op and _migrate_snapshot is skipped
+    # (preventing spurious schema_migration observer events)
+    mocker.patch.object(
+        evaluator,
+        "_get_physical_data_objects",
+        return_value={
+            mv_snapshot.snapshot_id: DataObject(
+                schema="sqlmesh__db",
+                name="db__mv__1",
+                type=DataObjectType.MATERIALIZED_VIEW,
+            )
+        },
+    )
+    evaluator.migrate(
+        [mv_snapshot],
+        {mv_snapshot.snapshot_id: mv_snapshot},
+        create_only_snapshot_ids={mv_snapshot.snapshot_id},
+    )
+    migrate_snapshot_spy.assert_not_called()
+    adapter_mock.create_view.assert_not_called()
+    adapter_mock.drop_view.assert_not_called()
+    adapter_mock.drop_data_object_on_type_mismatch.assert_not_called()
+    adapter_mock.execute.assert_not_called()
+
+    # Case 2: Physical MV is missing while downstream exists -> falls through to _execute_create
+    downstream = make_snapshot(
+        SqlModel(
+            name="db.downstream",
+            query=parse_one("SELECT a FROM db.mv"),
+            kind=FullKind(),
+        ),
+        nodes={mv_snapshot.name: mv_snapshot.model},
+        version="1",
+    )
+    downstream.categorize_as(SnapshotChangeCategory.BREAKING)
+    mocker.patch.object(
+        evaluator,
+        "_get_physical_data_objects",
+        return_value={
+            downstream.snapshot_id: DataObject(
+                schema="sqlmesh__db",
+                name="db__downstream__1",
+                type=DataObjectType.TABLE,
+            )
+        },
+    )
+    execute_create_spy = mocker.spy(evaluator, "_execute_create")
+    mocker.patch.object(evaluator, "_migrate_target_table")
+    adapter_mock.drop_data_object_on_type_mismatch.return_value = False
+    adapter_mock.table_exists.return_value = False
+
+    evaluator.migrate(
+        [mv_snapshot, downstream],
+        {mv_snapshot.snapshot_id: mv_snapshot, downstream.snapshot_id: downstream},
+        create_only_snapshot_ids={mv_snapshot.snapshot_id},
+    )
+
+    assert [c.args[0].snapshot_id for c in migrate_snapshot_spy.call_args_list] == [
+        mv_snapshot.snapshot_id,
+        downstream.snapshot_id,
+    ]
+    assert execute_create_spy.call_count == 1
+    assert execute_create_spy.call_args.kwargs["snapshot"].snapshot_id == mv_snapshot.snapshot_id
+    adapter_mock.create_view.assert_called_once()
+    assert adapter_mock.create_view.call_args.args[0] == mv_snapshot.table_name(is_deployable=True)
+    assert adapter_mock.create_view.call_args.kwargs["materialized"] is True
+
+    # Case 3: Physical inventory is completely empty -> still dispatches to create missing MV
+    migrate_snapshot_spy.reset_mock()
+    execute_create_spy.reset_mock()
+    adapter_mock.create_view.reset_mock()
+    mocker.patch.object(evaluator, "_get_physical_data_objects", return_value={})
+
+    evaluator.migrate(
+        [mv_snapshot],
+        {mv_snapshot.snapshot_id: mv_snapshot},
+        create_only_snapshot_ids={mv_snapshot.snapshot_id},
+    )
+
+    assert [c.args[0].snapshot_id for c in migrate_snapshot_spy.call_args_list] == [
+        mv_snapshot.snapshot_id,
+    ]
+    assert execute_create_spy.call_count == 1
+    adapter_mock.create_view.assert_called_once()
+    assert adapter_mock.create_view.call_args.args[0] == mv_snapshot.table_name(is_deployable=True)
+    assert adapter_mock.create_view.call_args.kwargs["materialized"] is True

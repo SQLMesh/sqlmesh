@@ -315,14 +315,35 @@ class RichExplainerConsole(ExplainerConsole):
                 tree.add(f"{display_name} \\[standalone audit]")
         return tree
 
-    def visit_migrate_schemas_stage(self, stage: stages.MigrateSchemasStage) -> Tree:
-        tree = Tree(
-            "[bold]Update schemas (add, drop, alter columns) of production physical tables to reflect forward-only changes[/bold]"
-        )
+    def visit_migrate_schemas_stage(self, stage: stages.MigrateSchemasStage) -> t.Optional[Tree]:
+        migrated_snapshots = [
+            s
+            for s in stage.snapshots
+            if s.snapshot_id not in stage.grants_only_snapshot_ids
+            and s.snapshot_id not in stage.create_only_snapshot_ids
+        ]
+        grants_only_snapshots = [
+            s for s in stage.snapshots if s.snapshot_id in stage.grants_only_snapshot_ids
+        ]
+        if not migrated_snapshots and not grants_only_snapshots:
+            return None
+
+        if migrated_snapshots:
+            tree = Tree(
+                "[bold]Update schemas (add, drop, alter columns) of production physical tables to reflect forward-only changes[/bold]"
+            )
+        else:
+            tree = Tree("[bold]Sync grants on production physical tables[/bold]")
+
         for snapshot in stage.snapshots:
+            if snapshot.snapshot_id in stage.create_only_snapshot_ids:
+                continue
             display_name = self._display_name(snapshot)
             table_name = snapshot.table_name(True)
-            tree.add(f"{display_name} -> {table_name}")
+            if migrated_snapshots and snapshot.snapshot_id in stage.grants_only_snapshot_ids:
+                tree.add(f"{display_name} -> {table_name} (sync grants)")
+            else:
+                tree.add(f"{display_name} -> {table_name}")
         return tree
 
     def visit_virtual_layer_update_stage(self, stage: stages.VirtualLayerUpdateStage) -> Tree:
