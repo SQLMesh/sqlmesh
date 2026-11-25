@@ -10,7 +10,7 @@ This guide is for maintainers with write access to `SQLMesh/sqlmesh`. It covers 
 
 ## Release the Python Package
 
-The [`Release`](.github/workflows/release.yaml) workflow runs when a tag that matches `v*.*.*` is pushed. The package version comes from the tag through `setuptools_scm`, so you don't edit a version number in the code.
+The [`Release`](workflows/release.yaml) workflow runs when a tag that matches `v*.*.*` is pushed. The package version comes from the tag through `setuptools_scm`, so you don't edit a version number in the code.
 
 The workflow does four things:
 
@@ -51,7 +51,7 @@ If the workflow fails after the PyPI step, don't delete or reuse the tag. PyPI d
 
 ### Release Notes
 
-GitHub builds the notes from merged pull request titles and groups them by label, as configured in [`.github/release.yml`](.github/release.yml). The [PR Labels](.github/workflows/pr-labels.yaml) workflow applies the labels from each pull request's title (`type(scope): description`), and adds `migration` to pull requests that add a state migration. See [Pull Request Titles](CONTRIBUTING.md#pull-request-titles) in `CONTRIBUTING.md`.
+GitHub builds the notes from merged pull request titles and groups them by label, as configured in [`.github/release.yml`](release.yml). The [PR Labels](workflows/pr-labels.yaml) workflow applies the labels from each pull request's title (`type(scope): description`), and adds `migration` to pull requests that add a state migration. See [Pull Request Titles](../CONTRIBUTING.md#pull-request-titles) in `CONTRIBUTING.md`.
 
 - A `!` in the title, such as `fix!:` or `feat!:`, puts the pull request under **Breaking changes**.
 - A pull request that adds a state migration goes under **State migrations**.
@@ -63,7 +63,7 @@ To move a pull request to another section, change its title. The workflow resets
 
 ## Release the VS Code Extension
 
-The [Release VSCode Extension](.github/workflows/release_extension.yaml) workflow publishes to the VS Code Marketplace and to Open VSX.
+The [Release VSCode Extension](workflows/release_extension.yaml) workflow publishes to the VS Code Marketplace and to Open VSX.
 
 1. On the workflow's page, choose **Run workflow**.
 2. Select the `main` branch. The workflow stops if you run it from any other branch.
@@ -73,4 +73,4 @@ The workflow sets the version only in its own build. It doesn't commit it, so `v
 
 ## Release the Shared Web Package
 
-The [Release web common code](.github/workflows/release_shared_js.yaml) workflow publishes `@tobikodata/sqlmesh-common` from `web/common` to npm. Run it the same way as the extension workflow: from `main`, with a version that has no `v`. It also doesn't commit the version, so check [npm](https://www.npmjs.com/package/@tobikodata/sqlmesh-common) for the latest published version first.
+The [Release web common code](workflows/release_shared_js.yaml) workflow publishes `@tobikodata/sqlmesh-common` from `web/common` to npm. Run it the same way as the extension workflow: from `main`, with a version that has no `v`. It also doesn't commit the version, so check [npm](https://www.npmjs.com/package/@tobikodata/sqlmesh-common) for the latest published version first.
