@@ -34,6 +34,7 @@ from sqlmesh.core.state_sync.common import (
     PromotionResult,
     ExpiredBatchRange,
 )
+from sqlmesh.core.state_sync.rewrite import RewriteProtection
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +341,15 @@ class StateReader(abc.ABC):
 class StateSync(StateReader, abc.ABC):
     """Abstract base class for snapshot and environment state management."""
 
+    def rewrite_state(self) -> t.Optional[RewriteProtection]:
+        # Custom state backends remain unprotected unless they implement this contract.
+        return None
+
+    def initialize_rewrite_protection(self) -> None:
+        from sqlmesh.core.state_sync.rewrite import RewriteBlockedError
+
+        raise RewriteBlockedError("This StateSync does not implement rewrite protection")
+
     @abc.abstractmethod
     def push_snapshots(self, snapshots: t.Iterable[Snapshot]) -> None:
         """Push snapshots into the state sync.
@@ -545,6 +555,12 @@ class StateSync(StateReader, abc.ABC):
 
 
 class DelegatingStateSync(StateSync):
+    def rewrite_state(self) -> t.Optional[RewriteProtection]:
+        return self.state_sync.rewrite_state()
+
+    def initialize_rewrite_protection(self) -> None:
+        self.state_sync.initialize_rewrite_protection()
+
     def __init__(self, state_sync: StateSync) -> None:
         self.state_sync = state_sync
 

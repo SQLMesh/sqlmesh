@@ -92,6 +92,7 @@ else:
     import importlib_metadata as metadata  # type: ignore
 
 if t.TYPE_CHECKING:
+    from sqlmesh.core.state_sync.rewrite import RewriteProtection
     from sqlmesh.core.engine_adapter._typing import DF, QueryOrDF
     from sqlmesh.core.engine_adapter.base import EngineAdapter
     from sqlmesh.core.environment import EnvironmentNamingInfo
@@ -131,6 +132,9 @@ class SnapshotEvaluator:
         ddl_concurrent_tasks: int = 1,
         selected_gateway: t.Optional[str] = None,
     ):
+        self.rewrite_state_resolver: t.Optional[t.Callable[[], t.Optional[RewriteProtection]]] = (
+            None
+        )
         self.adapters = (
             adapters if isinstance(adapters, t.Dict) else {selected_gateway or "": adapters}
         )
@@ -146,6 +150,10 @@ class SnapshotEvaluator:
         )
         self.selected_gateway = selected_gateway
         self.ddl_concurrent_tasks = ddl_concurrent_tasks
+
+    @property
+    def rewrite_state(self) -> t.Optional[RewriteProtection]:
+        return self.rewrite_state_resolver() if self.rewrite_state_resolver else None
 
     def evaluate(
         self,
@@ -180,6 +188,23 @@ class SnapshotEvaluator:
         Returns:
             The WAP ID of this evaluation if supported, None otherwise.
         """
+        state = self.rewrite_state
+        if state:
+            from sqlmesh.core.state_sync.rewrite import evaluation_attempt
+
+            a = evaluation_attempt.get()
+            bounds = snapshot.inclusive_exclusive(start, end, strict=False, expand=False)
+            if a is None or (a.name, a.identifier, a.version, a.target, a.start, a.end) != (
+                snapshot.name,
+                snapshot.identifier,
+                snapshot.version,
+                snapshot.table_name(),
+                *bounds,
+            ):
+                raise state.blocked(
+                    "Direct SnapshotEvaluator materialization lacks an owned native attempt"
+                )
+            state.check_attempt(a)
         with self.execution_tracker.track_execution(
             SnapshotIdBatch(snapshot_id=snapshot.snapshot_id, batch_id=batch_index)
         ):
@@ -286,6 +311,8 @@ class SnapshotEvaluator:
             on_complete: A callback to call on each successfully promoted snapshot.
         """
 
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         tables_by_gateway: t.Dict[t.Union[str, None], t.List[exp.Table]] = defaultdict(list)
         for snapshot in target_snapshots:
             if snapshot.is_model and not snapshot.is_symbolic:
@@ -346,6 +373,8 @@ class SnapshotEvaluator:
             environment_naming_info: Naming info for the target environment.
             on_complete: A callback to call on each successfully demoted snapshot.
         """
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         with self.concurrent_context():
             concurrent_apply_to_snapshots(
                 target_snapshots,
@@ -383,6 +412,8 @@ class SnapshotEvaluator:
         Returns:
             CompletionStatus: The status of the creation operation (success, failure, nothing to do).
         """
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
 
         snapshots_to_create = self.get_snapshots_to_create(target_snapshots, deployability_index)
@@ -410,6 +441,8 @@ class SnapshotEvaluator:
             snapshots: Snapshots to create physical schemas for.
             deployability_index: Determines snapshots that are deployable in the context of this creation.
         """
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         tables_by_gateway: t.Dict[t.Optional[str], t.List[str]] = defaultdict(list)
         for snapshot in snapshots:
             if snapshot.is_model and not snapshot.is_symbolic:
@@ -489,6 +522,8 @@ class SnapshotEvaluator:
             allow_additive_snapshots: Set of snapshots that are allowed to have additive schema changes.
             deployability_index: Determines snapshots that are deployable in the context of this evaluation.
         """
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         target_data_objects = self._get_physical_data_objects(target_snapshots, deployability_index)
         if not target_data_objects:
@@ -527,6 +562,8 @@ class SnapshotEvaluator:
             target_snapshots: Snapshots to cleanup.
             on_complete: A callback to call on each successfully deleted database object.
         """
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         target_snapshots = [
             t for t in target_snapshots if t.snapshot.is_model and not t.snapshot.is_symbolic
         ]
@@ -686,7 +723,7 @@ class SnapshotEvaluator:
             logger.exception("Failed to close Snapshot Evaluator")
 
     def set_correlation_id(self, correlation_id: CorrelationId) -> SnapshotEvaluator:
-        return SnapshotEvaluator(
+        evaluator = SnapshotEvaluator(
             {
                 gateway: adapter.with_settings(correlation_id=correlation_id)
                 for gateway, adapter in self.adapters.items()
@@ -694,6 +731,8 @@ class SnapshotEvaluator:
             self.ddl_concurrent_tasks,
             self.selected_gateway,
         )
+        evaluator.rewrite_state_resolver = self.rewrite_state_resolver
+        return evaluator
 
     def _evaluate_snapshot(
         self,
@@ -885,6 +924,8 @@ class SnapshotEvaluator:
             allow_destructive_snapshots: Snapshots for which destructive schema changes are allowed.
             allow_additive_snapshots: Snapshots for which additive schema changes are allowed.
         """
+        if state := self.rewrite_state:
+            state.reject_lifecycle()
         if not snapshot.is_model:
             return
 

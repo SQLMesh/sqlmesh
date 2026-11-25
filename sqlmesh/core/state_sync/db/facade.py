@@ -58,6 +58,7 @@ from sqlmesh.core.state_sync.common import (
     ExpiredBatchRange,
 )
 from sqlmesh.core.state_sync.db.interval import IntervalState
+from sqlmesh.core.state_sync.rewrite import RewriteProtection
 from sqlmesh.core.state_sync.db.environment import EnvironmentState
 from sqlmesh.core.state_sync.db.snapshot import SnapshotState
 from sqlmesh.core.state_sync.db.version import VersionState
@@ -108,6 +109,22 @@ class EngineAdapterStateSync(StateSync):
         self.engine_adapter = engine_adapter
         self.console = console or get_console()
 
+    def rewrite_state(self) -> t.Optional[RewriteProtection]:
+        from sqlmesh.core.state_sync.db.rewrite import RewriteState
+
+        state = RewriteState(self)
+        return state if state.enabled else None
+
+    def initialize_rewrite_protection(self) -> None:
+        from sqlmesh.core.state_sync.db.rewrite import RewriteState
+
+        RewriteState(self).initialize()
+
+    def _reject_rewrite_lifecycle(self) -> None:
+        state = self.rewrite_state()
+        if state:
+            state.reject_lifecycle()
+
     @transactional()
     def push_snapshots(self, snapshots: t.Iterable[Snapshot]) -> None:
         """Pushes snapshots to the state store, merging them with existing ones.
@@ -119,6 +136,7 @@ class EngineAdapterStateSync(StateSync):
         Args:
             snapshots: The snapshots to push.
         """
+        self._reject_rewrite_lifecycle()
         snapshots_by_id = {}
         for snapshot in snapshots:
             if not snapshot.version:
@@ -164,6 +182,7 @@ class EngineAdapterStateSync(StateSync):
         Returns:
            A tuple of (added snapshot table infos, removed snapshot table infos, and environment target suffix for the removed table infos)
         """
+        self._reject_rewrite_lifecycle()
         logger.info("Promoting environment '%s'", environment.name)
 
         missing = {s.snapshot_id for s in environment.snapshots} - self.snapshots_exist(
@@ -250,15 +269,18 @@ class EngineAdapterStateSync(StateSync):
         Args:
             environment: The target environment to finalize.
         """
+        self._reject_rewrite_lifecycle()
         self.environment_state.finalize(environment)
 
     @transactional()
     def unpause_snapshots(
         self, snapshots: t.Collection[SnapshotInfoLike], unpaused_dt: TimeLike
     ) -> None:
+        self._reject_rewrite_lifecycle()
         self.snapshot_state.unpause_snapshots(snapshots, unpaused_dt)
 
     def invalidate_environment(self, name: str, protect_prod: bool = True) -> None:
+        self._reject_rewrite_lifecycle()
         self.environment_state.invalidate_environment(name, protect_prod)
 
     def get_expired_snapshots(
@@ -268,6 +290,7 @@ class EngineAdapterStateSync(StateSync):
         current_ts: t.Optional[int] = None,
         ignore_ttl: bool = False,
     ) -> t.Optional[ExpiredSnapshotBatch]:
+        self._reject_rewrite_lifecycle()
         current_ts = current_ts or now_timestamp()
         return self.snapshot_state.get_expired_snapshots(
             environments=self.environment_state.get_environments(),
@@ -279,6 +302,7 @@ class EngineAdapterStateSync(StateSync):
     def get_expired_environments(
         self, current_ts: int, name: t.Optional[str] = None
     ) -> t.List[EnvironmentSummary]:
+        self._reject_rewrite_lifecycle()
         return self.environment_state.get_expired_environments(current_ts=current_ts, name=name)
 
     @transactional()
@@ -288,6 +312,7 @@ class EngineAdapterStateSync(StateSync):
         ignore_ttl: bool = False,
         current_ts: t.Optional[int] = None,
     ) -> None:
+        self._reject_rewrite_lifecycle()
         batch = self.get_expired_snapshots(
             ignore_ttl=ignore_ttl,
             current_ts=current_ts,
@@ -301,10 +326,12 @@ class EngineAdapterStateSync(StateSync):
     def delete_expired_environments(
         self, current_ts: t.Optional[int] = None, name: t.Optional[str] = None
     ) -> t.List[EnvironmentSummary]:
+        self._reject_rewrite_lifecycle()
         current_ts = current_ts or now_timestamp()
         return self.environment_state.delete_expired_environments(current_ts=current_ts, name=name)
 
     def delete_snapshots(self, snapshot_ids: t.Iterable[SnapshotIdLike]) -> None:
+        self._reject_rewrite_lifecycle()
         self.snapshot_state.delete_snapshots(snapshot_ids)
 
     def snapshots_exist(self, snapshot_ids: t.Iterable[SnapshotIdLike]) -> t.Set[SnapshotId]:
@@ -315,6 +342,7 @@ class EngineAdapterStateSync(StateSync):
 
     def remove_state(self, including_backup: bool = False) -> None:
         """Removes the state store objects."""
+        self._reject_rewrite_lifecycle()
         for table in (
             self.snapshot_state.snapshots_table,
             self.snapshot_state.auto_restatements_table,
@@ -470,6 +498,7 @@ class EngineAdapterStateSync(StateSync):
         promoted_snapshots_only: bool = True,
     ) -> None:
         """Migrate the state sync to the latest SQLMesh / SQLGlot version."""
+        self._reject_rewrite_lifecycle()
         self.migrator.migrate(
             self.schema,
             skip_backup=skip_backup,
@@ -479,10 +508,12 @@ class EngineAdapterStateSync(StateSync):
     @transactional()
     def rollback(self) -> None:
         """Rollback to the previous migration."""
+        self._reject_rewrite_lifecycle()
         self.migrator.rollback()
 
     @transactional()
     def export(self, environment_names: t.Optional[t.List[str]] = None) -> StateStream:
+        self._reject_rewrite_lifecycle()
         versions = self.get_versions(
             validate=True
         )  # will throw if the state db hasnt been created or there is a version mismatch
@@ -519,6 +550,7 @@ class EngineAdapterStateSync(StateSync):
 
     @transactional()
     def import_(self, stream: StateStream, clear: bool = True) -> None:
+        self._reject_rewrite_lifecycle()
         existing_versions = self.get_versions()
 
         for state_chunk in stream:

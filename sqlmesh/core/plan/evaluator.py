@@ -87,6 +87,9 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         plan: EvaluatablePlan,
         circuit_breaker: t.Optional[t.Callable[[], bool]] = None,
     ) -> None:
+        state = self.state_sync.rewrite_state()
+        if state:
+            state.reject_lifecycle()
         self._circuit_breaker = circuit_breaker
         self.snapshot_evaluator = self.snapshot_evaluator.set_correlation_id(
             CorrelationId.from_plan_id(plan.plan_id)

@@ -505,6 +505,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 ddl_concurrent_tasks=self.concurrent_tasks,
                 selected_gateway=self.selected_gateway,
             )
+        self._snapshot_evaluator.rewrite_state_resolver = self.state_sync.rewrite_state
         return self._snapshot_evaluator
 
     def _ensure_virtual_catalog_injection(self) -> None:
@@ -1017,6 +1018,9 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     @python_api_analytics
     def destroy(self) -> bool:
+        state = self.state_sync.rewrite_state()
+        if state:
+            state.reject_lifecycle()
         success = False
 
         # Collect resources to be deleted
@@ -1941,6 +1945,9 @@ class GenericContext(BaseContext, t.Generic[C]):
             plan: The plan to apply.
             circuit_breaker: An optional handler which checks if the apply should be aborted.
         """
+        state = self.state_sync.rewrite_state()
+        if state:
+            state.reject_lifecycle()
         if (
             not plan.context_diff.has_changes
             and not plan.requires_backfill
@@ -3179,6 +3186,9 @@ class GenericContext(BaseContext, t.Generic[C]):
         force_delete: bool = False,
         environment: t.Optional[str] = None,
     ) -> None:
+        state = self.state_sync.rewrite_state()
+        if state:
+            state.reject_lifecycle()
         current_ts = now_timestamp()
         failures: t.List[str] = []
 

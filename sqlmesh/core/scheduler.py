@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from contextvars import copy_context
 import abc
 import logging
 import typing as t
@@ -54,6 +55,7 @@ from sqlmesh.utils.errors import (
 
 if t.TYPE_CHECKING:
     from sqlmesh.core.context import ExecutionContext
+    from sqlmesh.core.state_sync.rewrite import RewriteProtection
 
 logger = logging.getLogger(__name__)
 SnapshotToIntervals = t.Dict[Snapshot, Intervals]
@@ -123,12 +125,17 @@ class Scheduler:
         console: t.Optional[Console] = None,
         notification_target_manager: t.Optional[NotificationTargetManager] = None,
     ):
+        self._rewrite_owner: t.Optional[str] = None
+        self._rewrite_locks: t.Dict[str, t.Any] = {}
+        self._rewrite_repair_id: t.Optional[str] = None
         self.state_sync = state_sync
         self.snapshots = {s.snapshot_id: s for s in snapshots}
+        self._snapshot_dag = snapshots_to_dag(self.snapshots.values())
         self.snapshots_by_name = {snapshot.name: snapshot for snapshot in self.snapshots.values()}
         self.snapshot_per_version = _resolve_one_snapshot_per_version(self.snapshots.values())
         self.default_catalog = default_catalog
         self.snapshot_evaluator = snapshot_evaluator
+        self.snapshot_evaluator.rewrite_state_resolver = state_sync.rewrite_state
         self.max_workers = max_workers
         self.console = console or get_console()
         self.notification_target_manager = (
@@ -202,6 +209,92 @@ class Scheduler:
         target_table_exists: t.Optional[bool] = None,
         **kwargs: t.Any,
     ) -> t.List[AuditResult]:
+        """Evaluate a batch under native admission when rewrite protection is enabled."""
+        from sqlmesh.core.state_sync.rewrite import evaluation_attempt
+
+        kwargs.update(
+            environment_naming_info=environment_naming_info,
+            allow_destructive_snapshots=allow_destructive_snapshots,
+            allow_additive_snapshots=allow_additive_snapshots,
+            target_table_exists=target_table_exists,
+        )
+        state = self.state_sync.rewrite_state()
+        if not state:
+            return self._evaluate_batch(
+                snapshot, start, end, execution_time, deployability_index, batch_index, **kwargs
+            )
+        self._require_rewrite_owner(state)
+        self._validate_rewrite_scope(snapshot, deployability_index)
+        target = snapshot.table_name()
+        # Dictionary insertion is done before the DAG starts; direct evaluation is refused.
+        lock = self._rewrite_locks[target]
+        with lock:
+            ancestors = self._rewrite_ancestor_names(snapshot, state)
+            if any(a.name in ancestors for a in state.list_unresolved()):
+                raise state.blocked("Unresolved ancestor blocks evaluation")
+            a = state.begin(self._rewrite_owner, snapshot, start, end, self._rewrite_repair_id)
+            token = evaluation_attempt.set(a)
+            try:
+                return self._evaluate_batch(
+                    snapshot, start, end, execution_time, deployability_index, batch_index, **kwargs
+                )
+            finally:
+                evaluation_attempt.reset(token)
+
+    def _rewrite_ancestor_names(self, snapshot: Snapshot, state: RewriteProtection) -> t.Set[str]:
+        ancestors = self._snapshot_dag.upstream(snapshot.snapshot_id)
+        if not ancestors.issubset(self.snapshots):
+            raise state.blocked("Ancestor snapshot definition is unavailable")
+        return {sid.name for sid in ancestors}
+
+    def _require_rewrite_owner(self, state: RewriteProtection) -> None:
+        from sqlmesh.core.state_sync.rewrite import execution_owner
+
+        if not self._rewrite_owner or execution_owner.get() != self._rewrite_owner:
+            raise state.blocked("Direct scheduler entry requires native run admission")
+        state.check_owner(self._rewrite_owner)
+
+    def _validate_rewrite_scope(
+        self, snapshot: Snapshot, deployability_index: DeployabilityIndex
+    ) -> None:
+        from sqlmesh.core.state_sync.rewrite import RewriteBlockedError
+
+        if not snapshot.is_model:
+            raise RewriteBlockedError("Prototype does not protect external or symbolic snapshots")
+        model = snapshot.model
+        if (
+            self.snapshot_evaluator.adapter.dialect != "duckdb"
+            or not snapshot.is_incremental_by_time_range
+            or not model.is_sql
+            or model.pre_statements
+            or model.post_statements
+            or model.signals
+            or not deployability_index.is_deployable(snapshot)
+            or model.gateway
+        ):
+            raise RewriteBlockedError(
+                "Prototype protects built-in deployable SQL time-range models on local DuckDB only"
+            )
+        if not self.snapshot_evaluator.adapter.table_exists(snapshot.table_name()):
+            raise RewriteBlockedError("Protected ordinary runs require existing physical tables")
+        catalog = exp.to_table(snapshot.table_name()).catalog
+        if catalog and catalog != self.snapshot_evaluator.adapter.get_current_catalog():
+            raise RewriteBlockedError("Prototype does not protect attached warehouse catalogs")
+
+    def _evaluate_batch(
+        self,
+        snapshot: Snapshot,
+        start: TimeLike,
+        end: TimeLike,
+        execution_time: TimeLike,
+        deployability_index: DeployabilityIndex,
+        batch_index: int,
+        environment_naming_info: t.Optional[EnvironmentNamingInfo] = None,
+        allow_destructive_snapshots: t.Optional[t.Set[str]] = None,
+        allow_additive_snapshots: t.Optional[t.Set[str]] = None,
+        target_table_exists: t.Optional[bool] = None,
+        **kwargs: t.Any,
+    ) -> t.List[AuditResult]:
         """Evaluate a snapshot and add the processed interval to the state sync.
 
         Args:
@@ -226,34 +319,58 @@ class Scheduler:
 
         is_deployable = deployability_index.is_deployable(snapshot)
 
-        wap_id = self.snapshot_evaluator.evaluate(
-            snapshot,
-            start=start,
-            end=end,
-            execution_time=execution_time,
-            snapshots=snapshots,
-            allow_destructive_snapshots=allow_destructive_snapshots,
-            allow_additive_snapshots=allow_additive_snapshots,
-            deployability_index=deployability_index,
-            batch_index=batch_index,
-            target_table_exists=target_table_exists,
-            **kwargs,
-        )
-        audit_results = self._audit_snapshot(
-            snapshot=snapshot,
-            environment_naming_info=environment_naming_info,
-            start=start,
-            end=end,
-            execution_time=execution_time,
-            snapshots=snapshots,
-            deployability_index=deployability_index,
-            wap_id=wap_id,
-            **kwargs,
-        )
+        from sqlmesh.core.state_sync.rewrite import evaluation_attempt
 
-        self.state_sync.add_interval(
-            snapshot, start, end, is_dev=not is_deployable, last_altered_ts=now_timestamp()
-        )
+        attempt = evaluation_attempt.get()
+        state = self.state_sync.rewrite_state() if attempt else None
+        try:
+            wap_id = self.snapshot_evaluator.evaluate(
+                snapshot,
+                start=start,
+                end=end,
+                execution_time=execution_time,
+                snapshots=snapshots,
+                allow_destructive_snapshots=allow_destructive_snapshots,
+                allow_additive_snapshots=allow_additive_snapshots,
+                deployability_index=deployability_index,
+                batch_index=batch_index,
+                target_table_exists=target_table_exists,
+                **kwargs,
+            )
+            audit_results = self._audit_snapshot(
+                snapshot=snapshot,
+                environment_naming_info=environment_naming_info,
+                start=start,
+                end=end,
+                execution_time=execution_time,
+                snapshots=snapshots,
+                deployability_index=deployability_index,
+                wap_id=wap_id,
+                **kwargs,
+            )
+
+        except Exception as error:
+            if state:
+                import duckdb
+
+                if isinstance(
+                    error,
+                    (
+                        duckdb.BinderException,
+                        duckdb.ConversionException,
+                        duckdb.ConstraintException,
+                        NodeAuditsErrors,
+                    ),
+                ):
+                    state.terminal(attempt)
+            raise
+
+        if state:
+            state.finish(attempt, snapshot)
+        else:
+            self.state_sync.add_interval(
+                snapshot, start, end, is_dev=not is_deployable, last_altered_ts=now_timestamp()
+            )
         return audit_results
 
     def run(
@@ -454,6 +571,20 @@ class Scheduler:
         Returns:
             A tuple of errors and skipped intervals.
         """
+        state = self.state_sync.rewrite_state()
+        if state:
+            self._require_rewrite_owner(state)
+            if (
+                is_restatement
+                or audit_only
+                or (
+                    run_environment_statements
+                    and self.state_sync.get_environment_statements(environment_naming_info.name)
+                )
+            ):
+                raise state.blocked(
+                    "Protected direct backfill, restatement and audit entry is unsupported"
+                )
         execution_time = execution_time or now_timestamp()
 
         selected_snapshots = [self.snapshots[sid] for sid in (selected_snapshot_ids or set())]
@@ -461,7 +592,7 @@ class Scheduler:
             selected_snapshots = list(merged_intervals)
 
         # Build the full DAG from all snapshots to preserve transitive dependencies
-        full_dag = snapshots_to_dag(self.snapshots.values())
+        full_dag = self._snapshot_dag
 
         # Create a subdag that includes the selected snapshots and all their upstream dependencies
         # This ensures that transitive dependencies are preserved even when intermediate nodes are not selected
@@ -602,6 +733,7 @@ class Scheduler:
                     run_node,
                     self.max_workers,
                     raise_on_error=False,
+                    context_factory=copy_context if state else None,
                 )
                 self.console.stop_evaluation_progress(success=not errors)
 
@@ -768,7 +900,40 @@ class Scheduler:
         cache[parent_sid] = transitive_deps
         return transitive_deps
 
-    def _run_or_audit(
+    def _run_or_audit(self, *args: t.Any, **kwargs: t.Any) -> CompletionStatus:
+        import threading
+        import uuid
+        from sqlmesh.core.state_sync.rewrite import execution_owner
+
+        state = self.state_sync.rewrite_state()
+        if not state:
+            return self._run_or_audit_admitted(*args, **kwargs)
+        if self._rewrite_owner:
+            raise state.blocked("Nested or concurrent scheduler invocation")
+        if self.snapshot_evaluator.adapter.dialect != "duckdb":
+            raise state.blocked(
+                "Prototype has no terminal-outcome contract for this warehouse engine"
+            )
+        owner = str(uuid.uuid4())
+        with state.execution(owner):
+            path = self.snapshot_evaluator.adapter.fetchone(
+                "SELECT path FROM duckdb_databases() WHERE database_name=current_database()"
+            )[0]
+            if not path:
+                raise state.blocked("Protected warehouse requires a persistent private DuckDB file")
+            state.bind_warehouse(owner, path)
+            self._rewrite_owner = owner
+            token = execution_owner.set(owner)
+            self._rewrite_locks = {
+                s.table_name(): threading.Lock() for s in self.snapshots.values()
+            }
+            try:
+                return self._run_or_audit_admitted(*args, **kwargs)
+            finally:
+                self._rewrite_owner = None
+                execution_owner.reset(token)
+
+    def _run_or_audit_admitted(
         self,
         environment: str | EnvironmentNamingInfo,
         start: t.Optional[TimeLike] = None,
@@ -828,6 +993,67 @@ class Scheduler:
             else DeployabilityIndex.all_deployable()
         )
         execution_time = execution_time or now_timestamp()
+
+        state = self.state_sync.rewrite_state()
+        if state:
+            if (
+                remove_intervals
+                or audit_only
+                or (
+                    run_environment_statements
+                    and self.state_sync.get_environment_statements(environment_naming_info.name)
+                )
+            ):
+                raise state.blocked(
+                    "Protected restatement, standalone audit and environment statements are unsupported"
+                )
+            for snapshot in self.snapshots.values():
+                self._validate_rewrite_scope(snapshot, deployability_index)
+            pending = state.list_unresolved()
+            for a in pending:
+                snapshot = self.snapshots_by_name.get(a.name)
+                if (
+                    snapshot is None
+                    or snapshot.identifier != a.identifier
+                    or snapshot.version != a.version
+                    or snapshot.table_name() != a.target
+                    or a.status.value != "terminal"
+                ):
+                    raise state.blocked("Rewrite is uncertain or its exact snapshot is unavailable")
+                if selected_snapshots is not None and a.name not in selected_snapshots:
+                    raise state.blocked("Selection excludes required repair")
+            # Repair exact owned ranges before missing-interval selection and NOTHING_TO_DO.
+            # Coverage stays persisted. Parent repairs precede child repairs.
+            from sqlmesh.utils.date import to_datetime
+
+            remaining = list(pending)
+            while remaining:
+                ready = [
+                    a
+                    for a in remaining
+                    if not any(
+                        p.name
+                        in self._rewrite_ancestor_names(self.snapshots_by_name[a.name], state)
+                        for p in remaining
+                    )
+                ]
+                if not ready:
+                    raise state.blocked("Repair dependencies cannot be ordered")
+                for a in ready:
+                    self._rewrite_repair_id = a.attempt_id
+                    try:
+                        self.evaluate(
+                            self.snapshots_by_name[a.name],
+                            to_datetime(a.start),
+                            to_datetime(a.end),
+                            execution_time,
+                            deployability_index,
+                            0,
+                            environment_naming_info=environment_naming_info,
+                        )
+                    finally:
+                        self._rewrite_repair_id = None
+                    remaining.remove(a)
 
         self.state_sync.refresh_snapshot_intervals(self.snapshots.values())
         for s_id, interval in (remove_intervals or {}).items():
