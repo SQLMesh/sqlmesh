@@ -185,6 +185,7 @@ class Scheduler:
             ignore_cron=ignore_cron,
             end_bounded=end_bounded,
         )
+
         # Filtering snapshots after computing missing intervals because we need all snapshots in order
         # to correctly infer start dates.
         if selected_snapshots is not None:
@@ -1083,7 +1084,9 @@ def merged_missing_intervals(
     restatements = restatements or {}
     validate_date_range(start, end)
 
-    return compute_interval_params(
+    deployability_index = deployability_index or DeployabilityIndex.all_deployable()
+
+    snapshots_to_intervals = compute_interval_params(
         snapshots,
         start=start or earliest_start_date(snapshots),
         end=end or now_timestamp(),
@@ -1095,6 +1098,15 @@ def merged_missing_intervals(
         ignore_cron=ignore_cron,
         end_bounded=end_bounded,
     )
+
+    if snapshots:
+        snapshots_to_intervals = {
+            snapshot: interval
+            for snapshot, interval in snapshots_to_intervals.items()
+            if deployability_index.is_eligible_for_physical_layer(snapshot)
+        }
+
+    return snapshots_to_intervals
 
 
 def compute_interval_params(
