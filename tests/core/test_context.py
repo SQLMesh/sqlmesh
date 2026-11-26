@@ -4427,6 +4427,72 @@ ON_VIRTUAL_UPDATE_END;
     assert model.on_virtual_update[1].sql() == "SELECT 'Model-specific update' AS message"
 
 
+@pytest.mark.parametrize("statement_type", ["pre_statements", "post_statements"])
+def test_model_defaults_statements_not_applied_to_external_models(
+    tmp_path: Path, statement_type: str
+):
+    """Changing a default statement that calls a project macro doesn't break the plan.
+
+    External models used to inherit the statement without the project's macros, so the second
+    plan failed when it rendered their copy to compare it.
+    """
+    (tmp_path / "macros").mkdir()
+    (tmp_path / "macros" / "tag.py").write_text(
+        """
+from sqlmesh import macro
+
+
+@macro()
+def tag_query(evaluator, version):
+    return None
+"""
+    )
+    (tmp_path / "external_models.yaml").write_text(
+        """
+- name: '"db"."ext_db"."ext_table"'
+  columns:
+    id: int
+"""
+    )
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "test_model.sql").write_text(
+        """
+MODEL (name test.test_model, kind FULL);
+
+SELECT id FROM db.ext_db.ext_table
+"""
+    )
+
+    def write_config(version: str) -> None:
+        (tmp_path / "config.yaml").write_text(
+            f"""
+gateways:
+    local:
+        connection:
+            type: duckdb
+            database: {tmp_path / "db.duckdb"}
+default_gateway: local
+model_defaults:
+    dialect: duckdb
+    {statement_type}:
+        - "@tag_query('{version}')"
+"""
+        )
+
+    write_config("v1")
+    ctx = Context(paths=[tmp_path])
+    ctx.engine_adapter.execute("CREATE SCHEMA ext_db")
+    ctx.engine_adapter.execute("CREATE TABLE ext_db.ext_table AS SELECT 1 AS id")
+    ctx.plan(auto_apply=True, no_prompts=True)
+
+    write_config("v2")
+    ctx = Context(paths=[tmp_path])
+    plan = ctx.plan(no_prompts=True)
+    assert [s.name for s in plan.directly_modified] == ['"db"."test"."test_model"']
+    assert not ctx.get_model("db.ext_db.ext_table").pre_statements
+    assert not ctx.get_model("db.ext_db.ext_table").post_statements
+
+
 def test_uppercase_gateway_external_models(tmp_path):
     # Create a temporary SQLMesh project with uppercase gateway name
     config_py = tmp_path / "config.py"
