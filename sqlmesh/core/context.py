@@ -210,17 +210,7 @@ class BaseContext(abc.ABC):
         )
         return self.resolve_table(model_name)
 
-    def resolve_table(self, model_name: str) -> str:
-        """Gets the physical table name for a given model.
-
-        Args:
-            model_name: The model name.
-
-        Returns:
-            The physical table name.
-        """
-        model_name = normalize_model_name(model_name, self.default_catalog, self.default_dialect)
-
+    def _resolve_normalized_table(self, model_name: str) -> str:
         if model_name not in self._model_tables:
             model_name_list = "\n".join(list(self._model_tables))
             logger.debug(
@@ -234,6 +224,19 @@ class BaseContext(abc.ABC):
         # fetchdf call and so the quotes need to be correct (eg. backticks for bigquery)
         return parse_one(self._model_tables[model_name]).sql(
             dialect=self.default_dialect, identify=True
+        )
+
+    def resolve_table(self, model_name: str) -> str:
+        """Gets the physical table name for a given model.
+
+        Args:
+            model_name: The model name.
+
+        Returns:
+            The physical table name.
+        """
+        return self._resolve_normalized_table(
+            normalize_model_name(model_name, self.default_catalog, self.default_dialect)
         )
 
     def fetchdf(
@@ -274,6 +277,8 @@ class ExecutionContext(BaseContext):
         deployability_index: Determines snapshots that are deployable in the context of this evaluation.
     """
 
+    _on_table_resolve: t.Optional[t.Callable[[str], None]] = None
+
     def __init__(
         self,
         engine_adapter: EngineAdapter,
@@ -285,6 +290,7 @@ class ExecutionContext(BaseContext):
         parent_intervals: t.Optional[Intervals] = None,
         variables: t.Optional[t.Dict[str, t.Any]] = None,
         blueprint_variables: t.Optional[t.Dict[str, t.Any]] = None,
+        on_table_resolve: t.Optional[t.Callable[[str], None]] = None,
     ):
         self.snapshots = snapshots
         self.deployability_index = deployability_index
@@ -295,6 +301,16 @@ class ExecutionContext(BaseContext):
         self._blueprint_variables = blueprint_variables or {}
         self._is_restatement = is_restatement
         self._parent_intervals = parent_intervals
+        self._on_table_resolve = on_table_resolve
+
+    def resolve_table(self, model_name: str) -> str:
+        normalized_name = normalize_model_name(
+            model_name, self.default_catalog, self.default_dialect
+        )
+        table_name = self._resolve_normalized_table(normalized_name)
+        if self._on_table_resolve is not None:
+            self._on_table_resolve(normalized_name)
+        return table_name
 
     @property
     def default_dialect(self) -> t.Optional[str]:
@@ -350,6 +366,7 @@ class ExecutionContext(BaseContext):
             self._is_restatement,
             variables=variables,
             blueprint_variables=blueprint_variables,
+            on_table_resolve=self._on_table_resolve,
         )
 
 

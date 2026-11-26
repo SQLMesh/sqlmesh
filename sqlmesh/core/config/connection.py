@@ -1501,17 +1501,29 @@ class PostgresConnectionConfig(ConnectionConfig):
     def _connection_factory(self) -> t.Callable:
         from psycopg2 import connect
 
-        return connect
-
-    @property
-    def _cursor_init(self) -> t.Optional[t.Callable[[t.Any], None]]:
         if not self.role:
-            return None
+            return connect
 
-        def init(cursor: t.Any) -> None:
-            cursor.execute(f"SET ROLE {self.role}")
+        role = self.role
 
-        return init
+        def connect_with_role(*args: t.Any, **kwargs: t.Any) -> t.Any:
+            conn = connect(*args, **kwargs)
+            try:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(f"SET ROLE {role}")
+                finally:
+                    cursor.close()
+                conn.commit()
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise
+            return conn
+
+        return connect_with_role
 
 
 class MySQLConnectionConfig(ConnectionConfig):

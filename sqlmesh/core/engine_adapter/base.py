@@ -98,6 +98,7 @@ class EngineAdapter:
     DEFAULT_BATCH_SIZE = 10000
     DATA_OBJECT_FILTER_BATCH_SIZE = 4000
     SUPPORTS_TRANSACTIONS = True
+    ROLLBACK_AFTER_PING = True
     SUPPORTS_INDEXES = False
     COMMENT_CREATION_TABLE = CommentCreationTable.IN_SCHEMA_DEF_CTAS
     COMMENT_CREATION_VIEW = CommentCreationView.IN_SCHEMA_DEF_AND_COMMANDS
@@ -3148,11 +3149,33 @@ class EngineAdapter:
     ) -> Query:
         return query
 
+    def _is_autocommit(self, conn: t.Optional[t.Any] = None) -> bool:
+        if conn is None:
+            conn = self._connection_pool.get()
+        autocommit = getattr(conn, "autocommit", None)
+        if isinstance(autocommit, bool):
+            return autocommit
+        autocommit_state = getattr(conn, "autocommit_state", None)
+        if isinstance(autocommit_state, bool):
+            return autocommit_state
+        return False
+
     def ping(self) -> None:
         try:
             self._execute(exp.select("1").sql(dialect=self.dialect))
         finally:
             self._connection_pool.close_cursor()
+
+        if (
+            self.SUPPORTS_TRANSACTIONS
+            and self.ROLLBACK_AFTER_PING
+            and not self._connection_pool.is_transaction_active
+        ):
+            conn = self._connection_pool.get()
+            if not self._is_autocommit(conn):
+                rollback = getattr(conn, "rollback", None)
+                if callable(rollback):
+                    rollback()
 
     @classmethod
     def _select_columns(

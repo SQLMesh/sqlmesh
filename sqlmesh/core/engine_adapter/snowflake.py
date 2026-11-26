@@ -61,6 +61,7 @@ class SnowflakeEngineAdapter(
     GetCurrentCatalogFromFunctionMixin, ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchemaMixin
 ):
     DIALECT = "snowflake"
+    ROLLBACK_AFTER_PING = False
     SUPPORTS_MATERIALIZED_VIEWS = True
     SUPPORTS_MATERIALIZED_VIEW_SCHEMA = True
     SUPPORTS_CLONING = True

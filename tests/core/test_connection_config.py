@@ -1192,6 +1192,77 @@ def test_postgres(make_config):
     assert config.is_recommended_for_state_sync is True
 
 
+def test_postgres_role_connection_factory(make_config, mocker):
+    import psycopg2
+
+    config_no_role = make_config(
+        type="postgres",
+        host="host",
+        user="user",
+        password="password",
+        port=5432,
+        database="database",
+    )
+    assert config_no_role._cursor_init is None
+    assert config_no_role._connection_factory is psycopg2.connect
+
+    config_with_role = make_config(
+        type="postgres",
+        host="host",
+        user="user",
+        password="password",
+        port=5432,
+        database="database",
+        role="analytics",
+    )
+    assert config_with_role._cursor_init is None
+
+    mock_conn = mocker.MagicMock()
+    mock_cursor = mocker.MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    connect_mock = mocker.patch("psycopg2.connect", return_value=mock_conn)
+
+    events: t.List[str] = []
+    mock_cursor.execute.side_effect = lambda sql: events.append(f"execute:{sql}")
+    mock_cursor.close.side_effect = lambda: events.append("close_cursor")
+    mock_conn.commit.side_effect = lambda: events.append("commit")
+
+    conn = config_with_role._connection_factory(host="host", user="user")
+    assert conn is mock_conn
+    connect_mock.assert_called_once_with(host="host", user="user")
+    assert events == ["execute:SET ROLE analytics", "close_cursor", "commit"]
+    mock_conn.close.assert_not_called()
+
+    # If SET ROLE fails, the connection must be closed and the error re-raised
+    failing_conn = mocker.MagicMock()
+    failing_cursor = mocker.MagicMock()
+    failing_cursor.execute.side_effect = RuntimeError("permission denied for role")
+    failing_conn.cursor.return_value = failing_cursor
+    connect_mock.return_value = failing_conn
+
+    with pytest.raises(RuntimeError, match="permission denied for role"):
+        config_with_role._connection_factory(host="host", user="user")
+
+    failing_cursor.close.assert_called_once()
+    failing_conn.commit.assert_not_called()
+    failing_conn.close.assert_called_once()
+
+    # If conn.close() also fails while cleaning up, the original SET ROLE error must still propagate
+    failing_close_conn = mocker.MagicMock()
+    failing_close_cursor = mocker.MagicMock()
+    failing_close_cursor.execute.side_effect = RuntimeError("permission denied for role")
+    failing_close_conn.cursor.return_value = failing_close_cursor
+    failing_close_conn.close.side_effect = RuntimeError("close failed")
+    connect_mock.return_value = failing_close_conn
+
+    with pytest.raises(RuntimeError, match="permission denied for role"):
+        config_with_role._connection_factory(host="host", user="user")
+
+    failing_close_cursor.close.assert_called_once()
+    failing_close_conn.commit.assert_not_called()
+    failing_close_conn.close.assert_called_once()
+
+
 def test_gcp_postgres(make_config):
     config = make_config(
         type="gcp_postgres",

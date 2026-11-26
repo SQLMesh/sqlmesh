@@ -2017,6 +2017,443 @@ def test_snapshot_evaluator_yield_empty_pd(adapter_mock, make_snapshot):
     adapter_mock.insert_overwrite_by_time_partition.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "kind, overwrite_strategy, insert_method, payload",
+    [
+        (
+            FullKind(),
+            InsertOverwriteStrategy.DELETE_INSERT,
+            "replace_query",
+            """import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    return pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])""",
+        ),
+        (
+            IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds", format="%Y-%m-%d")),
+            InsertOverwriteStrategy.DELETE_INSERT,
+            "insert_overwrite_by_time_partition",
+            """import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    yield pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])""",
+        ),
+        (
+            IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds", format="%Y-%m-%d")),
+            InsertOverwriteStrategy.INSERT_OVERWRITE,
+            "insert_overwrite_by_time_partition",
+            """import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    yield pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])""",
+        ),
+        (
+            "scd_type_2_by_time",
+            InsertOverwriteStrategy.DELETE_INSERT,
+            "scd_type_2_by_time",
+            """import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    return pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])""",
+        ),
+    ],
+)
+def test_python_model_defers_create_table_until_first_yield(
+    adapter_mock,
+    make_snapshot,
+    kind,
+    overwrite_strategy,
+    insert_method,
+    payload,
+):
+    from sqlmesh.core.model.kind import SCDType2ByTimeKind
+
+    if kind == "scd_type_2_by_time":
+        kind = SCDType2ByTimeKind(unique_key=["a"], updated_at_name="ds")
+
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = overwrite_strategy
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+    getattr(adapter_mock, insert_method).side_effect = lambda *args, **kwargs: events.append(
+        "insert"
+    )
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=kind,
+            columns={"a": "INT", "ds": "STRING"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload=payload,
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={},
+        events=events,
+    )
+
+    assert events == ["python_execute", "create_table", "insert"]
+
+
+def test_python_model_streaming_creates_table_once_after_first_batch(adapter_mock, make_snapshot):
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+    adapter_mock.insert_overwrite_by_time_partition.side_effect = (
+        lambda *args, **kwargs: events.append("insert")
+    )
+    adapter_mock.insert_append.side_effect = lambda *args, **kwargs: events.append("append")
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds", format="%Y-%m-%d")),
+            columns={"a": "INT", "ds": "STRING"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload="""import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("yield_0")
+    yield pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])
+    events.append("yield_1")
+    yield pd.DataFrame([{"a": 2, "ds": "2023-01-01"}])""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={},
+        events=events,
+    )
+
+    assert events == ["yield_0", "create_table", "insert", "yield_1", "append"]
+    adapter_mock.create_table.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "overwrite_strategy",
+    [InsertOverwriteStrategy.DELETE_INSERT, InsertOverwriteStrategy.INSERT_OVERWRITE],
+)
+def test_python_model_empty_generator_still_creates_table(
+    adapter_mock, make_snapshot, overwrite_strategy
+):
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = overwrite_strategy
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds", format="%Y-%m-%d")),
+            columns={"a": "INT", "ds": "STRING"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload="""def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    yield from ()""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={},
+        events=events,
+    )
+
+    assert events == ["python_execute", "create_table"]
+    adapter_mock.create_table.assert_called_once()
+    adapter_mock.insert_overwrite_by_time_partition.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "overwrite_strategy",
+    [InsertOverwriteStrategy.DELETE_INSERT, InsertOverwriteStrategy.INSERT_OVERWRITE],
+)
+def test_python_model_exception_before_yield_skips_create_table(
+    adapter_mock, make_snapshot, overwrite_strategy
+):
+    from sqlmesh.utils.errors import PythonModelEvalError
+
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = overwrite_strategy
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds", format="%Y-%m-%d")),
+            columns={"a": "INT", "ds": "STRING"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload="""def python_func(context, **kwargs):
+    raise RuntimeError("boom")
+    yield""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    with pytest.raises(PythonModelEvalError, match="boom"):
+        evaluator.evaluate(
+            snapshot,
+            start="2023-01-01",
+            end="2023-01-01",
+            execution_time="2023-01-01",
+            snapshots={},
+        )
+
+    adapter_mock.create_table.assert_not_called()
+
+
+def test_python_model_self_referential_creates_table_upfront(adapter_mock, make_snapshot):
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+    adapter_mock.insert_overwrite_by_time_partition.side_effect = (
+        lambda *args, **kwargs: events.append("insert")
+    )
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=IncrementalByTimeRangeKind(time_column=TimeColumn(column="ds", format="%Y-%m-%d")),
+            columns={"a": "INT", "ds": "STRING"},
+            depends_on={"db.model"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload="""import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    return pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    assert snapshot.model.depends_on_self is True
+
+    evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={},
+        events=events,
+    )
+
+    assert events == ["create_table", "python_execute", "insert"]
+
+
+def test_python_model_wap_enabled_creates_table_upfront(adapter_mock, make_snapshot):
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = True
+    adapter_mock.wap_supported.return_value = True
+    adapter_mock.wap_prepare.side_effect = lambda table, wap_id: (
+        events.append("wap_prepare") or f"{table}__{wap_id}"
+    )
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+    adapter_mock.replace_query.side_effect = lambda *args, **kwargs: events.append("insert")
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=FullKind(),
+            columns={"a": "INT"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload="""import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    return pd.DataFrame([{"a": 1}])""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    wap_id = evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={},
+        events=events,
+    )
+
+    assert wap_id is not None
+    assert events == ["create_table", "wap_prepare", "python_execute", "insert"]
+
+
+def test_python_model_incremental_by_unique_key_defers_create_table_before_columns(
+    adapter_mock, make_snapshot
+):
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+
+    def _columns(*args: t.Any, **kwargs: t.Any) -> t.Dict[str, exp.DataType]:
+        events.append("columns")
+        return {"a": exp.DataType.build("INT"), "ds": exp.DataType.build("STRING")}
+
+    adapter_mock.columns.side_effect = _columns
+    adapter_mock.replace_query.side_effect = lambda *args, **kwargs: events.append("insert")
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=IncrementalByUniqueKeyKind(unique_key=["a"]),
+            columns={"a": "INT", "ds": "STRING"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload="""import pandas as pd
+def python_func(context, events, **kwargs):
+    events.append("python_execute")
+    return pd.DataFrame([{"a": 1, "ds": "2023-01-01"}])""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={},
+        events=events,
+    )
+
+    assert events == ["python_execute", "create_table", "columns", "insert"]
+    adapter_mock.create_table.assert_called_once()
+    adapter_mock.columns.assert_called_once()
+
+
+@pytest.mark.parametrize("resolve_method", ["resolve_table", "table"])
+def test_python_model_resolve_table_self_creates_table_lazily(
+    adapter_mock, make_snapshot, resolve_method
+):
+    events: t.List[str] = []
+    adapter_mock.table_exists.return_value = False
+    adapter_mock.wap_enabled = False
+    adapter_mock.INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.DELETE_INSERT
+    adapter_mock.create_table.side_effect = lambda *args, **kwargs: events.append("create_table")
+    adapter_mock.replace_query.side_effect = lambda *args, **kwargs: events.append("insert")
+
+    evaluator = SnapshotEvaluator(adapter_mock)
+    upstream_snapshot = make_snapshot(
+        SqlModel(name="db.upstream", query=parse_one("SELECT 1 AS a"))
+    )
+    upstream_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+
+    snapshot = make_snapshot(
+        PythonModel(
+            name="db.model",
+            entrypoint="python_func",
+            kind=FullKind(),
+            columns={"a": "INT"},
+            depends_on={"db.upstream"},
+            python_env={
+                "python_func": Executable(
+                    name="python_func",
+                    alias="python_func",
+                    path="test_snapshot_evaluator.py",
+                    payload=f"""import pandas as pd
+def python_func(context, events, **kwargs):
+    context.{resolve_method}("db.upstream")
+    events.append("after_upstream_resolve")
+    context.{resolve_method}("db.model")
+    events.append("after_self_resolve")
+    return pd.DataFrame([{{"a": 1}}])""",
+                )
+            },
+        )
+    )
+    snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    assert snapshot.model.depends_on_self is False
+
+    evaluator.evaluate(
+        snapshot,
+        start="2023-01-01",
+        end="2023-01-01",
+        execution_time="2023-01-01",
+        snapshots={upstream_snapshot.name: upstream_snapshot, snapshot.name: snapshot},
+        events=events,
+    )
+
+    assert events == ["after_upstream_resolve", "create_table", "after_self_resolve", "insert"]
+    assert adapter_mock.create_table.call_count == 1
+
+
 def test_create_clone_in_dev(mocker: MockerFixture, adapter_mock, make_snapshot):
     adapter_mock.SUPPORTS_CLONING = True
     adapter_mock.get_alter_operations.return_value = []
