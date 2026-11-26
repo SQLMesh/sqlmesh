@@ -224,9 +224,13 @@ Options:
 ## format
 
 ```
-Usage: sqlmesh format [OPTIONS]
+Usage: sqlmesh format [OPTIONS] [PATHS]...
 
   Format all SQL models and audits.
+
+  PATHS are SQL model or audit files. When given, only those files are
+  formatted and the project is not loaded. Paths that are not SQL models or
+  audits, such as macros, are left alone.
 
 Options:
   -t, --transpile TEXT        Transpile project models to the specified
