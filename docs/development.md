@@ -27,6 +27,8 @@ For symbolic links, you must ensure that when checking out the repository:
 
 Development containers are supported by [a number of IDEs](https://containers.dev/supporting.html). For developers using VSCode,  [Microsoft has a tutorial on how to use development containers](https://code.visualstudio.com/docs/devcontainers/tutorial).
 
+It is also required that `core.autocrlf` is set to `input`. This ensures that Windows carriage return characters are not present, which can cause unexpected failures in shell scripts on Linux images, and Python tests.
+
 ## Virtual environment setup
 
 We do recommend using a virtual environment to develop SQLMesh.
