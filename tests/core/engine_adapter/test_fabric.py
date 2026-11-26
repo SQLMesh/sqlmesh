@@ -12,6 +12,7 @@ from sqlmesh.core.engine_adapter import FabricEngineAdapter
 from sqlmesh.core.engine_adapter.fabric import FabricHttpClient
 from tests.core.engine_adapter import to_sql_calls
 from sqlmesh.core.engine_adapter.shared import DataObject, DataObjectType
+from sqlmesh.utils.errors import SQLMeshError
 
 pytestmark = [pytest.mark.engine, pytest.mark.fabric]
 
@@ -546,6 +547,128 @@ def test_create_warehouse_unrelated_conflict_still_raises(
 
     with pytest.raises(requests.HTTPError):
         fabric_http_client.create_warehouse("my_warehouse")
+
+
+def test_drop_catalog_waits_for_async_delete(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    location = "https://api.fabric.microsoft.com/v1/operations/op-1"
+    api_client = mocker.MagicMock()
+    api_client.delete_warehouse.return_value = location
+    adapter._connection_pool.set_attribute("api_client", api_client)
+
+    adapter.drop_catalog("ci_prod__dev")
+
+    api_client._wait_for_completion.assert_called_once_with(location, "ci_prod__dev")
+
+
+def test_drop_catalog_closes_when_deleted_warehouse_is_connected(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    api_client = mocker.MagicMock()
+    api_client.delete_warehouse.return_value = None
+    adapter._connection_pool.set_attribute("api_client", api_client)
+    adapter._connection_pool.set_attribute("connected_catalog", "ci_prod__dev")
+    close = mocker.spy(adapter, "close")
+
+    adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_called_once()
+    api_client.delete_warehouse.assert_called_once_with("ci_prod__dev")
+
+
+def test_drop_catalog_keeps_connection_when_deleted_warehouse_is_idle(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    api_client = mocker.MagicMock()
+    api_client.delete_warehouse.return_value = None
+    adapter._connection_pool.set_attribute("api_client", api_client)
+    close = mocker.spy(adapter, "close")
+
+    adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_not_called()
+    api_client.delete_warehouse.assert_called_once_with("ci_prod__dev")
+
+
+def test_drop_catalog_closes_when_wait_fails_after_delete_accepted(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    api_client = mocker.MagicMock()
+    api_client.delete_warehouse.return_value = "https://api.fabric.microsoft.com/v1/operations/op-1"
+    api_client._wait_for_completion.side_effect = SQLMeshError("delete failed")
+    adapter._connection_pool.set_attribute("api_client", api_client)
+    adapter._connection_pool.set_attribute("connected_catalog", "ci_prod__dev")
+    close = mocker.spy(adapter, "close")
+
+    with pytest.raises(SQLMeshError, match="delete failed"):
+        adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_called_once()
+
+
+def test_drop_catalog_skips_close_when_delete_not_accepted(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+) -> None:
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    api_client = mocker.MagicMock()
+    api_client.delete_warehouse.side_effect = SQLMeshError("list warehouses failed")
+    adapter._connection_pool.set_attribute("api_client", api_client)
+    adapter._connection_pool.set_attribute("connected_catalog", "ci_prod__dev")
+    close = mocker.spy(adapter, "close")
+
+    with pytest.raises(SQLMeshError, match="list warehouses failed"):
+        adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_not_called()
+
+
+def test_drop_catalog_closes_when_warehouse_already_absent(
+    make_mocked_engine_adapter: t.Callable,
+    fabric_http_client: FabricHttpClient,
+    mocker: MockerFixture,
+) -> None:
+    """Missing-warehouse (None) must still clear an in-use connection."""
+    adapter = make_mocked_engine_adapter(
+        FabricEngineAdapter,
+        default_catalog="ci_prod",
+        database="ci_prod",
+    )
+    list_resp = mocker.MagicMock()
+    list_resp.json.return_value = {"value": [{"displayName": "other_wh", "id": "wh-2"}]}
+    fabric_http_client.session.get.return_value = list_resp
+    adapter._connection_pool.set_attribute("api_client", fabric_http_client)
+    adapter._connection_pool.set_attribute("connected_catalog", "ci_prod__dev")
+    close = mocker.spy(adapter, "close")
+
+    adapter.drop_catalog("ci_prod__dev")
+
+    close.assert_called_once()
+    fabric_http_client.session.delete.assert_not_called()
 
 
 def test_get_data_objects_uses_configured_default_catalog(
