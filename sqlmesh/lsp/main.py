@@ -9,10 +9,17 @@ import urllib.parse
 import uuid
 
 from lsprotocol import types
-from lsprotocol.types import (
-    WorkspaceDiagnosticRefreshRequest,
-    WorkspaceInlayHintRefreshRequest,
-)
+
+try:
+    from lsprotocol.types import (
+        WorkspaceDiagnosticRefreshRequest,
+        WorkspaceInlayHintRefreshRequest,
+    )
+except ImportError:
+    from lsprotocol.types import (  # type: ignore[attr-defined,no-redef]
+        DiagnosticRefreshRequest as WorkspaceDiagnosticRefreshRequest,
+        InlayHintRefreshRequest as WorkspaceInlayHintRefreshRequest,
+    )
 from pygls.server import LanguageServer
 from sqlglot import exp
 from sqlmesh._version import __version__
