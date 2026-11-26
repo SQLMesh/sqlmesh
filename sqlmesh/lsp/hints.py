@@ -6,7 +6,8 @@ from lsprotocol import types
 
 from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
-from sqlmesh.core.model.definition import SqlModel
+from sqlmesh.core.dialect import parse
+from sqlmesh.core.model.definition import SqlModel, _split_sql_model_statements
 from sqlmesh.lsp.context import LSPContext, ModelTarget
 from sqlmesh.lsp.uri import URI
 
@@ -16,6 +17,7 @@ def get_hints(
     document_uri: URI,
     start_line: int,
     end_line: int,
+    document_text: t.Optional[str] = None,
 ) -> t.List[types.InlayHint]:
     """
     Get type hints for certain lines in a document
@@ -25,6 +27,8 @@ def get_hints(
         document_uri: The URI of the document
         start_line: the starting line to get hints for
         end_line: the ending line to get hints for
+        document_text: the text currently held by the editor, if it may differ from the
+            text the context was loaded from
 
     Returns:
         A list of hints to apply to the document
@@ -49,13 +53,43 @@ def get_hints(
     if not isinstance(model, SqlModel):
         return []
 
-    query = model.query
     dialect = model.dialect
     columns_to_types = model.columns_to_types or {}
+
+    query: exp.Expr
+    if document_text is None:
+        query = model.query
+    else:
+        # The context is only reloaded when the document is saved, so the model's query
+        # carries the positions of the text as it was last saved. Placing hints at those
+        # positions puts them inside tokens the user is still editing, so take the
+        # positions from the text the editor currently holds instead. Column types are
+        # still looked up by name on the loaded model, and a column that isn't on it yet
+        # simply gets no hint until the next reload.
+        parsed_query = _query_from_document_text(document_text, dialect)
+        if parsed_query is None:
+            return []
+        query = parsed_query
 
     return _get_type_hints_for_model_from_query(
         query, dialect, columns_to_types, start_line, end_line
     )
+
+
+def _query_from_document_text(document_text: str, dialect: str) -> t.Optional[exp.Expr]:
+    """Extract the model's query from the raw text of a model file.
+
+    Returns None if the text cannot be parsed, which is expected while the user is
+    part-way through an edit.
+    """
+    try:
+        expressions = parse(document_text, default_dialect=dialect)
+        if not expressions:
+            return None
+        query, *_ = _split_sql_model_statements(expressions[1:], None, dialect=dialect)
+        return query
+    except Exception:
+        return None
 
 
 def _get_type_hints_for_select(
