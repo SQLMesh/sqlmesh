@@ -15,6 +15,7 @@ from sqlmesh.core.config import (
     GatewayConfig,
     ModelDefaultsConfig,
     DuckDBConnectionConfig,
+    OwnershipConfig,
     TableNamingConvention,
     AutoCategorizationMode,
 )
@@ -578,3 +579,47 @@ def test_auto_categorization(sushi_context: Context):
         sushi_context.get_snapshot("sushi.waiter_as_customer_by_day", raise_if_missing=True).version
         == version
     )
+
+
+def test_ownership_config_plan_applies_without_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """OwnershipConfig flows through the full plan/apply lifecycle without errors.
+
+    DuckDB's alter_schema_owner/alter_view_owner are no-ops, so we cannot verify
+    that ownership was actually changed — but we confirm the config plumbing
+    doesn't break schema creation, view promotion, or dev environment application.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        default_connection=DuckDBConnectionConfig(),
+        ownership=OwnershipConfig(
+            environment_owner_mapping={
+                "^prod$": "svc_prod_owner",
+                ".*": "group:shared-developers",
+            }
+        ),
+    )
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "model.sql").write_text(
+        """
+        MODEL (name example_schema.test_model, kind FULL);
+        SELECT '1' AS a
+        """
+    )
+
+    ctx = Context(config=config, paths=tmp_path)
+
+    # Prod plan/apply — exercises virtual layer schema and view creation with ownership config
+    ctx.plan(auto_apply=True)
+    assert ctx.engine_adapter.table_exists("example_schema.test_model")
+
+    # Dev plan/apply — exercises env-suffixed schema and view creation with ownership config
+    ctx.plan(environment="dev", include_unmodified=True, auto_apply=True)
+    metadata = DuckDBMetadata.from_context(ctx)
+    dev_schemas = {s for s in metadata.schemas if "__dev" in s}
+    assert len(dev_schemas) > 0
