@@ -1495,3 +1495,255 @@ def test_new_forward_only_model_same_dev_environment(init_and_plan_context: t.Ca
 
     df = context.fetchdf("SELECT * FROM memory.sushi__dev.new_model").replace({np.nan: None})
     assert df.to_dict() == {"ds": {0: "2023-01-07"}, "b": {0: 1}}
+
+
+def _init_mv_context(tmp_path):
+    from sqlmesh.core.config import Config, DuckDBConnectionConfig, GatewayConfig
+    from tests.utils.test_filesystem import create_temp_file
+
+    models_dir = tmp_path / "models"
+    create_temp_file(
+        tmp_path,
+        models_dir / "src.sql",
+        """
+        MODEL (
+            name db.src,
+            kind FULL,
+        );
+        SELECT 1 AS a, '2023-01-01' AS ds;
+        """,
+    )
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+        );
+        SELECT a, ds FROM db.src;
+        """,
+    )
+    config = Config(
+        gateways={"": GatewayConfig(connection=DuckDBConnectionConfig())},
+        default_gateway="",
+    )
+    return Context(paths=tmp_path, config=config)
+
+
+def test_materialized_view_metadata_only_no_recreate(tmp_path, mocker):
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from tests.utils.test_filesystem import create_temp_file
+
+    context = _init_mv_context(tmp_path)
+    create_view_spy = mocker.spy(DuckDBEngineAdapter, "create_view")
+    drop_view_spy = mocker.spy(DuckDBEngineAdapter, "drop_view")
+
+    # Initial prod deploy builds the physical MV once
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    mv_creates = [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")]
+    assert len(mv_creates) == 1
+    assert context.engine_adapter.fetchall("SELECT a FROM db.mv") == [(1,)]
+
+    models_dir = tmp_path / "models"
+
+    # 1. Metadata-only change in prod (owner + tags + SQL comment) -> zero physical MV recreate/drop
+    create_view_spy.reset_mock()
+    drop_view_spy.reset_mock()
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+            owner alice,
+            tags ['analytics'],
+        );
+        SELECT a, ds FROM db.src -- trailing doc comment
+        """,
+    )
+    context.load()
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")] == []
+    assert drop_view_spy.call_count == 0
+    assert context.engine_adapter.fetchall("SELECT a FROM db.mv") == [(1,)]
+
+    # 2. Dev -> prod metadata-only change -> zero physical MV recreate/drop on prod deploy
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+            owner bob,
+            tags ['analytics', 'core'],
+        );
+        SELECT a, ds FROM db.src -- updated doc comment
+        """,
+    )
+    context.load()
+    context.plan("dev", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    create_view_spy.reset_mock()
+    drop_view_spy.reset_mock()
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")] == []
+    assert drop_view_spy.call_count == 0
+    assert context.engine_adapter.fetchall("SELECT a FROM db.mv") == [(1,)]
+
+    # 3. Rollback in prod to previous metadata-only snapshot -> zero physical MV recreate/drop
+    create_view_spy.reset_mock()
+    drop_view_spy.reset_mock()
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+            owner alice,
+            tags ['analytics'],
+        );
+        SELECT a, ds FROM db.src -- trailing doc comment
+        """,
+    )
+    context.load()
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    assert [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")] == []
+    assert drop_view_spy.call_count == 0
+
+    # 4. Physical grants sync (add, update, revoke-all) -> sync_grants_config without MV recreation
+    mocker.patch.object(DuckDBEngineAdapter, "SUPPORTS_GRANTS", True)
+    sync_grants_mock = mocker.patch.object(DuckDBEngineAdapter, "sync_grants_config")
+    for grants_sql, expected_grants in [
+        ("grants ('select' = ['analyst'])", {"select": ["analyst"]}),
+        ("grants ('select' = ['analyst', 'viewer'])", {"select": ["analyst", "viewer"]}),
+        ("grants ()", {}),
+    ]:
+        create_view_spy.reset_mock()
+        drop_view_spy.reset_mock()
+        sync_grants_mock.reset_mock()
+        create_temp_file(
+            tmp_path,
+            models_dir / "mv.sql",
+            f"""
+            MODEL (
+                name db.mv,
+                kind VIEW (materialized true),
+                owner alice,
+                grants_target_layer physical,
+                {grants_sql},
+            );
+            SELECT a, ds FROM db.src -- trailing doc comment
+            """,
+        )
+        context.load()
+        context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+        assert [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")] == []
+        assert drop_view_spy.call_count == 0
+        assert sync_grants_mock.call_count == 1
+        assert sync_grants_mock.call_args[0][1] == expected_grants
+
+    # 5. Stacked dev forward-only SQL change + metadata-only change -> prod MUST migrate MV
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+            owner alice,
+        );
+        SELECT a + 10 AS a, ds FROM db.src
+        """,
+    )
+    context.load()
+    context.plan("dev", forward_only=True, auto_apply=True, no_prompts=True, skip_tests=True)
+
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+            owner charlie,
+        );
+        SELECT a + 10 AS a, ds FROM db.src
+        """,
+    )
+    context.load()
+    context.plan("dev", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    create_view_spy.reset_mock()
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+    mv_creates = [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")]
+    assert len(mv_creates) == 1
+    assert context.engine_adapter.fetchall("SELECT a FROM db.mv") == [(11,)]
+
+
+def test_materialized_view_upstream_breaking_with_downstream_forward_only_created_once(
+    tmp_path, mocker
+):
+    from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+    from tests.utils.test_filesystem import create_temp_file
+
+    context = _init_mv_context(tmp_path)
+    models_dir = tmp_path / "models"
+    create_temp_file(
+        tmp_path,
+        models_dir / "downstream.sql",
+        """
+        MODEL (
+            name db.downstream,
+            kind INCREMENTAL_BY_TIME_RANGE (
+                time_column ds,
+                forward_only true,
+            ),
+            start '2023-01-01',
+        );
+        SELECT a, ds FROM db.mv;
+        """,
+    )
+    context.load()
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    create_view_spy = mocker.spy(DuckDBEngineAdapter, "create_view")
+    # Breaking change on upstream MV + forward_only downstream table
+    create_temp_file(
+        tmp_path,
+        models_dir / "mv.sql",
+        """
+        MODEL (
+            name db.mv,
+            kind VIEW (materialized true),
+        );
+        SELECT a * 2 AS a, 99 AS b, ds FROM db.src;
+        """,
+    )
+    create_temp_file(
+        tmp_path,
+        models_dir / "downstream.sql",
+        """
+        MODEL (
+            name db.downstream,
+            kind INCREMENTAL_BY_TIME_RANGE (
+                time_column ds,
+                forward_only true,
+            ),
+            start '2023-01-01',
+        );
+        SELECT a, b, ds FROM db.mv;
+        """,
+    )
+    context.load()
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    mv_creates = [c for c in create_view_spy.call_args_list if c.kwargs.get("materialized")]
+    # Upstream MV must be created once (during BackfillStage), NOT recreated during MigrateSchemasStage
+    assert len(mv_creates) == 1
+    assert context.engine_adapter.fetchall("SELECT a, b FROM db.mv") == [(2, 99)]
+    # Downstream forward-only table had column `b` added without re-backfilling historical intervals
+    assert context.engine_adapter.fetchall("SELECT a, b FROM db.downstream") == [(1, None)]

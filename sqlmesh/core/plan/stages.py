@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import typing as t
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from sqlmesh.core import constants as c
 from sqlmesh.core.environment import EnvironmentStatements, EnvironmentNamingInfo, Environment
 from sqlmesh.core.plan.common import should_force_rebuild
@@ -14,6 +16,7 @@ from sqlmesh.core.snapshot.definition import (
     SnapshotId,
     snapshots_to_dag,
 )
+from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.errors import PlanError
 
 
@@ -154,11 +157,17 @@ class MigrateSchemasStage:
         snapshots: Snapshots to migrate schemas for.
         all_snapshots: All snapshots in the plan by snapshot ID.
         deployability_index: Deployability index for this stage.
+        grants_only_snapshot_ids: Snapshot IDs that only need physical grants synchronized
+            without recreating or altering their physical objects.
+        create_only_snapshot_ids: Snapshot IDs that should only be created if their physical
+            object does not yet exist, without being migrated or recreated if it already exists.
     """
 
     snapshots: t.List[Snapshot]
     all_snapshots: t.Dict[SnapshotId, Snapshot]
     deployability_index: DeployabilityIndex
+    grants_only_snapshot_ids: t.Set[SnapshotId] = field(default_factory=set)
+    create_only_snapshot_ids: t.Set[SnapshotId] = field(default_factory=set)
 
 
 @dataclass
@@ -263,7 +272,6 @@ class PlanStagesBuilder:
         if plan.is_dev:
             before_promote_snapshots = all_selected_for_backfill_snapshots
             after_promote_snapshots = set()
-            snapshots_with_schema_migration = []
         else:
             before_promote_snapshots = {
                 s.snapshot_id
@@ -273,30 +281,6 @@ class PlanStagesBuilder:
             }
             after_promote_snapshots = all_selected_for_backfill_snapshots - before_promote_snapshots
             deployability_index = DeployabilityIndex.all_deployable()
-
-            snapshot_ids_with_schema_migration = [
-                s.snapshot_id for s in snapshots.values() if s.requires_schema_migration_in_prod
-            ]
-            # Include all upstream dependencies of snapshots that require schema migration to make sure
-            # the upstream tables are created before the schema updates are applied
-            snapshot_ids_to_migrate = set(dag.subdag(*snapshot_ids_with_schema_migration))
-            # Migrating a view replaces it, and engines like Postgres drop its dependent views with CASCADE,
-            # so those are migrated too to be recreated
-            for s_id in dag:
-                snapshot = snapshots[s_id]
-                if snapshot.is_view and any(
-                    p_id in snapshot_ids_to_migrate
-                    and snapshots[p_id].is_view
-                    and snapshots[p_id].supports_schema_migration_in_prod
-                    for p_id in snapshot.parents
-                ):
-                    snapshot_ids_to_migrate.add(s_id)
-            snapshots_with_schema_migration = [
-                snapshots[s_id]
-                for s_id in dag
-                if s_id in snapshot_ids_to_migrate
-                and snapshots[s_id].supports_schema_migration_in_prod
-            ]
 
         snapshots_to_intervals = self._missing_intervals(
             plan, snapshots_by_name, deployability_index
@@ -387,14 +371,12 @@ class PlanStagesBuilder:
             )
         )
 
-        if snapshots_with_schema_migration:
-            stages.append(
-                MigrateSchemasStage(
-                    snapshots=snapshots_with_schema_migration,
-                    all_snapshots=snapshots,
-                    deployability_index=deployability_index,
-                )
+        if not plan.is_dev:
+            migrate_schemas_stage = self._get_migrate_schemas_stage(
+                snapshots, dag, existing_environment, deployability_index, needs_backfill
             )
+            if migrate_schemas_stage:
+                stages.append(migrate_schemas_stage)
 
         if not plan.is_dev and not plan.ensure_finalized_snapshots and promoted_snapshots:
             # Only unpause at this point if we don't have to use the finalized snapshots
@@ -505,6 +487,170 @@ class PlanStagesBuilder:
                 if plan.is_selected_for_backfill(s.name)
             },
             deployability_index=deployability_index,
+        )
+
+    def _get_migrate_schemas_stage(
+        self,
+        snapshots: t.Dict[SnapshotId, Snapshot],
+        dag: DAG[SnapshotId],
+        existing_environment: t.Optional[Environment],
+        deployability_index: DeployabilityIndex,
+        needs_backfill: bool,
+    ) -> t.Optional[MigrateSchemasStage]:
+        if existing_environment and not existing_environment.expired:
+            if existing_environment.finalized_ts:
+                prod_baselines: t.List[t.Dict[str, SnapshotTableInfo]] = [
+                    {s.name: s for s in existing_environment.snapshots}
+                ]
+            elif existing_environment.previous_finalized_snapshots:
+                # Unfinalized prod environment: the previous failed plan may have stopped either
+                # before or after MigrateSchemasStage, so the live physical MV could match either
+                # previous_finalized_snapshots or existing_environment.snapshots. Only skip
+                # recreation when the candidate matches both baselines.
+                prod_baselines = [
+                    {s.name: s for s in existing_environment.previous_finalized_snapshots},
+                    {s.name: s for s in existing_environment.snapshots},
+                ]
+            else:
+                prod_baselines = []
+        else:
+            prod_baselines = []
+
+        candidate_mv_old_ids: t.Set[SnapshotId] = {
+            baseline[s.name].snapshot_id
+            for s in snapshots.values()
+            if s.requires_schema_migration_in_prod and s.is_materialized_view
+            for baseline in prod_baselines
+            if s.name in baseline
+        }
+        old_snapshots_by_id: t.Dict[SnapshotId, Snapshot] = {}
+        if candidate_mv_old_ids:
+            missing_old_ids = [s_id for s_id in candidate_mv_old_ids if s_id not in snapshots]
+            fetched_old_snapshots = (
+                self.state_reader.get_snapshots(missing_old_ids) if missing_old_ids else {}
+            )
+            for s_id in candidate_mv_old_ids:
+                old_snapshot = snapshots.get(s_id) or fetched_old_snapshots.get(s_id)
+                if old_snapshot:
+                    old_snapshots_by_id[s_id] = old_snapshot
+
+        def _matches_baseline(s: Snapshot, baseline: t.Dict[str, SnapshotTableInfo]) -> bool:
+            existing = baseline.get(s.name)
+            if existing is None or not existing.is_model or existing.is_symbolic:
+                return False
+            if existing.table_name(is_deployable=True) != s.table_name(is_deployable=True):
+                return False
+            old = old_snapshots_by_id.get(existing.snapshot_id)
+            if old is not None:
+                if not old.is_model or s.is_directly_modified(old):
+                    return False
+            elif existing.fingerprint.data_hash != s.fingerprint.data_hash:
+                return False
+            if existing.fingerprint.parent_data_hash != s.fingerprint.parent_data_hash:
+                return False
+            parents_to_check = list(s.parents)
+            visited_parents: t.Set[SnapshotId] = set()
+            while parents_to_check:
+                p_id = parents_to_check.pop()
+                if p_id in visited_parents:
+                    continue
+                visited_parents.add(p_id)
+                parent = snapshots.get(p_id)
+                if parent is None:
+                    return False
+                if parent.is_symbolic:
+                    parents_to_check.extend(parent.parents)
+                    continue
+                if not parent.is_model:
+                    return False
+                existing_parent = baseline.get(parent.name)
+                if (
+                    existing_parent is None
+                    or not existing_parent.is_model
+                    or existing_parent.is_symbolic
+                    or existing_parent.table_name(is_deployable=True)
+                    != parent.table_name(is_deployable=True)
+                ):
+                    return False
+            return True
+
+        def _is_metadata_only_in_prod(s: Snapshot) -> bool:
+            return bool(prod_baselines) and all(
+                _matches_baseline(s, baseline) for baseline in prod_baselines
+            )
+
+        schema_migration_snapshot_ids: t.List[SnapshotId] = []
+        grants_only_snapshot_ids: t.Set[SnapshotId] = set()
+        metadata_only_create_ids: t.Set[SnapshotId] = set()
+        for s in snapshots.values():
+            if not s.requires_schema_migration_in_prod:
+                continue
+            if s.is_materialized_view and _is_metadata_only_in_prod(s):
+                targets_physical_grants = s.model.grants is not None and (
+                    s.model.grants_target_layer.is_all
+                    or s.model.grants_target_layer.is_physical
+                    or s.model.virtual_environment_mode.is_dev_only
+                )
+                grants_changed = any(
+                    (old := old_snapshots_by_id.get(baseline[s.name].snapshot_id)) is None
+                    or not old.is_model
+                    or s.model.grants != old.model.grants
+                    or s.model.grants_target_layer != old.model.grants_target_layer
+                    for baseline in prod_baselines
+                )
+                if targets_physical_grants and grants_changed:
+                    grants_only_snapshot_ids.add(s.snapshot_id)
+                elif needs_backfill:
+                    # When backfill runs, PhysicalLayerUpdateStage is skipped. Route metadata-only
+                    # MVs to create-only handling so a missing physical MV is still created while an
+                    # existing MV is untouched.
+                    metadata_only_create_ids.add(s.snapshot_id)
+                continue
+            schema_migration_snapshot_ids.append(s.snapshot_id)
+
+        # Include all upstream dependencies of snapshots that require schema migration to make sure
+        # the upstream tables are created before the schema updates are applied
+        snapshot_ids_to_migrate = set(dag.subdag(*schema_migration_snapshot_ids))
+        upstream_only_ids = snapshot_ids_to_migrate - set(schema_migration_snapshot_ids)
+        create_only_snapshot_ids = {
+            s_id
+            for s_id in upstream_only_ids
+            if s_id not in grants_only_snapshot_ids
+            and snapshots[s_id].is_materialized_view
+            and snapshots[s_id].supports_schema_migration_in_prod
+        } | metadata_only_create_ids
+        snapshot_ids_to_migrate |= metadata_only_create_ids
+        # Migrating a view replaces it, and engines like Postgres drop its dependent views with CASCADE,
+        # so those are migrated too to be recreated
+        for s_id in dag:
+            snapshot = snapshots[s_id]
+            if snapshot.is_view and any(
+                p_id in snapshot_ids_to_migrate
+                and p_id not in create_only_snapshot_ids
+                and p_id not in grants_only_snapshot_ids
+                and snapshots[p_id].is_view
+                and snapshots[p_id].supports_schema_migration_in_prod
+                for p_id in snapshot.parents
+            ):
+                snapshot_ids_to_migrate.add(s_id)
+                grants_only_snapshot_ids.discard(s_id)
+                create_only_snapshot_ids.discard(s_id)
+
+        all_migrate_stage_ids = snapshot_ids_to_migrate | grants_only_snapshot_ids
+        snapshots_with_schema_migration = [
+            snapshots[s_id]
+            for s_id in dag
+            if s_id in all_migrate_stage_ids and snapshots[s_id].supports_schema_migration_in_prod
+        ]
+        if not snapshots_with_schema_migration:
+            return None
+
+        return MigrateSchemasStage(
+            snapshots=snapshots_with_schema_migration,
+            all_snapshots=snapshots,
+            deployability_index=deployability_index,
+            grants_only_snapshot_ids=grants_only_snapshot_ids,
+            create_only_snapshot_ids=create_only_snapshot_ids,
         )
 
     def _get_virtual_layer_update_stage(
