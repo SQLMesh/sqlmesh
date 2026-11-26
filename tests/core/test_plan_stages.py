@@ -1316,6 +1316,13 @@ def test_build_plan_stages_audit_only(
     assert isinstance(audit_only_stage, AuditOnlyRunStage)
     assert len(audit_only_stage.snapshots) == 1
     assert audit_only_stage.snapshots[0].snapshot_id == new_snapshot_a.snapshot_id
+    assert audit_only_stage.all_snapshots == {
+        new_snapshot_a.name: new_snapshot_a,
+        new_snapshot_b.name: new_snapshot_b,
+    }
+    assert audit_only_stage.deployability_index == DeployabilityIndex.create(
+        [new_snapshot_a, new_snapshot_b]
+    )
 
     # Verify BackfillStage
     backfill_stage = stages[4]
@@ -1334,6 +1341,132 @@ def test_build_plan_stages_audit_only(
 
     # Verify FinalizeEnvironmentStage
     assert isinstance(stages[7], FinalizeEnvironmentStage)
+
+    # Verify prod plan passes all_deployable deployability_index and all_snapshots
+    prod_env = Environment(
+        name="prod",
+        snapshots=[new_snapshot_a.table_info, new_snapshot_b.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="test_plan_prod",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[new_snapshot_a.snapshot_id, new_snapshot_b.snapshot_id],
+    )
+    prod_plan = plan.copy(update={"environment": prod_env, "is_dev": False})
+    prod_stages = build_plan_stages(prod_plan, state_reader, None)
+    prod_audit_stages = [s for s in prod_stages if isinstance(s, AuditOnlyRunStage)]
+    assert len(prod_audit_stages) == 1
+    assert prod_audit_stages[0].snapshots == [new_snapshot_a]
+    assert prod_audit_stages[0].all_snapshots == {
+        new_snapshot_a.name: new_snapshot_a,
+        new_snapshot_b.name: new_snapshot_b,
+    }
+    assert prod_audit_stages[0].deployability_index == DeployabilityIndex.all_deployable()
+
+
+def test_build_plan_stages_audit_only_skips_non_representative_without_dev_intervals(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    parent_model = SqlModel(
+        name="p",
+        query=parse_one("select 1 as id, '2023-01-01'::date as ds"),
+        kind=dict(
+            name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
+            time_column="ds",
+            auto_restatement_cron="@daily",
+        ),
+        start="2023-01-01",
+    )
+    parent_snapshot = make_snapshot(parent_model)
+    parent_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    parent_snapshot.unpaused_ts = 1
+    parent_snapshot.add_interval("2023-01-01", "2023-01-02")
+
+    old_child_model = SqlModel(
+        name="c",
+        query=parse_one("select id from p"),
+        kind=dict(name=ModelKindName.FULL),
+        start="2023-01-01",
+    )
+    old_child_snapshot = make_snapshot(old_child_model, nodes={'"p"': parent_model})
+    old_child_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_child_snapshot.unpaused_ts = 1
+    old_child_snapshot.add_interval("2023-01-01", "2023-01-02")
+
+    new_child_snapshot = make_snapshot(
+        old_child_model.copy(update={"audits": [("not_null", {})]}),
+        nodes={'"p"': parent_model},
+    )
+    new_child_snapshot.previous_versions = old_child_snapshot.all_versions
+    new_child_snapshot.categorize_as(SnapshotChangeCategory.METADATA)
+    new_child_snapshot.add_interval("2023-01-01", "2023-01-02")
+
+    def _get_snapshots(snapshot_ids: t.Iterable[SnapshotIdLike]) -> t.Dict[SnapshotId, Snapshot]:
+        result: t.Dict[SnapshotId, Snapshot] = {}
+        for s in snapshot_ids:
+            sid = s.snapshot_id
+            if sid == parent_snapshot.snapshot_id:
+                result[sid] = parent_snapshot
+            elif sid == old_child_snapshot.snapshot_id:
+                result[sid] = old_child_snapshot
+        return result
+
+    state_reader = mocker.Mock(spec=StateReader)
+    state_reader.get_snapshots.side_effect = _get_snapshots
+    state_reader.get_environment.return_value = None
+
+    environment = Environment(
+        name="dev",
+        snapshots=[parent_snapshot.table_info, new_child_snapshot.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="test_plan",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[parent_snapshot.snapshot_id, new_child_snapshot.snapshot_id],
+    )
+    plan = EvaluatablePlan(
+        start="2023-01-01",
+        end="2023-01-02",
+        new_snapshots=[new_child_snapshot],
+        environment=environment,
+        no_gaps=False,
+        skip_backfill=False,
+        empty_backfill=False,
+        restatements={},
+        restate_all_snapshots=False,
+        is_dev=True,
+        allow_destructive_models=set(),
+        allow_additive_models=set(),
+        forward_only=False,
+        end_bounded=False,
+        ensure_finalized_snapshots=False,
+        ignore_cron=False,
+        directly_modified_snapshots=[new_child_snapshot.snapshot_id],
+        indirectly_modified_snapshots={},
+        metadata_updated_snapshots=[],
+        removed_snapshots=[],
+        requires_backfill=True,
+        models_to_backfill=None,
+        execution_time="2023-01-02",
+        disabled_restatement_models=set(),
+        environment_statements=None,
+        user_provided_flags=None,
+    )
+
+    # Without dev_intervals, non-representative dev child must skip AuditOnlyRunStage and backfill instead.
+    stages = build_plan_stages(plan, state_reader, None)
+    assert not any(isinstance(s, AuditOnlyRunStage) for s in stages)
+    backfill_stages = [s for s in stages if isinstance(s, BackfillStage)]
+    assert len(backfill_stages) == 1
+    assert new_child_snapshot in backfill_stages[0].snapshot_to_intervals
+
+    # Once dev_intervals exist, AuditOnlyRunStage must include the non-representative dev child.
+    new_child_snapshot.add_interval("2023-01-01", "2023-01-02", is_dev=True)
+    stages_with_dev = build_plan_stages(plan, state_reader, None)
+    audit_stages = [s for s in stages_with_dev if isinstance(s, AuditOnlyRunStage)]
+    assert len(audit_stages) == 1
+    assert audit_stages[0].snapshots == [new_child_snapshot]
+    assert not audit_stages[0].deployability_index.is_representative(new_child_snapshot)
 
 
 def test_build_plan_stages_forward_only_ensure_finalized_snapshots(

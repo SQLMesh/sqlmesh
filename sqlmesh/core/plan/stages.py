@@ -92,9 +92,13 @@ class AuditOnlyRunStage:
 
     Args:
         snapshots: Snapshots to run audits for.
+        all_snapshots: All snapshots in the plan by name.
+        deployability_index: Deployability index for this stage.
     """
 
     snapshots: t.List[Snapshot]
+    all_snapshots: t.Dict[str, Snapshot]
+    deployability_index: DeployabilityIndex
 
 
 @dataclass
@@ -344,9 +348,15 @@ class PlanStagesBuilder:
                 )
             )
 
-        audit_only_snapshots = self._get_audit_only_snapshots(new_snapshots)
+        audit_only_snapshots = self._get_audit_only_snapshots(new_snapshots, deployability_index)
         if audit_only_snapshots:
-            stages.append(AuditOnlyRunStage(snapshots=list(audit_only_snapshots.values())))
+            stages.append(
+                AuditOnlyRunStage(
+                    snapshots=list(audit_only_snapshots.values()),
+                    all_snapshots=snapshots_by_name,
+                    deployability_index=deployability_index,
+                )
+            )
 
         if missing_intervals_before_promote:
             stages.append(
@@ -604,7 +614,9 @@ class PlanStagesBuilder:
         )
 
     def _get_audit_only_snapshots(
-        self, new_snapshots: t.Dict[SnapshotId, Snapshot]
+        self,
+        new_snapshots: t.Dict[SnapshotId, Snapshot],
+        deployability_index: DeployabilityIndex,
     ) -> t.Dict[SnapshotId, Snapshot]:
         metadata_snapshots = []
         for snapshot in new_snapshots.values():
@@ -613,6 +625,10 @@ class PlanStagesBuilder:
                 or not snapshot.is_model
                 or not snapshot.evaluatable
                 or not snapshot.previous_version
+                or (
+                    not deployability_index.is_representative(snapshot)
+                    and not snapshot.dev_intervals
+                )
             ):
                 continue
 

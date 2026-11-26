@@ -314,6 +314,10 @@ class Scheduler:
         # by _run_or_audit as "missing intervals" to reuse the rest of it's logic
         remove_intervals = {}
         for snapshot in self.snapshots.values():
+            if not snapshot.evaluatable or (
+                selected_snapshots is not None and snapshot.name not in selected_snapshots
+            ):
+                continue
             removal_intervals = snapshot.get_removal_interval(
                 start, end, execution_time, is_preview=True
             )
@@ -505,19 +509,22 @@ class Scheduler:
                     selected_models=selected_models,
                 )
 
-            # We only need to create physical tables if the snapshot is not representative or if it
-            # needs backfill
-            snapshots_to_create_candidates = [
-                s
-                for s in selected_snapshots
-                if not deployability_index.is_representative(s) or s in batched_intervals
-            ]
-            snapshots_to_create = {
-                s.snapshot_id
-                for s in self.snapshot_evaluator.get_snapshots_to_create(
-                    snapshots_to_create_candidates, deployability_index
-                )
-            }
+            if audit_only:
+                snapshots_to_create: t.Set[SnapshotId] = set()
+            else:
+                # We only need to create physical tables if the snapshot is not representative or if it
+                # needs backfill
+                snapshots_to_create_candidates = [
+                    s
+                    for s in selected_snapshots
+                    if not deployability_index.is_representative(s) or s in batched_intervals
+                ]
+                snapshots_to_create = {
+                    s.snapshot_id
+                    for s in self.snapshot_evaluator.get_snapshots_to_create(
+                        snapshots_to_create_candidates, deployability_index
+                    )
+                }
 
             dag = self._dag(
                 batched_intervals,
@@ -560,11 +567,19 @@ class Scheduler:
                         assert deployability_index  # mypy
 
                         if audit_only:
+                            audit_snapshots = {
+                                snapshot.name: snapshot,
+                                **{
+                                    self.snapshots[p_id].name: self.snapshots[p_id]
+                                    for p_id in snapshot.parents
+                                    if p_id in self.snapshots
+                                },
+                            }
                             audit_results = self._audit_snapshot(
                                 snapshot=snapshot,
                                 environment_naming_info=environment_naming_info,
                                 deployability_index=deployability_index,
-                                snapshots=self.snapshots_by_name,
+                                snapshots=audit_snapshots,
                                 start=start,
                                 end=end,
                                 execution_time=execution_time,
@@ -859,8 +874,9 @@ class Scheduler:
         execution_time = execution_time or now_timestamp()
 
         self.state_sync.refresh_snapshot_intervals(self.snapshots.values())
-        for s_id, interval in (remove_intervals or {}).items():
-            self.snapshots[s_id].remove_interval(interval)
+        if not audit_only:
+            for s_id, interval in (remove_intervals or {}).items():
+                self.snapshots[s_id].remove_interval(interval)
 
         all_auto_restatement_triggers: t.Dict[SnapshotId, t.List[SnapshotId]] = {}
         if auto_restatement_enabled:
