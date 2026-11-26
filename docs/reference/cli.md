@@ -66,6 +66,10 @@ Options:
   -e, --end TEXT         The end datetime of the interval for which this
                          command will be applied.
   --execution-time TEXT  The execution time (defaults to now).
+  --time-zone TEXT       IANA timezone for day-sized relative dates such as
+                         '1 week ago', 'today', and 'yesterday' (for example,
+                         America/Los_Angeles). Those values are converted to
+                         UTC timestamps. Defaults to UTC.
   --help                 Show this message and exit.
 ```
 
@@ -83,6 +87,10 @@ Options:
                        command will be applied.
   -e, --end TEXT       The end datetime of the interval for which this command
                        will be applied.
+  --time-zone TEXT     IANA timezone for day-sized relative dates such as '1
+                       week ago', 'today', and 'yesterday' (for example,
+                       America/Los_Angeles). Those values are converted to
+                       UTC timestamps. Defaults to UTC.
   --help               Show this message and exit.
 ```
 
@@ -205,6 +213,10 @@ Options:
   -e, --end TEXT         The end datetime of the interval for which this
                          command will be applied.
   --execution-time TEXT  The execution time (defaults to now).
+  --time-zone TEXT       IANA timezone for day-sized relative dates such as
+                         '1 week ago', 'today', and 'yesterday' (for example,
+                         America/Los_Angeles). Those values are converted to
+                         UTC timestamps. Defaults to UTC.
   --limit INTEGER        The number of rows which the query should be limited
                          to.
   --help                 Show this message and exit.
@@ -352,6 +364,12 @@ Options:
   -e, --end TEXT                  The end datetime of the interval for which
                                   this command will be applied.
   --execution-time TEXT           The execution time (defaults to now).
+  --time-zone TEXT                IANA timezone for day-sized relative dates
+                                  such as '1 week ago', 'today', and
+                                  'yesterday' (for example,
+                                  America/Los_Angeles). Those values are
+                                  converted to UTC timestamps. Defaults to
+                                  UTC.
   --create-from TEXT              The environment to create the target
                                   environment from if it doesn't exist.
                                   Default: prod.
@@ -442,6 +460,10 @@ Options:
   -e, --end TEXT              The end datetime of the interval for which this
                               command will be applied.
   --execution-time TEXT       The execution time (defaults to now).
+  --time-zone TEXT            IANA timezone for day-sized relative dates such
+                              as '1 week ago', 'today', and 'yesterday' (for
+                              example, America/Los_Angeles). Those values are
+                              converted to UTC timestamps. Defaults to UTC.
   --expand TEXT               Whether or not to expand materialized models
                               (defaults to False). If True, all referenced
                               models are expanded as raw queries. Multiple
@@ -508,6 +530,11 @@ Options:
                                 this command will be applied.
   -e, --end TEXT                The end datetime of the interval for which
                                 this command will be applied.
+  --time-zone TEXT              IANA timezone for day-sized relative dates
+                                such as '1 week ago', 'today', and
+                                'yesterday' (for example,
+                                America/Los_Angeles). Those values are
+                                converted to UTC timestamps. Defaults to UTC.
   --skip-janitor                Skip the janitor task.
   --ignore-cron                 Run for all missing intervals, ignoring
                                 individual cron schedules.
