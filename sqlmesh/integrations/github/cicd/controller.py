@@ -439,6 +439,7 @@ class GithubController:
                 categorizer_config=self.bot_config.auto_categorize_changes,
                 run=self.bot_config.run_on_deploy_to_prod,
                 forward_only=self.forward_only_plan,
+                max_trailing_gap_intervals=self.bot_config.max_trailing_gap_intervals_on_deploy_to_prod,
             )
         assert self._prod_plan_builder
         return self._prod_plan_builder.build()
