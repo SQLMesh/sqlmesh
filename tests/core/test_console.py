@@ -1,11 +1,12 @@
 import pytest
 
-from sqlmesh.core.console import MarkdownConsole
+from sqlmesh.core.console import MarkdownConsole, _create_evaluation_model_annotation
 from sqlmesh.core.context_diff import ContextDiff
 from sqlmesh.core.dialect import parse
 from sqlmesh.core.environment import EnvironmentNamingInfo, EnvironmentStatements
 from sqlmesh.core.model import load_sql_based_model
-from sqlmesh.core.snapshot import SnapshotChangeCategory
+from sqlmesh.core.snapshot import SnapshotChangeCategory, SnapshotIdBatch
+from sqlmesh.core.snapshot.execution_tracker import QueryExecutionStats
 from sqlmesh.utils.metaprogramming import Executable
 
 
@@ -354,3 +355,30 @@ def test_markdown_console_error_block():
     )
 
     assert console.consume_captured_errors() == ""
+
+
+@pytest.mark.parametrize(
+    "rows_processed,expected",
+    [
+        (1, "1 row"),
+        (999, "999 rows"),
+        (1_000, "1 k rows"),
+        (1_050, "1.05 k rows"),
+        (1_500, "1.50 k rows"),
+        (10_000_000, "10 M rows"),
+        (5_007_210, "5.01 M rows"),
+        (2_070_000_000, "2.07 G rows"),
+    ],
+)
+def test_evaluation_model_annotation_rows_processed(make_snapshot, rows_processed, expected):
+    snapshot = make_snapshot(
+        load_sql_based_model(parse("MODEL (name test.model, kind FULL); SELECT 1 AS a"))
+    )
+    execution_stats = QueryExecutionStats(
+        snapshot_id_batch=SnapshotIdBatch(snapshot_id=snapshot.snapshot_id, batch_id=0),
+        total_rows_processed=rows_processed,
+    )
+    assert (
+        _create_evaluation_model_annotation(snapshot, None, execution_stats)
+        == f"full refresh ({expected})"
+    )

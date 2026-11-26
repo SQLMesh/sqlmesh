@@ -4299,8 +4299,8 @@ def _create_evaluation_model_annotation(
     if execution_stats:
         rows_processed = execution_stats.total_rows_processed
         if rows_processed:
-            # 1.00 and 1.0 to 1
-            rows_processed_str = metric(rows_processed).replace(".00", "").replace(".0", "")
+            # 1.00 and 1.0 to 1, but 5.01 stays 5.01
+            rows_processed_str = re.sub(r"\.0+(?= |$)", "", metric(rows_processed))
             execution_stats_str += f"{rows_processed_str} row{'s' if rows_processed > 1 else ''}"
 
         bytes_processed = execution_stats.total_bytes_processed
