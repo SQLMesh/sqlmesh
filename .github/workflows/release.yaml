@@ -55,13 +55,6 @@ jobs:
         env:
           TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.TWINE_PASSWORD }}
-      - name: Update pypirc for private repository
-        run: ./.github/scripts/update-pypirc.sh
-        env:
-          TOBIKO_PRIVATE_PYPI_URL: ${{ secrets.TOBIKO_PRIVATE_PYPI_URL }}
-          TOBIKO_PRIVATE_PYPI_KEY: ${{ secrets.TOBIKO_PRIVATE_PYPI_KEY }}
-      - name: Publish Python Tests package
-        run: unset TWINE_USERNAME TWINE_PASSWORD && make publish-tests
 
   gh-release:
     runs-on: ubuntu-24.04
