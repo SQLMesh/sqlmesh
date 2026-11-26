@@ -1,7 +1,8 @@
-from sqlglot import parse_one
+from sqlglot import exp, parse_one
 
 from sqlmesh.core import dialect as d
 from sqlmesh.core.metric import expand_metrics, load_metric_ddl, rewrite
+from sqlmesh.core.model import load_sql_based_model
 from sqlmesh.core.reference import ReferenceGraph
 from sqlmesh.utils import UniqueKeyDict
 
@@ -248,3 +249,152 @@ def test_rewrite_order_by_metric(sushi_context_pre_scheduling):
     assert "ARRAY_AGG(sushi__orders.amount ORDER BY sushi__orders.amount" in sql
     assert "sushi.orders AS sushi__orders" in sql
     parse_one(sql, dialect=context.config.dialect)
+
+
+def test_rewrite_nested_metric_aggregates():
+    dialect = "bigquery"
+    model = load_sql_based_model(
+        d.parse(
+            "MODEL (name sushi.orders, kind FULL); SELECT 1 AS customer_id, 10 AS amount, 100 AS other_amount, 1000 AS __sqlmesh_metric_median_amount__agg_0",
+            default_dialect=dialect,
+        ),
+        dialect=dialect,
+    )
+    metric_statements = d.parse(
+        """
+        METRIC (name total_amount, expression SUM(sushi.orders.amount));
+        METRIC (name derived_amount, expression total_amount + 1);
+        METRIC (name median_amount, expression APPROX_QUANTILES(sushi.orders.amount, 2)[OFFSET(1)]);
+        METRIC (name safe_median_amount, expression COALESCE(CAST(APPROX_QUANTILES(sushi.orders.amount, 2)[OFFSET(1)] AS FLOAT64), 0));
+        METRIC (name scaled_median, expression median_amount * 2);
+        METRIC (name safe_median_plus_one, expression safe_median_amount + 1);
+        METRIC (name combined_amount, expression SUM(sushi.orders.amount) + MAX(sushi.orders.amount));
+        METRIC (name reused_amount, expression SUM(sushi.orders.amount) / NULLIF(SUM(sushi.orders.amount), 0));
+        METRIC (name __sqlmesh_metric_safe_median_amount__agg_0, expression SUM(sushi.orders.other_amount));
+        """,
+        default_dialect=dialect,
+    )
+    metas = UniqueKeyDict(
+        "metas",
+        {
+            meta.name: meta
+            for meta in (load_metric_ddl(stmt, dialect=dialect) for stmt in metric_statements)
+        },
+    )
+    metrics = expand_metrics(metas)
+    graph = ReferenceGraph([model])
+
+    query = rewrite(
+        """
+        SELECT
+          customer_id,
+          METRIC(median_amount),
+          METRIC(safe_median_amount),
+          METRIC(scaled_median),
+          METRIC(safe_median_plus_one),
+          METRIC(combined_amount),
+          METRIC(reused_amount),
+          METRIC(__sqlmesh_metric_safe_median_amount__agg_0),
+          METRIC(total_amount),
+          METRIC(derived_amount)
+        FROM __semantic.__table
+        GROUP BY customer_id
+        """,
+        graph=graph,
+        metrics=metrics,
+        dialect=dialect,
+    )
+
+    outer_projections = {
+        projection.alias_or_name: (
+            projection.this if isinstance(projection, exp.Alias) else projection
+        )
+        for projection in query.selects
+    }
+    assert isinstance(outer_projections["median_amount"], exp.Bracket)
+    safe_median = outer_projections["safe_median_amount"]
+    assert isinstance(safe_median, exp.Coalesce)
+    assert safe_median.find(exp.Cast) is not None
+    assert safe_median.find(exp.Bracket) is not None
+
+    scaled_median = outer_projections["scaled_median"]
+    assert isinstance(scaled_median, exp.Mul)
+    assert isinstance(scaled_median.this, exp.Bracket)
+    safe_median_plus_one = outer_projections["safe_median_plus_one"]
+    assert isinstance(safe_median_plus_one, exp.Add)
+    assert isinstance(safe_median_plus_one.this, exp.Coalesce)
+    assert safe_median_plus_one.find(exp.Cast) is not None
+
+    median_aggregate_ref = outer_projections["median_amount"].this
+    safe_median_aggregate_ref = outer_projections["safe_median_amount"].find(exp.Bracket).this
+    assert median_aggregate_ref.name != safe_median_aggregate_ref.name
+
+    combined = outer_projections["combined_amount"]
+    assert isinstance(combined, exp.Add)
+    assert not list(combined.find_all(exp.AggFunc))
+    reused = outer_projections["reused_amount"]
+    reused_aggregate_refs = list(reused.find_all(exp.Column))
+    assert len(reused_aggregate_refs) == 2
+    assert reused_aggregate_refs[0].name == reused_aggregate_refs[1].name
+
+    # The aggregate expressions are projected once, with aliases that the outer
+    # metric formulas can reference after applying their wrappers.
+    source = query.args["from_"].this
+    inner = source.this if isinstance(source, exp.Subquery) else None
+    assert isinstance(inner, exp.Select)
+    aggregate_projections = [
+        projection for projection in inner.selects if projection.find(exp.AggFunc)
+    ]
+    assert len(aggregate_projections) >= 3
+    assert all(isinstance(projection, exp.Alias) for projection in aggregate_projections)
+
+    # Existing simple and derived metric behavior remains intact.
+    assert isinstance(outer_projections["total_amount"], exp.Column)
+    assert isinstance(outer_projections["derived_amount"], exp.Add)
+
+    # A public metric name can match the generated alias for an aggregate
+    # nested under a wrapper. The source query must allocate distinct aliases.
+    colliding_metric = outer_projections["__sqlmesh_metric_safe_median_amount__agg_0"]
+    assert isinstance(colliding_metric, exp.Column)
+    assert colliding_metric.name != safe_median_aggregate_ref.name
+    projected_aliases = [projection.alias for projection in aggregate_projections]
+    assert len(projected_aliases) == len(set(projected_aliases))
+
+    dimension_metrics = {"median_amount": metrics["median_amount"]}
+    selected_dimension_query = rewrite(
+        """
+        SELECT __sqlmesh_metric_median_amount__agg_0, METRIC(median_amount)
+        FROM __semantic.__table
+        GROUP BY __sqlmesh_metric_median_amount__agg_0
+        """,
+        graph=graph,
+        metrics=dimension_metrics,
+        dialect=dialect,
+    )
+    selected_dimension_source = selected_dimension_query.args["from_"].this
+    selected_dimension_inner = (
+        selected_dimension_source.this
+        if isinstance(selected_dimension_source, exp.Subquery)
+        else None
+    )
+    assert isinstance(selected_dimension_inner, exp.Select)
+    selected_dimension_names = [
+        projection.output_name for projection in selected_dimension_inner.selects
+    ]
+    assert len(selected_dimension_names) == len(set(selected_dimension_names))
+
+    dimension_collision_query = rewrite(
+        """
+        SELECT METRIC(median_amount)
+        FROM __semantic.__table
+        GROUP BY __sqlmesh_metric_median_amount__agg_0
+        """,
+        graph=graph,
+        metrics=dimension_metrics,
+        dialect=dialect,
+    )
+    dimension_source = dimension_collision_query.args["from_"].this
+    dimension_inner = dimension_source.this if isinstance(dimension_source, exp.Subquery) else None
+    assert isinstance(dimension_inner, exp.Select)
+    dimension_projection_names = [projection.output_name for projection in dimension_inner.selects]
+    assert len(dimension_projection_names) == len(set(dimension_projection_names))
