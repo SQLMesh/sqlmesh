@@ -112,6 +112,8 @@ Configuration for the `sqlmesh run` command. Please note that this is only appli
 | `environment_check_interval` | The number of seconds to wait between attempts to check the target environment for readiness (Default: 30 seconds) | int  |    N     |
 | `environment_check_max_wait` | The maximum number of seconds to wait for the target environment to be ready (Default: 6 hours)                    | int  |    N     |
 
+`sqlmesh run` checks the target environment's persisted finalization state. This check does not establish whether a plan process is active. A failed promotion can leave the environment unfinalized, so `run` continues to wait. If the plan failed, inspect its logs, resolve the errors, and successfully reapply it with `sqlmesh plan <environment>` before retrying the run.
+
 ## Format
 
 Formatting settings for the `sqlmesh format` command and UI.
