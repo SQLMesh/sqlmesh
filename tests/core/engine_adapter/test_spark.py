@@ -1106,3 +1106,28 @@ def test_get_data_object_wap_branch(make_mocked_engine_adapter: t.Callable, mock
         d.schema_("sqlmesh__test", "catalog"),
         {"test__test_view__630979748"},
     )
+
+
+def test_df_source_query_drops_global_temp_view(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = make_mocked_engine_adapter(SparkEngineAdapter)
+    pyspark_df = mocker.Mock()
+    mocker.patch.object(adapter, "_ensure_pyspark_df", return_value=pyspark_df)
+    mocker.patch.object(
+        adapter,
+        "_get_temp_table",
+        return_value=exp.to_table("`temp_test_abcdefgh`", dialect="spark"),
+    )
+
+    source_queries = adapter._df_to_source_queries(
+        pyspark_df, {"a": exp.DataType.build("int")}, batch_size=0, target_table="db.test"
+    )
+    assert len(source_queries) == 1
+
+    with source_queries[0] as query:
+        pyspark_df.createOrReplaceGlobalTempView.assert_called_once_with("`temp_test_abcdefgh`")
+        assert query.sql(dialect="spark") == "SELECT `a` FROM global_temp.`temp_test_abcdefgh`"
+        adapter.spark.catalog.dropGlobalTempView.assert_not_called()
+
+    adapter.spark.catalog.dropGlobalTempView.assert_called_once_with("temp_test_abcdefgh")

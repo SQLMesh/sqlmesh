@@ -282,14 +282,18 @@ class SparkEngineAdapter(
         source_columns: t.Optional[t.List[str]] = None,
     ) -> t.List[SourceQuery]:
         df = self._ensure_pyspark_df(df, target_columns_to_types, source_columns=source_columns)
+        temp_table = self._get_temp_table(target_table or "spark", table_only=True)
+        temp_view_name = temp_table.sql(dialect=self.dialect)
+        temp_table.set("db", "global_temp")
 
         def query_factory() -> Query:
-            temp_table = self._get_temp_table(target_table or "spark", table_only=True)
-            df.createOrReplaceGlobalTempView(temp_table.sql(dialect=self.dialect))  # type: ignore
-            temp_table.set("db", "global_temp")
+            df.createOrReplaceGlobalTempView(temp_view_name)  # type: ignore
             return exp.select(*self._select_columns(target_columns_to_types)).from_(temp_table)
 
-        return [SourceQuery(query_factory=query_factory)]
+        def cleanup() -> None:
+            self.spark.catalog.dropGlobalTempView(temp_table.name)
+
+        return [SourceQuery(query_factory=query_factory, cleanup_func=cleanup)]
 
     def _ensure_pyspark_df(
         self,
