@@ -933,6 +933,7 @@ These pages describe the connection configuration options for each execution eng
 * [BigQuery](../integrations/engines/bigquery.md)
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
+* [Doris](../integrations/engines/doris.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)
@@ -975,6 +976,7 @@ Other state engines with fast and reliable database transactions (less tested th
 Unsupported state engines, even for development:
 
 * [ClickHouse](../integrations/engines/clickhouse.md)
+* [Doris](../integrations/engines/doris.md)
 * [Spark](../integrations/engines/spark.md)
 * [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)

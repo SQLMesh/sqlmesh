@@ -44,10 +44,10 @@ from sqlmesh.core.snapshot.evaluator import _adjust_physical_properties_for_engi
 pytestmark = [pytest.mark.starrocks, pytest.mark.engine]
 
 
-def _load_sql_model(model_sql: str) -> SqlModel:
+def _load_sql_model(model_sql: str, default_catalog: t.Optional[str] = None) -> SqlModel:
     """Parse StarRocks MODEL SQL into a SqlModel instance."""
     expressions = parse(model_sql, default_dialect="starrocks")
-    return t.cast(SqlModel, load_sql_based_model(expressions))
+    return t.cast(SqlModel, load_sql_based_model(expressions, default_catalog=default_catalog))
 
 
 def _columns(model: SqlModel) -> t.Dict[str, exp.DataType]:
@@ -2487,6 +2487,119 @@ class TestExcludedTablesResolution:
         assert (
             "excluded_refresh_tables"
             in StarRocksEngineAdapter.RESOLVE_TABLE_REFS_IN_PHYSICAL_PROPERTIES
+        )
+
+    def test_tuple_and_default_catalog_refs_are_resolved(
+        self,
+        make_mocked_engine_adapter: t.Callable[..., StarRocksEngineAdapter],
+    ) -> None:
+        """Tuple values and 2-part refs against 3-part default_catalog snapshots resolve to physical tables."""
+        base_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.managed_model,
+                kind FULL,
+                dialect starrocks,
+                columns (a INT)
+            );
+            SELECT 1 AS a;
+            """,
+        )
+        base_snapshot = self._make_snapshot(base_model)
+        physical_name = exp.to_table(base_snapshot.table_name())
+        expected_physical = f"{physical_name.db}.{physical_name.name}"
+
+        mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv_tuple,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = (starrocks.managed_model, external_db.raw_table)
+                )
+            );
+            SELECT 1 AS a;
+            """,
+        )
+
+        adapter = make_mocked_engine_adapter(StarRocksEngineAdapter)
+        snapshots = {base_snapshot.name: base_snapshot}
+        rendered = mv_model.render_physical_properties(
+            snapshots=snapshots,
+            engine_adapter=adapter,
+        )
+        assert rendered["excluded_trigger_tables"] == exp.Literal.string(
+            f"{expected_physical},external_db.raw_table"
+        )
+
+        # Also verify 2-part reference resolution when snapshots are normalized with a 3-part default_catalog
+        catalog_base_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.managed_model,
+                kind FULL,
+                dialect starrocks,
+                columns (a INT)
+            );
+            SELECT 1 AS a;
+            """,
+            default_catalog="default_catalog",
+        )
+        catalog_base_snapshot = self._make_snapshot(catalog_base_model)
+        catalog_physical_name = exp.to_table(catalog_base_snapshot.table_name())
+        expected_catalog_physical = f"{catalog_physical_name.db}.{catalog_physical_name.name}"
+
+        catalog_mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv_tuple,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = (starrocks.managed_model, external_db.raw_table)
+                )
+            );
+            SELECT 1 AS a;
+            """,
+            default_catalog="default_catalog",
+        )
+
+        rendered_with_catalog = catalog_mv_model.render_physical_properties(
+            snapshots={catalog_base_snapshot.name: catalog_base_snapshot},
+            engine_adapter=adapter,
+        )
+        assert rendered_with_catalog["excluded_trigger_tables"] == exp.Literal.string(
+            f"{expected_catalog_physical},external_db.raw_table"
+        )
+
+        # Also verify explicit 3-part reference resolution strips the catalog to a 2-part StarRocks name
+        explicit_catalog_mv_model = _load_sql_model(
+            """
+            MODEL (
+                name starrocks.test_mv_explicit_catalog,
+                kind VIEW (materialized true),
+                dialect starrocks,
+                columns (a INT),
+                physical_properties (
+                    refresh_scheme = ASYNC,
+                    excluded_trigger_tables = (default_catalog.starrocks.managed_model, external_db.raw_table)
+                )
+            );
+            SELECT 1 AS a;
+            """,
+            default_catalog="default_catalog",
+        )
+        rendered_explicit_catalog = explicit_catalog_mv_model.render_physical_properties(
+            snapshots={catalog_base_snapshot.name: catalog_base_snapshot},
+            engine_adapter=adapter,
+        )
+        assert rendered_explicit_catalog["excluded_trigger_tables"] == exp.Literal.string(
+            f"{expected_catalog_physical},external_db.raw_table"
         )
 
 

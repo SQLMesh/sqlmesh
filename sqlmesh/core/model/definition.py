@@ -735,9 +735,35 @@ class _Model(ModelMeta, frozen=True):
                 (render_kwargs.get("snapshots") or {}).values(),
                 render_kwargs.get("deployability_index"),
             )
+            discover_doris_version = getattr(engine_adapter, "_get_doris_version", None)
+            doris_version = (
+                discover_doris_version()
+                if discover_doris_version
+                else getattr(engine_adapter, "_doris_version", None)
+            )
+            engine_dialect = getattr(engine_adapter, "dialect", None)
+            referenced_tables: t.List[str | exp.Table] = list(self.depends_on or ())
+            model_query = getattr(self, "query", None)
+            if isinstance(model_query, exp.Expr):
+                cte_names = {
+                    cte.alias.lower() for cte in model_query.find_all(exp.CTE) if cte.alias
+                }
+                referenced_tables.extend(
+                    t_node
+                    for t_node in model_query.find_all(exp.Table)
+                    if t_node.name
+                    and (t_node.db or t_node.catalog or t_node.name.lower() not in cte_names)
+                )
             for key in keys_to_resolve:
                 rendered[key] = _resolve_model_refs_to_physical_tables(
-                    rendered[key], table_mapping, self.dialect
+                    rendered[key],
+                    table_mapping,
+                    self.dialect,
+                    default_catalog=self.default_catalog,
+                    doris_version=doris_version,
+                    property_name=key,
+                    engine_dialect=engine_dialect,
+                    referenced_tables=referenced_tables,
                 )
 
         return rendered
@@ -2830,27 +2856,105 @@ def _split_sql_model_statements(
 
 
 def _resolve_model_refs_to_physical_tables(
-    value: exp.Expr, table_mapping: t.Dict[str, str], dialect: DialectType
+    value: exp.Expr,
+    table_mapping: t.Dict[str, str],
+    dialect: DialectType,
+    default_catalog: t.Optional[str] = None,
+    doris_version: t.Optional[t.Tuple[int, ...]] = None,
+    property_name: t.Optional[str] = None,
+    engine_dialect: t.Optional[DialectType] = None,
+    referenced_tables: t.Optional[t.Iterable[str | exp.Table]] = None,
 ) -> exp.Literal:
     """Resolve managed-model references in a property value to their physical table names.
 
-    The value is a single table reference or a comma-separated list of them. Each reference that
-    matches a managed model (via ``table_mapping``) is swapped for its physical ``db.table`` name;
-    anything else (e.g. a raw source) is kept as written. Returns a single string literal so the
-    property renders just like a hand-written value.
+    The value is a single table reference, a comma-separated string of references, or a tuple/array
+    of references. Each reference that matches a managed model (via ``table_mapping``) is swapped
+    for its physical ``db.table`` name; anything else (e.g. a raw source) is kept as written.
+    Returns a single string literal so the property renders just like a hand-written value.
     """
+    if isinstance(value, exp.Paren):
+        value = value.this
+
     if isinstance(value, exp.Literal) and value.is_string:
         refs = value.this.split(",")
+    elif isinstance(value, (exp.Tuple, exp.Array)):
+        refs = [
+            part
+            for elem in value.expressions
+            for part in (
+                elem.this.split(",")
+                if isinstance(elem, exp.Literal) and elem.is_string
+                else [elem.sql(dialect=dialect)]
+            )
+        ]
     else:
         refs = [value.sql(dialect=dialect)]
 
-    def resolve(ref: str) -> str:
-        table = exp.to_table(ref.strip(), dialect=dialect)
-        physical = table_mapping.get(exp.table_name(table, identify=True))
-        # Managed model -> physical table; otherwise keep the reference (just unquoted/normalized).
-        return exp.table_name(
-            exp.to_table(physical, dialect=dialect) if physical else table, identify=False
+    def _to_physical_table(ref: str | exp.Table) -> t.Tuple[exp.Table, t.Optional[str], bool]:
+        table = (
+            ref.copy() if isinstance(ref, exp.Table) else exp.to_table(ref.strip(), dialect=dialect)
         )
+        physical: t.Optional[str] = None
+        strip_catalog = False
+        if default_catalog and not table.catalog:
+            normalized_name = d.normalize_model_name(
+                table, default_catalog=default_catalog, dialect=dialect
+            )
+            physical = table_mapping.get(normalized_name)
+            strip_catalog = bool(physical)
+        if not physical:
+            physical = table_mapping.get(exp.table_name(table, identify=True)) or table_mapping.get(
+                d.normalize_model_name(table, default_catalog=default_catalog, dialect=dialect)
+            )
+        resolved_table = exp.to_table(physical, dialect=dialect) if physical else table
+        return resolved_table, physical, strip_catalog
+
+    effective_engine_dialect = engine_dialect if engine_dialect is not None else dialect
+    dbs_by_table_name: t.Dict[str, t.Set[t.Tuple[str, str]]] = {}
+    if (
+        effective_engine_dialect == "doris"
+        and property_name == "excluded_trigger_tables"
+        and not d.doris_supports_qualified_excluded_trigger_tables(doris_version)
+    ):
+        default_cat_lower = (default_catalog or "internal").lower()
+        for candidate in [*(referenced_tables or ()), *(r for r in refs if r.strip())]:
+            cand_tbl, _, _ = _to_physical_table(candidate)
+            if cand_tbl.name and (
+                cand_tbl.db or cand_tbl.catalog or isinstance(candidate, exp.Table)
+            ):
+                cand_cat = (cand_tbl.catalog or default_cat_lower).lower()
+                dbs_by_table_name.setdefault(cand_tbl.name.lower(), set()).add(
+                    (cand_cat, cand_tbl.db or "")
+                )
+
+    def resolve(ref: str) -> str:
+        resolved_table, physical, strip_catalog = _to_physical_table(ref)
+        if physical and effective_engine_dialect != "doris" and resolved_table.catalog:
+            strip_catalog = True
+        if (
+            effective_engine_dialect == "doris"
+            and property_name == "excluded_trigger_tables"
+            and not d.doris_supports_qualified_excluded_trigger_tables(doris_version)
+        ):
+            if resolved_table.catalog and resolved_table.catalog.lower() != "internal":
+                raise SQLMeshError(
+                    f"Doris 'excluded_trigger_tables' only supports non-internal catalog references in Doris 2.1.10+ (and 3.0.6+); "
+                    f"got '{exp.table_name(resolved_table, identify=False)}'."
+                )
+            if (resolved_table.db or resolved_table.catalog) and len(
+                dbs_by_table_name.get(resolved_table.name.lower(), set())
+            ) > 1:
+                raise SQLMeshError(
+                    f"Doris 'excluded_trigger_tables' prior to 2.1.10 (and 3.0.6) matches tables by bare name only "
+                    f"and cannot disambiguate '{exp.table_name(resolved_table, identify=False)}' when the view references multiple tables named '{resolved_table.name}'."
+                )
+            resolved_table.set("catalog", None)
+            resolved_table.set("db", None)
+        elif strip_catalog and (
+            effective_engine_dialect != "doris" or resolved_table.catalog.lower() == "internal"
+        ):
+            resolved_table.set("catalog", None)
+        return exp.table_name(resolved_table, identify=False)
 
     return exp.Literal.string(",".join(resolve(ref) for ref in refs if ref.strip()))
 

@@ -33,7 +33,7 @@ gateways:
       database: state.db
 ```
 
-NOTE: Spark and Trino engines may not be used for the state connection.
+NOTE: Spark, Trino, and Doris engines may not be used for the state connection; configure a separate `state_connection` (for example, DuckDB for local development or Postgres/MySQL in production) when using these engines.
 
 ## Default connection
 
@@ -85,6 +85,7 @@ default_gateway: local_db
 * [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
 * [Db2](../integrations/engines/db2.md)
+* [Doris](../integrations/engines/doris.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)

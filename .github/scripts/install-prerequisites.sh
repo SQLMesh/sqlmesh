@@ -28,6 +28,8 @@ elif [ "$ENGINE" == "fabric" ]; then
     rm packages-microsoft-prod.deb
 
     ENGINE_DEPENDENCIES="msodbcsql18"
+elif [ "$ENGINE" == "doris" ]; then
+    sudo sysctl -w vm.max_map_count=2000000
 fi
 
 ALL_DEPENDENCIES="$COMMON_DEPENDENCIES $ENGINE_DEPENDENCIES"
