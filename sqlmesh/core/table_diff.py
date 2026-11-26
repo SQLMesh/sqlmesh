@@ -256,7 +256,7 @@ class TableDiff:
         self.target_alias = target_alias
 
         cols: t.List[str] = ensure_list(skip_columns)
-        self.skip_columns = {
+        self._requested_skip_columns = {
             normalize_identifiers(
                 exp.parse_identifier(col),
                 dialect=self.model_dialect or self.dialect,
@@ -276,29 +276,75 @@ class TableDiff:
         return self.adapter.columns(self.target_table)
 
     @cached_property
+    def skip_columns(self) -> t.Set[str]:
+        """The names of the columns to skip, as reported by the engine for either table.
+
+        Names that don't exist in a table are ignored for that table.
+        """
+        skipped = set()
+        for name in self._requested_skip_columns:
+            for schema in (self.source_schema, self.target_schema):
+                if (resolved := self._find_column_name(name, schema)) is not None:
+                    skipped.add(resolved)
+        return skipped
+
+    def _find_column_name(self, name: str, schema: t.Dict[str, exp.DataType]) -> t.Optional[str]:
+        """Maps a user-supplied column name to the column name reported by the engine.
+
+        User-supplied names are normalized using the dialect, which may change their casing
+        compared to the casing the engine reports. An exact match always wins, otherwise a
+        case-insensitive match is used as long as it is unambiguous.
+
+        Returns None if there is no match and raises if the match is ambiguous.
+        """
+        if name in schema:
+            return name
+
+        matches = [c for c in schema if c.casefold() == name.casefold()]
+        if len(matches) > 1:
+            raise SQLMeshError(
+                f"Column '{name}' is ambiguous, it matches multiple columns: {', '.join(matches)}"
+            )
+        return matches[0] if matches else None
+
+    def _resolve_column_name(self, name: str, schema: t.Dict[str, exp.DataType]) -> str:
+        resolved = self._find_column_name(name, schema)
+        if resolved is None:
+            raise SQLMeshError(
+                f"Column '{name}' does not exist. Available columns: {', '.join(schema)}"
+            )
+        return resolved
+
+    @cached_property
     def key_columns(self) -> t.Tuple[t.List[exp.Column], t.List[exp.Column], t.List[str]]:
         dialect = self.model_dialect or self.dialect
 
         # If the columns to join on are explicitly specified, then just return them
         if isinstance(self._on, (list, tuple)):
-            identifiers = [normalize_identifiers(c, dialect=dialect) for c in self._on]
-            s_index = [exp.column(c, "s") for c in identifiers]
-            t_index = [exp.column(c, "t") for c in identifiers]
-            return s_index, t_index, [i.name for i in identifiers]
+            names = [normalize_identifiers(c, dialect=dialect).name for c in self._on]
+            s_names = [self._resolve_column_name(n, self.source_schema) for n in names]
+            t_names = [self._resolve_column_name(n, self.target_schema) for n in names]
+            s_index = [exp.column(c, "s") for c in s_names]
+            t_index = [exp.column(c, "t") for c in t_names]
+            # The source and target spellings of a column can differ, so keep both
+            return s_index, t_index, list(dict.fromkeys(s_names + t_names))
 
         # Otherwise, we need to parse them out of the supplied "on" condition
         index_cols = []
         s_index = []
         t_index = []
 
-        normalize_identifiers(self._on, dialect=dialect)
-        for col in self._on.find_all(exp.Column):
+        # Work on a copy so the caller's expression isn't modified
+        on = normalize_identifiers(self._on.copy(), dialect=dialect)
+        for col in on.find_all(exp.Column):
+            table = col.table.lower()
+            if table in ("s", "t"):
+                schema = self.source_schema if table == "s" else self.target_schema
+                col.set("this", exp.to_identifier(self._resolve_column_name(col.name, schema)))
+                (s_index if table == "s" else t_index).append(col)
             index_cols.append(col.name)
-            if col.table.lower() == "s":
-                s_index.append(col)
-            elif col.table.lower() == "t":
-                t_index.append(col)
 
+        # Like the list form above, index_cols can contain both source and target spellings
         index_cols = list(dict.fromkeys(index_cols))
         s_index = list(dict.fromkeys(s_index))
         t_index = list(dict.fromkeys(t_index))
