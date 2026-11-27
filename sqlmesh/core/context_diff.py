@@ -20,7 +20,12 @@ from sqlmesh.core import constants as c
 from sqlmesh.core.console import get_console
 from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.model.common import sorted_python_env_payloads
-from sqlmesh.core.snapshot import Snapshot, SnapshotId, SnapshotTableInfo
+from sqlmesh.core.snapshot import (
+    Snapshot,
+    SnapshotChangeCategory,
+    SnapshotId,
+    SnapshotTableInfo,
+)
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.pydantic import PydanticModel
 
@@ -444,11 +449,17 @@ class ContextDiff(PydanticModel):
         current, previous = self.modified_snapshots[name]
         return current.is_directly_modified(previous)
 
-    def indirectly_modified(self, name: str) -> bool:
+    def indirectly_modified(self, name: str, include_metadata_only: bool = False) -> bool:
         """Returns whether or not a node was indirectly modified in this context.
+
+        By default, a node whose upstream changes were all categorized as metadata-only (it is
+        METADATA and keeps the previous version) is not reported as indirectly modified. This is
+        meant for display callers (console, CI bot, web UI). Plan building passes
+        `include_metadata_only=True` so that its answer doesn't depend on categorization state.
 
         Args:
             name: The snapshot name to check.
+            include_metadata_only: Whether to also count such metadata-only nodes.
 
         Returns:
             Whether or not the node was indirectly modified.
@@ -458,7 +469,16 @@ class ContextDiff(PydanticModel):
             return False
 
         current, previous = self.modified_snapshots[name]
-        return current.is_indirectly_modified(previous)
+        if not current.is_indirectly_modified(previous):
+            return False
+
+        # A snapshot whose upstream changes are all metadata-only (eg. whitespace in a parent's query,
+        # which still changes the parent's data hash) is categorized as METADATA and keeps the previous
+        # version, so its data isn't affected.
+        return include_metadata_only or not (
+            current.change_category == SnapshotChangeCategory.METADATA
+            and current.version == previous.version
+        )
 
     def metadata_updated(self, name: str) -> bool:
         """Returns whether or not the given node's metadata has been updated.

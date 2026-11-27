@@ -696,6 +696,91 @@ def test_no_backfill_for_model_downstream_of_metadata_change(init_and_plan_conte
     )
 
 
+def test_metadata_only_parent_change_is_not_indirect(init_and_plan_context: t.Callable):
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    parent_name, child_name = "sushi.waiter_revenue_by_day", "sushi.top_waiters"
+    parent = t.cast(SqlModel, context.get_model(parent_name))
+    child_snapshot = context.get_snapshot(child_name, raise_if_missing=True)
+
+    # Whitespace changes the raw query text, and therefore the parent's data hash, but not its
+    # rendered query, so it is a metadata-only change.
+    context.upsert_model(parent.copy(update={"query_": ParsableSql(sql=parent.query_.sql + "  ")}))
+
+    plan = context.plan_builder("dev", skip_tests=True).build()
+    diff = plan.context_diff
+    assert diff.metadata_updated(parent.fqn)
+    assert not diff.directly_modified(parent.fqn)
+    assert not diff.indirectly_modified(parent.fqn)
+
+    new_child = diff.snapshots[
+        next(s_id for s_id in diff.snapshots if s_id.name == child_snapshot.name)
+    ]
+    assert new_child.fingerprint.parent_data_hash != child_snapshot.fingerprint.parent_data_hash
+    assert not diff.indirectly_modified(child_snapshot.name)
+    assert new_child.change_category == SnapshotChangeCategory.METADATA
+    assert new_child.version == child_snapshot.version
+    assert not plan.missing_intervals
+
+
+def test_data_change_in_parent_is_indirect(init_and_plan_context: t.Callable):
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    parent = t.cast(SqlModel, context.get_model("sushi.waiter_revenue_by_day"))
+    child_name = context.get_snapshot("sushi.top_waiters", raise_if_missing=True).name
+    context.upsert_model(add_projection_to_model(parent))
+
+    diff = context.plan_builder("dev", skip_tests=True).build().context_diff
+    assert diff.directly_modified(parent.fqn)
+    assert diff.indirectly_modified(child_name)
+
+
+def test_metadata_only_parent_change_rebuild_keeps_forward_only_child(
+    init_and_plan_context: t.Callable,
+):
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    parent = t.cast(SqlModel, context.get_model("sushi.waiter_revenue_by_day"))
+    context.upsert_model(
+        load_sql_based_model(
+            d.parse(
+                """
+                MODEL (
+                    name memory.sushi.forward_only_child,
+                    kind INCREMENTAL_BY_TIME_RANGE (time_column event_date, forward_only true),
+                    start '2023-01-01',
+                );
+                SELECT waiter_id, revenue, event_date
+                FROM memory.sushi.waiter_revenue_by_day
+                WHERE event_date BETWEEN @start_ds AND @end_ds
+                """
+            )
+        )
+    )
+    context.plan("prod", auto_apply=True, no_prompts=True, skip_tests=True)
+
+    context.upsert_model(parent.copy(update={"query_": ParsableSql(sql=parent.query_.sql + "  ")}))
+    plan_builder = context.plan_builder("dev", skip_tests=True)
+
+    def child_state(plan: Plan) -> t.Tuple[SnapshotChangeCategory, bool]:
+        child = next(
+            s
+            for s in plan.context_diff.snapshots.values()
+            if s.name.endswith('forward_only_child"')
+        )
+        return child.change_category, child.is_forward_only  # type: ignore
+
+    first = child_state(plan_builder.build())
+    # Rebuilding sees the child already categorized by the first build.
+    second = child_state(plan_builder.set_start("2023-01-01").build())
+
+    assert first == (SnapshotChangeCategory.METADATA, True)
+    assert second == first
+
+
 @time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_plan_set_choice_is_reflected_in_missing_intervals(init_and_plan_context: t.Callable):
     context, _ = init_and_plan_context("examples/sushi")

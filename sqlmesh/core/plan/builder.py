@@ -420,7 +420,7 @@ class PlanBuilder:
                 and (
                     # Metadata changes should not be previewed.
                     self._context_diff.directly_modified(s.name)
-                    or self._context_diff.indirectly_modified(s.name)
+                    or self._context_diff.indirectly_modified(s.name, include_metadata_only=True)
                 )
             }
             is_preview = True
@@ -724,7 +724,7 @@ class PlanBuilder:
                     )
                     if mode == AutoCategorizationMode.FULL:
                         snapshot.categorize_as(SnapshotChangeCategory.BREAKING, forward_only)
-        elif self._context_diff.indirectly_modified(snapshot.name):
+        elif self._context_diff.indirectly_modified(snapshot.name, include_metadata_only=True):
             if snapshot.is_materialized_view and not forward_only:
                 # We categorize changes as breaking to allow for instantaneous switches in a virtual layer.
                 # Otherwise, there might be a potentially long downtime during MVs recreation.
@@ -985,7 +985,7 @@ class PlanBuilder:
     def _is_forward_only_change(self, s_id: SnapshotId) -> bool:
         if not self._context_diff.directly_modified(
             s_id.name
-        ) and not self._context_diff.indirectly_modified(s_id.name):
+        ) and not self._context_diff.indirectly_modified(s_id.name, include_metadata_only=True):
             return False
         snapshot = self._context_diff.snapshots[s_id]
         if snapshot.name in self._context_diff.modified_snapshots:
