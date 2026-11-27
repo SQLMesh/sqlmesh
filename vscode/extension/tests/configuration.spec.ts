@@ -20,9 +20,14 @@ const createEntrypointFile = (
 ): {
   entrypointFile: string
   fileWhereStoredInputs: string
+  fileWhereStoredTelemetryPreference: string
 } => {
   const entrypointFile = path.join(tempDir, entrypointFileName)
   const fileWhereStoredInputs = path.join(tempDir, 'inputs.txt')
+  const fileWhereStoredTelemetryPreference = path.join(
+    tempDir,
+    'telemetry-preference.txt',
+  )
   const sqlmeshLSPFile = path.join(
     path.dirname(pythonEnvironment.pythonPath),
     'sqlmesh_lsp',
@@ -33,6 +38,7 @@ const createEntrypointFile = (
     entrypointFile,
     `#!/bin/bash
 echo "$@" > ${fileWhereStoredInputs}
+echo "\${SQLMESH__DISABLE_ANONYMIZED_ANALYTICS:-}" > ${fileWhereStoredTelemetryPreference}
 # Strip bitToStripFromArgs from the beginning of the args if it matches
 if [[ "$1" == "${bitToStripFromArgs}" ]]; then
   shift
@@ -45,6 +51,7 @@ ${sqlmeshLSPFile} "$@"`,
   return {
     entrypointFile,
     fileWhereStoredInputs,
+    fileWhereStoredTelemetryPreference,
   }
 }
 
@@ -57,11 +64,8 @@ test.describe('Test LSP Entrypoint configuration', () => {
   }) => {
     await fs.copy(SUSHI_SOURCE_PATH, tempDir)
 
-    const { fileWhereStoredInputs } = createEntrypointFile(
-      tempDir,
-      'entrypoint.sh',
-      sharedPythonEnvironment,
-    )
+    const { fileWhereStoredInputs, fileWhereStoredTelemetryPreference } =
+      createEntrypointFile(tempDir, 'entrypoint.sh', sharedPythonEnvironment)
 
     const settings = {
       'sqlmesh.lspEntrypoint': './entrypoint.sh',
@@ -94,6 +98,12 @@ test.describe('Test LSP Entrypoint configuration', () => {
     expect(fs.existsSync(fileWhereStoredInputs)).toBe(true)
     expect(fs.readFileSync(fileWhereStoredInputs, 'utf8')).toBe(`--stdio
 `)
+    // The e2e code-server is launched with --disable-telemetry. Verify the
+    // packaged extension propagates that global preference to the real LSP
+    // child process, not only to a mocked environment builder.
+    expect(fs.readFileSync(fileWhereStoredTelemetryPreference, 'utf8')).toBe(
+      'true\n',
+    )
   })
 
   test('specify one entrypoint absolute path', async ({
