@@ -16,7 +16,7 @@ The state database is how SQLMesh "remembers" what it's done before so it can co
 
     The workload against the state database is an OLTP workload that requires transaction support in order to work correctly.
 
-    For the best experience, we recommend [Tobiko Cloud](../cloud/cloud_index.md) or databases designed for OLTP workloads such as [PostgreSQL](../integrations/engines/postgres.md).
+    For the best experience, we recommend databases designed for OLTP workloads such as [PostgreSQL](../integrations/engines/postgres.md).
 
     Using your warehouse OLAP database to store state is supported for proof-of-concept projects but is not suitable for production and **will** lead to poor performance and consistency.
 

@@ -110,38 +110,6 @@ nav:
     - Configuration:
       - reference/configuration.md
       - reference/model_configuration.md
-  - Tobiko Cloud: # NOTE: if this item is no longer last, need to update extra.css to adjust logo positioning
-    - "Overview": cloud/cloud_index.md
-    - "Getting Started": cloud/tcloud_getting_started.md
-    - Cloud Features:
-      - "Alerts & Notifications": cloud/features/alerts_notifications.md
-      - cloud/features/data_catalog.md
-      - cloud/features/debugger_view.md
-      - Maintenance:
-        - cloud/features/incident_reporting.md
-        - cloud/features/upgrades.md
-      - Scheduler:
-        - "Cloud": cloud/features/scheduler/scheduler.md
-        - "Cloud Hybrid Deployments":
-          - "Overview": cloud/features/scheduler/hybrid_executors_overview.md
-          - "Helm Chart example": cloud/features/scheduler/hybrid_executors_helm.md
-          - "Docker Compose example": cloud/features/scheduler/hybrid_executors_docker_compose.md
-        - cloud/features/scheduler/airflow.md
-        - cloud/features/scheduler/dagster.md
-      - Security:
-        - cloud/features/security/security.md
-        - cloud/features/security/single_sign_on.md
-      - Tools:
-        - cloud/features/xdb_diffing.md
-#      - Observability:
-#        - cloud/features/observability/overview.md
-#        - cloud/features/observability/model_freshness.md
-#        - cloud/features/observability/prod_environment.md
-#        - cloud/features/observability/development_environment.md
-#        - cloud/features/observability/plan.md
-#        - cloud/features/observability/run.md
-#        - cloud/features/observability/model.md
-#        - "Measures & Dashboards": cloud/features/observability/measures_dashboards.md
 theme:
   name: material
   logo: _readthedocs/html/sqlmesh.png

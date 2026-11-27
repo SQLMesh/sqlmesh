@@ -212,9 +212,9 @@ The output matches, with the exception of the column labels in the `COMMON ROWS 
 
 ## Diffing tables or views across gateways
 
-!!! info "Tobiko Cloud Feature"
+!!! info "Not available in open-source SQLMesh"
 
-    Cross-database table diffing is available in [Tobiko Cloud](../cloud/features/xdb_diffing.md).
+    The `table_diff` command compares tables and environments within a single gateway. Cross-database table diffing, which compares tables that live in two different data systems, is not part of open-source SQLMesh.
 
 SQLMesh executes a project's models with a single database system, specified as a [gateway](../guides/connections.md#overview) in the project configuration.
 
@@ -227,6 +227,4 @@ The [within-database table diff](#diffing-models-across-environments) tool canno
 1. It must join the two tables being diffed, but with two systems no single database engine can access both tables.
 2. It assumes that data values can be compared across tables without modification. If the systems use different SQL engines, however, the diff must account for differences in the engines' data types (e.g., whether timestamps should include time zone information).
 
-SQLMesh's cross-database table diff tool is built for just this scenario. Its comparison algorithm efficiently diffs tables without moving them from one system to the other and automatically addresses differences in data types.
-
-Learn more about cross-database table diffing in our [Tobiko Cloud docs](../cloud/features/xdb_diffing.md).
+If you need a diff across data systems, materialize both sides into one gateway first, then run `table_diff` against the two tables there.

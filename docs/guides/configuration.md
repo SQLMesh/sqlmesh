@@ -958,7 +958,7 @@ Unlike data transformations, storing state information requires database transac
 !!! note
     Using the same connection for data warehouse and state is not recommended for production deployments of SQLMesh.
 
-The easiest and most reliable way to manage your state connection is for [Tobiko Cloud](https://tobikodata.com/product.html) to do it for you. If you'd rather handle it yourself, we list recommended and unsupported state engines below.
+We list recommended and unsupported state engines below.
 
 Recommended state engines for production deployments:
 
@@ -1540,7 +1540,7 @@ Example enabling debug mode for the CLI command `sqlmesh plan`:
 ### Python library dependencies
 SQLMesh enables you to write Python models and macros which depend on third-party libraries. To ensure each run / evaluation uses the same version, you can specify versions in a `sqlmesh-requirements.lock` file in the root of your project.
 
-The sqlmesh.lock must be of the format `dep==version`. Only `==` is supported.
+The lock file must be of the format `dep==version`. Only `==` is supported.
 
 For example:
 
@@ -1549,7 +1549,7 @@ numpy==2.1.2
 pandas==2.2.3
 ```
 
-This feature is only available in [Tobiko Cloud](https://tobikodata.com/product.html).
+SQLMesh reads the lock file when it loads your project and records the pinned versions on the environment, so a change to the file shows up as a plan change.
 
 #### Excluding dependencies
 
