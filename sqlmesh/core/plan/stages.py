@@ -348,15 +348,17 @@ class PlanStagesBuilder:
         if audit_only_snapshots:
             stages.append(AuditOnlyRunStage(snapshots=list(audit_only_snapshots.values())))
 
+        # When only one backfill stage runs, it also creates missing tables for selected snapshots
+        # from the other phase. Those snapshots can have no intervals to backfill yet.
         if missing_intervals_before_promote:
             stages.append(
                 BackfillStage(
                     snapshot_to_intervals=missing_intervals_before_promote,
-                    selected_snapshot_ids={
-                        s_id
-                        for s_id in before_promote_snapshots
-                        if plan.is_selected_for_backfill(s_id.name)
-                    },
+                    selected_snapshot_ids=(
+                        before_promote_snapshots
+                        if missing_intervals_after_promote
+                        else all_selected_for_backfill_snapshots
+                    ),
                     all_snapshots=snapshots_by_name,
                     deployability_index=deployability_index,
                 )
@@ -406,11 +408,11 @@ class PlanStagesBuilder:
             stages.append(
                 BackfillStage(
                     snapshot_to_intervals=missing_intervals_after_promote,
-                    selected_snapshot_ids={
-                        s_id
-                        for s_id in after_promote_snapshots
-                        if plan.is_selected_for_backfill(s_id.name)
-                    },
+                    selected_snapshot_ids=(
+                        after_promote_snapshots
+                        if missing_intervals_before_promote
+                        else all_selected_for_backfill_snapshots
+                    ),
                     all_snapshots=snapshots_by_name,
                     deployability_index=deployability_index,
                 )
