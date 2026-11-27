@@ -652,6 +652,17 @@ def test_macro_functions(macro_evaluator: MacroEvaluator, assert_exp_eq, sql, ex
     assert_exp_eq(macro_evaluator.transform(parse_one(sql)), expected)
 
 
+def test_each_lambda_quotes_identifiers_needing_quotes():
+    evaluator = MacroEvaluator(dialect="snowflake")
+
+    # Names that are not safe identifiers get quoted, safe names are left untouched
+    expression = parse_one('SELECT @EACH(["a b", c], x -> 1 AS prefix_@x)', dialect="snowflake")
+    assert (
+        evaluator.transform(expression).sql(dialect="snowflake")
+        == 'SELECT 1 AS "prefix_a b", 1 AS prefix_c'
+    )
+
+
 def test_macro_returns_none(macro_evaluator: MacroEvaluator):
     assert macro_evaluator.transform(parse_one("@NOOP()")) is None
 

@@ -630,6 +630,29 @@ def test_unique_values_audit(model: Model):
     )
 
 
+def test_unique_values_audit_quoted_columns():
+    model = load_sql_based_model(
+        parse(
+            """
+            MODEL (
+                name db.test_model,
+                dialect snowflake,
+                audits (unique_values(columns := ("Item functional number", plain_col)))
+            );
+
+            SELECT 1 AS "Item functional number", 2 AS plain_col
+            """
+        )
+    )
+    audit, args = model.audits_with_args[0]
+    query = model.render_audit_query(audit, **args)
+    rendered = query.sql(dialect="snowflake")
+    assert 'AS "rank_Item functional number"' in rendered
+    assert 'WHERE "rank_Item functional number" > 1 OR "RANK_PLAIN_COL" > 1' in rendered
+    # The rendered query must be valid SQL
+    parse_one(rendered, dialect="snowflake")
+
+
 def test_accepted_values_audit(model: Model):
     rendered_query = model.render_audit_query(
         builtin.accepted_values_audit,
