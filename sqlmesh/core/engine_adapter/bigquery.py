@@ -1049,6 +1049,12 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
             return exp.Properties(expressions=properties)
         return None
 
+    def _truncate_table_comment(self, comment: str) -> str:
+        limit = self._extra_config.get("max_table_comment_length")
+        return self._truncate_comment(
+            comment, self.MAX_TABLE_COMMENT_LENGTH if limit is None else limit
+        )
+
     def _build_create_comment_table_exp(
         self, table: exp.Table, table_comment: str, table_kind: str
     ) -> exp.Comment | str:

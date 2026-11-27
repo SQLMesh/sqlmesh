@@ -1122,6 +1122,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
     priority: t.Optional[BigQueryPriority] = None
     maximum_bytes_billed: t.Optional[int] = None
     reservation: t.Optional[str] = None
+    max_table_comment_length: t.Optional[int] = Field(default=None, ge=1, le=16_384)
 
     concurrent_tasks: int = 1
     register_comments: bool = True
@@ -1232,6 +1233,7 @@ class BigQueryConnectionConfig(ConnectionConfig):
                 "priority",
                 "maximum_bytes_billed",
                 "reservation",
+                "max_table_comment_length",
             }
         }
 
