@@ -1197,6 +1197,49 @@ def test_data_diff_sample_limit():
     assert len(diff.joined_sample) == 3
 
 
+@pytest.mark.parametrize("limit", [1, 2])
+def test_data_diff_sample_omits_empty_column_tables(limit):
+    engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
+    try:
+        engine_adapter.execute(
+            "CREATE TABLE src AS SELECT * FROM (VALUES (1, 10, 20, 30), (2, 10, 20, 30)) "
+            "AS records(id, early, late, unchanged)"
+        )
+        engine_adapter.execute(
+            "CREATE TABLE target AS SELECT * FROM (VALUES (1, 99, 20, 30), (2, 10, 99, 30)) "
+            "AS records(id, early, late, unchanged)"
+        )
+        table_diff = TableDiff(
+            adapter=engine_adapter, source="src", target="target", on=["id"], limit=limit
+        )
+
+        row_diff = table_diff.row_diff()
+        assert row_diff.partial_match_count == 2
+        assert row_diff.column_stats["pct_match"].to_dict() == {
+            "early": 50.0,
+            "late": 50.0,
+            "unchanged": 100.0,
+        }
+        assert row_diff.joined_sample["id"].tolist() == list(range(1, limit + 1))
+        assert "s__late" in row_diff.joined_sample
+        assert "s__unchanged" not in row_diff.joined_sample
+        original_stats = row_diff.column_stats.copy(deep=True)
+        original_sample = row_diff.joined_sample.copy(deep=True)
+
+        output = strip_ansi_codes(capture_console_output("show_row_diff", row_diff=row_diff))
+
+        assert "Column: early" in output
+        assert ("Column: late" in output) == (limit == 2)
+        assert "Column: unchanged" not in output
+        assert "99" in output
+        assert "PARTIAL MATCH: 2 rows (100.0%)" in output
+        assert "unchanged" in output and "100.0" in output
+        pd.testing.assert_frame_equal(row_diff.column_stats, original_stats)
+        pd.testing.assert_frame_equal(row_diff.joined_sample, original_sample)
+    finally:
+        engine_adapter.close()
+
+
 def test_data_diff_nulls_in_some_grain_columns():
     engine_adapter = DuckDBConnectionConfig().create_engine_adapter()
 
