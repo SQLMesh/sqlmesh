@@ -237,6 +237,7 @@ Using a list creates secrets with DuckDB's default naming:
               region: "YOUR_AWS_REGION"
               key_id: "YOUR_AWS_ACCESS_KEY"
               secret: "YOUR_AWS_SECRET_KEY"
+              # endpoint: "s3.example-region.example.com" # For S3-compatible providers
     ```
 
 === "Python"
@@ -266,7 +267,8 @@ Using a list creates secrets with DuckDB's default naming:
                             "type": "s3",
                             "region": "YOUR_AWS_REGION",
                             "key_id": "YOUR_AWS_ACCESS_KEY",
-                            "secret": "YOUR_AWS_SECRET_KEY"
+                            "secret": "YOUR_AWS_SECRET_KEY",
+                            # "endpoint": "s3.example-region.example.com",  # For S3-compatible providers
                         }
                     ]
                 )
@@ -349,6 +351,10 @@ After configuring the secrets, you can directly reference S3 paths in your catal
 Refer to the official DuckDB documentation for the full list of [supported S3 secret parameters](https://duckdb.org/docs/stable/extensions/httpfs/s3api.html#overview-of-s3-secret-parameters) and for more information on the [Secrets Manager configuration](https://duckdb.org/docs/configuration/secrets_manager.html).
 
 > Note: Loading credentials at runtime using `load_aws_credentials()` or similar deprecated functions may fail when using SQLMesh.
+
+##### S3-Compatible Endpoints
+
+An `s3` secret targets Amazon S3 by default. To use another S3-compatible object store (for example Backblaze B2, Cloudflare R2, or MinIO), uncomment `endpoint` in the List Format example and set it to the provider's S3 host, without `https://`. For providers that require path-style addressing, also set `url_style: path`.
 
 ##### File system configuration example for Microsoft Onelake
 
