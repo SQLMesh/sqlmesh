@@ -24,6 +24,7 @@ from sqlmesh.core.macros import call_macro
 from sqlmesh.core.model import Model, ModelKindMixin, ModelKindName, ViewKind, CustomKind
 from sqlmesh.core.model.definition import _Model
 from sqlmesh.core.node import IntervalUnit, NodeType
+from sqlmesh.core.renderer import TableMapping
 from sqlmesh.utils import sanitize_name, unique
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import (
@@ -1471,7 +1472,7 @@ class Snapshot(PydanticModel, SnapshotInfoMixin):
            An example of this can be an INCREMENTAL_BY_TIME_RANGE model that references previous records from itself.
         2. Models that can only be restated from the beginning of history *and* their interval batches must be processed sequentially.
         """
-        return self.depends_on_self or self.full_history_restatement_only
+        return self.full_history_restatement_only or self.depends_on_self
 
     @property
     def depends_on_self(self) -> bool:
@@ -2007,14 +2008,17 @@ def to_view_mapping(
     environment_naming_info: EnvironmentNamingInfo,
     default_catalog: t.Optional[str] = None,
     dialect: t.Optional[str] = None,
-) -> t.Dict[str, str]:
-    return {
-        snapshot.name: snapshot.display_name(
-            environment_naming_info, default_catalog=default_catalog, dialect=dialect
+) -> TableMapping:
+    return TableMapping(
+        (
+            snapshot.name,
+            snapshot.display_name(
+                environment_naming_info, default_catalog=default_catalog, dialect=dialect
+            ),
         )
         for snapshot in snapshots
         if snapshot.is_model
-    }
+    )
 
 
 def has_paused_forward_only(

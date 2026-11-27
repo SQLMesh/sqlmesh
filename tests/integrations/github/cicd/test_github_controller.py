@@ -3,7 +3,7 @@ import typing as t
 import os
 import pathlib
 from unittest import mock
-from unittest.mock import PropertyMock, call
+from unittest.mock import ANY, PropertyMock, call
 
 import pytest
 import time_machine
@@ -12,7 +12,9 @@ from pytest_mock.plugin import MockerFixture
 from sqlmesh.core import constants as c
 from sqlmesh.core.config import CategorizerConfig
 from sqlmesh.core.dialect import parse_one
+from sqlmesh.core.environment import EnvironmentNamingInfo, EnvironmentStatements
 from sqlmesh.core.model import SqlModel
+from sqlmesh.core.snapshot import SnapshotChangeCategory
 from sqlmesh.core.user import User, UserRole
 from sqlmesh.core.plan.definition import Plan
 from sqlmesh.core.linter.rule import RuleViolation
@@ -256,7 +258,9 @@ def test_pr_plan(github_client, make_controller):
     assert controller.pr_plan.skip_backfill
     assert not controller.pr_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert (
         controller._pr_plan_builder._categorizer_config
         == controller._context.auto_categorize_changes
@@ -278,7 +282,9 @@ def test_pr_plan_auto_categorization(github_client, make_controller):
     assert controller.pr_plan.skip_backfill
     assert not controller.pr_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert controller._pr_plan_builder._categorizer_config == custom_categorizer_config
     assert controller.pr_plan.start == default_start_absolute
     assert not controller.pr_plan.start_override_per_model
@@ -365,7 +371,9 @@ def test_prod_plan(github_client, make_controller):
     assert not controller.prod_plan.skip_backfill
     assert controller.prod_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert (
         controller._prod_plan_builder._categorizer_config
         == controller._context.auto_categorize_changes
@@ -387,7 +395,9 @@ def test_prod_plan_auto_categorization(github_client, make_controller):
     assert not controller.prod_plan.skip_backfill
     assert controller.prod_plan.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
     assert controller._prod_plan_builder._categorizer_config == custom_categorizer_config
     # default PR start should be ignored for prod plans
     assert controller.prod_plan.start != default_pr_start
@@ -404,7 +414,9 @@ def test_prod_plan_with_gaps(github_client, make_controller):
     assert controller._prod_plan_with_gaps_builder._auto_categorization_enabled
     assert not controller.prod_plan_with_gaps.no_gaps
     assert not controller._context.apply.called
-    assert controller._context._run_plan_tests.call_args == call(skip_tests=True)
+    assert controller._context._run_plan_tests.call_args == call(
+        skip_tests=True, test_changed_only=False, model_names=ANY
+    )
 
 
 def test_run_tests(github_client, make_controller):
@@ -788,6 +800,60 @@ def test_get_plan_summary_includes_warnings_and_errors(
     assert (
         "> Linter **errors** for `tests/linter_test.sql`:\n>  - mock_linter_rule: Linter error\n>"
     ) in summary
+
+
+def test_get_plan_summary_preserves_literal_sql(
+    github_client, make_controller, make_snapshot, mocker
+):
+    controller = make_controller(
+        "tests/fixtures/github/pull_request_synchronized.json", github_client
+    )
+    context_diff = controller.prod_plan.context_diff
+    old, new = [
+        make_snapshot(
+            SqlModel(
+                name="test.model",
+                dialect="tsql",
+                query=parse_one(f"SELECT [{column}] FROM [schema].[table]", dialect="tsql"),
+            )
+        )
+        for column in ("old_col", "new_col")
+    ]
+    new.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+    context_diff.is_new_environment = False
+    context_diff.added = set()
+    context_diff.snapshots = {new.snapshot_id: new}
+    context_diff.modified_snapshots = {new.name: (new, old)}
+    context_diff.environment_statements = [
+        EnvironmentStatements(
+            before_all=["SELECT [before] FROM [schema].[table]"],
+            after_all=["SELECT ':smile: [/invalid] ```' AS [after]"],
+            python_env={},
+        )
+    ]
+    plan = mocker.Mock(
+        spec=Plan,
+        context_diff=context_diff,
+        restatements={},
+        missing_intervals=[],
+        user_provided_flags={},
+        environment_naming_info=EnvironmentNamingInfo(),
+    )
+    controller._console.log_success("stale output")
+    github_client.reset_mock()
+
+    summary = controller.get_plan_summary(plan)
+
+    diff = context_diff.text_diff(new.name)
+    assert (
+        "  ```diff\n" + "\n".join(f"  {line}" for line in diff.split("\n")) + "\n  ```\n" in summary
+    )
+    for _, diff in context_diff.environment_statements_diff():
+        fence = "````" if "```" in diff else "```"
+        assert f"{fence}diff\n{diff}\n{fence}\n" in summary
+    assert "stale output" not in summary
+    assert controller._console.consume_captured_output() == ""
+    assert not github_client.mock_calls
 
 
 def test_get_pr_environment_summary_includes_warnings_and_errors(

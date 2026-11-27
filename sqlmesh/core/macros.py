@@ -965,15 +965,82 @@ def generate_surrogate_key(
             )
         )
 
+    concat = exp.func("CONCAT", *string_fields)
+    # The argument is always a string; annotating it here lets generators that
+    # split string/binary hash semantics (Presto, Trino) wrap the encode.
+    concat.type = exp.DataType.build("text")
+
     func = exp.func(
         hash_function.name,
-        exp.func("CONCAT", *string_fields),
+        concat,
         dialect=evaluator.dialect,
     )
     if isinstance(func, exp.MD5Digest):
         func = exp.MD5(this=func.this)
+    elif isinstance(func, exp.SHA2Digest):
+        # Same split as MD5/MD5Digest: the surrogate key must be a hex string,
+        # not a binary digest, on every dialect.
+        func = exp.SHA2(this=func.this, length=func.args.get("length"))
+    elif isinstance(func, exp.Anonymous) and _is_presto_family(evaluator.dialect):
+        # Athena runs the Trino engine, so sha256() takes varbinary there too,
+        # but its parser has no SHA256/SHA512 entry: exp.func returns an
+        # Anonymous node, so neither branch above fires and the surrogate key
+        # keeps the bare SHA256(varchar) form reported in #5871. Unlike the
+        # probe below, this is not a pin-era workaround — Athena still parses
+        # to Anonymous on sqlglot versions that carry tobymao/sqlglot#7824.
+        #
+        # Anonymous is the catch-all for every unrecognised function name, and
+        # hash_function is caller-supplied, so the name is checked rather than
+        # assumed: an unknown hash must pass through untouched.
+        length = _SHA2_DIGEST_LENGTHS.get(func.name.upper())
+        if length is not None:
+            func = exp.SHA2(this=concat, length=exp.Literal.number(length))
+
+    if isinstance(func, exp.SHA2) and _sha2_renders_binary(evaluator.dialect):
+        # Presto/Trino render a bare SHA256(varchar) for exp.SHA2 on sqlglot
+        # versions without tobymao/sqlglot#7824: a type error on Trino, and
+        # binary rather than string semantics where it runs. Build the
+        # hex-string form explicitly, mirroring what those generators do for
+        # MD5: LOWER(TO_HEX(SHA256(TO_UTF8(...)))). The probe keeps this
+        # branch inert once sqlglot renders the hex form natively, so the
+        # expression is never wrapped twice.
+        return exp.Lower(
+            this=exp.Hex(
+                this=exp.SHA2(
+                    this=exp.Encode(this=func.this, charset=exp.Literal.string("utf-8")),
+                    length=func.args.get("length"),
+                )
+            )
+        )
 
     return func
+
+
+# Dialects that model string and binary hashes separately, so a bare
+# SHA256(varchar) is a type error rather than a hex-string surrogate key.
+# Athena is on the list because it runs the Trino engine.
+_PRESTO_FAMILY = frozenset({"presto", "trino", "athena"})
+
+# The SHA-2 digest widths a surrogate key may ask for, by function name.
+_SHA2_DIGEST_LENGTHS = {"SHA256": 256, "SHA512": 512}
+
+
+def _is_presto_family(dialect: DialectType) -> bool:
+    """Whether this dialect is Presto, Trino or Athena."""
+    return (str(dialect) if dialect else "").split(",")[0].strip().lower() in _PRESTO_FAMILY
+
+
+@lru_cache(maxsize=None)
+def _sha2_renders_binary(dialect: DialectType) -> bool:
+    """Whether this dialect renders exp.SHA2 as a bare binary-semantics call.
+
+    Only the Presto family models string and binary hashes separately; other
+    dialects' SHA256(varchar) already returns a hex string.
+    """
+    if not _is_presto_family(dialect):
+        return False
+    probe = exp.SHA2(this=exp.column("_sqlmesh_probe"), length=exp.Literal.number(256))
+    return "TO_HEX" not in probe.sql(dialect=dialect)
 
 
 @macro()
@@ -985,12 +1052,11 @@ def safe_add(_: MacroEvaluator, *fields: exp.Expr) -> exp.Case:
         >>> from sqlmesh.core.macros import MacroEvaluator
         >>> sql = "SELECT @SAFE_ADD(a, b) FROM foo"
         >>> MacroEvaluator().transform(parse_one(sql)).sql()
-        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE COALESCE(a, 0) + COALESCE(b, 0) END FROM foo'
+        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE (COALESCE(a, 0) + COALESCE(b, 0)) END FROM foo'
     """
-    return (
-        exp.Case()
-        .when(exp.and_(*(field.is_(exp.null()) for field in fields)), exp.null())
-        .else_(reduce(lambda a, b: a + b, [exp.func("COALESCE", field, 0) for field in fields]))  # type: ignore
+    return _null_if_all_null(
+        fields,
+        reduce(lambda a, b: a + b, [exp.func("COALESCE", field, 0) for field in fields]),  # type: ignore
     )
 
 
@@ -1003,17 +1069,30 @@ def safe_sub(_: MacroEvaluator, *fields: exp.Expr) -> exp.Case:
         >>> from sqlmesh.core.macros import MacroEvaluator
         >>> sql = "SELECT @SAFE_SUB(a, b) FROM foo"
         >>> MacroEvaluator().transform(parse_one(sql)).sql()
-        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE COALESCE(a, 0) - COALESCE(b, 0) END FROM foo'
+        'SELECT CASE WHEN a IS NULL AND b IS NULL THEN NULL ELSE (COALESCE(a, 0) - COALESCE(b, 0)) END FROM foo'
+    """
+    return _null_if_all_null(
+        fields,
+        reduce(lambda a, b: a - b, [exp.func("COALESCE", field, 0) for field in fields]),  # type: ignore
+    )
+
+
+def _null_if_all_null(fields: t.Sequence[exp.Expr], arithmetic: exp.Expr) -> exp.Case:
+    """Returns NULL when every field is NULL, otherwise the result of the arithmetic.
+
+    The arithmetic is parenthesized because the optimizer replaces the CASE with this branch
+    when the condition is statically false (e.g. `1 IS NULL`), and without the parentheses
+    the operation would bind to the operators around the macro call.
     """
     return (
         exp.Case()
         .when(exp.and_(*(field.is_(exp.null()) for field in fields)), exp.null())
-        .else_(reduce(lambda a, b: a - b, [exp.func("COALESCE", field, 0) for field in fields]))  # type: ignore
+        .else_(exp.paren(arithmetic, copy=False))
     )
 
 
 @macro()
-def safe_div(_: MacroEvaluator, numerator: exp.Expr, denominator: exp.Expr) -> exp.Div:
+def safe_div(_: MacroEvaluator, numerator: exp.Expr, denominator: exp.Expr) -> exp.Paren:
     """Divides numbers, returns null if the denominator is 0.
 
     Example:
@@ -1021,9 +1100,10 @@ def safe_div(_: MacroEvaluator, numerator: exp.Expr, denominator: exp.Expr) -> e
         >>> from sqlmesh.core.macros import MacroEvaluator
         >>> sql = "SELECT @SAFE_DIV(a, b) FROM foo"
         >>> MacroEvaluator().transform(parse_one(sql)).sql()
-        'SELECT a / NULLIF(b, 0) FROM foo'
+        'SELECT (a / NULLIF(b, 0)) FROM foo'
     """
-    return numerator / exp.func("NULLIF", denominator, 0)
+    # The quotient must stay a single operand of whatever operator surrounds the macro call
+    return exp.paren(numerator / exp.func("NULLIF", denominator, 0), copy=False)
 
 
 @macro()

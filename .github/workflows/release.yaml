@@ -5,15 +5,16 @@ on:
       - 'v*.*.*'
 permissions:
   contents: write
+# Pin Ubuntu 24.04. ubuntu-latest now resolves to 26.04.
 jobs:
   ui-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: latest
       - name: Install dependencies
@@ -21,7 +22,7 @@ jobs:
       - name: Build UI
         run: pnpm --prefix web/client run build
       - name: Upload UI build artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ui-dist
           path: web/client/dist/
@@ -29,20 +30,24 @@ jobs:
 
   publish:
     needs: ui-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Download UI build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ui-dist
           path: web/client/dist/
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.10'
+          # 3.13.17+ bundles pip 26.2.2+, which no longer trusts the compromised eMudhra/emSign root CA.
+          python-version: '3.13'
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      - name: Check pip includes the eMudhra/emSign CA removal
+        run: |
+          python -c "import sys, pip; v = tuple(int(p) for p in pip.__version__.split('.')[:3]); sys.exit(0 if v >= (26, 2, 2) else f'pip {pip.__version__} predates the eMudhra/emSign CA removal; need >= 26.2.2')"
       - name: Install build dependencies
         run: pip install build twine setuptools_scm
       - name: Publish Python package
@@ -50,22 +55,15 @@ jobs:
         env:
           TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.TWINE_PASSWORD }}
-      - name: Update pypirc for private repository
-        run: ./.github/scripts/update-pypirc.sh
-        env:
-          TOBIKO_PRIVATE_PYPI_URL: ${{ secrets.TOBIKO_PRIVATE_PYPI_URL }}
-          TOBIKO_PRIVATE_PYPI_KEY: ${{ secrets.TOBIKO_PRIVATE_PYPI_KEY }}
-      - name: Publish Python Tests package
-        run: unset TWINE_USERNAME TWINE_PASSWORD && make publish-tests
 
   gh-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Create release on GitHub
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           tag_name: ${{ github.ref_name }}

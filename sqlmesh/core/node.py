@@ -28,7 +28,8 @@ if t.TYPE_CHECKING:
 class IntervalUnit(str, Enum):
     """IntervalUnit is the inferred granularity of an incremental node.
 
-    IntervalUnit can be one of 5 types, YEAR, MONTH, DAY, HOUR, MINUTE. The unit is inferred
+    IntervalUnit can be one of 7 types: YEAR, MONTH, DAY, HOUR, HALF_HOUR, QUARTER_HOUR,
+    FIVE_MINUTE. The unit is inferred
     based on the cron schedule of a node. The minimum time delta between a sample set of dates
     is used to determine which unit a node's schedule is.
 

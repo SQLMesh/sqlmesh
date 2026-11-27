@@ -714,6 +714,38 @@ def test_drop_schema(make_mocked_engine_adapter: t.Callable):
     ]
 
 
+def test_drop_schema_skips_dbo(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
+
+    adapter._get_data_objects = mock.Mock()
+    adapter._get_data_objects.return_value = [
+        DataObject(
+            catalog="test_catalog",
+            schema="dbo",
+            name="test_view",
+            type=DataObjectType.from_str("VIEW"),
+        )
+    ]
+
+    # String "dbo" path (original coverage)
+    adapter.drop_schema("dbo", cascade=True)
+
+    sql_calls = to_sql_calls(adapter)
+    assert """DROP VIEW IF EXISTS [dbo].[test_view];""" in sql_calls
+    assert """DROP SCHEMA IF EXISTS [dbo];""" not in sql_calls
+
+    # exp.to_table("dbo") path — schema ends up in .name, not .db
+    adapter2 = make_mocked_engine_adapter(MSSQLEngineAdapter)
+    adapter2._get_data_objects = mock.Mock()
+    adapter2._get_data_objects.return_value = []
+
+    schema_name = exp.to_table("dbo", dialect="tsql")
+    adapter2.drop_schema(schema_name, cascade=False)
+
+    sql_calls2 = to_sql_calls(adapter2)
+    assert """DROP SCHEMA IF EXISTS [dbo];""" not in sql_calls2
+
+
 def test_drop_schema_with_special_identifiers(make_mocked_engine_adapter: t.Callable):
     adapter = make_mocked_engine_adapter(MSSQLEngineAdapter)
 
@@ -1023,3 +1055,17 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
         adapter._build_create_comment_table_exp(table, comment),
         adapter._build_create_comment_column_exp(table, "a", comment),
     ]
+
+
+def test_concat_columns_uses_varchar_max(adapter: MSSQLEngineAdapter):
+    # CAST(x AS VARCHAR) without a length truncates to 30 characters in T-SQL, which
+    # breaks the table_diff join key for long or UNIQUEIDENTIFIER key columns
+    columns_to_types = {
+        "id": exp.DataType.build("UNIQUEIDENTIFIER", dialect=adapter.dialect),
+        "name": exp.DataType.build("NVARCHAR(100)", dialect=adapter.dialect),
+    }
+
+    assert (
+        adapter.concat_columns(columns_to_types).sql(dialect=adapter.dialect)
+        == "COALESCE(CAST(id AS VARCHAR(MAX)), '') + ',' + COALESCE(CAST(name AS VARCHAR(MAX)), '')"
+    )

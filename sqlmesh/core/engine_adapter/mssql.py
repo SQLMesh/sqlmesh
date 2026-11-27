@@ -81,6 +81,19 @@ class MSSQLEngineAdapter(
     VARIABLE_LENGTH_DATA_TYPES = {"binary", "varbinary", "char", "varchar", "nchar", "nvarchar"}
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.MERGE
 
+    def normalize_value(
+        self,
+        expr: exp.Expr,
+        type: exp.DataType,
+        decimal_precision: int = 3,
+        timestamp_precision: int = RowDiffMixin.MAX_TIMESTAMP_PRECISION,
+    ) -> exp.Expr:
+        # T-SQL truncates CAST(x AS VARCHAR) to 30 characters when no length is given.
+        # Keep this VARCHAR rather than NVARCHAR: Fabric inherits it and has no NVARCHAR type.
+        normalized = super().normalize_value(expr, type, decimal_precision, timestamp_precision)
+        normalized.set("to", exp.DataType.build("VARCHAR(MAX)", dialect=self.dialect))
+        return normalized
+
     @property
     def catalog_support(self) -> CatalogSupport:
         # MSSQL and AzureSQL both use this engine adapter, but they differ in catalog support.
@@ -180,7 +193,10 @@ class MSSQLEngineAdapter(
         **drop_args: t.Dict[str, exp.Expr],
     ) -> None:
         """
-        MsSql doesn't support CASCADE clause and drops schemas unconditionally.
+        MsSql doesn't support CASCADE clause so objects are dropped individually.
+
+        SQL Server also forbids dropping the built-in ``dbo`` schema (error 15150).
+        Objects inside it are still dropped when cascade=True, but the schema itself is left in place.
         """
         if cascade:
             objects = self._get_data_objects(schema_name)
@@ -199,6 +215,15 @@ class MSSQLEngineAdapter(
                         object_table,
                         exists=ignore_if_not_exists,
                     )
+
+        schema = (
+            (schema_name.db or schema_name.name)
+            if isinstance(schema_name, exp.Table)
+            else schema_name
+        )
+        if schema.lower() == "dbo":
+            return
+
         super().drop_schema(schema_name, ignore_if_not_exists=ignore_if_not_exists, cascade=False)
 
     def merge(

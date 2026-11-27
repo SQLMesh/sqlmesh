@@ -42,6 +42,17 @@ def test_to_datetime() -> None:
 
 
 @pytest.mark.parametrize(
+    "value",
+    ["inf", "-inf", "1e30", "99999999999999999999", float("inf")],
+)
+def test_to_datetime_out_of_range_raises(value: t.Any) -> None:
+    # A non-finite or out-of-range epoch overflows fromtimestamp; it must raise
+    # the documented ValueError rather than leaking OverflowError/OSError.
+    with pytest.raises(ValueError):
+        to_datetime(value)
+
+
+@pytest.mark.parametrize(
     "expression, result",
     [
         ("1 second ago", datetime(2023, 1, 20, 12, 29, 59, tzinfo=UTC)),

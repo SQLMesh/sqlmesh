@@ -329,6 +329,16 @@ By default, the SQLMesh cache is stored in a `.cache` directory within your proj
 
 The cache directory is automatically created if it doesn't exist. You can clear the cache using the `sqlmesh clean` command.
 
+#### Project index
+
+The `--use-project-index` option on supported commands maintains a persistent model dependency index in the cache directory. Each project writes a file named `<project>_<hash>_model_index.json`.
+
+A full project load with the option enabled creates or refreshes the index. SQLMesh invalidates it when relevant configuration, gateway, macro, audit, or signal metadata changes, or when the set of model files changes. If the index is missing, invalid, or stale, SQLMesh safely falls back to a full project load and rebuilds it.
+
+For operations targeting selected models, the index allows SQLMesh to load only those models and their upstream dependencies.
+
+In multi-repository projects, dependencies that cross project boundaries may not be represented by an individual project's index. SQLMesh detects incomplete scoped loads and falls back to loading the full configured project set.
+
 ### Table/view storage locations
 
 SQLMesh creates schemas, physical tables, and views in the data warehouse/engine. Learn more about why and how SQLMesh creates schema in the ["Why does SQLMesh create schemas?" FAQ](../faq/faq.md#schema-question).
@@ -919,19 +929,22 @@ Example snowflake connection configuration:
 These pages describe the connection configuration options for each execution engine.
 
 * [Athena](../integrations/engines/athena.md)
+* [Azure SQL](../integrations/engines/azuresql.md)
 * [BigQuery](../integrations/engines/bigquery.md)
+* [ClickHouse](../integrations/engines/clickhouse.md)
 * [Databricks](../integrations/engines/databricks.md)
 * [DuckDB](../integrations/engines/duckdb.md)
 * [Fabric](../integrations/engines/fabric.md)
 * [MotherDuck](../integrations/engines/motherduck.md)
-* [MySQL](../integrations/engines/mysql.md)
 * [MSSQL](../integrations/engines/mssql.md)
+* [MySQL](../integrations/engines/mysql.md)
 * [Postgres](../integrations/engines/postgres.md)
 * [GCP Postgres](../integrations/engines/gcp-postgres.md)
 * [Redshift](../integrations/engines/redshift.md)
+* [RisingWave](../integrations/engines/risingwave.md)
 * [Snowflake](../integrations/engines/snowflake.md)
-* [StarRocks](../integrations/engines/starrocks.md)
 * [Spark](../integrations/engines/spark.md)
+* [StarRocks](../integrations/engines/starrocks.md)
 * [Trino](../integrations/engines/trino.md)
 
 #### State connection
@@ -1200,9 +1213,11 @@ Example configuration:
 
 #### Default connections/scheduler
 
-The `default_connection`, `default_test_connection`, and `default_scheduler` keys are used to specify shared defaults across multiple gateways.
+The `default_connection`, `default_test_connection`, and `default_scheduler` keys specify a connection or scheduler for gateways that do not define their own.
 
 For example, you might have a specific connection where your tests should run regardless of which gateway is being used. Instead of duplicating the test connection information in each gateway specification, specify it once in the `default_test_connection` key.
+
+A default is only used when a gateway omits the corresponding key entirely. If a gateway specifies its own `connection`, `test_connection`, or `scheduler`, SQLMesh uses that configuration as written and ignores the default. Fields are not merged, so a gateway connection cannot inherit individual fields such as `type` from `default_connection`. Each gateway connection must be a complete connection configuration.
 
 Example configuration specifying a Postgres default connection, in-memory DuckDB default test connection, and builtin default scheduler:
 

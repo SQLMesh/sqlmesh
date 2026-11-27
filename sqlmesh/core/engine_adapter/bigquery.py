@@ -405,6 +405,7 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
     def alter_table(
         self,
         alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
     ) -> None:
         """
         Performs the alter statements to change the current table into the structure of the target table,
@@ -818,6 +819,7 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin, GrantsFromInfoSchema
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
         materialized_view: bool = False,
+        table_format: t.Optional[str] = None,
     ) -> None:
         if not (table_kind == "VIEW" and materialized_view):
             table = self._get_table(table_name)

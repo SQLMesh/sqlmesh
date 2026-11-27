@@ -137,14 +137,16 @@ WHERE
 )
 
 # at_least_one(column=column_name)
+# The aggregate is computed over the whole table rather than per group: grouping by the constant
+# produces no groups at all when the table is empty or @condition filters out every row, which
+# would make the audit pass even though no row has a non-NULL value.
 at_least_one_audit = ModelAudit(
     name="at_least_one",
     defaults={"condition": exp.true()},
     query="""
-SELECT 1
+SELECT COUNT(@column) AS cnt_not_null
 FROM @this_model
 WHERE @condition
-GROUP BY 1
 HAVING COUNT(@column) = 0
     """,
 )
@@ -297,7 +299,7 @@ valid_uuid_audit = ModelAudit(
 SELECT *
 FROM @this_model
 WHERE @AND(
-  NOT REGEXP_LIKE(LOWER(@column), '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  NOT REGEXP_LIKE(LOWER(@column), '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
   @condition,
 )
 
@@ -318,10 +320,14 @@ WHERE @AND(NOT REGEXP_LIKE(@column, '^(https?|ftp)://[^\s/$.?#].[^\s]*$'), @cond
 # valid_http_method(column=column_name)
 valid_http_method_audit = ModelAudit(
     name="valid_http_method",
+    defaults={"condition": exp.true()},
     query="""
 SELECT *
 FROM @this_model
-WHERE NOT @column IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT')
+WHERE @AND(
+  NOT @column IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT'),
+  @condition,
+)
     """,
 )
 
@@ -432,7 +438,7 @@ SELECT
   @column,
   (@column - mean_@column) / NULLIF(stddev_@column, 0) AS z_score
 FROM @this_model, stats
-WHERE ABS((@column - mean_@column) / NULLIF(stddev_@column, 0)) > @threshold
+WHERE @AND(ABS((@column - mean_@column) / NULLIF(stddev_@column, 0)) > @threshold, @condition)
     """,
 )
 

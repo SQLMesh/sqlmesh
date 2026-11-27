@@ -84,6 +84,44 @@ def test_restatement_plan_ignores_changes(init_and_plan_context: t.Callable):
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
+def test_prod_restatement_with_unbackfilled_dev_version(init_and_plan_context: t.Callable):
+    """
+    Scenario:
+        Prod is built. A breaking change is planned to `dev` with `--skip-backfill`,
+        so `dev` holds a different snapshot version with no interval rows. Prod is
+        then restated.
+    Outcome:
+        RestatementStage tries to clear `dev` intervals for that other version, finds
+        none in `_intervals`, and no-ops instead of crashing on an empty insert. Prod
+        restatement still applies; the un-backfilled `dev` snapshot still has no
+        intervals.
+    """
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    prod_snapshot_id = context.get_snapshot("sushi.waiter_revenue_by_day").snapshot_id
+
+    context.upsert_model(
+        add_projection_to_model(t.cast(SqlModel, context.get_model("sushi.waiter_revenue_by_day")))
+    )
+    context.plan("dev", skip_backfill=True, auto_apply=True, no_prompts=True)
+
+    dev_snapshot_id = context.get_snapshot("sushi.waiter_revenue_by_day").snapshot_id
+    assert dev_snapshot_id != prod_snapshot_id
+    assert not context.state_sync.get_snapshots([dev_snapshot_id])[dev_snapshot_id].intervals
+
+    context.plan(
+        restate_models=["sushi.waiter_revenue_by_day"],
+        start="2023-01-07",
+        end="2023-01-08",
+        auto_apply=True,
+        no_prompts=True,
+    )
+
+    assert not context.state_sync.get_snapshots([dev_snapshot_id])[dev_snapshot_id].intervals
+
+
+@time_machine.travel("2023-01-08 15:00:00 UTC")
 def test_restatement_plan_across_environments_snapshot_with_shared_version(
     init_and_plan_context: t.Callable,
 ):
@@ -1816,7 +1854,6 @@ def entrypoint(evaluator: MacroEvaluator) -> str:
         # ensure dev is present before the restatement plan starts
         assert restatement_ctx.state_sync.get_environment("dev") is not None
 
-        q.put("plan_started")
         expected_error = None
         try:
             restatement_ctx.plan(
@@ -1837,15 +1874,15 @@ def entrypoint(evaluator: MacroEvaluator) -> str:
 
     assert q.get() == "thread_started"
 
-    try:
-        if e := restatement_plan_future.exception(timeout=1):
-            # abort early if the plan thread threw an exception
-            raise e
-    except TimeoutError:
-        # that's ok, we dont actually expect the plan to have finished in 1 second
-        pass
-
-    assert q.get() == "plan_started"
+    # wait until the original model is blocked inside the restatement's evaluation
+    deadline = time.monotonic() + 30
+    while not evaluation_lock_file_path.exists():
+        if restatement_plan_future.done():
+            if e := restatement_plan_future.exception():
+                raise e
+            raise AssertionError("Restatement plan finished before it blocked on the model")
+        assert time.monotonic() < deadline, "Restatement plan never entered the evaluation lock"
+        time.sleep(0.1)
 
     # ok, now the prod restatement plan is running, let's deploy dev to prod
     ctx.plan(environment="prod", auto_apply=True)

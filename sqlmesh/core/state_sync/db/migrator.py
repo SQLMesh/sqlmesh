@@ -96,6 +96,15 @@ class StateMigrator:
             migrate_rows = self._apply_migrations(schema, skip_backup)
 
             if not migrate_rows and major_minor(SQLMESH_VERSION) == versions.minor_sqlmesh_version:
+                # Nothing to migrate, but a patch-level bump still leaves the recorded versions
+                # behind what is actually running, so they are brought up to date here. The
+                # schema version is carried over rather than defaulted, since no migration ran
+                # and moving it could hide one that is genuinely needed later.
+                if (
+                    versions.sqlmesh_version != SQLMESH_VERSION
+                    or versions.sqlglot_version != SQLGLOT_VERSION
+                ):
+                    self.version_state.update_versions(schema_version=versions.schema_version)
                 return
 
             if migrate_rows:

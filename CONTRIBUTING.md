@@ -14,7 +14,7 @@ Initial TSC voting members are the project's Maintainers:
 |---------------------|---------------|----------------|------------| 
 | Alexander Butler    | z3z1ma        | Harness        | TSC Member |
 | Alexander Filipchik | afilipchik    | Cloud Kitchens | TSC Member |
-| Reid Hooper         | rhooper9711   | Benzinga       | TSC Member |
+| Cortland Goffena    | cmgoffena13   | Benzinga       | TSC Member |
 | Yuki Kakegawa       | StuffbyYuki   | Jump.ai        | TSC Member |
 | Toby Mao            | tobymao       | Fivetran       | TSC Chair  |
 | Alex Wilde          | alexminerv    | Minerva        | TSC Member |
@@ -65,9 +65,11 @@ See [docs/development.md](docs/development.md) for full setup instructions. Key 
 python -m venv .venv
 source .venv/bin/activate
 make install-dev
-make style    # Run before submitting
+make style     # Run before submitting
 make fast-test # Quick test suite
 ```
+
+Optionally, `make install-pre-commit` installs git hooks so ruff and mypy run on `git commit`. Hooks do not replace `make style`: they run on staged files, while CI runs `make style` across the tree.
 
 ## Coding Standards
 
@@ -84,6 +86,30 @@ make fast-test # Quick test suite
 - Ensure all CI checks pass
 - Include a DCO sign-off on all commits (`git commit -s`)
 - Be responsive to review feedback from maintainers
+
+### Pull Request Titles
+
+Pull requests are squash-merged, so the title becomes the commit message and the
+entry in the release notes. Titles must follow this format, which CI checks:
+
+```
+type(scope): description
+```
+
+- `type` is one of `feat`, `fix`, `perf`, `docs`, `refactor`, `chore`, `build`, `revert`, `ci` or `test`. Lowercase is preferred, but `Fix:` is treated like `fix:`.
+- `scope` is optional and names the area changed, e.g. `snowflake`, `plan`, `dbt` or `vscode`.
+- Add `!` after the type or scope for a breaking change, e.g. `feat(plan)!: drop support for X`.
+- Write the description for users: say what changed for them, not how the code changed.
+
+Titles created by GitHub's "Revert" button (`Revert "..."`) are also accepted. If the
+title check fails, edit the title. Editing it runs the check again.
+
+Release notes are grouped using labels that are applied automatically from the title
+and the files changed. The title decides the `Feature`, `Bug`, `performance`,
+`Documentation`, `maintenance`, `ci`, `test` and `breaking-change` labels, so to
+recategorize a PR, change its title rather than its labels. Use `ci` or `test` as the type
+or scope for internal-only changes (e.g. `fix(ci): ...`) so they are left out of the
+release notes. A maintainer can add the `skip-changelog` label to leave out any other PR.
 
 ## Licensing
 

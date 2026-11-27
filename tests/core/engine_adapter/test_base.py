@@ -3522,6 +3522,15 @@ def test_pre_ping(mocker: MockerFixture, make_mocked_engine_adapter: t.Callable)
     adapter._connection_pool.get().close.assert_called_once()
 
 
+def test_with_settings_preserves_pre_ping(make_mocked_engine_adapter: t.Callable):
+    adapter = make_mocked_engine_adapter(EngineAdapter, pre_ping=True)
+    assert adapter.with_settings()._pre_ping is True
+    assert adapter.with_settings(pre_ping=False)._pre_ping is False
+
+    adapter = make_mocked_engine_adapter(EngineAdapter)
+    assert adapter.with_settings()._pre_ping is False
+
+
 @pytest.mark.parametrize(
     "partitioned_by",
     [

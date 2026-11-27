@@ -42,6 +42,21 @@ SKIP_LOAD_COMMANDS = (
 )
 SKIP_CONTEXT_COMMANDS = ("init", "ui")
 LOCAL_ONLY_COMMANDS = ("format",)
+# Commands that are local-only when they're passed --local.
+OPTIONAL_LOCAL_COMMANDS = ("lint", "test")
+
+
+def _is_restate_arg(arg: str) -> bool:
+    """Whether ``arg`` is a ``--restate-model`` / ``-r`` option token.
+
+    Covers the four spellings Click accepts: ``--restate-model VALUE``,
+    ``--restate-model=VALUE``, ``-r VALUE`` and ``-rVALUE``.
+    """
+    if arg == "--restate-model" or arg.startswith("--restate-model="):
+        return True
+    if arg == "-r" or (arg.startswith("-r") and not arg.startswith("--")):
+        return True
+    return False
 
 
 class _SQLMeshGroup(click.Group):
@@ -129,8 +144,12 @@ def cli(
     load = True
     # Local-only gating must hold for any number of --paths, so it stays outside the block below.
     load_state = ctx.invoked_subcommand not in LOCAL_ONLY_COMMANDS
-    # The parent callback constructs Context before Click invokes `lint`, so inspect its parsed args here.
-    if ctx.invoked_subcommand == "lint" and "--local" in ctx.meta["subcommand_args"]:
+    # The parent callback constructs Context before Click invokes the subcommand, so inspect its
+    # parsed args here.
+    if (
+        ctx.invoked_subcommand in OPTIONAL_LOCAL_COMMANDS
+        and "--local" in ctx.meta["subcommand_args"]
+    ):
         load_state = False
 
     if len(paths) == 1:
@@ -140,6 +159,18 @@ def cli(
             return
         if ctx.invoked_subcommand in SKIP_LOAD_COMMANDS:
             load = False
+
+    # Unlike the other commands above, lint can scope its own load for multi-project contexts.
+    if ctx.invoked_subcommand == "lint":
+        load = False
+
+    # `plan --restate-model` operates entirely against state, so a project with no
+    # local model definitions should still be allowed to run (parity with `run`).
+    # Local loading itself stays on so that backfill expansion, unit tests, and the
+    # linter continue to work when model files are present.
+    restating = ctx.invoked_subcommand == "plan" and any(
+        _is_restate_arg(arg) for arg in ctx.meta["subcommand_args"]
+    )
 
     configs = load_configs(config, Context.CONFIG_TYPE, paths, dotenv_path=dotenv)
     log_limit = list(configs.values())[0].log_limit
@@ -159,7 +190,7 @@ def cli(
             logger.exception("Failed to initialize SQLMesh context")
         raise
 
-    if load and not context.models:
+    if load and not context.models and not restating:
         raise click.ClickException(
             f"`{paths}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
         )
@@ -263,7 +294,7 @@ Next steps:
 
 Need help?
 • Docs:   https://sqlmesh.readthedocs.io
-• Slack:  https://www.tobikodata.com/slack
+• Slack:  https://tobiko-data.slack.com/
 • GitHub: https://github.com/SQLMesh/sqlmesh/issues
 """)
 
@@ -421,6 +452,12 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     "--skip-tests",
     is_flag=True,
     help="Skip tests prior to generating the plan if they are defined.",
+    default=None,
+)
+@click.option(
+    "--test-changed-only",
+    is_flag=True,
+    help="Run unit tests only for models included in the plan instead of all tests.",
     default=None,
 )
 @click.option(
@@ -641,7 +678,7 @@ def run(ctx: click.Context, environment: t.Optional[str] = None, **kwargs: t.Any
 def invalidate(ctx: click.Context, environment: str, **kwargs: t.Any) -> None:
     """Invalidate the target environment, forcing its removal during the next run of the janitor process."""
     context = ctx.obj
-    context.invalidate_environment(environment, **kwargs)
+    context.invalidate_environment(environment, must_exist=True, **kwargs)
 
 
 @cli.command("janitor")
@@ -795,6 +832,18 @@ def create_test(
     default=False,
     help="Preserve the fixture tables in the testing database, useful for debugging.",
 )
+@click.option(
+    "--select-model",
+    type=str,
+    multiple=True,
+    help="Select specific models to run unit tests for.",
+)
+@click.option(
+    "--local",
+    is_flag=True,
+    expose_value=False,
+    help="Run tests using only locally loaded project files without loading state. Tests whose model is not loaded are skipped with a warning rather than failing.",
+)
 @click.argument("tests", nargs=-1)
 @click.pass_obj
 @error_handler
@@ -804,14 +853,25 @@ def test(
     k: t.List[str],
     verbose: int,
     preserve_fixtures: bool,
+    select_model: t.List[str],
     tests: t.List[str],
 ) -> None:
-    """Run model unit tests."""
+    """Run model unit tests.
+
+    TESTS are test files, `file.yaml::test_name` selectors, or model files, in which case the
+    tests for those models are run. They are unioned, and a test selected more than once still
+    only runs once.
+    """
+    model_names = (
+        obj._new_selector().expand_model_selections(select_model) if select_model else None
+    )
     result = obj.test(
         match_patterns=k,
         tests=tests,
         verbosity=Verbosity(verbose),
         preserve_fixtures=preserve_fixtures,
+        model_names=model_names,
+        raise_on_unknown_paths=True,
     )
     if not result.wasSuccessful():
         exit(1)
@@ -1210,6 +1270,12 @@ def environments(obj: Context) -> None:
     help="A model to lint. Multiple models can be linted. If no models are specified, every model will be linted.",
 )
 @click.option(
+    "--use-project-index",
+    is_flag=True,
+    default=None,
+    help="Use the persistent project index. With --model, only the selected models and their upstream dependencies are loaded, resolved, and validated, so errors in unrelated models are not reported. Without --model, every model is still loaded and linted. Can also be enabled with linter.use_project_index.",
+)
+@click.option(
     "--local",
     is_flag=True,
     expose_value=False,
@@ -1221,9 +1287,18 @@ def environments(obj: Context) -> None:
 def lint(
     obj: Context,
     models: t.Iterator[str],
+    use_project_index: t.Optional[bool],
 ) -> None:
     """Run the linter for the target model(s)."""
-    obj.lint_models(models)
+    obj.lint_models(
+        models,
+        use_project_index=use_project_index,
+    )
+
+    if not obj.models:
+        raise click.ClickException(
+            f"`{obj.path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
+        )
 
 
 @cli.group(no_args_is_help=True)

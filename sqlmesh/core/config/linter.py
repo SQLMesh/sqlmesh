@@ -16,6 +16,8 @@ class LinterConfig(BaseConfig):
     Args:
         enabled: Flag indicating whether the linter should run
 
+        use_project_index: Whether to use the persistent project index when linting.
+
         rules: A list of error rules to be applied on model
         warn_rules: A list of rules to be applied on models but produce warnings instead of raising errors.
         ignored_rules: A list of rules to be excluded/ignored
@@ -23,6 +25,7 @@ class LinterConfig(BaseConfig):
     """
 
     enabled: bool = False
+    use_project_index: bool = False
 
     rules: t.Set[str] = set()
     warn_rules: t.Set[str] = set()

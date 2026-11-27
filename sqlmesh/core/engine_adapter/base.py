@@ -178,6 +178,7 @@ class EngineAdapter:
             "query_execution_tracker": kwargs.pop(
                 "query_execution_tracker", self._query_execution_tracker
             ),
+            "pre_ping": kwargs.pop("pre_ping", self._pre_ping),
             **self._extra_config,
             **kwargs,
         }
@@ -455,6 +456,14 @@ class EngineAdapter:
     def get_current_catalog(self) -> t.Optional[str]:
         """Returns the catalog name of the current connection."""
         raise NotImplementedError()
+
+    def _get_current_catalog_for_set_catalog(self) -> t.Optional[str]:
+        """Catalog token @set_catalog saves and restores.
+
+        Override when get_current_catalog() reports a default catalog name but
+        the restore must keep an internal sentinel so the connection is not reopened.
+        """
+        return self.get_current_catalog()
 
     def set_current_catalog(self, catalog: str) -> None:
         """Sets the catalog name of the current connection."""
@@ -832,7 +841,9 @@ class EngineAdapter:
             and self.COMMENT_CREATION_TABLE.is_comment_command_only
             and self.comments_enabled
         ):
-            self._create_column_comments(table_name, column_descriptions)
+            self._create_column_comments(
+                table_name, column_descriptions, table_format=kwargs.get("table_format")
+            )
 
     def _build_schema_exp(
         self,
@@ -989,7 +1000,11 @@ class EngineAdapter:
         ):
             self._create_table_comment(table_name, table_description)
         if column_descriptions and schema is None and self.comments_enabled:
-            self._create_column_comments(table_name, column_descriptions)
+            self._create_column_comments(
+                table_name,
+                column_descriptions,
+                table_format=None if table_kind else kwargs.get("table_format"),
+            )
 
     def _create_table(
         self,
@@ -1042,12 +1057,15 @@ class EngineAdapter:
     ) -> exp.Create:
         exists = False if replace else exists
         catalog_name = None
+        target_table: t.Optional[exp.Table] = None
         if not isinstance(table_name_or_schema, exp.Schema):
             table_name_or_schema = exp.to_table(table_name_or_schema)
             catalog_name = table_name_or_schema.catalog
+            target_table = table_name_or_schema
         else:
             if isinstance(table_name_or_schema.this, exp.Table):
                 catalog_name = table_name_or_schema.this.catalog
+                target_table = table_name_or_schema.this
 
         properties = (
             self._build_table_properties_exp(
@@ -1056,6 +1074,9 @@ class EngineAdapter:
                 target_columns_to_types=target_columns_to_types,
                 table_description=table_description,
                 table_kind=table_kind,
+                # Passed so an adapter can vary properties by target object, not just by
+                # connection. Additive: every override accepts **kwargs.
+                table=target_table,
             )
             if kwargs or table_description
             else None
@@ -1093,6 +1114,8 @@ class EngineAdapter:
         replace: bool = False,
         exists: bool = True,
         clone_kwargs: t.Optional[t.Dict[str, t.Any]] = None,
+        table_format: t.Optional[str] = None,
+        table_kind: t.Optional[str] = None,
         **kwargs: t.Any,
     ) -> None:
         """Creates a table with the target name by cloning the source table.
@@ -1102,6 +1125,10 @@ class EngineAdapter:
             source_table_name: The name of the source table that should be cloned.
             replace: Whether or not to replace an existing table.
             exists: Indicates whether to include the IF NOT EXISTS check.
+            clone_kwargs: Additional arguments for the CLONE clause.
+            table_format: The table format of the source table, if any. Engines that require
+                format-specific DDL to clone a table use it to derive `table_kind`.
+            table_kind: The kind of table to create. Defaults to `TABLE`.
         """
         if not self.SUPPORTS_CLONING:
             raise NotImplementedError(f"Engine does not support cloning: {type(self)}")
@@ -1110,7 +1137,7 @@ class EngineAdapter:
         self.execute(
             exp.Create(
                 this=exp.to_table(target_table_name),
-                kind="TABLE",
+                kind=table_kind or "TABLE",
                 replace=replace,
                 exists=exists,
                 clone=exp.Clone(
@@ -1213,9 +1240,15 @@ class EngineAdapter:
     def alter_table(
         self,
         alter_expressions: t.Union[t.List[exp.Alter], t.List[TableAlterOperation]],
+        table_format: t.Optional[str] = None,
     ) -> None:
         """
         Performs the alter statements to change the current table into the structure of the target table.
+
+        Args:
+            alter_expressions: The alter operations to apply.
+            table_format: The table format of the target table, if any. Engines that require
+                format-specific DDL to alter a table use it to adjust the generated statements.
         """
         with self.transaction():
             for alter_expression in [
@@ -1351,6 +1384,8 @@ class EngineAdapter:
                 else None
             ),
             physical_cluster=create_kwargs.pop("physical_cluster", None),
+            # See the note on the table-properties call site above.
+            table=exp.to_table(view_name),
         )
         if create_view_properties:
             for view_property in create_view_properties.expressions:
@@ -2623,12 +2658,17 @@ class EngineAdapter:
 
                 sql = self._attach_correlation_id(sql)
 
-                self._log_sql(
-                    sql,
-                    expression=e if isinstance(e, exp.Expr) else None,
-                    quote_identifiers=quote_identifiers,
-                )
-                self._execute(sql, track_rows_processed, **kwargs)
+                # The rendered statement and correlation comment are finalized
+                # here; observe the exact invocation, including driver errors.
+                from sqlmesh.core.execution_observation import action
+
+                with action("query", "execute", engine=self.dialect):
+                    self._log_sql(
+                        sql,
+                        expression=e if isinstance(e, exp.Expr) else None,
+                        quote_identifiers=quote_identifiers,
+                    )
+                    self._execute(sql, track_rows_processed, **kwargs)
 
     def _attach_correlation_id(self, sql: str) -> str:
         if self.ATTACH_CORRELATION_ID and self.correlation_id:
@@ -3057,7 +3097,18 @@ class EngineAdapter:
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
         materialized_view: bool = False,
+        table_format: t.Optional[str] = None,
     ) -> None:
+        """Registers column comments with a post-creation command.
+
+        Args:
+            table_name: The name of the table or view.
+            column_comments: Mapping between the column name and its comment.
+            table_kind: The kind of object being commented on, `TABLE` or `VIEW`.
+            materialized_view: Whether the view is materialized.
+            table_format: The table format of the table, if any. Engines that require
+                format-specific DDL to alter a table use it to derive `table_kind`.
+        """
         table = exp.to_table(table_name)
 
         for col, comment in column_comments.items():

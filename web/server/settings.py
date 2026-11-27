@@ -96,7 +96,7 @@ def get_path_to_model_mapping(
 
 def get_loaded_context(
     settings: Settings = Depends(get_settings),
-) -> t.Generator[Context, None]:
+) -> t.Generator[Context, None, None]:
     try:
         with get_loaded_context_lock:
             yield _get_loaded_context(settings.project_path, settings.config, settings.gateway)

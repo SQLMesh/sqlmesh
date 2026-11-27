@@ -167,12 +167,16 @@ class _ThreadLocalBase(_TransactionManagementMixin):
             self._thread_transactions.add(get_ident())
 
     def commit(self) -> None:
-        self._do_commit()
-        self._discard_transaction(get_ident())
+        try:
+            self._do_commit()
+        finally:
+            self._discard_transaction(get_ident())
 
     def rollback(self) -> None:
-        self._do_rollback()
-        self._discard_transaction(get_ident())
+        try:
+            self._do_rollback()
+        finally:
+            self._discard_transaction(get_ident())
 
     @property
     def is_transaction_active(self) -> bool:
@@ -312,12 +316,16 @@ class SingletonConnectionPool(_TransactionManagementMixin):
         self._is_transaction_active = True
 
     def commit(self) -> None:
-        self._do_commit()
-        self._is_transaction_active = False
+        try:
+            self._do_commit()
+        finally:
+            self._is_transaction_active = False
 
     def rollback(self) -> None:
-        self._do_rollback()
-        self._is_transaction_active = False
+        try:
+            self._do_rollback()
+        finally:
+            self._is_transaction_active = False
 
     @property
     def is_transaction_active(self) -> bool:

@@ -11,6 +11,7 @@ from sqlmesh.utils.date import to_datetime, to_date
 from sqlmesh.utils.errors import SQLMeshError
 from sqlmesh.utils.metaprogramming import Executable
 from sqlmesh.core.macros import RuntimeStage
+from sqlmesh.core.model import load_sql_based_model
 
 
 @pytest.fixture
@@ -1233,3 +1234,131 @@ def test_macro_coerce_literal_type(macro_evaluator):
     expression = d.parse_one("@TEST_LITERAL_TYPE(1.0)")
     with pytest.raises(MacroEvalError, match=".*Coercion failed"):
         macro_evaluator.transform(expression)
+
+
+def test_generate_surrogate_key_hash_semantics() -> None:
+    from sqlmesh.core.macros import generate_surrogate_key
+
+    # The macro must always build the string-semantics hash expression, never
+    # a binary digest, so dialects that model the two separately (Presto and
+    # Trino after tobymao/sqlglot#7824) can render the hex-string form.
+    # BigQuery's parser maps SHA256 to SHA2Digest, which exercises the
+    # conversion on every supported sqlglot version.
+    func = generate_surrogate_key(
+        MacroEvaluator(dialect="bigquery"),
+        exp.column("a"),
+        hash_function=exp.Literal.string("SHA256"),
+    )
+    assert isinstance(func, exp.SHA2)
+
+    # The hash argument is annotated as text so generators that wrap an
+    # encode around string inputs (TO_UTF8 on Presto/Trino) can do so without
+    # a separate annotation pass.
+    assert func.this.is_type("text")
+
+    def render(dialect: str, hash_function: str) -> str:
+        sql = f"SELECT @GENERATE_SURROGATE_KEY(a, hash_function := '{hash_function}') FROM foo"
+        rendered = MacroEvaluator(dialect=dialect).transform(parse_one(sql, dialect=dialect))
+        assert isinstance(rendered, exp.Expr)
+        return rendered.sql(dialect)
+
+    # Rendered SQL, stable across supported sqlglot versions.
+    assert (
+        render("bigquery", "SHA256")
+        == "SELECT SHA256(CONCAT(COALESCE(CAST(a AS STRING), '_sqlmesh_surrogate_key_null_'))) FROM foo"
+    )
+    assert (
+        render("duckdb", "SHA256")
+        == "SELECT SHA256(COALESCE(CAST(a AS TEXT), '_sqlmesh_surrogate_key_null_')) FROM foo"
+    )
+    assert (
+        render("trino", "MD5")
+        == "SELECT LOWER(TO_HEX(MD5(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
+    )
+
+    # The reported bug (#5871): Trino/Presto SHA256/SHA512 surrogate keys must
+    # be the hex-string form, not a bare SHA256(varchar). The macro-side
+    # fallback produces it under the current sqlglot pin; once sqlglot renders
+    # exp.SHA2 this way natively (tobymao/sqlglot#7824), the probe disables
+    # the fallback and these assertions hold unchanged.
+    # Athena is included: it runs the Trino engine and hits the same
+    # sha256(varbinary) failure, but its parser has no SHA256/SHA512 entry, so
+    # exp.func hands back exp.Anonymous rather than exp.SHA2/exp.SHA2Digest.
+    # That is true on every sqlglot version tested, before and after #7824, so
+    # the Anonymous path is not a pin-era workaround the way the probe is.
+    for _dialect in ("trino", "presto", "athena"):
+        assert (
+            render(_dialect, "SHA256")
+            == "SELECT LOWER(TO_HEX(SHA256(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
+        )
+        assert (
+            render(_dialect, "SHA512")
+            == "SELECT LOWER(TO_HEX(SHA512(TO_UTF8(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR))))) FROM foo"
+        )
+
+    # Anonymous is sqlglot's catch-all for an unrecognised function name, so
+    # the conversion is keyed on the name: an unknown hash_function must pass
+    # through untouched rather than be reinterpreted as a SHA-2 digest.
+    assert (
+        render("athena", "MYHASH")
+        == "SELECT MYHASH(CAST(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_') AS VARCHAR)) FROM foo"
+    )
+
+    # The fallback is scoped to the Presto family: dialects whose bare
+    # SHA256(varchar) already returns a hex string are left to sqlglot.
+    from sqlmesh.core.macros import _sha2_renders_binary
+
+    assert not _sha2_renders_binary("duckdb")
+    assert not _sha2_renders_binary("bigquery")
+    assert (
+        render("snowflake", "SHA256")
+        == "SELECT SHA256(CONCAT(COALESCE(CAST(a AS VARCHAR), '_sqlmesh_surrogate_key_null_'))) FROM foo"
+    )
+
+
+@pytest.mark.parametrize(
+    "projection, expected",
+    [
+        # GitHub issue #5649: once the optimizer resolves `1 IS NULL`, the CASE collapses into its
+        # ELSE branch, and the arithmetic must stay grouped inside the surrounding multiplication.
+        (
+            "(@SAFE_SUB(price, amount_off)) * (@SAFE_SUB(1, percent_off / 100))",
+            'CASE WHEN "s"."amount_off" IS NULL AND "s"."price" IS NULL THEN NULL ELSE (COALESCE("s"."price", 0) - COALESCE("s"."amount_off", 0)) END * (COALESCE(1, 0) - COALESCE("s"."percent_off" / 100, 0))',
+        ),
+        ("x * @SAFE_SUB(1, y)", '"s"."x" * (COALESCE(1, 0) - COALESCE("s"."y", 0))'),
+        ("-@SAFE_SUB(1, y)", '-(COALESCE(1, 0) - COALESCE("s"."y", 0))'),
+        ("x - @SAFE_ADD(1, y)", '"s"."x" - (COALESCE(1, 0) + COALESCE("s"."y", 0))'),
+        ("x * @SAFE_ADD(1, y)", '"s"."x" * (COALESCE(1, 0) + COALESCE("s"."y", 0))'),
+        (
+            "@SAFE_DIV(@SAFE_SUB(1, y), x)",
+            '(COALESCE(1, 0) - COALESCE("s"."y", 0)) / NULLIF("s"."x", 0)',
+        ),
+        # The quotient is a single operand of the enclosing operator.
+        ("x / @SAFE_DIV(price, y)", '"s"."x" / ("s"."price" / NULLIF("s"."y", 0))'),
+        ("x * @SAFE_DIV(price, y)", '"s"."x" * ("s"."price" / NULLIF("s"."y", 0))'),
+        # Standalone usages: the optimizer drops the redundant parentheses around the quotient,
+        # while the ELSE branch keeps its grouping.
+        ("@SAFE_DIV(price, y)", '"s"."price" / NULLIF("s"."y", 0)'),
+        (
+            "@SAFE_SUB(price, amount_off) + 1",
+            'CASE WHEN "s"."amount_off" IS NULL AND "s"."price" IS NULL THEN NULL ELSE (COALESCE("s"."price", 0) - COALESCE("s"."amount_off", 0)) END + 1',
+        ),
+    ],
+)
+def test_safe_arithmetic_macros_keep_precedence_after_optimization(
+    projection: str, expected: str
+) -> None:
+    model = load_sql_based_model(
+        d.parse(
+            f"""
+            MODEL (name db.safe_arithmetic);
+
+            SELECT {projection} AS result
+            FROM (SELECT 1 AS x, 2 AS y, 100 AS price, 25 AS amount_off, 20 AS percent_off) AS s
+            """
+        )
+    )
+
+    rendered_projection = model.render_query_or_raise().selects[0]
+
+    assert rendered_projection.sql() == f'{expected} AS "result"'

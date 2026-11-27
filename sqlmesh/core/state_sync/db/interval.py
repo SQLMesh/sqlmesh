@@ -108,6 +108,9 @@ class IntervalState:
                 for snapshot in all_snapshots
             ]
 
+        if not intervals_to_remove:
+            return
+
         if logger.isEnabledFor(logging.INFO):
             snapshot_ids = ", ".join(str(s.snapshot_id) for s, _ in intervals_to_remove)
             logger.info("Removing interval for snapshots: %s", snapshot_ids)

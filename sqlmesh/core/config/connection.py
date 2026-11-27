@@ -60,6 +60,9 @@ FORBIDDEN_STATE_SYNC_ENGINES = {
     # Nullable types are problematic
     "clickhouse",
     "starrocks",
+    # Db2 rejects table names starting with underscore (_versions, _snapshots,
+    # _environments, _intervals). Use a separate state_connection (e.g., DuckDB).
+    "db2",
 }
 MOTHERDUCK_TOKEN_REGEX = re.compile(r"(\?|\&)(motherduck_token=)(\S*)")
 PASSWORD_REGEX = re.compile(r"(password=)(\S+)")
@@ -820,6 +823,7 @@ class DatabricksConnectionConfig(ConnectionConfig):
     force_databricks_connect: bool = False
     disable_databricks_connect: bool = False
     disable_spark_session: bool = False
+    force_shared_connection: bool = False
 
     concurrent_tasks: int = 1
     register_comments: bool = True
@@ -836,8 +840,27 @@ class DatabricksConnectionConfig(ConnectionConfig):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def shared_connection(self) -> bool:
-        """The connection should only be shared if U2M OAuth is being used"""
-        return self.auth_type is not None and self.oauth_client_secret is None
+        """U2M OAuth connections share one login, so each thread can have its own connection. When the login can't
+        be shared, or `force_shared_connection` is set, a single connection is shared so only one browser flow runs."""
+        return self.force_shared_connection or (
+            self._uses_u2m_oauth and not self._uses_shared_u2m_login
+        )
+
+    @property
+    def _uses_shared_u2m_login(self) -> bool:
+        """Whether every connection is given the same U2M OAuth login, letting each thread have its own connection."""
+        from sqlmesh.utils.databricks import supports_shared_u2m_login
+
+        return bool(
+            self._uses_u2m_oauth
+            and self.server_hostname
+            and not self.force_shared_connection
+            and supports_shared_u2m_login()
+        )
+
+    @property
+    def _uses_u2m_oauth(self) -> bool:
+        return bool(self.auth_type and "oauth" in self.auth_type and not self.oauth_client_secret)
 
     @model_validator(mode="before")
     def _databricks_connect_validator(cls, data: t.Any) -> t.Any:
@@ -989,6 +1012,19 @@ class DatabricksConnectionConfig(ConnectionConfig):
                 else:
                     # if auth_type is set to an 'oauth' type but no client_id/secret are set, then we are using U2M
                     # ref: https://docs.databricks.com/en/dev-tools/python-sql-connector.html#oauth-user-to-machine-u2m-authentication
+                    # All connections share one login so that each thread can have its own connection without
+                    # running its own browser flow. `credentials_provider` takes precedence over `auth_type` on the
+                    # connector's Thrift and SEA backends. `auth_type` is still passed for the connector's kernel
+                    # backend, which ignores `credentials_provider` and runs its own U2M flow for each connection
+                    # (`force_shared_connection` avoids that by only opening one connection).
+                    from sqlmesh.utils.databricks import get_shared_u2m_credentials_provider
+
+                    if self._uses_shared_u2m_login:
+                        if t.TYPE_CHECKING:
+                            assert self.server_hostname is not None
+                        conn_kwargs["credentials_provider"] = get_shared_u2m_credentials_provider(
+                            self.server_hostname, self.auth_type
+                        )
                     conn_kwargs["auth_type"] = self.auth_type
 
             return conn_kwargs
@@ -2241,6 +2277,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     port: t.Optional[int] = None
     cluster: t.Optional[str] = None
     virtual_catalog: t.Optional[str] = None
+    datalake_catalog_mapping: t.Dict[str, str] = Field(default_factory=dict)
     connect_timeout: int = 10
     send_receive_timeout: int = 300
     query_limit: int = 0
@@ -2286,6 +2323,21 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             raise ConfigError(
                 f"virtual_catalog must be a single identifier with no dots (got: {v!r})"
             )
+        return v
+
+    @field_validator("datalake_catalog_mapping")
+    def validate_datalake_catalog_mapping(cls, v: t.Dict[str, str]) -> t.Dict[str, str]:
+        for source_catalog, target_database in v.items():
+            if not source_catalog.strip() or "." in source_catalog:
+                raise ConfigError(
+                    "datalake_catalog_mapping keys must be non-empty single identifiers "
+                    f"(got: {source_catalog!r})"
+                )
+            if not target_database.strip() or "." in target_database:
+                raise ConfigError(
+                    "datalake_catalog_mapping values must be non-empty ClickHouse database "
+                    f"identifiers (got: {target_database!r})"
+                )
         return v
 
     @property
@@ -2354,6 +2406,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             "cluster": self.cluster,
             "cloud_mode": self.cloud_mode,
             "virtual_catalog": self.virtual_catalog,
+            "datalake_catalog_mapping": self.datalake_catalog_mapping,
         }
 
     @property
@@ -2371,7 +2424,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
         # https://clickhouse.com/docs/en/operations/settings/settings
         # - below are set to align with dbt-clickhouse
         # - https://github.com/ClickHouse/dbt-clickhouse/blob/44d26308ea6a3c8ead25c280164aa88191f05f47/dbt/adapters/clickhouse/dbclient.py#L77
-        settings = self.connection_settings or {}
+        settings = dict(self.connection_settings or {})
         #  mutations_sync = 2: "The query waits for all mutations [ALTER statements] to complete on all replicas (if they exist)"
         settings["mutations_sync"] = "2"
         #  insert_distributed_sync = 1: "INSERT operation succeeds only after all the data is saved on all shards"
@@ -2385,7 +2438,8 @@ class ClickhouseConnectionConfig(ConnectionConfig):
             #   - "INSERT succeeds only when ClickHouse manages to correctly write data to the insert_quorum of replicas during
             #       the insert_quorum_timeout"
             #   - "use majority number (number_of_replicas / 2 + 1) as quorum number"
-            settings["insert_quorum"] = "auto"
+            #   - a value set by the user in connection_settings takes precedence
+            settings.setdefault("insert_quorum", "auto")
 
         return {
             "compress": compress,
@@ -2602,6 +2656,93 @@ _CONNECTION_CONFIG_EXCLUDE: t.Set[t.Type[ConnectionConfig]] = {
     BaseDuckDBConnectionConfig,  # type: ignore[type-abstract]
 }
 
+
+class Db2ConnectionConfig(ConnectionConfig):
+    host: str
+    port: int = 50000
+    database: str
+    db2_schema: str
+    username: str
+    password: str
+    ssl: bool = False
+    ssl_cert: t.Optional[str] = None
+    ssl_key: t.Optional[str] = None
+    ssl_ca: t.Optional[str] = None
+    connect_timeout: int = 30
+
+    concurrent_tasks: int = 4
+    register_comments: bool = True
+    pre_ping: bool = True
+
+    type_: t.Literal["db2"] = Field(alias="type", default="db2")
+    DIALECT: t.ClassVar[t.Literal["db2"]] = "db2"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Db2"]] = "Db2"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[19]] = 19
+
+    _engine_import_validator = _get_engine_import_validator("ibm_db", "db2")
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        return {
+            "host",
+            "port",
+            "database",
+            "db2_schema",
+            "username",
+            "password",
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        adapter = getattr(engine_adapter, "Db2EngineAdapter", None)
+        if adapter is None:
+            raise ConfigError(
+                "The Db2 engine adapter requires Python 3.10+ and the 'db2' extra. "
+                "Please install it with: pip install 'sqlmesh[db2]'"
+            )
+        return t.cast(t.Type[EngineAdapter], adapter)
+
+    def get_catalog(self) -> t.Optional[str]:
+        """Db2 stores catalog names in uppercase; normalise here so the default_catalog
+        passed to the adapter matches what get_current_catalog() returns at runtime."""
+        catalog = super().get_catalog()
+        return catalog.upper() if catalog else None
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        import ibm_db_dbi  # type: ignore
+
+        ssl = self.ssl
+        ssl_cert = self.ssl_cert
+        ssl_key = self.ssl_key
+        ssl_ca = self.ssl_ca
+        connect_timeout = self.connect_timeout
+
+        def connect_db2(**kwargs: t.Any) -> t.Any:
+            conn_str_parts = [
+                f"DATABASE={kwargs['database']}",
+                f"HOSTNAME={kwargs['host']}",
+                f"PORT={kwargs['port']}",
+                "PROTOCOL=TCPIP",
+                f"UID={kwargs['username']}",
+                f"PWD={kwargs['password']}",
+                f"CURRENTSCHEMA={kwargs['db2_schema']}",
+                f"CONNECTTIMEOUT={connect_timeout}",
+            ]
+            if ssl:
+                conn_str_parts.append("SECURITY=SSL")
+                if ssl_cert:
+                    conn_str_parts.append(f"SSLClientCertificate={ssl_cert}")
+                if ssl_key:
+                    conn_str_parts.append(f"SSLClientKey={ssl_key}")
+                if ssl_ca:
+                    conn_str_parts.append(f"SSLServerCertificate={ssl_ca}")
+            conn_str = ";".join(conn_str_parts) + ";"
+            return ibm_db_dbi.connect(conn_str, "", "")
+
+        return connect_db2
+
+
 CONNECTION_CONFIG_TO_TYPE = {
     # Map all subclasses of ConnectionConfig to the value of their `type_` field.
     tpe.all_field_infos()["type_"].default: tpe
@@ -2657,7 +2798,8 @@ connection_config_validator: t.Callable = field_validator(
     "state_connection",
     "test_connection",
     "default_connection",
-    "default_test_connection",
+    # field_validator matches field names, not aliases
+    "default_test_connection_",
     mode="before",
     check_fields=False,
 )(_connection_config_validator)

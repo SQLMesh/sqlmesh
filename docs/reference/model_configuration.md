@@ -193,9 +193,14 @@ The SQLMesh project-level `model_defaults` key supports the following options, d
 - allow_partials
 - enabled
 - interval_unit
+- gateway
 - pre_statements (described [here](../concepts/models/sql_models.md#pre--and-post-statements))
 - post_statements (described [here](../concepts/models/sql_models.md#pre--and-post-statements))
 - on_virtual_update (described [here](../concepts/models/sql_models.md#on-virtual-update-statements))
+
+The `gateway` default applies to managed SQL, Python, and seed models. It does not apply to
+external models because an external model's `gateway` selects a gateway-specific source
+definition. Set that gateway explicitly in `external_models.yaml` when needed.
 
 
 ### Model Naming

@@ -90,6 +90,26 @@ export const pipInstall = async (
 }
 
 /**
+ * Import the language server entrypoint once so that Python writes its
+ * bytecode cache.
+ *
+ * The first import of sqlmesh in a fresh environment is several times slower
+ * than every import after it, because the whole dependency tree has to be
+ * compiled. Paying that here rather than inside a test keeps it out of the
+ * per-test timeout.
+ */
+export const warmUpVirtualEnvironment = async (
+  pythonDetails: PythonEnvironment,
+): Promise<void> => {
+  const { stderr, exitCode } = await execAsync(
+    `"${pythonDetails.pythonPath}" -c "import sqlmesh.lsp.main"`,
+  )
+  if (exitCode !== 0) {
+    throw new Error(`Failed to warm up the virtual environment: ${stderr}`)
+  }
+}
+
+/**
  * Open the lineage view in the given window.
  */
 export const openLineageView = async (page: Page) =>

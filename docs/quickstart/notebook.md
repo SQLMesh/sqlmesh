@@ -248,7 +248,7 @@ You've now created a new production environment with all of history backfilled.
 
 ## 3. Update a model
 
-Now that we have have populated the `prod` environment, let's modify one of the SQL models.
+Now that we have populated the `prod` environment, let's modify one of the SQL models.
 
 We can modify the incremental SQL model using the `%model` *line* notebook magic (note the single `%`) and the model name:
 
@@ -333,4 +333,4 @@ From here, you can:
 * [Learn more about SQLMesh notebook commands](../reference/notebook.md)
 * [Set up a connection to a database or SQL engine](../guides/connections.md)
 * [Learn more about SQLMesh concepts](../concepts/overview.md)
-* [Join our Slack community](https://tobikodata.com/slack)
+* [Join our Slack community](https://tobiko-data.slack.com/)
