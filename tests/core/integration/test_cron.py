@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import typing as t
+from contextlib import closing
+from pathlib import Path
+
 import pytest
 import time_machine
+from pytest_mock.plugin import MockerFixture
 
 from sqlmesh.core import dialect as d
+from sqlmesh.core.config import Config, ModelDefaultsConfig
+from sqlmesh.core.context import Context
 from sqlmesh.core.model import (
     SqlModel,
     load_sql_based_model,
 )
 from sqlmesh.core.plan import SnapshotIntervals
+from sqlmesh.core.plan.evaluator import BuiltInPlanEvaluator
 from sqlmesh.utils.date import to_timestamp
 from tests.core.integration.utils import add_projection_to_model
 
@@ -81,6 +88,68 @@ def test_cron_not_aligned_with_day_boundary(
                 intervals=expected_intervals,
             ),
         ]
+
+
+@time_machine.travel("2024-01-05 00:00:00 UTC", tick=False)
+@pytest.mark.parametrize(
+    "environment, start, retry",
+    [("prod", None, False), ("dev", "2024-01-01", False), ("prod", None, True)],
+    ids=["prod", "dev-with-start", "prod-retry"],
+)
+def test_first_plan_backfills_parent_from_plan_start(
+    tmp_path: Path, mocker: MockerFixture, environment: str, start: t.Optional[str], retry: bool
+):
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    with closing(Context(paths=tmp_path, config=config)) as context:
+        forward_only = "true" if retry else "false"
+        parent = context.upsert_model(
+            load_sql_based_model(
+                d.parse(f"""
+                MODEL (
+                    name test.parent,
+                    kind INCREMENTAL_BY_TIME_RANGE (
+                        time_column ds,
+                        batch_size 1,
+                        forward_only {forward_only}
+                    )
+                );
+                SELECT CAST(@start_ds AS DATE) AS ds;
+                """)
+            )
+        )
+        context.upsert_model(
+            load_sql_based_model(
+                d.parse("""
+                MODEL (name test.child, kind FULL, start '2024-01-01');
+                SELECT ds FROM test.parent;
+                """)
+            )
+        )
+
+        plan = context.plan_builder(environment, start=start, skip_tests=True).build()
+        if retry:
+            # Forward-only models backfill after the production environment record is saved.
+            backfill = mocker.patch.object(
+                BuiltInPlanEvaluator,
+                "visit_backfill_stage",
+                side_effect=RuntimeError("interrupted"),
+            )
+            with pytest.raises(RuntimeError, match="interrupted"):
+                context.apply(plan)
+            mocker.stop(backfill)
+            assert context.state_sync.get_environment(environment) is not None
+            plan = context.plan_builder(environment, start=start, skip_tests=True).build()
+
+        parent_intervals = next(
+            item.intervals for item in plan.missing_intervals if item.snapshot_id.name == parent.fqn
+        )
+        assert parent_intervals[0][0] == to_timestamp("2024-01-01")
+        assert parent_intervals[-1][1] == to_timestamp("2024-01-05")
+
+        context.apply(plan)
+
+        schema = "test" if environment == "prod" else "test__dev"
+        assert context.engine_adapter.fetchone(f"SELECT COUNT(*) FROM {schema}.child") == (4,)
 
 
 @time_machine.travel("2023-01-08 00:00:00 UTC")

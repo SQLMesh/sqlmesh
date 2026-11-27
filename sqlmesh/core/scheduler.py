@@ -1059,6 +1059,7 @@ def merged_missing_intervals(
     end_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ignore_cron: bool = False,
     end_bounded: bool = False,
+    is_initial_plan: bool = False,
 ) -> SnapshotToIntervals:
     """Find the largest contiguous date interval parameters based only on what is missing.
 
@@ -1079,6 +1080,7 @@ def merged_missing_intervals(
         ignore_cron: Whether to ignore the node's cron schedule.
         end_bounded: If set to true, the returned intervals will be bounded by the target end date, disregarding lookback,
             allow_partials, and other attributes that could cause the intervals to exceed the target end date.
+        is_initial_plan: Use the plan start when inferring a model start from its cron.
     """
     restatements = restatements or {}
     validate_date_range(start, end)
@@ -1094,6 +1096,7 @@ def merged_missing_intervals(
         end_override_per_model=end_override_per_model,
         ignore_cron=ignore_cron,
         end_bounded=end_bounded,
+        is_initial_plan=is_initial_plan,
     )
 
 
@@ -1109,6 +1112,7 @@ def compute_interval_params(
     end_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ignore_cron: bool = False,
     end_bounded: bool = False,
+    is_initial_plan: bool = False,
 ) -> SnapshotToIntervals:
     """Find the largest contiguous date interval parameters based only on what is missing.
 
@@ -1129,6 +1133,7 @@ def compute_interval_params(
         ignore_cron: Whether to ignore the node's cron schedule.
         end_bounded: If set to true, the returned intervals will be bounded by the target end date, disregarding lookback,
             allow_partials, and other attributes that could cause the intervals to exceed the target end date.
+        is_initial_plan: Use the plan start when inferring a model start from its cron.
 
     Returns:
         A dict containing all snapshots needing to be run with their associated interval params.
@@ -1146,6 +1151,7 @@ def compute_interval_params(
         end_override_per_model=end_override_per_model,
         ignore_cron=ignore_cron,
         end_bounded=end_bounded,
+        is_initial_plan=is_initial_plan,
     ).items():
         contiguous_batch = []
         next_batch: Intervals = []
