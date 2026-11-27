@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import typing as t
+from contextlib import closing
+from pathlib import Path
+
 import pytest
 import time_machine
 
 from sqlmesh.core import dialect as d
+from sqlmesh.core.config import Config, ModelDefaultsConfig
+from sqlmesh.core.context import Context
 from sqlmesh.core.model import (
     SqlModel,
     load_sql_based_model,
@@ -138,6 +143,94 @@ def test_cron_not_aligned_with_day_boundary_new_model(init_and_plan_context: t.C
             ],
         ),
     ]
+
+
+@time_machine.travel("2024-01-02 01:49:00 UTC", tick=False)
+@pytest.mark.parametrize(
+    "environment, downstream_kind",
+    [
+        ("dev", "FULL"),
+        ("prod", "FULL"),
+        ("prod", "INCREMENTAL_BY_TIME_RANGE (time_column event_date, forward_only true)"),
+    ],
+    ids=["dev", "prod-before-promotion", "prod-after-promotion"],
+)
+def test_plan_creates_new_model_table_before_first_cron_interval(
+    tmp_path: Path, environment: str, downstream_kind: str
+):
+    config = Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    with closing(Context(paths=tmp_path, config=config)) as context:
+        context.upsert_model(
+            load_sql_based_model(
+                d.parse("""
+                MODEL (name test.source, kind FULL, start '2024-01-01');
+                SELECT 1 AS id, CAST('2024-01-01' AS DATE) AS event_date;
+                """)
+            )
+        )
+        context.apply(context.plan_builder("prod", skip_tests=True).build())
+
+        context.upsert_model(
+            load_sql_based_model(
+                d.parse("""
+                MODEL (name test.upstream, kind FULL, cron '20 8 * * *');
+                SELECT id, event_date FROM test.source;
+                """)
+            )
+        )
+        downstream = context.upsert_model(
+            load_sql_based_model(
+                d.parse(f"""
+                MODEL (name test.downstream, kind {downstream_kind});
+                SELECT id, event_date FROM test.upstream;
+                """)
+            )
+        )
+
+        plan = context.plan_builder(environment, skip_tests=True).build()
+        assert {intervals.snapshot_id.name for intervals in plan.missing_intervals} == {
+            downstream.fqn
+        }
+        context.apply(plan)
+
+        schema = "test" if environment == "prod" else "test__dev"
+        assert context.fetchdf(f"SELECT id FROM {schema}.upstream").empty
+        assert context.fetchdf(f"SELECT id FROM {schema}.downstream").empty
+
+        with time_machine.travel("2024-01-02 09:00:00 UTC", tick=False):
+            context.run(environment)
+        assert context.fetchdf(f"SELECT id FROM {schema}.upstream")["id"].tolist() == [1]
+
+
+@time_machine.travel("2023-01-08 00:00:00 UTC", tick=False)
+@pytest.mark.parametrize("environment", ["dev", "prod"])
+def test_selected_new_model_with_cron_not_elapsed_is_created(
+    init_and_plan_context: t.Callable, environment: str
+):
+    context, plan = init_and_plan_context("examples/sushi")
+    context.apply(plan)
+
+    with time_machine.travel("2023-01-09 00:00:00 UTC", tick=False):
+        # The first interval of the new model isn't ready until 2023-01-09 08:00, while the
+        # unselected sushi models have intervals to backfill for 2023-01-08
+        new_model = load_sql_based_model(
+            d.parse(
+                """
+            MODEL (name memory.sushi.new_model, kind FULL, cron '0 8 * * *', start '2023-01-08');
+            SELECT 1 AS id;
+            """
+            )
+        )
+        new_model_name = context.upsert_model(new_model).fqn
+
+        plan = context.plan_builder(
+            environment, skip_tests=True, select_models=[new_model_name]
+        ).build()
+        assert not plan.missing_intervals
+        context.apply(plan)
+
+    schema = "sushi" if environment == "prod" else f"sushi__{environment}"
+    assert context.fetchdf(f"SELECT * FROM {schema}.new_model").empty
 
 
 @time_machine.travel("2023-01-08 00:00:00 UTC", tick=False)

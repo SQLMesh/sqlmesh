@@ -301,17 +301,16 @@ class PlanStagesBuilder:
         snapshots_to_intervals = self._missing_intervals(
             plan, snapshots_by_name, deployability_index
         )
-        needs_backfill = (
-            not plan.empty_backfill and not plan.skip_backfill and bool(snapshots_to_intervals)
-        )
         missing_intervals_before_promote: SnapshotToIntervals = {}
         missing_intervals_after_promote: SnapshotToIntervals = {}
-        if needs_backfill:
+        if not plan.empty_backfill and not plan.skip_backfill:
             for snapshot, intervals in snapshots_to_intervals.items():
                 if snapshot.snapshot_id in before_promote_snapshots:
                     missing_intervals_before_promote[snapshot] = intervals
                 elif snapshot.snapshot_id in after_promote_snapshots:
                     missing_intervals_after_promote[snapshot] = intervals
+        # Only snapshots selected for backfill count, since the others are never backfilled
+        needs_backfill = bool(missing_intervals_before_promote or missing_intervals_after_promote)
 
         promoted_snapshots, demoted_snapshots, demoted_environment_naming_info = (
             self._get_promoted_demoted_snapshots(plan, existing_environment)
@@ -348,15 +347,17 @@ class PlanStagesBuilder:
         if audit_only_snapshots:
             stages.append(AuditOnlyRunStage(snapshots=list(audit_only_snapshots.values())))
 
+        # When only one backfill stage runs, it also creates missing tables for selected snapshots
+        # from the other phase. Those snapshots can have no intervals to backfill yet.
         if missing_intervals_before_promote:
             stages.append(
                 BackfillStage(
                     snapshot_to_intervals=missing_intervals_before_promote,
-                    selected_snapshot_ids={
-                        s_id
-                        for s_id in before_promote_snapshots
-                        if plan.is_selected_for_backfill(s_id.name)
-                    },
+                    selected_snapshot_ids=(
+                        before_promote_snapshots
+                        if missing_intervals_after_promote
+                        else all_selected_for_backfill_snapshots
+                    ),
                     all_snapshots=snapshots_by_name,
                     deployability_index=deployability_index,
                 )
@@ -406,11 +407,11 @@ class PlanStagesBuilder:
             stages.append(
                 BackfillStage(
                     snapshot_to_intervals=missing_intervals_after_promote,
-                    selected_snapshot_ids={
-                        s_id
-                        for s_id in after_promote_snapshots
-                        if plan.is_selected_for_backfill(s_id.name)
-                    },
+                    selected_snapshot_ids=(
+                        after_promote_snapshots
+                        if missing_intervals_before_promote
+                        else all_selected_for_backfill_snapshots
+                    ),
                     all_snapshots=snapshots_by_name,
                     deployability_index=deployability_index,
                 )

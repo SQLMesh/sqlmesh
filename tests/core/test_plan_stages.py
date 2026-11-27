@@ -376,6 +376,7 @@ def test_build_plan_stages_select_models(
     expected_interval = (to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))
     assert len(backfill_stage.snapshot_to_intervals) == 1
     assert backfill_stage.snapshot_to_intervals[snapshot_a] == [expected_interval]
+    assert backfill_stage.selected_snapshot_ids == {snapshot_a.snapshot_id}
 
     # Verify EnvironmentRecordUpdateStage
     assert isinstance(stages[3], EnvironmentRecordUpdateStage)

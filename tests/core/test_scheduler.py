@@ -11,6 +11,7 @@ from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.model import load_sql_based_model
 from sqlmesh.core.model.definition import AuditResult, SqlModel
 from sqlmesh.core.model.kind import (
+    FullKind,
     IncrementalByTimeRangeKind,
     IncrementalByUniqueKeyKind,
     TimeColumn,
@@ -1020,6 +1021,48 @@ def test_before_all_environment_statements_called_first(mocker: MockerFixture, m
     execute_env_idx = call_order.index("execute_environment_statements")
     snapshots_to_create_idx = call_order.index("get_snapshots_to_create")
     assert env_statements_idx < execute_env_idx < snapshots_to_create_idx
+
+
+def test_run_merged_intervals_considers_unpopulated_deployable_tables_for_creation(
+    mocker: MockerFixture, make_snapshot
+):
+    def make_full_snapshot(name: str) -> Snapshot:
+        snapshot = make_snapshot(
+            SqlModel(name=name, query=parse_one("SELECT 1 AS id"), kind=FullKind())
+        )
+        snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+        return snapshot
+
+    ready = make_full_snapshot("ready")
+    waiting = make_full_snapshot("waiting")
+    populated = make_full_snapshot("populated")
+    populated.add_interval("2024-01-01", "2024-01-01")
+    unselected = make_full_snapshot("unselected")
+    shared_prod = make_full_snapshot("shared_prod")
+    shared_prod.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    shared_prod.unpaused_ts = to_timestamp("2024-01-01")
+
+    snapshots = [ready, waiting, populated, unselected, shared_prod]
+    deployability_index = DeployabilityIndex.create(snapshots)
+    assert deployability_index.is_representative(shared_prod)
+    assert not deployability_index.is_deployable(shared_prod)
+
+    snapshot_evaluator = mocker.MagicMock()
+    snapshot_evaluator.get_snapshots_to_create.return_value = []
+    snapshot_evaluator.execution_tracker.get_execution_stats.return_value = None
+    scheduler = Scheduler(snapshots, snapshot_evaluator, mocker.MagicMock(), default_catalog=None)
+    mocker.patch.object(scheduler, "evaluate", return_value=[])
+
+    errors, _ = scheduler.run_merged_intervals(
+        merged_intervals={ready: [(to_timestamp("2024-01-01"), to_timestamp("2024-01-02"))]},
+        deployability_index=deployability_index,
+        environment_naming_info=EnvironmentNamingInfo(name="dev"),
+        selected_snapshot_ids={s.snapshot_id for s in snapshots if s is not unselected},
+    )
+
+    assert not errors
+    snapshot_evaluator.get_snapshots_to_create.assert_called_once()
+    assert set(snapshot_evaluator.get_snapshots_to_create.call_args.args[0]) == {ready, waiting}
 
 
 def test_dag_transitive_deps(mocker: MockerFixture, make_snapshot):
