@@ -68,6 +68,7 @@ from sqlmesh.core.snapshot import (
     DeployabilityIndex,
     Intervals,
     Snapshot,
+    SnapshotChangeCategory,
     SnapshotId,
     SnapshotIdBatch,
     SnapshotInfoLike,
@@ -488,6 +489,7 @@ class SnapshotEvaluator:
         allow_destructive_snapshots: t.Optional[t.Set[str]] = None,
         allow_additive_snapshots: t.Optional[t.Set[str]] = None,
         deployability_index: t.Optional[DeployabilityIndex] = None,
+        metadata_only_snapshot_ids: t.Optional[t.Set[SnapshotId]] = None,
     ) -> None:
         """Alters a physical snapshot table to match its snapshot's schema for the given collection of snapshots.
 
@@ -497,6 +499,8 @@ class SnapshotEvaluator:
             allow_destructive_snapshots: Set of snapshots that are allowed to have destructive schema changes.
             allow_additive_snapshots: Set of snapshots that are allowed to have additive schema changes.
             deployability_index: Determines snapshots that are deployable in the context of this evaluation.
+            metadata_only_snapshot_ids: Optional set of snapshot IDs that only require in-place metadata
+                updates (e.g., physical grants) without DDL migration or view recreation.
         """
         deployability_index = deployability_index or DeployabilityIndex.all_deployable()
         target_data_objects = self._get_physical_data_objects(target_snapshots, deployability_index)
@@ -521,6 +525,7 @@ class SnapshotEvaluator:
                     allow_additive_snapshots,
                     self.get_adapter(s.model_gateway),
                     deployability_index,
+                    metadata_only=_is_metadata_only_migration(s, metadata_only_snapshot_ids),
                 ),
                 self.ddl_concurrent_tasks,
                 context_factory=execution_context_factory(),
@@ -1164,6 +1169,7 @@ class SnapshotEvaluator:
         allow_additive_snapshots: t.Set[str],
         adapter: EngineAdapter,
         deployability_index: DeployabilityIndex,
+        metadata_only: bool = False,
     ) -> None:
         if not snapshot.is_model or snapshot.is_symbolic:
             return
@@ -1179,6 +1185,20 @@ class SnapshotEvaluator:
         update_execution(target=target_table_name, existed=target_data_object is not None)
 
         evaluation_strategy = _evaluation_strategy(snapshot, adapter)
+        if metadata_only and target_data_object is not None:
+            if snapshot.model.grants is not None:
+                with (
+                    adapter.transaction(),
+                    adapter.session(snapshot.model.render_session_properties(**render_kwargs)),
+                ):
+                    evaluation_strategy._apply_grants(
+                        snapshot.model,
+                        target_table_name,
+                        GrantsTargetLayer.PHYSICAL,
+                        deployability_index.is_deployable(snapshot),
+                    )
+            return
+
         evaluation_strategy.run_pre_statements(
             snapshot=snapshot, render_kwargs={**render_kwargs, "inside_transaction": False}
         )
@@ -3458,3 +3478,29 @@ def _snapshot_to_data_object_type(snapshot: Snapshot) -> DataObjectType:
     if snapshot.is_materialized:
         return DataObjectType.TABLE
     return DataObjectType.UNKNOWN
+
+
+def _is_metadata_only_migration(
+    snapshot: Snapshot,
+    metadata_only_snapshot_ids: t.Optional[t.Set[SnapshotId]],
+) -> bool:
+    if metadata_only_snapshot_ids is not None:
+        return snapshot.snapshot_id in metadata_only_snapshot_ids
+    return (
+        snapshot.is_view
+        and snapshot.is_metadata
+        and not snapshot.is_forward_only
+        and snapshot.previous_version is not None
+        and snapshot.fingerprint.to_version() == snapshot.version
+        and snapshot.previous_version.fingerprint.to_version() == snapshot.version
+        and all(
+            v.is_new_version
+            and v.change_category
+            not in (
+                SnapshotChangeCategory.FORWARD_ONLY,
+                SnapshotChangeCategory.INDIRECT_NON_BREAKING,
+            )
+            for v in snapshot.previous_versions
+            if v.version == snapshot.version
+        )
+    )

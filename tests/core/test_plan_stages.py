@@ -1,11 +1,15 @@
 import pytest
 import typing as t
-from sqlglot import parse_one
+from sqlglot import exp, parse_one
 from pytest_mock.plugin import MockerFixture
 
+from sqlmesh.core import dialect as d
+from sqlmesh.core.audit import StandaloneAudit
 from sqlmesh.core.config import EnvironmentSuffixTarget
 from sqlmesh.core.config.common import VirtualEnvironmentMode
-from sqlmesh.core.model import SqlModel, ModelKindName
+from sqlmesh.core.dialect import parse
+from sqlmesh.core.model import SqlModel, ModelKindName, ViewKind, load_sql_based_model
+from sqlmesh.core.model.meta import GrantsTargetLayer
 from sqlmesh.core.plan.common import SnapshotIntervalClearRequest
 from sqlmesh.core.plan.definition import EvaluatablePlan
 from sqlmesh.core.plan.stages import (
@@ -2267,3 +2271,1188 @@ def test_adjust_intervals_should_force_rebuild(make_snapshot, mocker: MockerFixt
     (snapshot, intervals) = next(iter(backfill_stages[0].snapshot_to_intervals.items()))
     assert not snapshot.intervals
     assert intervals == [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
+
+
+def _make_prod_plan_and_state_reader(
+    mocker: MockerFixture,
+    old_snapshots: t.List[Snapshot],
+    new_snapshots: t.List[Snapshot],
+    env_snapshots: t.Optional[t.List[Snapshot]] = None,
+    *,
+    finalized_ts: t.Optional[int] = None,
+    expiration_ts: t.Optional[int] = None,
+    metadata_updated_snapshots: t.Optional[t.List[SnapshotId]] = None,
+    directly_modified_snapshots: t.Optional[t.List[SnapshotId]] = None,
+    indirectly_modified_snapshots: t.Optional[t.Dict[str, t.List[SnapshotId]]] = None,
+    set_default_finalized: bool = True,
+) -> t.Tuple[EvaluatablePlan, t.Any]:
+    stored = {s.snapshot_id: s for s in old_snapshots}
+    all_env_snapshots = env_snapshots if env_snapshots is not None else new_snapshots
+    for s in all_env_snapshots:
+        if s not in new_snapshots:
+            stored[s.snapshot_id] = s
+
+    def _get_snapshots(
+        snapshot_ids: t.Iterable[SnapshotIdLike],
+    ) -> t.Dict[SnapshotId, Snapshot]:
+        return {
+            s_id.snapshot_id: stored[s_id.snapshot_id]
+            for s_id in snapshot_ids
+            if s_id.snapshot_id in stored
+        }
+
+    if set_default_finalized and finalized_ts is None:
+        finalized_ts = to_timestamp("2023-01-02")
+
+    existing_environment = Environment(
+        name="prod",
+        snapshots=[s.table_info for s in old_snapshots],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="previous_plan",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[s.snapshot_id for s in old_snapshots],
+        finalized_ts=finalized_ts,
+        expiration_ts=expiration_ts,
+    )
+
+    state_reader = mocker.Mock(spec=StateReader)
+    state_reader.get_snapshots.side_effect = _get_snapshots
+    state_reader.get_environment.return_value = existing_environment
+
+    environment = Environment(
+        name="prod",
+        snapshots=[s.table_info for s in all_env_snapshots],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="test_plan",
+        previous_plan_id="previous_plan",
+        promoted_snapshot_ids=[s.snapshot_id for s in all_env_snapshots],
+    )
+
+    plan = EvaluatablePlan(
+        start="2023-01-01",
+        end="2023-01-02",
+        new_snapshots=new_snapshots,
+        environment=environment,
+        no_gaps=False,
+        skip_backfill=False,
+        empty_backfill=False,
+        restatements={},
+        restate_all_snapshots=False,
+        is_dev=False,
+        allow_destructive_models=set(),
+        allow_additive_models=set(),
+        forward_only=False,
+        end_bounded=False,
+        ensure_finalized_snapshots=False,
+        ignore_cron=False,
+        directly_modified_snapshots=directly_modified_snapshots or [],
+        indirectly_modified_snapshots=indirectly_modified_snapshots or {},
+        metadata_updated_snapshots=metadata_updated_snapshots or [],
+        removed_snapshots=[],
+        requires_backfill=False,
+        models_to_backfill=None,
+        execution_time="2023-01-02",
+        disabled_restatement_models=set(),
+        environment_statements=None,
+        user_provided_flags=None,
+    )
+    return plan, state_reader
+
+
+@pytest.mark.parametrize(
+    "change_type, expect_audit_stage",
+    [
+        ("tags", False),
+        ("owner", False),
+        ("cron", False),
+        ("audits", True),
+        ("sql_comment", False),
+    ],
+)
+def test_build_plan_stages_metadata_only_mv_skips_migrate_and_virtual_layer(
+    make_snapshot, mocker: MockerFixture, change_type: str, expect_audit_stage: bool
+) -> None:
+    old_model = load_sql_based_model(
+        parse(
+            """
+            MODEL (
+                name db.mv,
+                kind VIEW (materialized true),
+                cron '0 0 * * *'
+            );
+            SELECT 1 AS a
+            """
+        )
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    if change_type == "tags":
+        new_model = old_model.copy(update={"tags": ["mytag=a"]})
+    elif change_type == "owner":
+        new_model = old_model.copy(update={"owner": "new_owner"})
+    elif change_type == "cron":
+        new_model = old_model.copy(update={"cron": "0 1 * * *"})
+    elif change_type == "audits":
+        new_model = old_model.copy(update={"audits": [("not_null", {})]})
+    elif change_type == "sql_comment":
+        new_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.mv,
+                    kind VIEW (materialized true),
+                    cron '0 0 * * *'
+                );
+                -- formatting and comment only
+                SELECT   1 AS a
+                """
+            )
+        )
+    else:
+        raise AssertionError(f"Unexpected change_type: {change_type}")
+
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    assert not any(isinstance(s, VirtualLayerUpdateStage) for s in stages)
+
+    unpause_stages = [s for s in stages if isinstance(s, UnpauseStage)]
+    assert len(unpause_stages) == 1
+    assert unpause_stages[0].promoted_snapshots == {new_mv.table_info}
+
+    audit_stages = [s for s in stages if isinstance(s, AuditOnlyRunStage)]
+    if expect_audit_stage:
+        assert len(audit_stages) == 1
+        assert [s.snapshot_id for s in audit_stages[0].snapshots] == [new_mv.snapshot_id]
+    else:
+        assert len(audit_stages) == 0
+
+
+@pytest.mark.parametrize("upstream_change", ["owner_tags", "sql_comment"])
+def test_build_plan_stages_metadata_only_upstream_cascades_no_mv_migration(
+    make_snapshot, mocker: MockerFixture, upstream_change: str
+) -> None:
+    old_table_model = load_sql_based_model(
+        parse(
+            """
+            MODEL (
+                name db.table_a,
+                kind FULL
+            );
+            SELECT 1 AS a
+            """
+        )
+    )
+    old_mv_b_model = SqlModel(
+        name="db.mv_b",
+        query=parse_one("SELECT a FROM db.table_a"),
+        kind=ViewKind(materialized=True),
+    )
+    old_mv_c_model = SqlModel(
+        name="db.mv_c",
+        query=parse_one("SELECT a FROM db.mv_b"),
+        kind=ViewKind(materialized=True),
+    )
+
+    old_nodes = {
+        old_table_model.fqn: old_table_model,
+        old_mv_b_model.fqn: old_mv_b_model,
+        old_mv_c_model.fqn: old_mv_c_model,
+    }
+    old_table = make_snapshot(old_table_model, nodes=old_nodes)
+    old_mv_b = make_snapshot(old_mv_b_model, nodes=old_nodes)
+    old_mv_c = make_snapshot(old_mv_c_model, nodes=old_nodes)
+    for snap in (old_table, old_mv_b, old_mv_c):
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        snap.unpaused_ts = to_timestamp("2023-01-02")
+        snap.add_interval("2023-01-01", "2023-01-02")
+
+    if upstream_change == "owner_tags":
+        new_table_model = old_table_model.copy(update={"owner": "team_a", "tags": ["tier=1"]})
+    else:
+        new_table_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.table_a,
+                    kind FULL
+                );
+                -- comment change only
+                SELECT  1 AS a
+                """
+            )
+        )
+
+    new_nodes = {
+        new_table_model.fqn: new_table_model,
+        old_mv_b_model.fqn: old_mv_b_model,
+        old_mv_c_model.fqn: old_mv_c_model,
+    }
+    new_table = make_snapshot(new_table_model, nodes=new_nodes)
+    new_mv_b = make_snapshot(old_mv_b_model.copy(), nodes=new_nodes)
+    new_mv_c = make_snapshot(old_mv_c_model.copy(), nodes=new_nodes)
+    for new_snap, old_snap in ((new_table, old_table), (new_mv_b, old_mv_b), (new_mv_c, old_mv_c)):
+        new_snap.previous_versions = old_snap.all_versions
+        new_snap.categorize_as(SnapshotChangeCategory.METADATA)
+        new_snap.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_table, old_mv_b, old_mv_c],
+        new_snapshots=[new_table, new_mv_b, new_mv_c],
+        metadata_updated_snapshots=[
+            new_table.snapshot_id,
+            new_mv_b.snapshot_id,
+            new_mv_c.snapshot_id,
+        ],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    assert not any(isinstance(s, VirtualLayerUpdateStage) for s in stages)
+
+    unpause_stages = [s for s in stages if isinstance(s, UnpauseStage)]
+    assert len(unpause_stages) == 1
+    assert unpause_stages[0].promoted_snapshots == {
+        new_table.table_info,
+        new_mv_b.table_info,
+        new_mv_c.table_info,
+    }
+
+
+@pytest.mark.parametrize(
+    "old_grants, old_layer, new_grants, new_layer, expect_virtual_update",
+    [
+        (
+            {"select": ["r1"]},
+            GrantsTargetLayer.ALL,
+            {"select": ["r2"]},
+            GrantsTargetLayer.ALL,
+            True,
+        ),
+        ({"select": ["r1"]}, GrantsTargetLayer.ALL, {}, GrantsTargetLayer.ALL, True),
+        (
+            {"select": ["r1"]},
+            GrantsTargetLayer.VIRTUAL,
+            {"select": ["r1"]},
+            GrantsTargetLayer.ALL,
+            False,
+        ),
+    ],
+    ids=["update_role", "revoke_empty_grants", "virtual_to_all"],
+)
+def test_build_plan_stages_metadata_only_grants_on_mv_no_downstream_cascade(
+    make_snapshot,
+    mocker: MockerFixture,
+    old_grants: t.Dict[str, t.List[str]],
+    old_layer: GrantsTargetLayer,
+    new_grants: t.Dict[str, t.List[str]],
+    new_layer: GrantsTargetLayer,
+    expect_virtual_update: bool,
+) -> None:
+    old_mv_a_model = SqlModel(
+        name="db.mv_a",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        grants=old_grants,
+        grants_target_layer=old_layer,
+    )
+    old_mv_b_model = SqlModel(
+        name="db.mv_b",
+        query=parse_one("SELECT a FROM db.mv_a"),
+        kind=ViewKind(materialized=True),
+    )
+
+    old_nodes = {old_mv_a_model.fqn: old_mv_a_model, old_mv_b_model.fqn: old_mv_b_model}
+    old_mv_a = make_snapshot(old_mv_a_model, nodes=old_nodes)
+    old_mv_b = make_snapshot(old_mv_b_model, nodes=old_nodes)
+    for snap in (old_mv_a, old_mv_b):
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        snap.unpaused_ts = to_timestamp("2023-01-02")
+        snap.add_interval("2023-01-01", "2023-01-02")
+
+    new_mv_a_model = SqlModel(
+        name="db.mv_a",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        grants=new_grants,
+        grants_target_layer=new_layer,
+    )
+    new_nodes = {new_mv_a_model.fqn: new_mv_a_model, old_mv_b_model.fqn: old_mv_b_model}
+    new_mv_a = make_snapshot(new_mv_a_model, nodes=new_nodes)
+    new_mv_b = make_snapshot(old_mv_b_model.copy(), nodes=new_nodes)
+    for new_snap, old_snap in ((new_mv_a, old_mv_a), (new_mv_b, old_mv_b)):
+        new_snap.previous_versions = old_snap.all_versions
+        new_snap.categorize_as(SnapshotChangeCategory.METADATA)
+        new_snap.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv_a, old_mv_b],
+        new_snapshots=[new_mv_a, new_mv_b],
+        metadata_updated_snapshots=[new_mv_a.snapshot_id, new_mv_b.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_mv_a.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == {new_mv_a.snapshot_id}
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    if expect_virtual_update:
+        assert len(virtual_stages) == 1
+        assert virtual_stages[0].promoted_snapshots == {new_mv_a.table_info}
+    else:
+        assert len(virtual_stages) == 0
+
+
+def test_build_plan_stages_metadata_only_virtual_only_grants_skips_migrate(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    old_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        grants={"select": ["r1"]},
+        grants_target_layer=GrantsTargetLayer.VIRTUAL,
+        virtual_environment_mode=VirtualEnvironmentMode.FULL,
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    new_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        grants={"select": ["r2"]},
+        grants_target_layer=GrantsTargetLayer.VIRTUAL,
+        virtual_environment_mode=VirtualEnvironmentMode.FULL,
+    )
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
+
+
+@pytest.mark.parametrize("change_type", ["description", "inline_column_comment"])
+def test_build_plan_stages_metadata_only_description_and_inline_col_comment(
+    make_snapshot, mocker: MockerFixture, change_type: str
+) -> None:
+    old_model = load_sql_based_model(
+        parse(
+            """
+            MODEL (
+                name db.mv,
+                kind VIEW (materialized true),
+                description 'old description'
+            );
+            SELECT 1 AS a /* old col */
+            """
+        )
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    if change_type == "description":
+        new_model = old_model.copy(update={"description": "new description"})
+    else:
+        new_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.mv,
+                    kind VIEW (materialized true),
+                    description 'old description'
+                );
+                SELECT 1 AS a /* new col */
+                """
+            )
+        )
+
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
+
+
+@pytest.mark.parametrize("change_type", ["on_virtual_update", "virtual_properties"])
+def test_build_plan_stages_metadata_only_with_on_virtual_update_or_virtual_properties(
+    make_snapshot, mocker: MockerFixture, change_type: str
+) -> None:
+    if change_type == "on_virtual_update":
+        old_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.mv,
+                    kind VIEW (materialized true)
+                );
+                SELECT 1 AS a;
+                ON_VIRTUAL_UPDATE_BEGIN;
+                SELECT 1;
+                ON_VIRTUAL_UPDATE_END;
+                """
+            )
+        )
+        new_model = old_model.copy(update={"tags": ["updated"]})
+    else:
+        old_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.mv,
+                    kind VIEW (materialized true),
+                    virtual_properties (a = 1)
+                );
+                SELECT 1 AS a
+                """
+            )
+        )
+        new_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.mv,
+                    kind VIEW (materialized true),
+                    virtual_properties (a = 2)
+                );
+                SELECT 1 AS a
+                """
+            )
+        )
+
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
+
+
+def test_build_plan_stages_metadata_only_parent_mv_with_forward_only_child_view(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    old_parent_model = SqlModel(
+        name="db.mv_parent",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+    )
+    old_child_model = SqlModel(
+        name="db.view_child",
+        query=parse_one("SELECT a FROM db.mv_parent"),
+        kind=ViewKind(),
+    )
+    old_sibling_model = SqlModel(
+        name="db.mv_sibling",
+        query=parse_one("SELECT a FROM db.mv_parent"),
+        kind=ViewKind(materialized=True),
+    )
+    old_nodes = {
+        old_parent_model.fqn: old_parent_model,
+        old_child_model.fqn: old_child_model,
+        old_sibling_model.fqn: old_sibling_model,
+    }
+    old_parent = make_snapshot(old_parent_model, nodes=old_nodes)
+    old_child = make_snapshot(old_child_model, nodes=old_nodes)
+    old_sibling = make_snapshot(old_sibling_model, nodes=old_nodes)
+    for snap in (old_parent, old_child, old_sibling):
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        snap.unpaused_ts = to_timestamp("2023-01-02")
+        snap.add_interval("2023-01-01", "2023-01-02")
+
+    new_parent_model = old_parent_model.copy(update={"tags": ["parent_tag"]})
+    new_child_model = SqlModel(
+        name="db.view_child",
+        query=parse_one("SELECT a, 2 AS b FROM db.mv_parent"),
+        kind=ViewKind(),
+    )
+    new_nodes = {
+        new_parent_model.fqn: new_parent_model,
+        new_child_model.fqn: new_child_model,
+        old_sibling_model.fqn: old_sibling_model,
+    }
+    new_parent = make_snapshot(new_parent_model, nodes=new_nodes)
+    new_parent.previous_versions = old_parent.all_versions
+    new_parent.categorize_as(SnapshotChangeCategory.METADATA)
+    new_parent.add_interval("2023-01-01", "2023-01-02")
+
+    new_child = make_snapshot(new_child_model, nodes=new_nodes)
+    new_child.previous_versions = old_child.all_versions
+    new_child.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    new_child.add_interval("2023-01-01", "2023-01-02")
+
+    new_sibling = make_snapshot(old_sibling_model.copy(), nodes=new_nodes)
+    new_sibling.previous_versions = old_sibling.all_versions
+    new_sibling.categorize_as(SnapshotChangeCategory.METADATA)
+    new_sibling.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_parent, old_child, old_sibling],
+        new_snapshots=[new_parent, new_child, new_sibling],
+        directly_modified_snapshots=[new_child.snapshot_id],
+        metadata_updated_snapshots=[new_parent.snapshot_id, new_sibling.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_child.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_child.table_info}
+
+
+def test_build_plan_stages_stale_parent_after_select_model_still_migrates_view(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    p_v1_model = SqlModel(name="db.p", query=parse_one("SELECT 1 AS a"), kind=ModelKindName.FULL)
+    p_v2_model = SqlModel(name="db.p", query=parse_one("SELECT 2 AS a"), kind=ModelKindName.FULL)
+    v_model = SqlModel(
+        name="db.v",
+        query=parse_one("SELECT a FROM db.p"),
+        kind=ViewKind(materialized=True),
+    )
+
+    p_v1 = make_snapshot(p_v1_model)
+    p_v1.categorize_as(SnapshotChangeCategory.BREAKING)
+    p_v1.unpaused_ts = to_timestamp("2023-01-02")
+    p_v1.add_interval("2023-01-01", "2023-01-02")
+
+    p_v2 = make_snapshot(p_v2_model)
+    p_v2.previous_versions = p_v1.all_versions
+    p_v2.categorize_as(SnapshotChangeCategory.BREAKING)
+    p_v2.unpaused_ts = to_timestamp("2023-01-02")
+    p_v2.add_interval("2023-01-01", "2023-01-02")
+
+    # Prod currently has P_v2 (deployed via --select-model db.p) and old_V still pointing to P_v1
+    old_v = make_snapshot(v_model, nodes={p_v1_model.fqn: p_v1_model, v_model.fqn: v_model})
+    old_v.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_v.unpaused_ts = to_timestamp("2023-01-02")
+    old_v.add_interval("2023-01-01", "2023-01-02")
+
+    # Next full prod plan keeps unchanged P_v2 and updates V to point to P_v2 (same version)
+    new_v = make_snapshot(v_model.copy(), nodes={p_v2_model.fqn: p_v2_model, v_model.fqn: v_model})
+    new_v.previous_versions = old_v.all_versions
+    new_v.change_category = SnapshotChangeCategory.INDIRECT_NON_BREAKING
+    new_v.version = old_v.version
+    new_v.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[p_v2, old_v],
+        new_snapshots=[new_v],
+        env_snapshots=[p_v2, new_v],
+        indirectly_modified_snapshots={p_v2.name: [new_v.snapshot_id]},
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_v.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_v.table_info}
+
+
+def test_build_plan_stages_pr6200_forward_only_view_cascades_downstream(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    old_a_model = SqlModel(name="db.view_a", query=parse_one("SELECT 1 AS a"), kind=ViewKind())
+    old_b_model = SqlModel(
+        name="db.view_b", query=parse_one("SELECT * FROM db.view_a"), kind=ViewKind()
+    )
+    old_c_model = SqlModel(
+        name="db.view_c", query=parse_one("SELECT * FROM db.view_b"), kind=ViewKind()
+    )
+    old_nodes = {
+        old_a_model.fqn: old_a_model,
+        old_b_model.fqn: old_b_model,
+        old_c_model.fqn: old_c_model,
+    }
+    old_a = make_snapshot(old_a_model, nodes=old_nodes)
+    old_b = make_snapshot(old_b_model, nodes=old_nodes)
+    old_c = make_snapshot(old_c_model, nodes=old_nodes)
+    for snap in (old_a, old_b, old_c):
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        snap.unpaused_ts = to_timestamp("2023-01-02")
+        snap.add_interval("2023-01-01", "2023-01-02")
+
+    new_a_model = SqlModel(
+        name="db.view_a", query=parse_one("SELECT 1 AS a, 2 AS b"), kind=ViewKind()
+    )
+    new_nodes = {
+        new_a_model.fqn: new_a_model,
+        old_b_model.fqn: old_b_model,
+        old_c_model.fqn: old_c_model,
+    }
+    new_a = make_snapshot(new_a_model, nodes=new_nodes)
+    new_a.previous_versions = old_a.all_versions
+    new_a.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    new_a.add_interval("2023-01-01", "2023-01-02")
+
+    new_b = make_snapshot(old_b_model.copy(), nodes=new_nodes)
+    new_b.previous_versions = old_b.all_versions
+    new_b.categorize_as(SnapshotChangeCategory.BREAKING)
+    new_b.add_interval("2023-01-01", "2023-01-02")
+
+    new_c = make_snapshot(old_c_model.copy(), nodes=new_nodes)
+    new_c.previous_versions = old_c.all_versions
+    new_c.categorize_as(SnapshotChangeCategory.BREAKING)
+    new_c.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_a, old_b, old_c],
+        new_snapshots=[new_a, new_b, new_c],
+        directly_modified_snapshots=[new_a.snapshot_id],
+        indirectly_modified_snapshots={new_a.name: [new_b.snapshot_id, new_c.snapshot_id]},
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [
+        new_a.snapshot_id,
+        new_b.snapshot_id,
+        new_c.snapshot_id,
+    ]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+
+def test_build_plan_stages_metadata_after_forward_only_in_dev_migrates_in_prod(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    mv_v1_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+    )
+    mv_v1 = make_snapshot(mv_v1_model)
+    mv_v1.categorize_as(SnapshotChangeCategory.BREAKING)
+    mv_v1.unpaused_ts = to_timestamp("2023-01-02")
+    mv_v1.add_interval("2023-01-01", "2023-01-02")
+
+    mv_v2_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a, 2 AS b"),
+        kind=ViewKind(materialized=True),
+    )
+    mv_v2 = make_snapshot(mv_v2_model)
+    mv_v2.previous_versions = mv_v1.all_versions
+    mv_v2.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+
+    mv_v3_model = mv_v2_model.copy(update={"owner": "new_owner"})
+    mv_v3 = make_snapshot(mv_v3_model)
+    mv_v3.previous_versions = mv_v2.all_versions
+    mv_v3.categorize_as(SnapshotChangeCategory.METADATA)
+    mv_v3.add_interval("2023-01-01", "2023-01-02")
+
+    # Prod still runs mv_v1; deploying mv_v3 (METADATA relative to mv_v2, but data-changed vs mv_v1!)
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[mv_v1],
+        new_snapshots=[],
+        env_snapshots=[mv_v3],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [mv_v3.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {mv_v3.table_info}
+
+
+@pytest.mark.parametrize("change_type", ["tags", "grants", "query"])
+def test_build_plan_stages_dev_only_vde_metadata_and_grants(
+    make_snapshot, mocker: MockerFixture, change_type: str
+) -> None:
+    old_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+        virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+        grants={"select": ["r1"]},
+        grants_target_layer=GrantsTargetLayer.VIRTUAL,
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    if change_type == "tags":
+        new_model = old_model.copy(update={"tags": ["tag1"]})
+        category = SnapshotChangeCategory.METADATA
+        forward_only = False
+    elif change_type == "grants":
+        new_model = SqlModel(
+            name="db.mv",
+            query=parse_one("SELECT 1 AS a"),
+            kind=ViewKind(materialized=True),
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+            grants={"select": ["r2"]},
+            grants_target_layer=GrantsTargetLayer.VIRTUAL,
+        )
+        category = SnapshotChangeCategory.METADATA
+        forward_only = False
+    else:
+        new_model = SqlModel(
+            name="db.mv",
+            query=parse_one("SELECT 1 AS a, 2 AS b"),
+            kind=ViewKind(materialized=True),
+            virtual_environment_mode=VirtualEnvironmentMode.DEV_ONLY,
+            grants={"select": ["r1"]},
+            grants_target_layer=GrantsTargetLayer.VIRTUAL,
+        )
+        category = SnapshotChangeCategory.BREAKING
+        forward_only = True
+
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(category, forward_only=forward_only)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, VirtualLayerUpdateStage) for s in stages)
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    if change_type == "tags":
+        assert len(migrate_stages) == 0
+    elif change_type == "grants":
+        assert len(migrate_stages) == 1
+        assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_mv.snapshot_id]
+        assert migrate_stages[0].metadata_only_snapshot_ids == {new_mv.snapshot_id}
+    else:
+        assert len(migrate_stages) == 1
+        assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_mv.snapshot_id]
+        assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+
+@pytest.mark.parametrize("reason", ["unfinalized", "expired"])
+def test_build_plan_stages_unfinalized_or_expired_prod_conservatively_migrates(
+    make_snapshot, mocker: MockerFixture, reason: str
+) -> None:
+    old_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    new_model = old_model.copy(update={"tags": ["t1"]})
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        finalized_ts=None if reason == "unfinalized" else to_timestamp("2023-01-02"),
+        expiration_ts=to_timestamp("2020-01-01") if reason == "expired" else None,
+        set_default_finalized=False,
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_mv.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
+
+
+def test_build_plan_stages_metadata_only_with_standalone_audit_snapshot(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    old_mv_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+    )
+    audit = StandaloneAudit(
+        name="assert_mv_positive",
+        query=parse_one("SELECT * FROM db.mv WHERE a <= 0"),
+    )
+    old_nodes = {old_mv_model.fqn: old_mv_model, audit.fqn: audit}
+    old_mv = make_snapshot(old_mv_model, nodes=old_nodes)
+    old_audit = make_snapshot(audit, nodes=old_nodes)
+    for snap in (old_mv, old_audit):
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        snap.unpaused_ts = to_timestamp("2023-01-02")
+        snap.add_interval("2023-01-01", "2023-01-02")
+
+    new_mv_model = old_mv_model.copy(update={"owner": "team_a"})
+    new_nodes = {new_mv_model.fqn: new_mv_model, audit.fqn: audit}
+    new_mv = make_snapshot(new_mv_model, nodes=new_nodes)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    new_audit = make_snapshot(audit.copy(), nodes=new_nodes)
+    new_audit.previous_versions = old_audit.all_versions
+    new_audit.categorize_as(SnapshotChangeCategory.METADATA)
+    new_audit.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv, old_audit],
+        new_snapshots=[new_mv, new_audit],
+        metadata_updated_snapshots=[new_mv.snapshot_id, new_audit.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    assert not any(isinstance(s, VirtualLayerUpdateStage) for s in stages)
+
+
+@pytest.mark.parametrize("policy_field", ["on_additive_change", "on_destructive_change"])
+def test_build_plan_stages_migration_policy_change_still_migrates(
+    make_snapshot, mocker: MockerFixture, policy_field: str
+) -> None:
+    old_model = load_sql_based_model(
+        parse(
+            f"""
+            MODEL (
+                name db.inc,
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds,
+                    forward_only true,
+                    {policy_field} ignore
+                )
+            );
+            SELECT 1 AS a, '2023-01-01' AS ds
+            """
+        )
+    )
+    old_snap = make_snapshot(old_model)
+    old_snap.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_snap.unpaused_ts = to_timestamp("2023-01-02")
+    old_snap.add_interval("2023-01-01", "2023-01-02")
+
+    new_model = load_sql_based_model(
+        parse(
+            f"""
+            MODEL (
+                name db.inc,
+                kind INCREMENTAL_BY_TIME_RANGE (
+                    time_column ds,
+                    forward_only true,
+                    {policy_field} allow
+                )
+            );
+            SELECT 1 AS a, '2023-01-01' AS ds
+            """
+        )
+    )
+    new_snap = make_snapshot(new_model)
+    new_snap.previous_versions = old_snap.all_versions
+    new_snap.categorize_as(SnapshotChangeCategory.METADATA)
+    new_snap.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_snap],
+        new_snapshots=[new_snap],
+        metadata_updated_snapshots=[new_snap.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_snap.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_snap.table_info}
+
+
+@pytest.mark.parametrize(
+    "dialect, columns_clause, query",
+    [
+        ("bigquery", "columns (a INT, b FLOAT)", "SELECT 1 AS a, 1.0 AS b"),
+        ("snowflake", "columns (c STRING)", "SELECT 'x' AS c"),
+    ],
+    ids=["bigquery_int_float", "snowflake_string"],
+)
+def test_build_plan_stages_metadata_only_mv_json_roundtrip_dialect_aliases(
+    make_snapshot, mocker: MockerFixture, dialect: str, columns_clause: str, query: str
+) -> None:
+    old_model = load_sql_based_model(
+        parse(
+            f"""
+            MODEL (
+                name db.mv,
+                kind VIEW (materialized true),
+                dialect {dialect},
+                {columns_clause}
+            );
+            {query}
+            """
+        )
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+
+    # Simulate loading old_snapshot from state DB (JSON deserialization normalizes dialect type aliases)
+    old_mv_loaded = Snapshot.parse_raw(old_mv.json())
+    old_mv_loaded.add_interval("2023-01-01", "2023-01-02")
+
+    new_model = load_sql_based_model(
+        parse(
+            f"""
+            MODEL (
+                name db.mv,
+                kind VIEW (materialized true),
+                dialect {dialect},
+                {columns_clause},
+                tags ('mytag=a')
+            );
+            {query}
+            """
+        )
+    )
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv_loaded.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv_loaded],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    assert not any(isinstance(s, VirtualLayerUpdateStage) for s in stages)
+
+
+@pytest.mark.parametrize("dynamic_kind", ["at_template", "jinja"])
+def test_build_plan_stages_metadata_only_dynamic_virtual_properties(
+    make_snapshot, mocker: MockerFixture, dynamic_kind: str
+) -> None:
+    if dynamic_kind == "at_template":
+        old_model = load_sql_based_model(
+            parse(
+                """
+                MODEL (
+                    name db.mv,
+                    kind VIEW (materialized true),
+                    virtual_properties (label = prefix_@{start_ds})
+                );
+                SELECT 1 AS a
+                """
+            )
+        )
+    else:
+        old_model = SqlModel(
+            name="db.mv",
+            query=parse_one("SELECT 1 AS a"),
+            kind=ViewKind(materialized=True),
+            virtual_properties=exp.Tuple(
+                expressions=[
+                    exp.EQ(this=exp.var("label"), expression=d.Jinja(this="{{ start_ds }}"))
+                ]
+            ),
+        )
+
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    new_model = old_model.copy(update={"tags": ["updated"]})
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    assert not any(isinstance(s, MigrateSchemasStage) for s in stages)
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
+
+
+def test_build_plan_stages_missing_old_snapshot_for_model_conservatively_migrates(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    old_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ViewKind(materialized=True),
+    )
+    old_mv = make_snapshot(old_model)
+    old_mv.categorize_as(SnapshotChangeCategory.BREAKING)
+    old_mv.unpaused_ts = to_timestamp("2023-01-02")
+    old_mv.add_interval("2023-01-01", "2023-01-02")
+
+    new_model = old_model.copy(update={"tags": ["t1"]})
+    new_mv = make_snapshot(new_model)
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_mv],
+        new_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    # Simulate old_snapshot missing from state store
+    state_reader.get_snapshots.side_effect = None
+    state_reader.get_snapshots.return_value = {}
+
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_mv.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
+
+
+def test_build_plan_stages_parent_absent_from_plan_snapshots_conservatively_migrates(
+    make_snapshot, mocker: MockerFixture
+) -> None:
+    parent_model = SqlModel(
+        name="db.p",
+        query=parse_one("SELECT 1 AS a"),
+        kind=ModelKindName.FULL,
+    )
+    mv_model = SqlModel(
+        name="db.mv",
+        query=parse_one("SELECT a FROM db.p"),
+        kind=ViewKind(materialized=True),
+    )
+    nodes = {parent_model.fqn: parent_model, mv_model.fqn: mv_model}
+    old_parent = make_snapshot(parent_model, nodes=nodes)
+    old_mv = make_snapshot(mv_model, nodes=nodes)
+    for snap in (old_parent, old_mv):
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        snap.unpaused_ts = to_timestamp("2023-01-02")
+        snap.add_interval("2023-01-01", "2023-01-02")
+
+    new_mv_model = mv_model.copy(update={"tags": ["t1"]})
+    new_mv = make_snapshot(
+        new_mv_model, nodes={parent_model.fqn: parent_model, new_mv_model.fqn: new_mv_model}
+    )
+    new_mv.previous_versions = old_mv.all_versions
+    new_mv.categorize_as(SnapshotChangeCategory.METADATA)
+    new_mv.add_interval("2023-01-01", "2023-01-02")
+
+    # Existing prod has both old_parent and old_mv, while current plan's snapshots omit old_parent
+    plan, state_reader = _make_prod_plan_and_state_reader(
+        mocker,
+        old_snapshots=[old_parent, old_mv],
+        new_snapshots=[new_mv],
+        env_snapshots=[new_mv],
+        metadata_updated_snapshots=[new_mv.snapshot_id],
+    )
+    stages = build_plan_stages(plan, state_reader, None)
+
+    migrate_stages = [s for s in stages if isinstance(s, MigrateSchemasStage)]
+    assert len(migrate_stages) == 1
+    assert [s.snapshot_id for s in migrate_stages[0].snapshots] == [new_mv.snapshot_id]
+    assert migrate_stages[0].metadata_only_snapshot_ids == set()
+
+    virtual_stages = [s for s in stages if isinstance(s, VirtualLayerUpdateStage)]
+    assert len(virtual_stages) == 1
+    assert virtual_stages[0].promoted_snapshots == {new_mv.table_info}
