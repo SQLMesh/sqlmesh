@@ -1166,10 +1166,10 @@ If you want to see a full walkthrough, [go here](incremental_time_full_walkthrou
     └── Indirectly Modified Children:
         ├── sqlmesh_example__dev.full_model (Forward-only)
         └── sqlmesh_example__dev.view_model (Forward-only)
-    Models needing backfill:
-    ├── sqlmesh_example__dev.full_model: [full refresh] (preview)
-    ├── sqlmesh_example__dev.incremental_model: [2025-04-17 - 2025-04-17] (preview)
-    └── sqlmesh_example__dev.view_model: [recreate view] (preview)
+    Models needing preview (data will NOT be reused in production):
+    ├── sqlmesh_example__dev.full_model: [full refresh]
+    ├── sqlmesh_example__dev.incremental_model: [2025-04-17 - 2025-04-17]
+    └── sqlmesh_example__dev.view_model: [recreate view]
     Apply - Preview Tables [y/n]: y
 
     Updating physical layer ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% • 3/3 • 0:00:00

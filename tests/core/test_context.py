@@ -18,7 +18,7 @@ from sqlglot.errors import SchemaError
 import sqlmesh.core.constants
 from sqlmesh.cli.project_init import init_example_project
 from sqlmesh.core.audit import StandaloneAudit
-from sqlmesh.core.console import TerminalConsole
+from sqlmesh.core.console import MarkdownConsole, TerminalConsole
 from sqlmesh.core import dialect as d, constants as c
 from sqlmesh.core.config import (
     load_configs,
@@ -2923,6 +2923,89 @@ def test_plan_runs_audits_on_dev_previews(sushi_context: Context, capsys, caplog
     assert "'not_null' audit error:" in log
     assert "'at_least_one_non_blocking' audit error:" in log
     assert "Virtual layer updated" in stdout
+
+
+@pytest.mark.parametrize(
+    "console_cls,backfill_header,preview_header",
+    [
+        (
+            TerminalConsole,
+            "Models needing backfill:",
+            "Models needing preview (data will NOT be reused in production):",
+        ),
+        (
+            MarkdownConsole,
+            "**Models needing backfill:**",
+            "**Models needing preview** (data will NOT be reused in production):",
+        ),
+    ],
+)
+def test_plan_summary_separates_preview_backfills(
+    sushi_context: Context, capsys, console_cls, backfill_header, preview_header
+):
+    console = console_cls()
+    sushi_context.console = console
+
+    def forward_only_model(extra_column: str) -> Model:
+        return load_sql_based_model(
+            parse(
+                f"""
+                MODEL (
+                    name sushi.test_preview_model,
+                    kind INCREMENTAL_BY_TIME_RANGE (time_column event_date, forward_only true)
+                );
+
+                SELECT *{extra_column} FROM sushi.orders
+                WHERE event_date BETWEEN @start_ts AND @end_ts
+                """
+            ),
+            default_catalog=sushi_context.default_catalog,
+        )
+
+    sushi_context.upsert_model(forward_only_model(""))
+    sushi_context.plan(auto_apply=True, no_prompts=True)
+
+    # A forward-only change is only previewed in dev, while a new model is backfilled for real
+    sushi_context.upsert_model(forward_only_model(", 1 AS new_col"))
+    sushi_context.upsert_model(
+        load_sql_based_model(
+            parse("MODEL (name sushi.test_new_model, kind FULL); SELECT 1 AS id"),
+            default_catalog=sushi_context.default_catalog,
+        )
+    )
+    plan = sushi_context.plan_builder("dev", skip_tests=True).build()
+
+    capsys.readouterr()  # clear output buffer
+    console._show_missing_dates(plan, sushi_context.default_catalog)
+    output = capsys.readouterr().out
+
+    assert output.index(backfill_header) < output.index(preview_header)
+
+    backfill_section, preview_section = output.split(preview_header)
+    assert "sushi__dev.test_new_model" in backfill_section
+    assert "test_preview_model" not in backfill_section
+    assert "sushi__dev.test_preview_model" in preview_section
+    assert "test_new_model" not in preview_section
+    assert "(preview)" not in output
+
+
+def test_plan_summary_omits_empty_preview_section(sushi_context: Context, capsys):
+    console = TerminalConsole()
+    sushi_context.console = console
+    sushi_context.upsert_model(
+        load_sql_based_model(
+            parse("MODEL (name sushi.test_new_model, kind FULL); SELECT 1 AS id"),
+            default_catalog=sushi_context.default_catalog,
+        )
+    )
+    plan = sushi_context.plan_builder("dev", skip_tests=True).build()
+
+    capsys.readouterr()
+    console._show_missing_dates(plan, sushi_context.default_catalog)
+    output = capsys.readouterr().out
+
+    assert "Models needing backfill:" in output
+    assert "Models needing preview" not in output
 
 
 def test_environment_statements(tmp_path: pathlib.Path):

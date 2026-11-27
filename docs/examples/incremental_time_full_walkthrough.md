@@ -724,8 +724,8 @@ Models:
 Directly Modified: demo__dev.incrementals_demo (Forward-only)
 Enter the effective date (eg. '1 year', '2020-01-01') to apply forward-only changes retroactively or blank to only apply them going forward once changes
 are deployed to prod:
-Models needing backfill (missing dates):
-└── demo__dev.incrementals_demo: 2024-11-07 - 2024-11-07 (preview)
+Models needing preview (data will NOT be reused in production):
+└── demo__dev.incrementals_demo: 2024-11-07 - 2024-11-07
 Enter the preview start date (eg. '1 year', '2020-01-01') or blank to backfill to preview starting from yesterday: 2024-10-27
 Enter the preview end date (eg. '1 month ago', '2020-01-01') or blank to preview up until '2024-11-08 00:00:00':
 Apply - Preview Tables [y/n]: y
