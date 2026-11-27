@@ -1316,6 +1316,10 @@ def test_build_plan_stages_audit_only(
     assert isinstance(audit_only_stage, AuditOnlyRunStage)
     assert len(audit_only_stage.snapshots) == 1
     assert audit_only_stage.snapshots[0].snapshot_id == new_snapshot_a.snapshot_id
+    assert audit_only_stage.all_snapshots == {'"a"': new_snapshot_a, '"b"': new_snapshot_b}
+    assert audit_only_stage.deployability_index == DeployabilityIndex.create(
+        [new_snapshot_a, new_snapshot_b]
+    )
 
     # Verify BackfillStage
     backfill_stage = stages[4]

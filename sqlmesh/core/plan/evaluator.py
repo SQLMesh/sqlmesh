@@ -273,8 +273,15 @@ class BuiltInPlanEvaluator(PlanEvaluator):
         if not audit_snapshots:
             return
 
-        # If there are any snapshots to be audited, we'll reuse the scheduler's internals to audit them
-        scheduler = self.create_scheduler(audit_snapshots, self.snapshot_evaluator)
+        # If there are any snapshots to be audited, we'll reuse the scheduler's internals to audit them.
+        # Like the backfill, the audits read the plan's physical tables of the audited snapshots' parents.
+        # The scheduler gets copies because it overwrites the intervals of the snapshots it's given, and
+        # later stages still use the original intervals.
+        audit_names = {s.name for s in audit_snapshots}
+        names = audit_names | {p.name for s in audit_snapshots for p in s.parents}
+        scheduler = self.create_scheduler(
+            [stage.all_snapshots[name].copy() for name in names], self.snapshot_evaluator
+        )
         completion_status = scheduler.audit(
             plan.environment,
             plan.start,
@@ -283,6 +290,8 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             end_bounded=plan.end_bounded,
             start_override_per_model=plan.start_override_per_model,
             end_override_per_model=plan.end_override_per_model,
+            selected_snapshots=audit_names,
+            deployability_index=stage.deployability_index,
         )
 
         if completion_status.is_failure:

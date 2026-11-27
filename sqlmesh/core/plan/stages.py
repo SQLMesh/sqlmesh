@@ -92,9 +92,13 @@ class AuditOnlyRunStage:
 
     Args:
         snapshots: Snapshots to run audits for.
+        all_snapshots: All snapshots in the plan by name.
+        deployability_index: Deployability index for this stage.
     """
 
     snapshots: t.List[Snapshot]
+    all_snapshots: t.Dict[str, Snapshot]
+    deployability_index: DeployabilityIndex
 
 
 @dataclass
@@ -346,7 +350,13 @@ class PlanStagesBuilder:
 
         audit_only_snapshots = self._get_audit_only_snapshots(new_snapshots)
         if audit_only_snapshots:
-            stages.append(AuditOnlyRunStage(snapshots=list(audit_only_snapshots.values())))
+            stages.append(
+                AuditOnlyRunStage(
+                    snapshots=list(audit_only_snapshots.values()),
+                    all_snapshots=snapshots_by_name,
+                    deployability_index=deployability_index,
+                )
+            )
 
         if missing_intervals_before_promote:
             stages.append(
