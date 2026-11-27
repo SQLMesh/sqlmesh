@@ -2267,3 +2267,194 @@ def test_adjust_intervals_should_force_rebuild(make_snapshot, mocker: MockerFixt
     (snapshot, intervals) = next(iter(backfill_stages[0].snapshot_to_intervals.items()))
     assert not snapshot.intervals
     assert intervals == [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
+
+
+def test_build_plan_stages_representative_snapshot_with_schema_migration(
+    snapshot_a: Snapshot, snapshot_b: Snapshot, make_snapshot, mocker: MockerFixture
+) -> None:
+    new_snapshot_a = make_snapshot(
+        snapshot_a.model.copy(update={"stamp": "new_version"}),
+    )
+    new_snapshot_a.previous_versions = snapshot_a.all_versions
+    new_snapshot_a.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+    new_snapshot_a.intervals = [(to_timestamp("2023-01-01"), to_timestamp("2023-01-03"))]
+
+    new_snapshot_b = make_snapshot(
+        snapshot_b.model.copy(),
+        nodes={'"a"': new_snapshot_a.model},
+    )
+    new_snapshot_b.previous_versions = snapshot_b.all_versions
+    new_snapshot_b.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
+    # Give the paused indirect non-breaking snapshot existing prod intervals so
+    # DeployabilityIndex.is_representative(new_snapshot_b) is True.
+    new_snapshot_b.intervals = [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
+
+    state_reader = mocker.Mock(spec=StateReader)
+    state_reader.get_snapshots.return_value = {}
+    existing_environment = Environment(
+        name="prod",
+        snapshots=[snapshot_a.table_info, snapshot_b.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="previous_plan",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[snapshot_a.snapshot_id, snapshot_b.snapshot_id],
+        finalized_ts=to_timestamp("2023-01-02"),
+    )
+    state_reader.get_environment.return_value = existing_environment
+
+    environment = Environment(
+        name="prod",
+        snapshots=[new_snapshot_a.table_info, new_snapshot_b.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-03",
+        plan_id="test_plan",
+        previous_plan_id="previous_plan",
+        promoted_snapshot_ids=[new_snapshot_a.snapshot_id, new_snapshot_b.snapshot_id],
+    )
+
+    plan = EvaluatablePlan(
+        start="2023-01-01",
+        end="2023-01-03",
+        new_snapshots=[new_snapshot_a, new_snapshot_b],
+        environment=environment,
+        no_gaps=False,
+        skip_backfill=False,
+        empty_backfill=False,
+        restatements={},
+        restate_all_snapshots=False,
+        is_dev=False,
+        allow_destructive_models=set(),
+        allow_additive_models=set(),
+        forward_only=False,
+        end_bounded=False,
+        ensure_finalized_snapshots=False,
+        ignore_cron=False,
+        directly_modified_snapshots=[new_snapshot_a.snapshot_id],
+        indirectly_modified_snapshots={
+            new_snapshot_a.name: [new_snapshot_b.snapshot_id],
+        },
+        metadata_updated_snapshots=[],
+        removed_snapshots=[],
+        requires_backfill=True,
+        models_to_backfill={new_snapshot_b.name},
+        execution_time="2023-01-03",
+        disabled_restatement_models=set(),
+        environment_statements=None,
+        user_provided_flags=None,
+    )
+
+    stages = build_plan_stages(plan, state_reader, None)
+
+    env_update_idx = next(
+        i for i, s in enumerate(stages) if isinstance(s, EnvironmentRecordUpdateStage)
+    )
+    migrate_idx = next(i for i, s in enumerate(stages) if isinstance(s, MigrateSchemasStage))
+    backfill_indices = [i for i, s in enumerate(stages) if isinstance(s, BackfillStage)]
+
+    assert stages[env_update_idx].no_gaps_snapshot_names == set()
+    assert len(backfill_indices) == 1
+    assert migrate_idx < backfill_indices[0]
+    backfill_stage = stages[backfill_indices[0]]
+    assert isinstance(backfill_stage, BackfillStage)
+    assert {s.snapshot_id for s in backfill_stage.snapshot_to_intervals} == {
+        new_snapshot_b.snapshot_id,
+    }
+
+
+def test_build_plan_stages_mixed_before_and_after_promote_with_schema_migration(
+    snapshot_a: Snapshot, snapshot_b: Snapshot, make_snapshot, mocker: MockerFixture
+) -> None:
+    new_snapshot_a = make_snapshot(
+        snapshot_a.model.copy(update={"stamp": "new_version"}),
+    )
+    new_snapshot_a.previous_versions = snapshot_a.all_versions
+    new_snapshot_a.categorize_as(SnapshotChangeCategory.NON_BREAKING)
+
+    new_snapshot_b = make_snapshot(
+        snapshot_b.model.copy(),
+        nodes={'"a"': new_snapshot_a.model},
+    )
+    new_snapshot_b.previous_versions = snapshot_b.all_versions
+    new_snapshot_b.categorize_as(SnapshotChangeCategory.INDIRECT_NON_BREAKING)
+    new_snapshot_b.intervals = [(to_timestamp("2023-01-01"), to_timestamp("2023-01-02"))]
+
+    state_reader = mocker.Mock(spec=StateReader)
+    state_reader.get_snapshots.return_value = {}
+    existing_environment = Environment(
+        name="prod",
+        snapshots=[snapshot_a.table_info, snapshot_b.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-02",
+        plan_id="previous_plan",
+        previous_plan_id=None,
+        promoted_snapshot_ids=[snapshot_a.snapshot_id, snapshot_b.snapshot_id],
+        finalized_ts=to_timestamp("2023-01-02"),
+    )
+    state_reader.get_environment.return_value = existing_environment
+
+    environment = Environment(
+        name="prod",
+        snapshots=[new_snapshot_a.table_info, new_snapshot_b.table_info],
+        start_at="2023-01-01",
+        end_at="2023-01-03",
+        plan_id="test_plan",
+        previous_plan_id="previous_plan",
+        promoted_snapshot_ids=[new_snapshot_a.snapshot_id, new_snapshot_b.snapshot_id],
+    )
+
+    plan = EvaluatablePlan(
+        start="2023-01-01",
+        end="2023-01-03",
+        new_snapshots=[new_snapshot_a, new_snapshot_b],
+        environment=environment,
+        no_gaps=False,
+        skip_backfill=False,
+        empty_backfill=False,
+        restatements={},
+        restate_all_snapshots=False,
+        is_dev=False,
+        allow_destructive_models=set(),
+        allow_additive_models=set(),
+        forward_only=False,
+        end_bounded=False,
+        ensure_finalized_snapshots=False,
+        ignore_cron=False,
+        directly_modified_snapshots=[new_snapshot_a.snapshot_id],
+        indirectly_modified_snapshots={
+            new_snapshot_a.name: [new_snapshot_b.snapshot_id],
+        },
+        metadata_updated_snapshots=[],
+        removed_snapshots=[],
+        requires_backfill=True,
+        models_to_backfill=None,
+        execution_time="2023-01-03",
+        disabled_restatement_models=set(),
+        environment_statements=None,
+        user_provided_flags=None,
+    )
+
+    stages = build_plan_stages(plan, state_reader, None)
+
+    env_update_idx = next(
+        i for i, s in enumerate(stages) if isinstance(s, EnvironmentRecordUpdateStage)
+    )
+    migrate_idx = next(i for i, s in enumerate(stages) if isinstance(s, MigrateSchemasStage))
+    backfill_indices = [i for i, s in enumerate(stages) if isinstance(s, BackfillStage)]
+
+    assert len(backfill_indices) == 2
+    before_idx, after_idx = backfill_indices
+    assert before_idx < env_update_idx < migrate_idx < after_idx
+
+    before_stage = stages[before_idx]
+    after_stage = stages[after_idx]
+    assert isinstance(before_stage, BackfillStage)
+    assert isinstance(after_stage, BackfillStage)
+
+    assert {s.snapshot_id for s in before_stage.snapshot_to_intervals} == {
+        new_snapshot_a.snapshot_id
+    }
+    assert stages[env_update_idx].no_gaps_snapshot_names == {new_snapshot_a.name}
+    assert {s.snapshot_id for s in after_stage.snapshot_to_intervals} == {
+        new_snapshot_b.snapshot_id
+    }
