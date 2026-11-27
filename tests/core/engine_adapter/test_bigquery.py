@@ -5,12 +5,14 @@ from datetime import datetime
 import pandas as pd  # noqa: TID253
 import pytest
 from google.cloud import bigquery
+from pydantic import ValidationError
 from pytest_mock.plugin import MockerFixture
 from sqlglot import expressions as exp
 from sqlglot import parse_one
 from sqlglot.helper import ensure_list
 
 import sqlmesh.core.dialect as d
+from sqlmesh.core.config import BigQueryConnectionConfig
 from sqlmesh.core.engine_adapter import BigQueryEngineAdapter
 from sqlmesh.core.engine_adapter.bigquery import select_partitions_expr
 from sqlmesh.core.engine_adapter.mixins import (
@@ -626,10 +628,20 @@ def test_create_table_table_options(make_mocked_engine_adapter: t.Callable, mock
     ]
 
 
-def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
-    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter)
+@pytest.mark.parametrize("max_table_comment_length", [None, 16_384])
+def test_comments(
+    make_mocked_engine_adapter: t.Callable,
+    mocker: MockerFixture,
+    max_table_comment_length: t.Optional[int],
+):
+    config = (
+        BigQueryConnectionConfig()
+        if max_table_comment_length is None
+        else BigQueryConnectionConfig(max_table_comment_length=max_table_comment_length)
+    )
+    adapter = make_mocked_engine_adapter(BigQueryEngineAdapter, **config._extra_engine_config)
 
-    allowed_table_comment_length = BigQueryEngineAdapter.MAX_TABLE_COMMENT_LENGTH
+    allowed_table_comment_length = max_table_comment_length or 1_024
     truncated_table_comment = "a" * allowed_table_comment_length
     long_table_comment = truncated_table_comment + "b"
 
@@ -706,6 +718,12 @@ def test_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture)
         f"CREATE OR REPLACE VIEW `test_table` OPTIONS (description='{truncated_table_comment}') AS SELECT `a`, `b` FROM `source_table`",
         f"CREATE OR REPLACE MATERIALIZED VIEW `test_table` OPTIONS (description='{truncated_table_comment}') AS SELECT `a`, `b` FROM `source_table`",
     ]
+
+
+@pytest.mark.parametrize("max_table_comment_length", [0, 16_385])
+def test_invalid_max_table_comment_length(max_table_comment_length: int):
+    with pytest.raises(ValidationError, match="max_table_comment_length"):
+        BigQueryConnectionConfig(max_table_comment_length=max_table_comment_length)
 
 
 def test_nested_comments(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):

@@ -164,6 +164,7 @@ pip install "sqlmesh[bigquery]"
 | `job_retries`                   | The number of times to retry the underlying job if it fails. (Default: `1`)                                                                                       |  int   |    N     |
 | `priority`                      | The priority of the underlying job. (Default: `INTERACTIVE`)                                                                                                      | string |    N     |
 | `maximum_bytes_billed`          | The maximum number of bytes to be billed for the underlying job.                                                                                                  |  int   |    N     |
+| `max_table_comment_length`      | Maximum length of table and view descriptions in characters. Defaults to 1,024. Set a value from 1 to 16,384.                                                     |  int   |    N     |
 
 ## Authentication Methods
 - [oauth](https://google-auth.readthedocs.io/en/master/reference/google.auth.html#google.auth.default) (default)
