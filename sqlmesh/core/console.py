@@ -2150,27 +2150,25 @@ class TerminalConsole(Console):
         if not missing_intervals:
             return
         backfill = Tree("[bold]Models needing backfill:[/bold]")
+        preview = Tree(
+            "[bold]Models needing preview ([orange1]data will NOT be reused in production[/orange1]):[/bold]"
+        )
         for missing in missing_intervals:
             snapshot = plan.context_diff.snapshots[missing.snapshot_id]
             if not snapshot.is_model:
                 continue
-
-            preview_modifier = ""
-            if not plan.deployability_index.is_deployable(snapshot):
-                preview_modifier = " ([orange1]preview[/orange1])"
 
             display_name = snapshot.display_name(
                 plan.environment_naming_info,
                 default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None,
                 dialect=self.dialect,
             )
-            backfill.add(
-                f"{display_name}: \\[{_format_missing_intervals(snapshot, missing)}]{preview_modifier}"
-            )
+            tree = backfill if plan.deployability_index.is_deployable(snapshot) else preview
+            tree.add(f"{display_name}: \\[{_format_missing_intervals(snapshot, missing)}]")
 
-        if backfill:
-            backfill = self._limit_model_names(backfill, self.verbosity)
-        self._print(backfill)
+        for tree in (backfill, preview):
+            if tree.children:
+                self._print(self._limit_model_names(tree, self.verbosity))
 
     def _prompt_effective_from(
         self, plan_builder: PlanBuilder, auto_apply: bool, default_catalog: t.Optional[str]
@@ -3526,37 +3524,41 @@ class MarkdownConsole(CaptureTerminalConsole):
         missing_intervals = plan.missing_intervals
         if not missing_intervals:
             return
-        self._print("\n**Models needing backfill:**")
-        snapshots = []
+        backfill: t.List[str] = []
+        preview: t.List[str] = []
         for missing in missing_intervals:
             snapshot = plan.context_diff.snapshots[missing.snapshot_id]
             if not snapshot.is_model:
                 continue
-
-            preview_modifier = ""
-            if not plan.deployability_index.is_deployable(snapshot):
-                preview_modifier = " (**preview**)"
 
             display_name = snapshot.display_name(
                 plan.environment_naming_info,
                 default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None,
                 dialect=self.dialect,
             )
-            snapshots.append(
-                f"* `{display_name}`: \\[{_format_missing_intervals(snapshot, missing)}]{preview_modifier}"
+            entries = backfill if plan.deployability_index.is_deployable(snapshot) else preview
+            entries.append(
+                f"* `{display_name}`: \\[{_format_missing_intervals(snapshot, missing)}]"
             )
 
-        length = len(snapshots)
-        if (
-            self.verbosity < Verbosity.VERY_VERBOSE
-            and length > self.INDIRECTLY_MODIFIED_DISPLAY_THRESHOLD
+        for header, snapshots in (
+            ("**Models needing backfill:**", backfill),
+            ("**Models needing preview** (data will NOT be reused in production):", preview),
         ):
-            self._print(snapshots[0])
-            self._print(f"- `.... {length - 2} more ....`\n")
-            self._print(snapshots[-1])
-        else:
-            for snap in snapshots:
-                self._print(snap)
+            if not snapshots:
+                continue
+            self._print(f"\n{header}")
+            length = len(snapshots)
+            if (
+                self.verbosity < Verbosity.VERY_VERBOSE
+                and length > self.INDIRECTLY_MODIFIED_DISPLAY_THRESHOLD
+            ):
+                self._print(snapshots[0])
+                self._print(f"- `.... {length - 2} more ....`\n")
+                self._print(snapshots[-1])
+            else:
+                for snap in snapshots:
+                    self._print(snap)
 
     def _show_categorized_snapshots(self, plan: Plan, default_catalog: t.Optional[str]) -> None:
         context_diff = plan.context_diff

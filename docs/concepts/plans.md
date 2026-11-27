@@ -228,7 +228,7 @@ The `start_end_model` is of kind `INCREMENTAL_BY_UNIQUE_KEY`, which is non-idemp
 
 Because the command's `--start` of 2024-09-24 is after `start_end_model`'s start date 2024-09-23, `start_end_model` is marked as preview:
 
-``` bash linenums="1" hl_lines="12-13 20-21"
+``` bash linenums="1" hl_lines="12-13 20-22"
 ❯ sqlmesh plan dev --start 2024-09-24
 ======================================================================
 Successfully Ran 1 tests against duckdb
@@ -248,8 +248,9 @@ Models:
 
 Directly Modified: sqlmesh_example__dev.start_end_model (Non-breaking)
 Models needing backfill (missing dates):
-├── sqlmesh_example__dev.incremental_model: 2024-09-24 - 2024-09-26
-└── sqlmesh_example__dev.start_end_model: 2024-09-24 - 2024-09-26 (preview)
+└── sqlmesh_example__dev.incremental_model: 2024-09-24 - 2024-09-26
+Models needing preview (data will NOT be reused in production):
+└── sqlmesh_example__dev.start_end_model: 2024-09-24 - 2024-09-26
 Enter the backfill end date (eg. '1 month ago', '2020-01-01') or blank to backfill up until '2024-09-27 00:00:00':
 ```
 
@@ -315,13 +316,14 @@ As mentioned earlier, the data output produced by [forward-only changes](#forwar
 
 The same holds true for any subsequent changes that depend on undeployed forward-only changes - data can be previewed but can't be reused in production.
 
-Backfills that are exclusively for preview purposes and will not be reused upon deployment to production are explicitly labeled with `(preview)` in the plan summary:
+Backfills that are exclusively for preview purposes and will not be reused upon deployment to production are listed in a separate "Models needing preview" section of the plan summary:
 ```bash
 Models needing backfill (missing dates):
-├── sushi__dev.customers: 2023-12-22 - 2023-12-28 (preview)
 ├── sushi__dev.waiter_revenue_by_day: 2023-12-22 - 2023-12-28
-├── sushi__dev.top_waiters: 2023-12-22 - 2023-12-28
-└── sushi__dev.waiter_as_customer_by_day: 2023-12-22 - 2023-12-28 (preview)
+└── sushi__dev.top_waiters: 2023-12-22 - 2023-12-28
+Models needing preview (data will NOT be reused in production):
+├── sushi__dev.customers: 2023-12-22 - 2023-12-28
+└── sushi__dev.waiter_as_customer_by_day: 2023-12-22 - 2023-12-28
 ```
 
 ## Forward-only plans
