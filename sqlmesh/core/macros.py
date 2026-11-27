@@ -655,9 +655,12 @@ def _norm_var_arg_lambda(
                 if name in evaluator.locals:
                     return exp.convert(evaluator.locals[name])
             if SQLMESH_MACRO_PREFIX in node.name:
-                return node.__class__(
-                    this=evaluator.template(node.name, {k: v.name for k, v in args.items()})
-                )
+                text = evaluator.template(node.name, {k: v.name for k, v in args.items()})
+                if isinstance(node, exp.Identifier):
+                    # Only quote the result if it isn't a safe identifier (e.g. it contains
+                    # spaces), so that names which were already valid render as before
+                    return exp.to_identifier(text)
+                return node.__class__(this=text)
         elif isinstance(node, MacroFunc):
             local_copy = evaluator.locals.copy()
             evaluator.locals.update(args)
