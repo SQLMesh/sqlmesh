@@ -179,6 +179,91 @@ def test_server_version(make_mocked_engine_adapter: t.Callable, mocker: MockerFi
     assert adapter.server_version == (15, 13)
 
 
+def _make_psycopg2_like_adapter(
+    make_mocked_engine_adapter: t.Callable, **kwargs: t.Any
+) -> PostgresEngineAdapter:
+    adapter = make_mocked_engine_adapter(PostgresEngineAdapter, pre_ping=True, **kwargs)
+    # psycopg2 has no `begin`: the first statement of a transaction starts it implicitly
+    connection = adapter._connection_pool.get()
+    del connection.begin
+    del connection.cursor.return_value.begin
+    del connection.cursor.return_value.commit
+    del connection.cursor.return_value.rollback
+    return adapter
+
+
+@pytest.mark.parametrize("role", [None, "test_role"])
+def test_pre_ping_commits_its_transaction(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture, role: t.Optional[str]
+):
+    adapter = _make_psycopg2_like_adapter(
+        make_mocked_engine_adapter,
+        cursor_init=(lambda cursor: cursor.execute(f"SET ROLE {role}")) if role else None,
+    )
+    connection = adapter._connection_pool.get()
+
+    adapter.execute("SELECT 'test'")
+
+    call = mocker.call
+    new_cursor = [call.cursor(), *([call.cursor().execute(f"SET ROLE {role}")] if role else [])]
+    assert connection.mock_calls == [
+        *new_cursor,
+        call.cursor().execute("SELECT 1"),
+        call.cursor().close(),
+        # The ping closed the cursor, so `cursor_init` runs again before the commit
+        *new_cursor,
+        call.commit(),
+        call.cursor().execute("SELECT 'test'"),
+        call.commit(),
+    ]
+
+
+def test_pre_ping_failure_reconnects_without_commit(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = _make_psycopg2_like_adapter(make_mocked_engine_adapter)
+    connection = adapter._connection_pool.get()
+    connection.cursor.return_value.execute.side_effect = [RuntimeError("connection lost"), None]
+
+    adapter.execute("SELECT 'test'")
+
+    call = mocker.call
+    assert connection.mock_calls == [
+        call.cursor(),
+        call.cursor().execute("SELECT 1"),
+        call.cursor().close(),
+        call.close(),
+        call.cursor(),
+        call.cursor().execute("SELECT 'test'"),
+        call.commit(),
+    ]
+
+
+def test_ping_inside_transaction_does_not_commit(
+    make_mocked_engine_adapter: t.Callable, mocker: MockerFixture
+):
+    adapter = _make_psycopg2_like_adapter(make_mocked_engine_adapter)
+    connection = adapter._connection_pool.get()
+
+    with adapter.transaction():
+        adapter.ping()
+        adapter.execute("SELECT 'test'")
+
+    call = mocker.call
+    assert connection.mock_calls == [
+        call.cursor(),
+        call.cursor().execute("SELECT 1"),
+        call.cursor().close(),
+        call.cursor(),
+        call.commit(),
+        call.cursor().execute("SELECT 1"),
+        call.cursor().close(),
+        call.cursor(),
+        call.cursor().execute("SELECT 'test'"),
+        call.commit(),
+    ]
+
+
 def test_sync_grants_config(make_mocked_engine_adapter: t.Callable, mocker: MockerFixture):
     adapter = make_mocked_engine_adapter(PostgresEngineAdapter)
     relation = exp.to_table("test_schema.test_table", dialect="postgres")

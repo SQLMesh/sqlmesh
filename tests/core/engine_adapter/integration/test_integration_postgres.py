@@ -5,7 +5,7 @@ import pytest
 from pytest import FixtureRequest
 from pathlib import Path
 from sqlmesh.core.engine_adapter import PostgresEngineAdapter
-from sqlmesh.core.config import Config, DuckDBConnectionConfig
+from sqlmesh.core.config import Config, DuckDBConnectionConfig, PostgresConnectionConfig
 from sqlmesh.core.config.common import VirtualEnvironmentMode
 from tests.core.engine_adapter.integration import TestContext
 import time_machine
@@ -130,6 +130,31 @@ def test_engine_adapter(ctx: TestContext):
 def test_server_version_psycopg(ctx: TestContext):
     assert isinstance(ctx.engine_adapter, PostgresEngineAdapter)
     assert ctx.engine_adapter.server_version != (0, 0)
+
+
+@pytest.mark.parametrize("set_role", [False, True])
+def test_pre_ping_does_not_leave_session_idle_in_transaction(
+    engine_adapter: PostgresEngineAdapter, ctx: TestContext, config: Config, set_role: bool
+):
+    connection_config = config.gateways[ctx.gateway].connection
+    assert isinstance(connection_config, PostgresConnectionConfig)
+    with create_users(engine_adapter, "etl") as roles:
+        role = roles["etl"]["username"] if set_role else None
+        adapter = connection_config.model_copy(update={"role": role}).create_engine_adapter()
+        try:
+            assert adapter._pre_ping
+            row = adapter.fetchone("SELECT pg_backend_pid()")
+            assert row
+            query = f"SELECT state FROM pg_stat_activity WHERE pid = {row[0]}"
+            assert engine_adapter.fetchone(query) == ("idle",)
+            with adapter.transaction():
+                # A Python model's code runs here, before the first statement of the transaction
+                state = engine_adapter.fetchone(query)
+                current_user = adapter.fetchone("SELECT current_user")
+            assert state == ("idle",)
+            assert current_user == (role or connection_config.user,)
+        finally:
+            adapter.close()
 
 
 def test_janitor_drop_cascade(ctx: TestContext, tmp_path: Path) -> None:

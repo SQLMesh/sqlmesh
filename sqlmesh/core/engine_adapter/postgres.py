@@ -72,6 +72,15 @@ class PostgresEngineAdapter(
         "drop_cascade": True,
     }
 
+    def ping(self) -> None:
+        super().ping()
+        # The driver implicitly opens a transaction for the ping's `SELECT 1`. Commit it so that the
+        # session isn't idle in transaction until the next statement, e.g. while a Python model runs
+        # inside `transaction()`. A rollback would also undo `cursor_init` statements like
+        # `SET ROLE`, which run again inside this transaction when the commit opens a new cursor.
+        if not self._connection_pool.is_transaction_active:
+            self._connection_pool.commit()
+
     def _fetch_native_df(
         self, query: t.Union[exp.Expr, str], quote_identifiers: bool = False
     ) -> DF:
