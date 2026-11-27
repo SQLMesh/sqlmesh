@@ -121,6 +121,16 @@ class Plan(PydanticModel, frozen=True):
         return self.context_diff.has_changes
 
     @property
+    def is_initial_plan(self) -> bool:
+        """Whether the plan is creating or completing an environment built from scratch."""
+        if self.context_diff.is_new_environment:
+            return not self.context_diff.create_from_env_exists
+        return (
+            self.context_diff.is_unfinalized_environment
+            and self.context_diff.previous_finalized_snapshots == []
+        )
+
+    @property
     def has_unmodified_unpromoted(self) -> bool:
         """Is the plan for an existing dev environment, has the include unmodified flag, and contains unmodified nodes that have not been promoted."""
         return (
@@ -197,6 +207,7 @@ class Plan(PydanticModel, frozen=True):
                 end_override_per_model=self.end_override_per_model,
                 end_bounded=self.end_bounded,
                 ignore_cron=self.ignore_cron,
+                is_initial_plan=self.is_initial_plan,
             ).items()
             if snapshot.is_model and missing
         ]
@@ -280,6 +291,7 @@ class Plan(PydanticModel, frozen=True):
             end_bounded=self.end_bounded,
             ensure_finalized_snapshots=self.ensure_finalized_snapshots,
             ignore_cron=self.ignore_cron,
+            is_initial_plan=self.is_initial_plan,
             directly_modified_snapshots=sorted(self.directly_modified),
             indirectly_modified_snapshots={
                 s.name: sorted(snapshot_ids) for s, snapshot_ids in self.indirectly_modified.items()
@@ -325,6 +337,7 @@ class EvaluatablePlan(PydanticModel):
     end_bounded: bool
     ensure_finalized_snapshots: bool
     ignore_cron: bool = False
+    is_initial_plan: bool = False
     directly_modified_snapshots: t.List[SnapshotId]
     indirectly_modified_snapshots: t.Dict[str, t.List[SnapshotId]]
     metadata_updated_snapshots: t.List[SnapshotId]

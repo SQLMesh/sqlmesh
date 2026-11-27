@@ -2045,6 +2045,7 @@ def missing_intervals(
     end_override_per_model: t.Optional[t.Dict[str, datetime]] = None,
     ignore_cron: bool = False,
     end_bounded: bool = False,
+    is_initial_plan: bool = False,
 ) -> t.Dict[Snapshot, Intervals]:
     """Returns all missing intervals given a collection of snapshots."""
     if not isinstance(snapshots, dict):
@@ -2085,9 +2086,14 @@ def missing_intervals(
                 continue
             snapshot_end_date = existing_interval_end
 
+        # For a first plan, anchor cron-based inference to the start of the backfill window.
+        # This lets parent models supply the early intervals their children need.
+        start_reference = (
+            snapshot_start_date if is_initial_plan and not restated_interval else snapshot_end_date
+        )
         snapshot_start_date = max(
             to_datetime(snapshot_start_date),
-            to_datetime(start_date(snapshot, snapshots, cache, relative_to=snapshot_end_date)),
+            to_datetime(start_date(snapshot, snapshots, cache, relative_to=start_reference)),
         )
         if snapshot_start_date > to_datetime(snapshot_end_date):
             continue

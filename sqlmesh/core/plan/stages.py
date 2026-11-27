@@ -601,6 +601,7 @@ class PlanStagesBuilder:
             ignore_cron=plan.ignore_cron,
             start_override_per_model=plan.start_override_per_model,
             end_override_per_model=plan.end_override_per_model,
+            is_initial_plan=plan.is_initial_plan,
         )
 
     def _get_audit_only_snapshots(
