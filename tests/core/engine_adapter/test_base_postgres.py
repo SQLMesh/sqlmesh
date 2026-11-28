@@ -23,6 +23,7 @@ def test_columns(make_mocked_engine_adapter: t.Callable):
         'JOIN "pg_catalog"."pg_class" ON "pg_class"."oid" = "attrelid" '
         'JOIN "pg_catalog"."pg_namespace" ON "pg_namespace"."oid" = "relnamespace" '
         """WHERE ("attnum" > 0 AND NOT "attisdropped" AND "relname" = 'table') AND "nspname" = 'db'"""
+        ' ORDER BY "attnum"'
     )
     assert resp == {"col": exp.DataType.build("INT")}
 

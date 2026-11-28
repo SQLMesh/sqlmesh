@@ -14,6 +14,7 @@ from sqlmesh.core.engine_adapter.shared import DataObjectType
 from sqlmesh.core.node import IntervalUnit
 from sqlmesh.core.dialect import schema_
 from sqlmesh.core.schema_diff import TableAlterOperation
+from sqlmesh.utils import columns_to_types_all_known
 from sqlmesh.utils.errors import SQLMeshError
 
 if t.TYPE_CHECKING:
@@ -280,6 +281,19 @@ class VarcharSizeWorkaroundMixin(EngineAdapter):
                 columns_to_types_from_view = self._default_precision_to_max(
                     self.columns(temp_view_name)
                 )
+
+                if not (
+                    columns_to_types_from_view
+                    and columns_to_types_all_known(columns_to_types_from_view)
+                ):
+                    # View metadata is unavailable (e.g. a late-binding view the catalog doesn't expose).
+                    # Never fall back to the LIMIT 0 CTAS since its column types (e.g. VARCHAR widths)
+                    # are non-deterministic and the table could silently truncate data.
+                    raise SQLMeshError(
+                        f"Could not determine column types for table "
+                        f"'{exp.to_table(table_name_or_schema).sql(dialect=self.dialect)}' from "
+                        "its query. Specify the column types explicitly, e.g. by annotating the model."
+                    )
 
                 schema = self._build_schema_exp(
                     exp.to_table(table_name_or_schema),
