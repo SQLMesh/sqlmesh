@@ -21,6 +21,11 @@ from sqlmesh.integrations.dlt import generate_dlt_models
 from sqlmesh.utils import major_minor
 from sqlmesh.utils.date import now_ds, time_like_to_str, timedelta, to_datetime, yesterday_ds
 from sqlmesh.core.config.connection import DIALECT_TO_TYPE
+from tests.core.test_test import (
+    break_unrelated_model,
+    create_indexed_test_project,
+    warm_project_index,
+)
 
 FREEZE_TIME = "2023-01-01 00:00:00 UTC"
 
@@ -3111,3 +3116,97 @@ test_py_model:
     assert result.exit_code != 0
     assert "is not a known model or test file" in result.output
     mock.assert_not_called()
+
+
+def test_test_use_project_index_skips_unrelated_models(runner: CliRunner, tmp_path: Path) -> None:
+    """The pre-commit case from #6024: a broken model elsewhere doesn't block a scoped test run."""
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    break_unrelated_model(tmp_path)
+    model_path = str(tmp_path / "models" / "a.sql")
+
+    # Without the index the whole project is loaded, so the unrelated model fails the run.
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", model_path])
+    assert result.exit_code != 0
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--use-project-index", model_path]
+    )
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    "flags, expected_load, expected_load_state",
+    [
+        (["--use-project-index"], False, True),
+        (["--local"], True, False),
+        (["--local", "--use-project-index"], False, False),
+    ],
+)
+def test_test_use_project_index_and_local_are_independent(
+    runner: CliRunner,
+    tmp_path: Path,
+    mocker,
+    flags: list[str],
+    expected_load: bool,
+    expected_load_state: bool,
+) -> None:
+    """`--use-project-index` defers the load to `test`, `--local` skips state; neither implies the other."""
+    create_indexed_test_project(tmp_path)
+    init_spy = mocker.spy(Context, "__init__")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", *flags])
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    # With no selectors, every test still runs.
+    assert "Successfully Ran 2 tests" in " ".join(result.output.split())
+    assert init_spy.call_count == 1
+    assert init_spy.call_args.kwargs["load"] is expected_load
+    assert init_spy.call_args.kwargs["load_state"] is expected_load_state
+
+
+def test_test_use_project_index_with_select_model(runner: CliRunner, tmp_path: Path) -> None:
+    create_indexed_test_project(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        ["--paths", str(tmp_path), "test", "--use-project-index", "--select-model", "demo.a"],
+    )
+
+    assert result.exit_code == 0, f"Test failed: {result.output}\nException: {result.exception}"
+    assert "Successfully Ran 1 tests" in " ".join(result.output.split())
+
+
+def test_test_use_project_index_errors_when_test_model_is_missing(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    create_indexed_test_project(tmp_path)
+    test_path = tmp_path / "tests" / "test_missing.yaml"
+    test_path.write_text(
+        """test_missing:
+  model: demo.nope
+  outputs:
+    query:
+      rows:
+        - id: 1
+""",
+        encoding="utf-8",
+    )
+    warm_project_index(tmp_path)
+
+    result = runner.invoke(
+        cli, ["--paths", str(tmp_path), "test", "--use-project-index", str(test_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "was not found" in " ".join(result.output.split())
+
+
+def test_test_use_project_index_no_models(runner: CliRunner, tmp_path: Path) -> None:
+    with open(tmp_path / "config.yaml", "w", encoding="utf-8") as f:
+        f.write("model_defaults:\n  dialect: duckdb\n")
+
+    result = runner.invoke(cli, ["--paths", str(tmp_path), "test", "--use-project-index"])
+    assert result.exit_code == 1
+    assert "doesn't seem to have any models" in result.output

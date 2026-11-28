@@ -163,6 +163,9 @@ def cli(
     # Unlike the other commands above, lint can scope its own load for multi-project contexts.
     if ctx.invoked_subcommand == "lint":
         load = False
+    # test scopes its own load only when it's asked to use the project index.
+    if ctx.invoked_subcommand == "test" and "--use-project-index" in ctx.meta["subcommand_args"]:
+        load = False
 
     # `plan --restate-model` operates entirely against state, so a project with no
     # local model definitions should still be allowed to run (parity with `run`).
@@ -844,6 +847,12 @@ def create_test(
     expose_value=False,
     help="Run tests using only locally loaded project files without loading state. Tests whose model is not loaded are skipped with a warning rather than failing.",
 )
+@click.option(
+    "--use-project-index",
+    is_flag=True,
+    default=False,
+    help="Use the persistent project index. With TESTS, only the models they test and their upstream dependencies are loaded, so errors in unrelated models are not reported, and a selected test whose model is not found fails. Without TESTS, or with --select-model, every model is still loaded.",
+)
 @click.argument("tests", nargs=-1)
 @click.pass_obj
 @error_handler
@@ -854,6 +863,7 @@ def test(
     verbose: int,
     preserve_fixtures: bool,
     select_model: t.List[str],
+    use_project_index: bool,
     tests: t.List[str],
 ) -> None:
     """Run model unit tests.
@@ -862,6 +872,9 @@ def test(
     tests for those models are run. They are unioned, and a test selected more than once still
     only runs once.
     """
+    if use_project_index and select_model:
+        # Model selections are expanded against the whole project, so it has to be loaded.
+        obj.load(use_project_index=True)
     model_names = (
         obj._new_selector().expand_model_selections(select_model) if select_model else None
     )
@@ -872,7 +885,13 @@ def test(
         preserve_fixtures=preserve_fixtures,
         model_names=model_names,
         raise_on_unknown_paths=True,
+        use_project_index=use_project_index,
     )
+    # The group callback skips its own empty-project check when test does the loading.
+    if use_project_index and not obj.models:
+        raise click.ClickException(
+            f"`{obj.path}` doesn't seem to have any models... cd into the proper directory or specify the path(s) with -p."
+        )
     if not result.wasSuccessful():
         exit(1)
 

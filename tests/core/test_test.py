@@ -3809,3 +3809,308 @@ def test_filter_tests_by_model_names():
         dialect="duckdb",
     )
     assert [t.test_name for t in filtered_short] == ["t1"]
+
+
+INDEXED_PROJECT_FQNS = {
+    name: f'"memory"."demo"."{name}"' for name in ("src", "a", "b", "unrelated")
+}
+
+
+def create_indexed_test_project(path: Path) -> None:
+    """A project where `a` reads from `src` and `b` and `unrelated` stand alone."""
+    (path / "models").mkdir(parents=True, exist_ok=True)
+    (path / "tests").mkdir(parents=True, exist_ok=True)
+    (path / "config.yaml").write_text(
+        "gateways:\n"
+        "  local:\n"
+        "    connection:\n"
+        "      type: duckdb\n"
+        "default_gateway: local\n"
+        "model_defaults:\n"
+        "  dialect: duckdb\n",
+        encoding="utf-8",
+    )
+
+    models = {
+        "src": "SELECT 1 AS id, 'x' AS name",
+        # `SELECT *` only resolves to columns if `src` is loaded alongside `a`.
+        "a": "SELECT * FROM demo.src",
+        "b": "SELECT 2 AS id",
+        "unrelated": "SELECT 3 AS id",
+    }
+    for name, query in models.items():
+        (path / "models" / f"{name}.sql").write_text(
+            f"MODEL(name demo.{name}, kind FULL); {query}", encoding="utf-8"
+        )
+
+    (path / "tests" / "test_a.yaml").write_text(
+        """test_a:
+  model: demo.a
+  inputs:
+    demo.src:
+      rows:
+        - id: 1
+          name: x
+  outputs:
+    query:
+      rows:
+        - id: 1
+          name: x
+""",
+        encoding="utf-8",
+    )
+    (path / "tests" / "test_b.yaml").write_text(
+        """test_b:
+  model: demo.b
+  outputs:
+    query:
+      rows:
+        - id: 2
+""",
+        encoding="utf-8",
+    )
+
+
+def warm_project_index(path: Path) -> None:
+    Context(paths=path, load=False).load(use_project_index=True)
+
+
+def break_unrelated_model(path: Path) -> None:
+    """Make `unrelated` fail to load without changing the set of model files.
+
+    The index only tracks which files exist, so it stays valid and a scoped load never
+    opens this file. A full load does, and fails.
+    """
+    (path / "models" / "unrelated.sql").write_text(
+        "MODEL(name demo.unrelated, kind NOT_A_KIND); SELECT 3 AS id", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    ["models/a.sql", "tests/test_a.yaml", "tests/test_a.yaml::test_a"],
+)
+def test_use_project_index_loads_only_selected_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector: str
+) -> None:
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    break_unrelated_model(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    result = context.test(tests=[selector], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    # The model under test and its upstream are loaded, nothing else.
+    assert set(context.models) == {INDEXED_PROJECT_FQNS["src"], INDEXED_PROJECT_FQNS["a"]}
+    # The upstream model is there for column resolution of `SELECT *`.
+    assert set(context.get_model("demo.a", raise_if_missing=True).columns_to_types or {}) == {
+        "id",
+        "name",
+    }
+
+
+def test_use_project_index_unions_model_and_test_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    break_unrelated_model(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    result = context.test(tests=["models/b.sql", "tests/test_a.yaml"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 2
+    assert set(context.models) == {
+        INDEXED_PROJECT_FQNS["src"],
+        INDEXED_PROJECT_FQNS["a"],
+        INDEXED_PROJECT_FQNS["b"],
+    }
+
+
+def test_use_project_index_errors_when_test_model_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_indexed_test_project(tmp_path)
+    (tmp_path / "tests" / "test_missing.yaml").write_text(
+        """test_missing:
+  model: demo.nope
+  outputs:
+    query:
+      rows:
+        - id: 1
+""",
+        encoding="utf-8",
+    )
+    warm_project_index(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    # Without the index the test is skipped with a warning, which is unchanged.
+    assert Context(paths=tmp_path).test(tests=["tests/test_missing.yaml"]).wasSuccessful()
+
+    # A scoped run must not pass with nothing tested.
+    context = Context(paths=tmp_path, load=False)
+    with pytest.raises(SQLMeshError, match=r"demo.*nope.*test_missing.*was not found"):
+        context.test(tests=["tests/test_missing.yaml"], use_project_index=True)
+
+
+def test_use_project_index_without_selectors_runs_full_suite(tmp_path: Path) -> None:
+    create_indexed_test_project(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    index_path = context._loaders[0]._model_index_path  # type: ignore[attr-defined]
+    assert not index_path.exists()
+
+    result = context.test(use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 2
+    assert set(context.models) == set(INDEXED_PROJECT_FQNS.values())
+    # A full run refreshes the index, the same as `sqlmesh lint --use-project-index`.
+    assert index_path.exists()
+
+
+def test_use_project_index_with_cold_index_falls_back_to_full_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_indexed_test_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    index_path = context._loaders[0]._model_index_path  # type: ignore[attr-defined]
+    result = context.test(tests=["models/a.sql"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    assert set(context.models) == set(INDEXED_PROJECT_FQNS.values())
+    assert index_path.exists()
+
+
+def test_use_project_index_keeps_loaded_context_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A context that's already loaded must not shrink to the selected models."""
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path)
+    result = context.test(tests=["models/a.sql"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    assert set(context.models) == set(INDEXED_PROJECT_FQNS.values())
+
+
+def test_use_project_index_reloads_partially_loaded_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A context left with only some models by a scoped run must not silently drop tests."""
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    assert context.test(tests=["models/a.sql"], use_project_index=True).testsRun == 1
+
+    # Case: a second scoped run needs a model the first one didn't load.
+    result = context.test(tests=["models/b.sql"], use_project_index=True)
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+
+    # Case: a run without selectors loads everything again.
+    result = context.test(use_project_index=True)
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 2
+    assert set(context.models) == set(INDEXED_PROJECT_FQNS.values())
+
+
+def test_use_project_index_resolves_schemas_after_stale_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Renaming a model in place leaves the index hint stale, which forces a full load."""
+    create_indexed_test_project(tmp_path)
+    warm_project_index(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    (tmp_path / "models" / "a.sql").write_text(
+        "MODEL(name demo.renamed, kind FULL); SELECT * FROM demo.src", encoding="utf-8"
+    )
+    test_path = tmp_path / "tests" / "test_a.yaml"
+    test_path.write_text(
+        test_path.read_text(encoding="utf-8").replace("model: demo.a", "model: demo.renamed"),
+        encoding="utf-8",
+    )
+
+    context = Context(paths=tmp_path, load=False)
+    result = context.test(tests=["models/a.sql"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    # The schema is resolved for the model the test targets, not the stale name in the index.
+    assert set(context.get_model("demo.renamed", raise_if_missing=True).columns_to_types or {}) == {
+        "id",
+        "name",
+    }
+
+
+def test_use_project_index_reloads_after_failed_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation that fails after the load must not leave the invalid model in the context."""
+    create_indexed_test_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    model_path = tmp_path / "models" / "a.sql"
+    valid_model = model_path.read_text(encoding="utf-8")
+    # Parses, but fails validation because of the duplicate partition column.
+    model_path.write_text(
+        "MODEL(name demo.a, kind FULL, partitioned_by (id, id)); SELECT * FROM demo.src",
+        encoding="utf-8",
+    )
+
+    # With no index yet, the load is full and validation of the selected model is deferred.
+    context = Context(paths=tmp_path, load=False)
+    with pytest.raises(ConfigError):
+        context.test(tests=["tests/test_a.yaml"], use_project_index=True)
+
+    model_path.write_text(valid_model, encoding="utf-8")
+    result = context.test(tests=["tests/test_a.yaml"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1
+    assert not context.get_model("demo.a", raise_if_missing=True).partitioned_by
+
+
+def test_use_project_index_reloads_after_missing_model_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding the missing model and retrying on the same context must run the test."""
+    create_indexed_test_project(tmp_path)
+    (tmp_path / "tests" / "test_missing.yaml").write_text(
+        """test_missing:
+  model: demo.nope
+  outputs:
+    query:
+      rows:
+        - id: 1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    context = Context(paths=tmp_path, load=False)
+    with pytest.raises(SQLMeshError, match="was not found"):
+        context.test(tests=["tests/test_missing.yaml"], use_project_index=True)
+
+    (tmp_path / "models" / "nope.sql").write_text(
+        "MODEL(name demo.nope, kind FULL); SELECT 1 AS id", encoding="utf-8"
+    )
+    result = context.test(tests=["tests/test_missing.yaml"], use_project_index=True)
+
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert result.testsRun == 1

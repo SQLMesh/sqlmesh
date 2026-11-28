@@ -420,6 +420,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._engine_adapter: t.Optional[EngineAdapter] = None
         self._linters: t.Dict[str, Linter] = {}
         self._loaded: bool = False
+        # Whether the last load used the project index to load only some of the models.
+        self._partially_loaded: bool = False
         self._materializations_loaded: bool = False
         self._load_state: bool = load_state
         self._uncached_model_names: t.Set[str] = set()
@@ -808,6 +810,8 @@ class GenericContext(BaseContext, t.Generic[C]):
         )
 
         self._loaded = True
+        # Loaders only report indexed models when the index actually scoped the load.
+        self._partially_loaded = bool(indexed_model_fqns)
         self._materializations_loaded = True
         return self
 
@@ -2450,12 +2454,35 @@ class GenericContext(BaseContext, t.Generic[C]):
         stream: t.Optional[t.TextIO] = None,
         model_names: t.Optional[t.Collection[str]] = None,
         raise_on_unknown_paths: bool = False,
+        use_project_index: bool = False,
     ) -> ModelTextTestResult:
-        """Discover and run model tests"""
+        """Discover and run model tests.
+
+        Args:
+            use_project_index: Whether to use the persistent project index when the context
+                isn't loaded yet. With test or model file selectors, only the models they need
+                and their upstream dependencies are loaded, and a selected test whose model
+                isn't found is an error. Without selectors, or together with ``model_names``,
+                the whole project is loaded.
+        """
         if verbosity >= Verbosity.VERBOSE:
             import pandas as pd
 
             pd.set_option("display.max_columns", None)
+
+        target_fqns: t.Optional[t.Set[str]] = None
+        # A fully loaded context is left as is, so callers that go on to use it don't end up
+        # with only part of the project. A partially loaded one may lack the models needed now.
+        if use_project_index and (not self._loaded or self._partially_loaded):
+            if tests and model_names is None:
+                target_fqns = self._model_fqns_for_test_selectors(tests)
+            # For a scoped load, schemas are updated below for the models the selected tests
+            # target. Those can differ from the index's hint, e.g. after a model is renamed.
+            self.load(
+                model_fqns=target_fqns,
+                use_project_index=True,
+                update_schemas=target_fqns is None,
+            )
 
         baseline_meta = self.select_tests(
             tests=tests,
@@ -2474,6 +2501,15 @@ class GenericContext(BaseContext, t.Generic[C]):
         else:
             test_meta = baseline_meta
             tests_skipped = 0
+
+        if target_fqns is not None:
+            try:
+                self._update_model_schemas_and_validate(self._scoped_test_model_fqns(test_meta))
+            except Exception:
+                # These checks were deferred from the load above, so the load didn't complete.
+                # Otherwise, a retry after the project is fixed would reuse the stale models.
+                self._loaded = False
+                raise
 
         result = run_tests(
             model_test_metadata=test_meta,
@@ -3740,6 +3776,61 @@ class GenericContext(BaseContext, t.Generic[C]):
                 return list(matched)
 
         return None
+
+    def _model_fqns_for_test_selectors(self, selectors: t.Iterable[str]) -> t.Optional[t.Set[str]]:
+        """Resolves test selectors to model FQNs without loading the project's models.
+
+        Returns None if any selector can't be resolved, so that a full load runs and the
+        usual selector errors are reported against the whole project.
+        """
+        model_fqns: t.Set[str] = set()
+        for selector in selectors:
+            path, _, test_name = (
+                selector.rpartition("::") if "::" in selector else (selector, "", "")
+            )
+            absolute_path = Path(os.path.abspath(path))
+            for loader in self._loaders:
+                model_names = loader.model_names_for_test_selector(absolute_path, test_name or None)
+                if model_names is not None:
+                    break
+            else:
+                return None
+
+            model_fqns.update(
+                normalize_model_name(
+                    model_name, default_catalog=self.default_catalog, dialect=self.default_dialect
+                )
+                for model_name in model_names
+            )
+
+        return model_fqns or None
+
+    def _scoped_test_model_fqns(self, test_meta: t.Iterable[ModelTestMetadata]) -> t.Set[str]:
+        """Returns the FQNs of the models targeted by the tests of a scoped run.
+
+        Fails if a selected test's model wasn't loaded. A full run warns and skips such a test,
+        but a scoped run that does so can pass while testing nothing.
+        """
+        fqns = set()
+        errors = []
+        for metadata in test_meta:
+            if not metadata.model_name:
+                continue
+            fqn = normalize_model_name(
+                metadata.model_name,
+                default_catalog=self.default_catalog,
+                dialect=self.default_dialect,
+            )
+            if fqn in self._models:
+                fqns.add(fqn)
+            else:
+                errors.append(
+                    f"Model '{fqn}' targeted by test '{metadata.fully_qualified_test_name}' was not found."
+                )
+
+        if errors:
+            raise SQLMeshError("\n".join(errors))
+        return fqns
 
     def _unknown_test_selector_error(self, selector: str) -> str:
         """Explains why a selector matched nothing.

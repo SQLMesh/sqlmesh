@@ -494,6 +494,18 @@ In multi-repository setups, or when running tests for only a subset of projects,
 
 So a passing exit code alone does not mean every test you expected actually ran. Watch the output for these warnings, and keep in mind that a hook using `--local` will not fail on them.
 
+By default, `sqlmesh test` loads every model in the project before it runs the selected tests. In a large project, or a commit hook that only tests a few changed files, you can pass `--use-project-index` to load only the models the selected tests need, together with their upstream dependencies:
+
+```
+$ sqlmesh test --use-project-index models/full_model.sql
+```
+
+This uses the persistent [project index](../guides/configuration.md#project-index). Model files are looked up in the index, and test files through the `model` of each test. Errors in unrelated models are not reported, the same as with `sqlmesh lint --use-project-index`. If the index is missing or stale, SQLMesh falls back to a full load and rebuilds it.
+
+When the load is scoped this way, a selected test whose model can't be found is an error rather than a warning, so the run can't pass without testing anything.
+
+Without test or model file arguments, or together with `--select-model`, every model is still loaded and the index is refreshed. `--use-project-index` and `--local` are independent and can be combined.
+
 ### Testing using notebooks
 
 You can execute tests on demand using the `%run_test` notebook magic as follows:
