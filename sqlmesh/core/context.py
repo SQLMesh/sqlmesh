@@ -80,7 +80,7 @@ from sqlmesh.core.environment import Environment, EnvironmentNamingInfo, Environ
 from sqlmesh.core.loader import Loader
 from sqlmesh.core.linter.definition import AnnotatedRuleViolation, Linter
 from sqlmesh.core.linter.rules import BUILTIN_RULES
-from sqlmesh.core.macros import ExecutableOrMacro, macro
+from sqlmesh.core.macros import ExecutableOrMacro, RuntimeStage, macro
 from sqlmesh.core.metric import Metric, rewrite
 from sqlmesh.core.model import Model, update_model_schemas
 from sqlmesh.core.config.model import ModelDefaultsConfig
@@ -1285,6 +1285,87 @@ class GenericContext(BaseContext, t.Generic[C]):
             engine_adapter=self._get_engine_adapter(model.gateway),
             **kwargs,
         )
+
+    @python_api_analytics
+    def render_audit(
+        self,
+        model_or_snapshot: t.Optional[ModelOrSnapshot] = None,
+        *,
+        audit_name: str,
+        start: t.Optional[TimeLike] = None,
+        end: t.Optional[TimeLike] = None,
+        execution_time: t.Optional[TimeLike] = None,
+    ) -> t.List[exp.Query]:
+        """Render an audit's failure queries without running them.
+
+        Args:
+            model_or_snapshot: The audited model, name, or snapshot. Omit for a standalone audit.
+            audit_name: The audit metadata name. All effective invocations on the model are rendered.
+            start: The start of the interval to render.
+            end: The end of the interval to render.
+            execution_time: The execution time reference, defaulting to now for the entire call.
+
+        Returns:
+            Failure queries in invocation order, including explicitly requested skipped audits.
+
+        Rendering can read column metadata, and user macros retain their normal execution behavior.
+        """
+        audit_name = audit_name.lower()
+        model = (
+            self.get_model(model_or_snapshot, raise_if_missing=True)
+            if model_or_snapshot is not None
+            else None
+        )
+        if model is not None:
+            audits = [
+                (audit, args) for audit, args in model.audits_with_args if audit.name == audit_name
+            ]
+            if not audits:
+                raise SQLMeshError(f"Audit '{audit_name}' is not attached to model '{model.name}'.")
+        else:
+            standalone_audit = self.standalone_audits.get(audit_name)
+            if standalone_audit is None:
+                from sqlmesh.core.audit.builtin import BUILT_IN_AUDITS
+
+                if audit_name in BUILT_IN_AUDITS or any(
+                    audit.name == audit_name
+                    for model in self.models.values()
+                    for audit, _ in model.audits_with_args
+                ):
+                    raise SQLMeshError(f"Audit '{audit_name}' requires a model. Supply MODEL.")
+                raise SQLMeshError(
+                    f"Cannot find standalone audit '{audit_name}'. Model-attached audits require MODEL."
+                )
+            audits = [(standalone_audit, {})]
+
+        snapshots = self.snapshots
+        deployability_index = DeployabilityIndex.create(snapshots.values(), start=start)
+        execution_time = now() if execution_time is None else execution_time
+        adapter = self._get_engine_adapter(model.gateway if model is not None else None)
+        queries = []
+        for audit, audit_args in audits:
+            audit_args = audit_args.copy()
+            audit_args.pop("blocking", None)
+            kwargs: t.Dict[str, t.Any] = {
+                "start": start,
+                "end": end,
+                "execution_time": execution_time,
+                "snapshots": snapshots,
+                "deployability_index": deployability_index,
+                "engine_adapter": adapter,
+                "runtime_stage": RuntimeStage.AUDITING,
+                **audit_args,
+            }
+            if model is not None:
+                snapshot = snapshots.get(model.fqn)
+                # Before the first plan there is no physical table to map to, as in model rendering.
+                if snapshot is not None and snapshot.version is None:
+                    kwargs.setdefault("this_model", model.fqn)
+                query = model.render_audit_query(audit, **kwargs)
+            else:
+                query = t.cast(StandaloneAudit, audit).render_audit_query(**kwargs)
+            queries.append(query)
+        return queries
 
     @python_api_analytics
     def evaluate(
