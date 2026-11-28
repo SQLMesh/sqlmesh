@@ -755,6 +755,7 @@ class SnapshotEvaluator:
         # If there are no existing intervals yet; only consider this a first insert for the first snapshot in the batch
         if target_table_exists is None:
             target_table_exists = adapter.table_exists(target_table_name)
+        was_creating = not target_table_exists
         is_first_insert = (
             not _intervals(snapshot, deployability_index) or not target_table_exists
         ) and batch_index == 0
@@ -812,6 +813,8 @@ class SnapshotEvaluator:
                 render_kwargs={**render_statements_kwargs, "inside_transaction": True},
             )
 
+            cloned_in_dev = False
+            created_before_insert = False
             if not target_table_exists or (model.is_seed and not snapshot.intervals):
                 # Only create the empty table if the columns were provided explicitly by the user
                 should_create_empty_table = (
@@ -832,6 +835,7 @@ class SnapshotEvaluator:
                         allow_destructive_snapshots=allow_destructive_snapshots,
                         allow_additive_snapshots=allow_additive_snapshots,
                     )
+                    cloned_in_dev = True
                     runtime_stage = RuntimeStage.EVALUATING
                     target_table_exists = True
                 elif should_create_empty_table or model.is_seed or model.kind.is_scd_type_2:
@@ -845,6 +849,15 @@ class SnapshotEvaluator:
                         dry_run=False,
                         run_pre_post_statements=False,
                     )
+                    created_before_insert = True
+                    if not is_snapshot_deployable:
+                        self._check_dev_schema_compatibility(
+                            snapshot=snapshot,
+                            dev_table_name=target_table_name,
+                            deployability_index=deployability_index,
+                            allow_destructive_snapshots=allow_destructive_snapshots,
+                            allow_additive_snapshots=allow_additive_snapshots,
+                        )
                     runtime_stage = RuntimeStage.EVALUATING
                     target_table_exists = True
 
@@ -879,6 +892,20 @@ class SnapshotEvaluator:
                 is_first_insert=is_first_insert,
                 batch_index=batch_index,
             )
+
+            if (
+                was_creating
+                and not is_snapshot_deployable
+                and not cloned_in_dev
+                and not created_before_insert
+            ):
+                self._check_dev_schema_compatibility(
+                    snapshot=snapshot,
+                    dev_table_name=target_table_name,
+                    deployability_index=deployability_index,
+                    allow_destructive_snapshots=allow_destructive_snapshots,
+                    allow_additive_snapshots=allow_additive_snapshots,
+                )
 
             evaluation_strategy.run_post_statements(
                 snapshot=snapshot,
@@ -954,15 +981,24 @@ class SnapshotEvaluator:
                 )
             else:
                 is_table_deployable = deployability_index.is_deployable(snapshot)
+                target_table_name = snapshot.table_name(is_deployable=is_table_deployable)
                 self._execute_create(
                     snapshot=snapshot,
-                    table_name=snapshot.table_name(is_deployable=is_table_deployable),
+                    table_name=target_table_name,
                     is_table_deployable=is_table_deployable,
                     deployability_index=deployability_index,
                     create_render_kwargs=create_render_kwargs,
                     rendered_physical_properties=rendered_physical_properties,
                     dry_run=True,
                 )
+                if not is_table_deployable:
+                    self._check_dev_schema_compatibility(
+                        snapshot=snapshot,
+                        dev_table_name=target_table_name,
+                        deployability_index=deployability_index,
+                        allow_destructive_snapshots=allow_destructive_snapshots,
+                        allow_additive_snapshots=allow_additive_snapshots,
+                    )
 
         evaluation_strategy.run_post_statements(
             snapshot=snapshot, render_kwargs={**create_render_kwargs, "inside_transaction": False}
@@ -1152,6 +1188,59 @@ class SnapshotEvaluator:
 
         except Exception:
             adapter.drop_table(target_table_name)
+            raise
+
+    def _check_dev_schema_compatibility(
+        self,
+        snapshot: Snapshot,
+        dev_table_name: str,
+        deployability_index: DeployabilityIndex,
+        allow_destructive_snapshots: t.Set[str],
+        allow_additive_snapshots: t.Set[str],
+    ) -> None:
+        if (
+            not snapshot.is_model
+            or not snapshot.is_materialized
+            or snapshot.is_seed
+            or snapshot.is_managed
+            or snapshot.is_dbt_custom
+            or not snapshot.is_no_rebuild
+            or not snapshot.previous_versions
+            or deployability_index.is_deployable(snapshot)
+        ):
+            return
+
+        needs_destructive = snapshot.needs_destructive_check(allow_destructive_snapshots)
+        needs_additive = snapshot.needs_additive_check(allow_additive_snapshots)
+        if not (needs_destructive or needs_additive):
+            return
+
+        adapter = self.get_adapter(snapshot.model.gateway)
+        prod_table_name = snapshot.table_name(is_deployable=True)
+        try:
+            if (
+                prod_table_name == dev_table_name
+                or not adapter.table_exists(prod_table_name)
+                or not adapter.table_exists(dev_table_name)
+            ):
+                return
+
+            alter_operations = adapter.get_alter_operations(
+                prod_table_name,
+                dev_table_name,
+                ignore_destructive=snapshot.model.on_destructive_change.is_ignore,
+                ignore_additive=snapshot.model.on_additive_change.is_ignore,
+            )
+            _check_destructive_schema_change(
+                snapshot, alter_operations, allow_destructive_snapshots
+            )
+            _check_additive_schema_change(snapshot, alter_operations, allow_additive_snapshots)
+        except Exception:
+            # Don't leave an unvalidated preview behind: a retry would skip creating it again.
+            try:
+                adapter.drop_table(dev_table_name)
+            except Exception:
+                logger.exception("Failed to drop the dev preview table '%s'", dev_table_name)
             raise
 
     @observe_snapshot("physical", "schema_migration")
@@ -3402,9 +3491,10 @@ def _check_destructive_schema_change(
                 )
             )
             return
-        raise DestructiveChangeError(
-            format_destructive_change_msg(snapshot_name, alter_operations, model_dialect)
-        )
+        if snapshot.model.on_destructive_change.is_error:
+            raise DestructiveChangeError(
+                format_destructive_change_msg(snapshot_name, alter_operations, model_dialect)
+            )
 
 
 def _check_additive_schema_change(
@@ -3416,8 +3506,12 @@ def _check_additive_schema_change(
     if not isinstance(snapshot.model.kind, _Incremental):
         return
 
-    if snapshot.needs_additive_check(allow_additive_snapshots) and has_additive_alteration(
-        alter_operations
+    # Snapshots that get a fresh physical table can't have an additive change applied to them.
+    # Pinned physical versions (and non-VDE modes) are migrated in place even when they rebuild.
+    if (
+        (snapshot.is_no_rebuild or snapshot.requires_schema_migration_in_prod)
+        and snapshot.needs_additive_check(allow_additive_snapshots)
+        and has_additive_alteration(alter_operations)
     ):
         # Note: IGNORE filtering is applied before this function is called
         # so if we reach here, additive changes are not being ignored

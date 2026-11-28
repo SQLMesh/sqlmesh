@@ -10,6 +10,9 @@ from sqlmesh.core.schema_diff import (
     TableAlterColumnPosition,
     TableAlterOperation,
     get_schema_differ,
+    has_additive_alteration,
+    has_drop_alteration,
+    prepare_columns_for_static_diff,
     TableAlterAddColumnOperation,
     TableAlterDropColumnOperation,
     TableAlterChangeColumnTypeOperation,
@@ -2366,3 +2369,180 @@ def test_drop_operation_missing_column_error():
         str(error_message.value)
         == "Cannot drop column 'missing_column' from table 'test_table' - column not found. This may indicate a mismatch between the expected and actual table schemas."
     )
+
+
+def test_prepare_columns_for_static_diff_nested_partial_unknown_types():
+    differ = get_schema_differ("databricks")
+
+    # 1. Partially-unknown STRUCT: dropping nested field 'b' (or unknown field 'u') is detected
+    old_struct = exp.DataType.build("STRUCT<a INT, b STRING, u NULL>", dialect="databricks")
+    new_struct_drop_b = exp.DataType.build("STRUCT<a INT, u NULL>", dialect="databricks")
+    comp = prepare_columns_for_static_diff({"info": old_struct}, {"info": new_struct_drop_b})
+    assert comp is not None
+    ops_drop_b = differ.compare_columns("tbl", comp[0], comp[1])
+    assert has_drop_alteration(ops_drop_b)
+    assert [op.expression.sql("databricks") for op in ops_drop_b] == [
+        "ALTER TABLE tbl DROP COLUMN info.b"
+    ]
+
+    new_struct_drop_u = exp.DataType.build("STRUCT<a INT, b STRING>", dialect="databricks")
+    comp_drop_u = prepare_columns_for_static_diff({"info": old_struct}, {"info": new_struct_drop_u})
+    assert comp_drop_u is not None
+    ops_drop_u = differ.compare_columns("tbl", comp_drop_u[0], comp_drop_u[1])
+    assert has_drop_alteration(ops_drop_u)
+    assert [op.expression.sql("databricks") for op in ops_drop_u] == [
+        "ALTER TABLE tbl DROP COLUMN info.u"
+    ]
+
+    # 2. Partially-unknown STRUCT: adding nested field 'c' in the middle preserves order & quoting
+    old_quoted = exp.DataType.build("STRUCT<`MyA` INT, u NULL>", dialect="databricks")
+    new_quoted_add = exp.DataType.build(
+        "STRUCT<`MyA` INT, `MyB` DOUBLE, u NULL>", dialect="databricks"
+    )
+    comp_add = prepare_columns_for_static_diff({"info": old_quoted}, {"info": new_quoted_add})
+    assert comp_add is not None
+    ops_add = differ.compare_columns("tbl", comp_add[0], comp_add[1])
+    assert has_additive_alteration(ops_add)
+    assert not has_drop_alteration(ops_add)
+    assert [op.expression.sql("databricks") for op in ops_add] == [
+        "ALTER TABLE tbl ADD COLUMN info.`MyB` DOUBLE AFTER `MyA`"
+    ]
+
+    # 3. Partially-unknown STRUCT: incompatible type change on known sibling field 'a' is detected
+    old_retype = exp.DataType.build("STRUCT<a STRING, u NULL>", dialect="databricks")
+    new_retype = exp.DataType.build("STRUCT<a INT, u NULL>", dialect="databricks")
+    comp_retype = prepare_columns_for_static_diff({"info": old_retype}, {"info": new_retype})
+    assert comp_retype is not None
+    ops_retype = differ.compare_columns("tbl", comp_retype[0], comp_retype[1])
+    assert has_drop_alteration(ops_retype)
+
+    # 4. Partially-unknown STRUCT: resolving unknown field (NULL -> STRING) does NOT false-positive
+    new_resolved = exp.DataType.build("STRUCT<a STRING, u STRING>", dialect="databricks")
+    comp_resolved = prepare_columns_for_static_diff({"info": old_retype}, {"info": new_resolved})
+    assert comp_resolved is not None
+    assert differ.compare_columns("tbl", comp_resolved[0], comp_resolved[1]) == []
+
+    # 5. Partially-unknown ARRAY<STRUCT> & ARRAY<UNKNOWN>
+    old_arr = exp.DataType.build("ARRAY<STRUCT<a INT, b STRING, u UNKNOWN>>", dialect="databricks")
+    new_arr_drop = exp.DataType.build("ARRAY<STRUCT<a INT, u UNKNOWN>>", dialect="databricks")
+    comp_arr_drop = prepare_columns_for_static_diff({"items": old_arr}, {"items": new_arr_drop})
+    assert comp_arr_drop is not None
+    ops_arr_drop = differ.compare_columns("tbl", comp_arr_drop[0], comp_arr_drop[1])
+    assert has_drop_alteration(ops_arr_drop)
+    assert [op.expression.sql("databricks") for op in ops_arr_drop] == [
+        "ALTER TABLE tbl DROP COLUMN items.element.b"
+    ]
+
+    comp_arr_unk_elem = prepare_columns_for_static_diff(
+        {"tags": exp.DataType.build("ARRAY<UNKNOWN>")},
+        {"tags": exp.DataType.build("ARRAY<INT>")},
+    )
+    assert comp_arr_unk_elem is not None
+    assert differ.compare_columns("tbl", comp_arr_unk_elem[0], comp_arr_unk_elem[1]) == []
+
+    # 6. Container-vs-primitive mismatch with partially-unknown STRUCT / ARRAY<UNKNOWN>
+    comp_prim_to_struct = prepare_columns_for_static_diff(
+        {"val": exp.DataType.build("STRING", dialect="databricks")},
+        {"val": old_struct},
+    )
+    assert comp_prim_to_struct is not None
+    ops_prim_to_struct = differ.compare_columns(
+        "tbl", comp_prim_to_struct[0], comp_prim_to_struct[1]
+    )
+    assert has_drop_alteration(ops_prim_to_struct)
+
+    comp_prim_to_arr = prepare_columns_for_static_diff(
+        {"val": exp.DataType.build("STRING", dialect="databricks")},
+        {"val": exp.DataType.build("ARRAY<UNKNOWN>")},
+    )
+    assert comp_prim_to_arr is not None
+    assert has_drop_alteration(
+        differ.compare_columns("tbl", comp_prim_to_arr[0], comp_prim_to_arr[1])
+    )
+
+
+def test_prepare_columns_for_static_diff_preserves_positional_column_order():
+    old_cols = {
+        "a": exp.DataType.build("INT", dialect="databricks"),
+        "c": exp.DataType.build("STRING", dialect="databricks"),
+    }
+    new_cols = {
+        "b_first": exp.DataType.build("DOUBLE", dialect="databricks"),
+        "a": exp.DataType.build("INT", dialect="databricks"),
+        "b_mid": exp.DataType.build("BIGINT", dialect="databricks"),
+        "c": exp.DataType.build("STRING", dialect="databricks"),
+    }
+    comp = prepare_columns_for_static_diff(old_cols, new_cols)
+    assert comp is not None
+    comparable_old, comparable_new = comp
+    assert list(comparable_old.keys()) == ["a", "c"]
+    assert list(comparable_new.keys()) == ["b_first", "a", "b_mid", "c"]
+
+    ops = get_schema_differ("databricks").compare_columns("tbl", comparable_old, comparable_new)
+    assert [op.expression.sql("databricks") for op in ops] == [
+        "ALTER TABLE tbl ADD COLUMN b_first DOUBLE FIRST",
+        "ALTER TABLE tbl ADD COLUMN b_mid BIGINT AFTER a",
+    ]
+
+
+def test_treat_alter_data_type_as_destructive_respects_ignore_flags():
+    differ = get_schema_differ("postgres", overrides={"treat_alter_data_type_as_destructive": True})
+    old_cols = {"val": exp.DataType.build("VARCHAR(10)", dialect="postgres")}
+    new_cols = {"val": exp.DataType.build("VARCHAR(50)", dialect="postgres")}
+
+    # When treat_alter_data_type_as_destructive=True, compatible type widening is destructive:
+    # ignore_destructive=True must suppress it, while ignore_additive=True must NOT suppress it.
+    assert (
+        differ.compare_columns(
+            "tbl", old_cols, new_cols, ignore_destructive=True, ignore_additive=False
+        )
+        == []
+    )
+    ops_keep_destructive = differ.compare_columns(
+        "tbl", old_cols, new_cols, ignore_destructive=False, ignore_additive=True
+    )
+    assert len(ops_keep_destructive) == 1
+    assert isinstance(ops_keep_destructive[0], TableAlterChangeColumnTypeOperation)
+    assert ops_keep_destructive[0].is_destructive
+    assert not ops_keep_destructive[0].is_additive
+
+
+def test_prepare_columns_for_static_diff_does_not_alias_input_types():
+    differ = get_schema_differ("databricks")
+    old_cols = {
+        "details": exp.DataType.build("STRUCT<a INT, b STRING>", dialect="databricks"),
+        "u": exp.DataType.build("NULL"),
+    }
+    new_cols = {
+        "details": exp.DataType.build("STRUCT<a INT>", dialect="databricks"),
+        "u": exp.DataType.build("STRING"),
+    }
+    old_sql = {k: v.sql("databricks") for k, v in old_cols.items()}
+    new_sql = {k: v.sql("databricks") for k, v in new_cols.items()}
+
+    for _ in range(2):
+        comp = prepare_columns_for_static_diff(old_cols, new_cols)
+        assert comp is not None
+        ops = differ.compare_columns("tbl", comp[0], comp[1])
+        assert [op.expression.sql("databricks") for op in ops] == [
+            "ALTER TABLE tbl DROP COLUMN details.b"
+        ]
+        # Neither the diff nor the normalization may mutate the caller's type trees.
+        assert {k: v.sql("databricks") for k, v in old_cols.items()} == old_sql
+        assert {k: v.sql("databricks") for k, v in new_cols.items()} == new_sql
+
+
+def test_prepare_columns_for_static_diff_positional_struct_fields():
+    # Positional (unnamed) struct fields, e.g. produced by annotating STRUCT(1, NULL).
+    old_struct = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[exp.DataType.build("INT"), exp.DataType.build("NULL")],
+        nested=True,
+    )
+    new_struct = exp.DataType(
+        this=exp.DataType.Type.STRUCT,
+        expressions=[exp.DataType.build("INT"), exp.DataType.build("VARCHAR")],
+        nested=True,
+    )
+    # Positional shapes can't be compared by name, so the comparison is deferred (not a KeyError).
+    assert prepare_columns_for_static_diff({"s": old_struct}, {"s": new_struct}) is None

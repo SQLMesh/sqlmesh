@@ -1,11 +1,21 @@
 import logging
 import typing as t
 from datetime import timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pytest
 
+from sqlmesh.core.config import (
+    Config,
+    DuckDBConnectionConfig,
+    GatewayConfig,
+    ModelDefaultsConfig,
+    PostgresConnectionConfig,
+)
 from sqlmesh.core.console import TerminalConsole
+from sqlmesh.utils import UniqueKeyDict
 from sqlmesh.utils.metaprogramming import Executable
 from tests.core.test_table_diff import create_test_console
 import time_machine
@@ -17,16 +27,21 @@ from sqlmesh.core.context import Context
 from sqlmesh.core.context_diff import ContextDiff
 from sqlmesh.core.environment import EnvironmentNamingInfo, EnvironmentStatements
 from sqlmesh.core.model import (
+    EmbeddedKind,
     ExternalModel,
     FullKind,
+    IncrementalByPartitionKind,
     IncrementalByTimeRangeKind,
     IncrementalUnmanagedKind,
+    Model,
+    SCDType2ByTimeKind,
     SeedKind,
     SeedModel,
     SqlModel,
     ModelKindName,
 )
 from sqlmesh.core.model.kind import OnDestructiveChange, OnAdditiveChange, ViewKind
+from sqlmesh.core.model.schema import update_model_schemas
 from sqlmesh.core.model.seed import Seed
 from sqlmesh.core.plan import Plan, PlanBuilder, SnapshotIntervals
 from sqlmesh.core.snapshot import (
@@ -104,7 +119,7 @@ def test_forward_only_dev(make_snapshot, mocker: MockerFixture):
         SqlModel(
             name="a",
             dialect="duckdb",
-            query=parse_one("select 1, ds"),
+            query=parse_one("select 1 as a, ds"),
             kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
         )
     )
@@ -114,7 +129,7 @@ def test_forward_only_dev(make_snapshot, mocker: MockerFixture):
         SqlModel(
             **{
                 **snapshot.model.dict(),
-                "query": parse_one("select 2, ds"),
+                "query": parse_one("select 2 as a, ds"),
             }
         )
     )
@@ -1697,7 +1712,7 @@ def test_forward_only_models(make_snapshot, mocker: MockerFixture):
     snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 1, ds"),
+            query=parse_one("select 1 as a, ds"),
             dialect="duckdb",
             kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
         )
@@ -1706,7 +1721,7 @@ def test_forward_only_models(make_snapshot, mocker: MockerFixture):
     updated_snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 3, ds"),
+            query=parse_one("select 3 as a, ds"),
             kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
             dialect="duckdb",
         )
@@ -1801,7 +1816,7 @@ def test_forward_only_models_model_kind_changed_to_incremental_by_time_range(
     snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 1, ds"),
+            query=parse_one("select 1 as a, ds"),
             kind=IncrementalUnmanagedKind(),
             partitioned_by=partitioned_by,
         )
@@ -1810,7 +1825,7 @@ def test_forward_only_models_model_kind_changed_to_incremental_by_time_range(
     updated_snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 3, ds"),
+            query=parse_one("select 3 as a, ds"),
             kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
         )
     )
@@ -2869,7 +2884,7 @@ def test_unaligned_start_model_with_forward_only_preview(make_snapshot):
     snapshot_a = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 1, ds"),
+            query=parse_one("select 1 as a, ds"),
             kind=dict(
                 name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, forward_only=True, time_column="ds"
             ),
@@ -2880,7 +2895,7 @@ def test_unaligned_start_model_with_forward_only_preview(make_snapshot):
     new_snapshot_a = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 2, ds"),
+            query=parse_one("select 2 as a, ds"),
             kind=dict(
                 name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, forward_only=True, time_column="ds"
             ),
@@ -2939,7 +2954,7 @@ def _make_forward_only_preview_context_diff(make_snapshot):
     old_snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 1, ds"),
+            query=parse_one("select 1 as a, ds"),
             kind=dict(
                 name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
                 forward_only=True,
@@ -2953,7 +2968,7 @@ def _make_forward_only_preview_context_diff(make_snapshot):
     new_snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 2, ds"),
+            query=parse_one("select 2 as a, ds"),
             kind=dict(
                 name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
                 forward_only=True,
@@ -3385,7 +3400,7 @@ def test_set_choice_for_forward_only_model(make_snapshot):
     snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 1, ds"),
+            query=parse_one("select 1 as a, ds"),
             dialect="duckdb",
             kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
         )
@@ -3394,7 +3409,7 @@ def test_set_choice_for_forward_only_model(make_snapshot):
     updated_snapshot = make_snapshot(
         SqlModel(
             name="a",
-            query=parse_one("select 3, ds"),
+            query=parse_one("select 3 as a, ds"),
             kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
             dialect="duckdb",
         )
@@ -5049,3 +5064,1371 @@ def test_indirect_change_forward_only_with_stored_forward_only_parent_and_new_pa
     assert child_new.is_forward_only == expected_forward_only
     # A forward-only child keeps its previous version, otherwise it's rebuilt.
     assert (child_new.version == child_old.version) == expected_forward_only
+
+
+def _hydrate_model_schemas(*models: Model) -> None:
+    dag: DAG[str] = DAG()
+    model_map: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
+    for m in models:
+        model_map[m.fqn] = m
+        dag.add(m.fqn, m.depends_on)
+    with TemporaryDirectory() as tmp_dir:
+        update_model_schemas(dag, model_map, Path(tmp_dir))
+
+
+def _build_snapshots_and_diff(
+    make_snapshot: t.Callable,
+    old_models: t.Sequence[Model],
+    new_models: t.Sequence[Model],
+    *,
+    environment: str = "dev",
+    is_new_environment: bool = True,
+    new_snapshot_names: t.Optional[t.Set[str]] = None,
+) -> t.Tuple[t.Dict[str, Snapshot], t.Dict[str, Snapshot], ContextDiff]:
+    _hydrate_model_schemas(*old_models)
+    _hydrate_model_schemas(*new_models)
+
+    old_nodes = {m.fqn: m for m in old_models}
+    new_nodes = {m.fqn: m for m in new_models}
+
+    old_snapshots: t.Dict[str, Snapshot] = {}
+    for m in old_models:
+        snap = make_snapshot(m, nodes=old_nodes)
+        snap.categorize_as(SnapshotChangeCategory.BREAKING)
+        old_snapshots[m.fqn] = snap
+
+    new_snapshots: t.Dict[str, Snapshot] = {}
+    for m in new_models:
+        snap = make_snapshot(m, nodes=new_nodes)
+        if m.fqn in old_snapshots:
+            snap.previous_versions = old_snapshots[m.fqn].all_versions
+        new_snapshots[m.fqn] = snap
+
+    modified_snapshots = {
+        fqn: (new_snap, old_snapshots[fqn])
+        for fqn, new_snap in new_snapshots.items()
+        if fqn in old_snapshots and new_snap.fingerprint != old_snapshots[fqn].fingerprint
+    }
+    snapshots_by_id = {snap.snapshot_id: snap for snap in new_snapshots.values()}
+    if new_snapshot_names is None:
+        new_snapshots_by_id = {
+            snap.snapshot_id: snap
+            for fqn, snap in new_snapshots.items()
+            if fqn in modified_snapshots
+        }
+    else:
+        new_snapshots_by_id = {
+            snap.snapshot_id: snap
+            for fqn, snap in new_snapshots.items()
+            if fqn in new_snapshot_names
+        }
+
+    context_diff = ContextDiff(
+        environment=environment,
+        is_new_environment=is_new_environment,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        modified_snapshots=modified_snapshots,
+        snapshots=snapshots_by_id,
+        new_snapshots=new_snapshots_by_id,
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+    return old_snapshots, new_snapshots, context_diff
+
+
+def test_indirectly_modified_forward_only_model_destructive_change(
+    make_snapshot, mocker: MockerFixture
+):
+    """Gap S2 (destructive): Upstream FULL model incompatibly alters a column type or drops a
+    nested struct field while an indirectly_modified downstream forward-only model selects it."""
+    up_old = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT 1::INT AS id, '1'::TEXT AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    up_new = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT 1::INT AS id, 1::INT AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+
+    def _make_time_range_diff(on_destructive: OnDestructiveChange) -> ContextDiff:
+        down_old = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=True,
+                on_destructive_change=on_destructive,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        down_new = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=True,
+                on_destructive_change=on_destructive,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        _, _, diff = _build_snapshots_and_diff(
+            make_snapshot, [up_old.copy(), down_old], [up_new.copy(), down_new]
+        )
+        assert diff.indirectly_modified('"db"."down"')
+        return diff
+
+    # 1. ERROR: logs destructive change with error=True and raises PlanError
+    console = TerminalConsole()
+    log_destructive_spy = mocker.spy(console, "log_destructive_change")
+    diff_error = _make_time_range_diff(OnDestructiveChange.ERROR)
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_error, console=console).build()
+    assert log_destructive_spy.call_count == 1
+    assert log_destructive_spy.call_args[0][0] == '"db"."down"'
+    assert log_destructive_spy.call_args[1]["error"] is True
+
+    # 2. allow_destructive_models overrides ERROR without logging or raising
+    log_destructive_spy.reset_mock()
+    diff_allowed = _make_time_range_diff(OnDestructiveChange.ERROR)
+    assert PlanBuilder(
+        diff_allowed,
+        allow_destructive_models={'"db"."down"'},
+        console=console,
+    ).build()
+    assert log_destructive_spy.call_count == 0
+
+    # 3. WARN: logs destructive change with error=False without raising
+    log_destructive_spy.reset_mock()
+    diff_warn = _make_time_range_diff(OnDestructiveChange.WARN)
+    assert PlanBuilder(diff_warn, console=console).build()
+    assert log_destructive_spy.call_count == 1
+    assert log_destructive_spy.call_args[0][0] == '"db"."down"'
+    assert log_destructive_spy.call_args[1]["error"] is False
+
+    # 4. ALLOW & IGNORE: succeed silently without logging
+    for permissive_mode in (OnDestructiveChange.ALLOW, OnDestructiveChange.IGNORE):
+        log_destructive_spy.reset_mock()
+        diff_permissive = _make_time_range_diff(permissive_mode)
+        assert PlanBuilder(diff_permissive, console=console).build()
+        assert log_destructive_spy.call_count == 0
+
+    # 5. INCREMENTAL_BY_PARTITION (forward_only=True by default)
+    part_old = SqlModel(
+        name="db.part_down",
+        dialect="postgres",
+        kind=IncrementalByPartitionKind(),
+        partitioned_by=["ds"],
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    part_new = SqlModel(
+        name="db.part_down",
+        dialect="postgres",
+        kind=IncrementalByPartitionKind(),
+        partitioned_by=["ds"],
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    _, _, diff_part = _build_snapshots_and_diff(
+        make_snapshot, [up_old.copy(), part_old], [up_new.copy(), part_new]
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_part).build()
+
+    # 6. SCD_TYPE_2_BY_TIME (forward_only=True by default)
+    scd_old = SqlModel(
+        name="db.scd_down",
+        dialect="postgres",
+        kind=SCDType2ByTimeKind(unique_key=["id"], updated_at_name="ds"),
+        query=parse_one("SELECT id, val, ds FROM db.up", read="postgres"),
+    )
+    scd_new = SqlModel(
+        name="db.scd_down",
+        dialect="postgres",
+        kind=SCDType2ByTimeKind(unique_key=["id"], updated_at_name="ds"),
+        query=parse_one("SELECT id, val, ds FROM db.up", read="postgres"),
+    )
+    _, _, diff_scd = _build_snapshots_and_diff(
+        make_snapshot, [up_old.copy(), scd_old], [up_new.copy(), scd_new]
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_scd).build()
+
+    # 7. STRUCT nested field drop on indirectly_modified forward-only downstream model (databricks)
+    struct_up_old = SqlModel(
+        name="db.struct_up",
+        dialect="databricks",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT CAST(NAMED_STRUCT('a', 1, 'b', 'x') AS STRUCT<a: INT, b: STRING>) AS info, "
+            "CAST('2022-01-01' AS DATE) AS ds",
+            read="databricks",
+        ),
+    )
+    struct_up_new = SqlModel(
+        name="db.struct_up",
+        dialect="databricks",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT CAST(NAMED_STRUCT('a', 1) AS STRUCT<a: INT>) AS info, "
+            "CAST('2022-01-01' AS DATE) AS ds",
+            read="databricks",
+        ),
+    )
+    struct_down_old = SqlModel(
+        name="db.struct_down",
+        dialect="databricks",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
+        query=parse_one("SELECT info, ds FROM db.struct_up", read="databricks"),
+    )
+    struct_down_new = SqlModel(
+        name="db.struct_down",
+        dialect="databricks",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
+        query=parse_one("SELECT info, ds FROM db.struct_up", read="databricks"),
+    )
+    _, _, diff_struct_drop = _build_snapshots_and_diff(
+        make_snapshot, [struct_up_old, struct_down_old], [struct_up_new, struct_down_new]
+    )
+    assert diff_struct_drop.indirectly_modified('"db"."struct_down"')
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_struct_drop).build()
+
+
+def test_indirectly_modified_forward_only_model_additive_change(
+    make_snapshot, mocker: MockerFixture
+):
+    """Gap S2 (additive): Upstream FULL model triggers a compatible type widening or nested struct
+    field addition on an indirectly_modified downstream forward-only model."""
+    up_old = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(10) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    up_new = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(50) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+
+    def _make_additive_diff(on_additive: OnAdditiveChange) -> ContextDiff:
+        down_old = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=True,
+                on_additive_change=on_additive,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        down_new = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=True,
+                on_additive_change=on_additive,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        _, _, diff = _build_snapshots_and_diff(
+            make_snapshot, [up_old.copy(), down_old], [up_new.copy(), down_new]
+        )
+        assert diff.indirectly_modified('"db"."down"')
+        return diff
+
+    # 1. ERROR: logs additive change with error=True and raises PlanError
+    console = TerminalConsole()
+    log_additive_spy = mocker.spy(console, "log_additive_change")
+    diff_error = _make_additive_diff(OnAdditiveChange.ERROR)
+    with pytest.raises(
+        PlanError, match=r"Plan requires an additive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_error, console=console).build()
+    assert log_additive_spy.call_count == 1
+    assert log_additive_spy.call_args[0][0] == '"db"."down"'
+    assert log_additive_spy.call_args[1]["error"] is True
+
+    # 2. allow_additive_models overrides ERROR without logging or raising
+    log_additive_spy.reset_mock()
+    diff_allowed = _make_additive_diff(OnAdditiveChange.ERROR)
+    assert PlanBuilder(
+        diff_allowed,
+        allow_additive_models={'"db"."down"'},
+        console=console,
+    ).build()
+    assert log_additive_spy.call_count == 0
+
+    # 3. WARN: logs additive change with error=False without raising
+    log_additive_spy.reset_mock()
+    diff_warn = _make_additive_diff(OnAdditiveChange.WARN)
+    assert PlanBuilder(diff_warn, console=console).build()
+    assert log_additive_spy.call_count == 1
+    assert log_additive_spy.call_args[0][0] == '"db"."down"'
+    assert log_additive_spy.call_args[1]["error"] is False
+
+    # 4. ALLOW & IGNORE: succeed silently without logging
+    for permissive_mode in (OnAdditiveChange.ALLOW, OnAdditiveChange.IGNORE):
+        log_additive_spy.reset_mock()
+        diff_permissive = _make_additive_diff(permissive_mode)
+        assert PlanBuilder(diff_permissive, console=console).build()
+        assert log_additive_spy.call_count == 0
+
+    # 5. STRUCT nested field addition on indirectly_modified forward-only model (databricks)
+    struct_up_old = SqlModel(
+        name="db.struct_up",
+        dialect="databricks",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT CAST(NAMED_STRUCT('a', 1) AS STRUCT<a: INT>) AS info, "
+            "CAST('2022-01-01' AS DATE) AS ds",
+            read="databricks",
+        ),
+    )
+    struct_up_new = SqlModel(
+        name="db.struct_up",
+        dialect="databricks",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT CAST(NAMED_STRUCT('a', 1, 'b', 'x') AS STRUCT<a: INT, b: STRING>) AS info, "
+            "CAST('2022-01-01' AS DATE) AS ds",
+            read="databricks",
+        ),
+    )
+    struct_down_old = SqlModel(
+        name="db.struct_down",
+        dialect="databricks",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_additive_change=OnAdditiveChange.ERROR,
+        ),
+        query=parse_one("SELECT info, ds FROM db.struct_up", read="databricks"),
+    )
+    struct_down_new = SqlModel(
+        name="db.struct_down",
+        dialect="databricks",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_additive_change=OnAdditiveChange.ERROR,
+        ),
+        query=parse_one("SELECT info, ds FROM db.struct_up", read="databricks"),
+    )
+    _, _, diff_struct_add = _build_snapshots_and_diff(
+        make_snapshot, [struct_up_old, struct_down_old], [struct_up_new, struct_down_new]
+    )
+    assert diff_struct_add.indirectly_modified('"db"."struct_down"')
+    with pytest.raises(
+        PlanError, match=r"Plan requires an additive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_struct_add).build()
+
+
+def test_indirect_downstream_inherits_forward_only_and_view_embedded_handling(
+    make_snapshot, mocker: MockerFixture
+):
+    """Gap S3 + #2576 non-regression + VIEW/EMBEDDED intermediate & leaf handling."""
+    # 1. Scenario S3: upstream forward_only=True (on_destructive_change=ALLOW) alters val TEXT->INT;
+    # downstream has model.forward_only=False (default on_destructive_change=ERROR) and inherits
+    # forward_only=True from all_upstream_forward_only == {True}, so PlanBuilder MUST raise PlanError.
+    up_old = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ALLOW,
+        ),
+        query=parse_one("SELECT '1'::TEXT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    up_new = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ALLOW,
+        ),
+        query=parse_one("SELECT 1::INT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    down_old = SqlModel(
+        name="db.down",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    down_new = SqlModel(
+        name="db.down",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    _, new_snaps_s3, diff_s3 = _build_snapshots_and_diff(
+        make_snapshot, [up_old, down_old], [up_new, down_new]
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_s3, forward_only=False).build()
+    assert new_snaps_s3['"db"."down"'].is_forward_only
+
+    # 2. #2576 non-regression: upstream drops unused_col, downstream only selects keep_col and ds
+    # (downstream's own schema did NOT change) -> succeeds with zero errors/warnings.
+    up_drop_old = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ALLOW,
+        ),
+        query=parse_one(
+            "SELECT 1::INT AS keep_col, 'drop_me'::TEXT AS unused_col, '2022-01-01'::DATE AS ds",
+            read="postgres",
+        ),
+    )
+    up_drop_new = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_destructive_change=OnDestructiveChange.ALLOW,
+        ),
+        query=parse_one(
+            "SELECT 1::INT AS keep_col, '2022-01-01'::DATE AS ds",
+            read="postgres",
+        ),
+    )
+    down_keep_old = SqlModel(
+        name="db.down",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT keep_col, ds FROM db.up", read="postgres"),
+    )
+    down_keep_new = SqlModel(
+        name="db.down",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT keep_col, ds FROM db.up", read="postgres"),
+    )
+    _, new_snaps_keep, diff_keep = _build_snapshots_and_diff(
+        make_snapshot, [up_drop_old, down_keep_old], [up_drop_new, down_keep_new]
+    )
+    console = TerminalConsole()
+    log_destructive_spy = mocker.spy(console, "log_destructive_change")
+    assert PlanBuilder(diff_keep, forward_only=False, console=console).build()
+    assert new_snaps_keep['"db"."down"'].is_forward_only
+    assert log_destructive_spy.call_count == 0
+
+    # 3. VIEW leaf does NOT raise PlanError (views recreate via CREATE OR REPLACE VIEW)
+    view_leaf_old = SqlModel(
+        name="db.v_leaf",
+        dialect="postgres",
+        kind=ViewKind(),
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    view_leaf_new = SqlModel(
+        name="db.v_leaf",
+        dialect="postgres",
+        kind=ViewKind(),
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    _, _, diff_view_leaf = _build_snapshots_and_diff(
+        make_snapshot, [up_old.copy(), view_leaf_old], [up_new.copy(), view_leaf_new]
+    )
+    assert PlanBuilder(diff_view_leaf, forward_only=True, console=console).build()
+    assert log_destructive_spy.call_count == 0
+
+    # 4. Materialized forward_only=True model downstream of EMBEDDED -> VIEW DOES raise PlanError
+    emb_old = SqlModel(
+        name="db.emb",
+        dialect="postgres",
+        kind=EmbeddedKind(),
+        query=parse_one("SELECT '1'::TEXT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    emb_new = SqlModel(
+        name="db.emb",
+        dialect="postgres",
+        kind=EmbeddedKind(),
+        query=parse_one("SELECT 1::INT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    mid_view_old = SqlModel(
+        name="db.mid_view",
+        dialect="postgres",
+        kind=ViewKind(),
+        query=parse_one("SELECT val, ds FROM db.emb", read="postgres"),
+    )
+    mid_view_new = SqlModel(
+        name="db.mid_view",
+        dialect="postgres",
+        kind=ViewKind(),
+        query=parse_one("SELECT val, ds FROM db.emb", read="postgres"),
+    )
+    leaf_fo_old = SqlModel(
+        name="db.leaf_fo",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
+        query=parse_one("SELECT val, ds FROM db.mid_view", read="postgres"),
+    )
+    leaf_fo_new = SqlModel(
+        name="db.leaf_fo",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
+        query=parse_one("SELECT val, ds FROM db.mid_view", read="postgres"),
+    )
+    _, _, diff_chain = _build_snapshots_and_diff(
+        make_snapshot,
+        [emb_old, mid_view_old, leaf_fo_old],
+        [emb_new, mid_view_new, leaf_fo_new],
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_chain).build()
+
+
+def test_forward_only_plan_indirect_downstream_destructive_change(make_snapshot):
+    """Gap S4: PlanBuilder(..., forward_only=True) where upstream FULL model alters column type and
+    indirectly_modified downstream INCREMENTAL_BY_TIME_RANGE(forward_only=False) selects it."""
+    up_old = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=FullKind(),
+        query=parse_one("SELECT '1'::TEXT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    up_new = SqlModel(
+        name="db.up",
+        dialect="postgres",
+        kind=FullKind(),
+        query=parse_one("SELECT 1::INT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    down_old = SqlModel(
+        name="db.down",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    down_new = SqlModel(
+        name="db.down",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+    )
+    _, _, diff = _build_snapshots_and_diff(make_snapshot, [up_old, down_old], [up_new, down_new])
+
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff, forward_only=True).build()
+
+    _, _, diff_allowed = _build_snapshots_and_diff(
+        make_snapshot, [up_old.copy(), down_old.copy()], [up_new.copy(), down_new.copy()]
+    )
+    assert PlanBuilder(
+        diff_allowed,
+        forward_only=True,
+        allow_destructive_models={'"db"."down"'},
+    ).build()
+
+
+def test_partially_unknown_columns_to_types_schema_checks(make_snapshot, mocker: MockerFixture):
+    """Gap S5: Partially UNKNOWN-typed columns_to_types still detects dropped columns, added
+    columns, and incompatible known-type alterations without false-positiving on shared UNKNOWNs."""
+
+    def _make_direct_diff(
+        old_sql: str,
+        new_sql: str,
+        on_destructive: OnDestructiveChange = OnDestructiveChange.ERROR,
+        on_additive: OnAdditiveChange = OnAdditiveChange.ALLOW,
+    ) -> ContextDiff:
+        kind = IncrementalByTimeRangeKind(
+            time_column="ds",
+            forward_only=True,
+            on_destructive_change=on_destructive,
+            on_additive_change=on_additive,
+        )
+        m_old = SqlModel(
+            name="db.m",
+            dialect="duckdb",
+            kind=kind,
+            query=parse_one(old_sql, read="duckdb"),
+        )
+        m_new = SqlModel(
+            name="db.m",
+            dialect="duckdb",
+            kind=kind,
+            query=parse_one(new_sql, read="duckdb"),
+        )
+        _, _, diff = _build_snapshots_and_diff(make_snapshot, [m_old], [m_new])
+        return diff
+
+    base_sql = (
+        "SELECT 'a'::TEXT AS typed_col, 'drop_me'::TEXT AS dropped_col, "
+        "some_udf(x) AS unk_col, '2022-01-01'::DATE AS ds FROM raw_tbl"
+    )
+
+    # 1. Dropping a typed column alongside an UNKNOWN column raises PlanError
+    diff_drop_typed = _make_direct_diff(
+        base_sql,
+        "SELECT 'a'::TEXT AS typed_col, some_udf(x) AS unk_col, '2022-01-01'::DATE AS ds FROM raw_tbl",
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_drop_typed).build()
+
+    # 2. Dropping the UNKNOWN column itself raises PlanError
+    diff_drop_unk = _make_direct_diff(
+        base_sql,
+        "SELECT 'a'::TEXT AS typed_col, 'drop_me'::TEXT AS dropped_col, '2022-01-01'::DATE AS ds FROM raw_tbl",
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_drop_unk).build()
+
+    # 3. Adding a known-typed OR UNKNOWN-typed column with on_additive_change=ERROR raises PlanError
+    for added_expr in ("1::INT AS added_col", "other_udf(x) AS added_col"):
+        diff_add = _make_direct_diff(
+            base_sql,
+            f"SELECT 'a'::TEXT AS typed_col, 'drop_me'::TEXT AS dropped_col, "
+            f"some_udf(x) AS unk_col, {added_expr}, '2022-01-01'::DATE AS ds FROM raw_tbl",
+            on_additive=OnAdditiveChange.ERROR,
+        )
+        with pytest.raises(
+            PlanError, match=r"Plan requires an additive change to a forward-only model\."
+        ):
+            PlanBuilder(diff_add).build()
+
+    # 4. Incompatibly changing typed_col ('a'::TEXT -> 1::INT) while unk_col stays UNKNOWN raises PlanError
+    diff_retype = _make_direct_diff(
+        base_sql,
+        "SELECT 1::INT AS typed_col, 'drop_me'::TEXT AS dropped_col, "
+        "some_udf(x) AS unk_col, '2022-01-01'::DATE AS ds FROM raw_tbl",
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_retype).build()
+
+    # 5. Shared column keeping UNKNOWN (or INT -> UNKNOWN) with no drops/incompatible changes does NOT false-positive
+    console = TerminalConsole()
+    log_destructive_spy = mocker.spy(console, "log_destructive_change")
+    diff_shared_unk = _make_direct_diff(
+        "SELECT 1::INT AS col_a, some_udf(x) AS unk_col, '2022-01-01'::DATE AS ds FROM raw_tbl",
+        "SELECT col_a, other_udf(x) AS unk_col, '2022-01-01'::DATE AS ds FROM raw_tbl",
+    )
+    assert PlanBuilder(diff_shared_unk, console=console).build()
+    assert log_destructive_spy.call_count == 0
+
+
+def test_forward_only_change_to_unannotated_star_does_not_false_positive(
+    make_snapshot, mocker: MockerFixture
+):
+    """Bug C2: Changing a forward-only model from known columns_to_types to unexpanded SELECT *
+    (columns_to_types is None) must NOT coerce None -> {} and falsely claim all columns dropped."""
+    kind = IncrementalByTimeRangeKind(
+        time_column="ds",
+        forward_only=True,
+        on_destructive_change=OnDestructiveChange.ERROR,
+    )
+    m_old = SqlModel(
+        name="db.m",
+        dialect="duckdb",
+        kind=kind,
+        query=parse_one("SELECT 1::INT AS a, '2022-01-01'::DATE AS ds", read="duckdb"),
+    )
+    m_new = SqlModel(
+        name="db.m",
+        dialect="duckdb",
+        kind=kind,
+        query=parse_one("SELECT * FROM unregistered_raw_tbl", read="duckdb"),
+    )
+    assert m_old.columns_to_types is not None
+    assert m_new.columns_to_types is None
+
+    _, _, diff = _build_snapshots_and_diff(make_snapshot, [m_old], [m_new])
+    console = TerminalConsole()
+    log_destructive_spy = mocker.spy(console, "log_destructive_change")
+    assert PlanBuilder(diff, console=console).build()
+    assert log_destructive_spy.call_count == 0
+
+
+def test_interactive_categorization_indirect_non_breaking_schema_checks(make_snapshot):
+    """Gaps S7 & S8 + --no-auto-categorization:
+    1. First build() while upstream is uncategorized must NOT prematurely raise PlanError.
+    2. set_choice(up, BREAKING) -> downstream INDIRECT_BREAKING (full rebuild) -> succeeds.
+    3. set_choice(up, NON_BREAKING) -> downstream INDIRECT_NON_BREAKING (is_no_rebuild) -> raises PlanError.
+    """
+
+    def _make_s7_diff() -> t.Tuple[Snapshot, Snapshot, ContextDiff]:
+        up_old = SqlModel(
+            name="db.up",
+            dialect="postgres",
+            kind=FullKind(),
+            query=parse_one("SELECT '1'::TEXT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+        )
+        up_new = SqlModel(
+            name="db.up",
+            dialect="postgres",
+            kind=FullKind(),
+            query=parse_one("SELECT 1::INT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+        )
+        down_old = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=False,
+                on_destructive_change=OnDestructiveChange.ERROR,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        down_new = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=False,
+                on_destructive_change=OnDestructiveChange.ERROR,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        _, new_snaps, diff = _build_snapshots_and_diff(
+            make_snapshot, [up_old, down_old], [up_new, down_new]
+        )
+        return new_snaps['"db"."up"'], new_snaps['"db"."down"'], diff
+
+    # S7 (destructive): uncategorized -> BREAKING succeeds -> NON_BREAKING raises PlanError
+    up_snap_b, down_snap_b, diff_s7_breaking = _make_s7_diff()
+    builder_s7_breaking = PlanBuilder(diff_s7_breaking, auto_categorization_enabled=False)
+    assert builder_s7_breaking.build()
+    assert not up_snap_b.categorized
+    assert builder_s7_breaking.set_choice(up_snap_b, SnapshotChangeCategory.BREAKING).build()
+    assert down_snap_b.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+    assert not down_snap_b.is_no_rebuild
+
+    up_snap_nb, down_snap_nb, diff_s7_nb = _make_s7_diff()
+    builder_s7_nb = PlanBuilder(diff_s7_nb, auto_categorization_enabled=False)
+    assert builder_s7_nb.build()
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        builder_s7_nb.set_choice(up_snap_nb, SnapshotChangeCategory.NON_BREAKING).build()
+    assert down_snap_nb.is_indirect_non_breaking
+    assert down_snap_nb.is_no_rebuild
+
+    # S8 (additive): uncategorized -> BREAKING succeeds -> NON_BREAKING raises PlanError
+    def _make_s8_diff() -> t.Tuple[Snapshot, Snapshot, ContextDiff]:
+        up_old = SqlModel(
+            name="db.up",
+            dialect="postgres",
+            kind=FullKind(),
+            query=parse_one(
+                "SELECT 'x'::VARCHAR(10) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+            ),
+        )
+        up_new = SqlModel(
+            name="db.up",
+            dialect="postgres",
+            kind=FullKind(),
+            query=parse_one(
+                "SELECT 'x'::VARCHAR(50) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+            ),
+        )
+        down_old = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=False,
+                on_additive_change=OnAdditiveChange.ERROR,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        down_new = SqlModel(
+            name="db.down",
+            dialect="postgres",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=False,
+                on_additive_change=OnAdditiveChange.ERROR,
+            ),
+            query=parse_one("SELECT val, ds FROM db.up", read="postgres"),
+        )
+        _, new_snaps, diff = _build_snapshots_and_diff(
+            make_snapshot, [up_old, down_old], [up_new, down_new]
+        )
+        return new_snaps['"db"."up"'], new_snaps['"db"."down"'], diff
+
+    up_s8_b, down_s8_b, diff_s8_b = _make_s8_diff()
+    builder_s8_b = PlanBuilder(diff_s8_b, auto_categorization_enabled=False)
+    assert builder_s8_b.build()
+    assert builder_s8_b.set_choice(up_s8_b, SnapshotChangeCategory.BREAKING).build()
+    assert down_s8_b.change_category == SnapshotChangeCategory.INDIRECT_BREAKING
+
+    up_s8_nb, down_s8_nb, diff_s8_nb = _make_s8_diff()
+    builder_s8_nb = PlanBuilder(diff_s8_nb, auto_categorization_enabled=False)
+    assert builder_s8_nb.build()
+    with pytest.raises(
+        PlanError, match=r"Plan requires an additive change to a forward-only model\."
+    ):
+        builder_s8_nb.set_choice(up_s8_nb, SnapshotChangeCategory.NON_BREAKING).build()
+    assert down_s8_nb.is_indirect_non_breaking
+    assert down_s8_nb.is_no_rebuild
+
+
+def test_precategorized_forward_only_snapshot_checked_on_prod_plan(make_snapshot):
+    """Gap S9: A snapshot pre-categorized in dev via categorize_as(BREAKING, forward_only=True)
+    and already persisted in state (new_snapshots={}) must still be checked on a prod plan."""
+    m_old = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT '1'::TEXT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    m_new = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=False),
+        query=parse_one("SELECT 1::INT AS val, '2022-01-01'::DATE AS ds", read="postgres"),
+    )
+    _, new_snaps, prod_diff = _build_snapshots_and_diff(
+        make_snapshot,
+        [m_old],
+        [m_new],
+        environment="prod",
+        is_new_environment=False,
+        new_snapshot_names=set(),
+    )
+    m_snap = new_snaps['"db"."m"']
+    m_snap.categorize_as(SnapshotChangeCategory.BREAKING, forward_only=True)
+    assert m_snap.is_forward_only
+    assert not prod_diff.new_snapshots
+
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(prod_diff, forward_only=False).build()
+
+    assert PlanBuilder(
+        prod_diff,
+        forward_only=False,
+        allow_destructive_models={'"db"."m"'},
+    ).build()
+
+
+def test_breaking_kind_change_in_forward_only_plan_skips_destructive_check(make_snapshot):
+    """Bug B1: Breaking kind change (FullKind -> IncrementalByTimeRangeKind) while dropping a
+    column in PlanBuilder(..., forward_only=True) forces forward_only=False (full rebuild) and
+    must succeed without raising PlanError."""
+    m_old = SqlModel(
+        name="db.m",
+        dialect="duckdb",
+        kind=FullKind(),
+        query=parse_one(
+            "SELECT 1::INT AS id, 'drop_me'::TEXT AS b, '2022-01-01'::DATE AS ds",
+            read="duckdb",
+        ),
+    )
+    m_new = SqlModel(
+        name="db.m",
+        dialect="duckdb",
+        kind=IncrementalByTimeRangeKind(time_column="ds"),
+        query=parse_one("SELECT 1::INT AS id, '2022-01-01'::DATE AS ds", read="duckdb"),
+    )
+    _, new_snaps, diff = _build_snapshots_and_diff(make_snapshot, [m_old], [m_new])
+
+    plan = PlanBuilder(diff, forward_only=True).build()
+    assert plan is not None
+    assert not new_snaps['"db"."m"'].is_forward_only
+    assert new_snaps['"db"."m"'].change_category == SnapshotChangeCategory.BREAKING
+
+
+def test_schema_warnings_logged_at_most_once_per_plan_builder(make_snapshot, mocker: MockerFixture):
+    """Idempotent schema warning logging: repeated build() calls after set_start / set_end on the
+    same PlanBuilder instance must log each warning at most once per (snapshot_id, change_kind)."""
+    kind = IncrementalByTimeRangeKind(
+        time_column="ds",
+        forward_only=True,
+        on_destructive_change=OnDestructiveChange.WARN,
+        on_additive_change=OnAdditiveChange.WARN,
+    )
+    m_old = SqlModel(
+        name="db.m",
+        dialect="duckdb",
+        kind=kind,
+        query=parse_one(
+            "SELECT 1::INT AS id, 'drop_me'::TEXT AS old_col, '2022-01-01'::DATE AS ds",
+            read="duckdb",
+        ),
+    )
+    m_new = SqlModel(
+        name="db.m",
+        dialect="duckdb",
+        kind=kind,
+        query=parse_one(
+            "SELECT 1::INT AS id, 'added'::TEXT AS new_col, '2022-01-01'::DATE AS ds",
+            read="duckdb",
+        ),
+    )
+    _, _, diff = _build_snapshots_and_diff(make_snapshot, [m_old], [m_new])
+
+    console = TerminalConsole()
+    log_destructive_spy = mocker.spy(console, "log_destructive_change")
+    log_additive_spy = mocker.spy(console, "log_additive_change")
+
+    plan_builder = PlanBuilder(diff, is_dev=True, console=console)
+    plan_builder.build()
+    plan_builder.set_start("2022-01-02")
+    plan_builder.build()
+    plan_builder.set_end("2022-01-03")
+    plan_builder.build()
+
+    assert log_destructive_spy.call_count == 1
+    assert log_additive_spy.call_count == 1
+
+
+def test_plan_builder_schema_differ_overrides(make_snapshot):
+    """Gap S10 (unit): PlanBuilder(..., schema_differ_overrides=...) applies both default (None)
+    and per-gateway overrides matching snapshot.model_gateway."""
+
+    def _make_widening_diff(gateway: t.Optional[str] = None) -> ContextDiff:
+        m_old = SqlModel(
+            name="db.m",
+            dialect="postgres",
+            gateway=gateway,
+            kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
+            query=parse_one(
+                "SELECT 'x'::VARCHAR(10) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+            ),
+        )
+        m_new = SqlModel(
+            name="db.m",
+            dialect="postgres",
+            gateway=gateway,
+            kind=IncrementalByTimeRangeKind(time_column="ds", forward_only=True),
+            query=parse_one(
+                "SELECT 'x'::VARCHAR(50) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+            ),
+        )
+        _, _, diff = _build_snapshots_and_diff(make_snapshot, [m_old], [m_new])
+        return diff
+
+    # Without overrides, VARCHAR(10) -> VARCHAR(50) in postgres is compatible (additive, allowed)
+    assert PlanBuilder(_make_widening_diff()).build()
+
+    # With default (None) override treat_alter_data_type_as_destructive=True -> raises PlanError
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(
+            _make_widening_diff(),
+            schema_differ_overrides={None: {"treat_alter_data_type_as_destructive": True}},
+        ).build()
+
+    # Per-gateway override: gw_a unaffected, gw_b raises PlanError
+    gateway_overrides: t.Dict[t.Optional[str], t.Dict[str, t.Any]] = {
+        "gw_b": {"treat_alter_data_type_as_destructive": True}
+    }
+    assert PlanBuilder(
+        _make_widening_diff(gateway="gw_a"),
+        schema_differ_overrides=gateway_overrides,
+    ).build()
+
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(
+            _make_widening_diff(gateway="gw_b"),
+            schema_differ_overrides=gateway_overrides,
+        ).build()
+
+    # Default gateway (None) overrides must NOT bleed onto an explicitly named secondary gateway
+    assert PlanBuilder(
+        _make_widening_diff(gateway="gw_other"),
+        schema_differ_overrides={
+            None: {"treat_alter_data_type_as_destructive": True},
+            "gw_a": {"treat_alter_data_type_as_destructive": True},
+            "gw_other": {},
+        },
+    ).build()
+
+
+def test_context_plan_builder_plumbs_schema_differ_overrides_without_connecting(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Gap S10 (Context plumbing): Context.plan_builder reads ConnectionConfig.schema_differ_overrides
+    for both the default gateway and named multi-gateway configs without instantiating uninitialized
+    secondary EngineAdapters."""
+    # 1. Default gateway DuckDBConnectionConfig with schema_differ_overrides catches DECIMAL widening
+    proj_default = tmp_path / "proj_default"
+    (proj_default / "models").mkdir(parents=True)
+    (proj_default / "models" / "m.sql").write_text(
+        """
+        MODEL (
+            name db.m,
+            kind INCREMENTAL_BY_TIME_RANGE (time_column ds, forward_only true),
+            start '2023-01-01'
+        );
+        SELECT 1::DECIMAL(10, 2) AS val, '2023-01-01'::DATE AS ds;
+        """
+    )
+    cfg_default = Config(
+        gateways={
+            "default": GatewayConfig(
+                connection=DuckDBConnectionConfig(
+                    schema_differ_overrides={"treat_alter_data_type_as_destructive": True}
+                )
+            )
+        },
+        default_gateway="default",
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+    )
+    ctx_default = Context(paths=[proj_default], config=cfg_default)
+    ctx_default.plan("prod", execution_time="2023-01-02", auto_apply=True, no_prompts=True)
+
+    (proj_default / "models" / "m.sql").write_text(
+        """
+        MODEL (
+            name db.m,
+            kind INCREMENTAL_BY_TIME_RANGE (time_column ds, forward_only true),
+            start '2023-01-01'
+        );
+        SELECT 1::DECIMAL(12, 2) AS val, '2023-01-01'::DATE AS ds;
+        """
+    )
+    ctx_default.load()
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        ctx_default.plan_builder("dev", execution_time="2023-01-02").build()
+
+    # 2. Multi-gateway config: secondary Postgres gateway with unreachable host is NOT connected
+    # when Context.plan_builder collects per-gateway schema_differ_overrides
+    proj_multi = tmp_path / "proj_multi"
+    (proj_multi / "models").mkdir(parents=True)
+    (proj_multi / "models" / "a.sql").write_text(
+        """
+        MODEL (name db.a, kind FULL);
+        SELECT 1::INT AS id;
+        """
+    )
+    pg_conn = PostgresConnectionConfig(
+        host="unreachable.invalid",
+        port=5432,
+        user="u",
+        password="p",
+        database="d",
+        schema_differ_overrides={"treat_alter_data_type_as_destructive": True},
+    )
+    cfg_multi = Config(
+        gateways={
+            "gw_a": GatewayConfig(connection=DuckDBConnectionConfig()),
+            "gw_b": GatewayConfig(connection=pg_conn),
+        },
+        default_gateway="gw_a",
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+    )
+    pg_adapter_spy = mocker.spy(PostgresConnectionConfig, "create_engine_adapter")
+    plan_builder_init_spy = mocker.spy(PlanBuilder, "__init__")
+    ctx_multi = Context(paths=[proj_multi], config=cfg_multi)
+    pg_adapter_spy.reset_mock()
+
+    pb = ctx_multi.plan_builder("dev", execution_time="2023-01-02")
+    assert pb.build()
+    assert pg_adapter_spy.call_count == 0
+    passed_overrides = plan_builder_init_spy.call_args.kwargs.get("schema_differ_overrides") or {}
+    assert passed_overrides.get("gw_b") == {"treat_alter_data_type_as_destructive": True}
+
+
+def test_plan_builder_partially_unknown_nested_struct_and_positional_add(
+    make_snapshot, mocker: MockerFixture
+):
+    # 1. Partially-unknown STRUCT field drop in forward-only model must raise PlanError
+    kind_err = IncrementalByTimeRangeKind(time_column="ds", forward_only=True)
+    m_old_struct = SqlModel(
+        name="db.m",
+        dialect="databricks",
+        kind=kind_err,
+        query=parse_one(
+            "SELECT STRUCT(1 AS a, 'x' AS b, NULL AS u) AS info, CAST('2023-01-01' AS DATE) AS ds",
+            read="databricks",
+        ),
+    )
+    m_new_struct = SqlModel(
+        name="db.m",
+        dialect="databricks",
+        kind=kind_err,
+        query=parse_one(
+            "SELECT STRUCT(1 AS a, NULL AS u) AS info, CAST('2023-01-01' AS DATE) AS ds",
+            read="databricks",
+        ),
+    )
+    _, _, diff_struct = _build_snapshots_and_diff(make_snapshot, [m_old_struct], [m_new_struct])
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_struct).build()
+
+    # 2. Positional column addition in the middle preserves AFTER clause on Databricks
+    kind_warn = IncrementalByTimeRangeKind(
+        time_column="ds",
+        forward_only=True,
+        on_additive_change=OnAdditiveChange.WARN,
+    )
+    m_old_pos = SqlModel(
+        name="db.m",
+        dialect="databricks",
+        kind=kind_warn,
+        query=parse_one("SELECT 1 AS a, CAST('2023-01-01' AS DATE) AS ds", read="databricks"),
+    )
+    m_new_pos = SqlModel(
+        name="db.m",
+        dialect="databricks",
+        kind=kind_warn,
+        query=parse_one(
+            "SELECT 1 AS a, 2 AS b_mid, CAST('2023-01-01' AS DATE) AS ds", read="databricks"
+        ),
+    )
+    _, _, diff_pos = _build_snapshots_and_diff(make_snapshot, [m_old_pos], [m_new_pos])
+    console = TerminalConsole()
+    log_additive_spy = mocker.spy(console, "log_additive_change")
+    assert PlanBuilder(diff_pos, console=console).build()
+    assert log_additive_spy.call_count == 1
+    alter_ops = log_additive_spy.call_args.args[1]
+    assert [op.expression.sql("databricks") for op in alter_ops] == [
+        "ALTER TABLE `db`.`m` ADD COLUMN b_mid INT AFTER a"
+    ]
+
+
+def test_context_plan_builder_gateway_default_connection_fallback_and_precedence(
+    tmp_path: Path, mocker: MockerFixture
+):
+    from sqlmesh.core.config import (
+        Config,
+        DuckDBConnectionConfig,
+        GatewayConfig,
+        ModelDefaultsConfig,
+        PostgresConnectionConfig,
+    )
+    from sqlmesh.core.context import Context
+
+    proj = tmp_path / "proj_gw_fallback"
+    (proj / "models").mkdir(parents=True)
+    (proj / "models" / "a.sql").write_text(
+        """
+        MODEL (name db.a, kind FULL);
+        SELECT 1::INT AS id;
+        """
+    )
+
+    pg_default_conn = PostgresConnectionConfig(
+        host="unreachable.invalid",
+        port=5432,
+        user="u",
+        password="p",
+        database="d",
+        schema_differ_overrides={"treat_alter_data_type_as_destructive": True},
+    )
+    cfg = Config(
+        default_connection=pg_default_conn,
+        gateways={
+            "gw_duck": GatewayConfig(connection=DuckDBConnectionConfig()),
+            # connection=None should inherit default_connection's schema_differ_overrides
+            "gw_state_only": GatewayConfig(
+                connection=None, state_connection=DuckDBConnectionConfig()
+            ),
+        },
+        default_gateway="gw_duck",
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+    )
+
+    pg_adapter_spy = mocker.spy(PostgresConnectionConfig, "create_engine_adapter")
+    plan_builder_init_spy = mocker.spy(PlanBuilder, "__init__")
+    ctx = Context(paths=[proj], config=cfg)
+    pg_adapter_spy.reset_mock()
+
+    pb = ctx.plan_builder("dev", execution_time="2023-01-02")
+    assert pb.build()
+    assert pg_adapter_spy.call_count == 0
+    passed_overrides = plan_builder_init_spy.call_args.kwargs.get("schema_differ_overrides") or {}
+    assert passed_overrides.get("gw_duck") == {}
+    assert passed_overrides.get(None) == {}
+    assert passed_overrides.get("gw_state_only") == {"treat_alter_data_type_as_destructive": True}
+
+
+def test_treat_alter_data_type_as_destructive_with_ignore_policies(
+    make_snapshot, mocker: MockerFixture
+):
+    overrides: t.Dict[t.Optional[str], t.Dict[str, t.Any]] = {
+        None: {"treat_alter_data_type_as_destructive": True}
+    }
+
+    # 1. on_destructive_change=IGNORE + on_additive_change=ERROR must NOT log or raise
+    kind_ignore_dest = IncrementalByTimeRangeKind(
+        time_column="ds",
+        forward_only=True,
+        on_destructive_change=OnDestructiveChange.IGNORE,
+        on_additive_change=OnAdditiveChange.ERROR,
+    )
+    m_old_1 = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=kind_ignore_dest,
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(10) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    m_new_1 = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=kind_ignore_dest,
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(50) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    _, _, diff_ignore_dest = _build_snapshots_and_diff(make_snapshot, [m_old_1], [m_new_1])
+    console = TerminalConsole()
+    log_dest_spy = mocker.spy(console, "log_destructive_change")
+    log_add_spy = mocker.spy(console, "log_additive_change")
+    assert PlanBuilder(diff_ignore_dest, console=console, schema_differ_overrides=overrides).build()
+    assert log_dest_spy.call_count == 0
+    assert log_add_spy.call_count == 0
+
+    # 2. on_destructive_change=ERROR + on_additive_change=IGNORE MUST still raise PlanError
+    kind_ignore_add = IncrementalByTimeRangeKind(
+        time_column="ds",
+        forward_only=True,
+        on_destructive_change=OnDestructiveChange.ERROR,
+        on_additive_change=OnAdditiveChange.IGNORE,
+    )
+    m_old_2 = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=kind_ignore_add,
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(10) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    m_new_2 = SqlModel(
+        name="db.m",
+        dialect="postgres",
+        kind=kind_ignore_add,
+        query=parse_one(
+            "SELECT 'x'::VARCHAR(50) AS val, '2022-01-01'::DATE AS ds", read="postgres"
+        ),
+    )
+    _, _, diff_ignore_add = _build_snapshots_and_diff(make_snapshot, [m_old_2], [m_new_2])
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff_ignore_add, schema_differ_overrides=overrides).build()
+
+
+def test_scd_type_2_by_time_updated_at_type_follows_time_data_type(make_snapshot):
+    """The physical `updated_at` column is always created with `time_data_type`, so changing the
+    projected type of that column is not a physical schema change."""
+
+    def _scd_model(updated_at_type: str, time_data_type: str = "TIMESTAMP") -> SqlModel:
+        return SqlModel(
+            name="db.scd",
+            dialect="duckdb",
+            kind=SCDType2ByTimeKind(
+                unique_key=["id"], updated_at_name="updated_at", time_data_type=time_data_type
+            ),
+            query=parse_one(
+                f"SELECT 1::INT AS id, 'a'::TEXT AS val, '2022-01-01'::{updated_at_type} AS updated_at",
+                read="duckdb",
+            ),
+        )
+
+    _, _, diff = _build_snapshots_and_diff(
+        make_snapshot, [_scd_model("DATE")], [_scd_model("TIMESTAMP")]
+    )
+    assert PlanBuilder(diff).build()
+
+    # A change of `time_data_type` itself still changes the physical columns and is rejected.
+    _, _, diff = _build_snapshots_and_diff(
+        make_snapshot,
+        [_scd_model("TIMESTAMP", "TIMESTAMP")],
+        [_scd_model("TIMESTAMP", "DATE")],
+    )
+    with pytest.raises(
+        PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+    ):
+        PlanBuilder(diff).build()
+
+
+@pytest.mark.parametrize(
+    "old_policies, expect_error",
+    [
+        # The previous definition ignored additions, so its physical table may not contain the
+        # columns that its definition lists. The drop is deferred to physical validation.
+        ({"on_additive_change": OnAdditiveChange.IGNORE}, False),
+        # The previous schema establishes the drop, keep the static error.
+        ({}, True),
+    ],
+)
+def test_forward_only_static_check_defers_when_previous_policy_ignored_changes(
+    make_snapshot, old_policies, expect_error
+):
+    def _model(query: str, **policies: t.Any) -> SqlModel:
+        return SqlModel(
+            name="db.down",
+            dialect="duckdb",
+            kind=IncrementalByTimeRangeKind(
+                time_column="ds",
+                forward_only=True,
+                **{
+                    "on_destructive_change": OnDestructiveChange.ERROR,
+                    "on_additive_change": OnAdditiveChange.ERROR,
+                    **policies,
+                },
+            ),
+            query=parse_one(query, read="duckdb"),
+        )
+
+    old = _model("SELECT 1::INT AS id, 'x'::TEXT AS b, '2022-01-01'::DATE AS ds", **old_policies)
+    new = _model("SELECT 1::INT AS id, '2022-01-01'::DATE AS ds")
+    _, _, diff = _build_snapshots_and_diff(make_snapshot, [old], [new])
+
+    if expect_error:
+        with pytest.raises(
+            PlanError, match=r"Plan requires a destructive change to a forward-only model\."
+        ):
+            PlanBuilder(diff).build()
+    else:
+        assert PlanBuilder(diff).build()
