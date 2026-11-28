@@ -98,7 +98,7 @@ type(scope): description
 
 - `type` is one of `feat`, `fix`, `perf`, `docs`, `refactor`, `chore`, `build`, `revert`, `ci` or `test`. Lowercase is preferred, but `Fix:` is treated like `fix:`.
 - `scope` is optional and names the area changed, e.g. `snowflake`, `plan`, `dbt` or `vscode`.
-- Add `!` after the type or scope for a breaking change, e.g. `feat(plan)!: drop support for X`.
+- Add `!` after the type or scope for a breaking change, e.g. `feat(plan)!: drop support for X`. Also add an `### Upgrade note` section to the description that says what users will see after upgrading and what to do about it. It's copied into the release notes.
 - Write the description for users: say what changed for them, not how the code changed.
 
 Titles created by GitHub's "Revert" button (`Revert "..."`) are also accepted. If the
