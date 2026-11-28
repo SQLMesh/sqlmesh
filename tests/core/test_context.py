@@ -3965,6 +3965,27 @@ def test_table_diff_ignores_extra_args(sushi_context: Context):
     )
 
 
+def test_plan_union_by_name_keeps_later_branch_columns(tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "x.sql").write_text("MODEL (name t.x, kind FULL); SELECT 1::INT AS a")
+    (models_dir / "y.sql").write_text(
+        "MODEL (name t.y, kind FULL); SELECT 2::INT AS a, 'two'::TEXT AS b"
+    )
+    (models_dir / "u.sql").write_text(
+        "MODEL (name t.u, kind FULL); SELECT a FROM t.x UNION ALL BY NAME SELECT a, b FROM t.y"
+    )
+
+    context = Context(
+        paths=tmp_path, config=Config(model_defaults=ModelDefaultsConfig(dialect="duckdb"))
+    )
+    context.plan(auto_apply=True, no_prompts=True)
+
+    df = context.fetchdf("SELECT * FROM t.u ORDER BY a")
+    assert list(df.columns) == ["a", "b"]
+    assert df["b"].tolist() == [None, "two"]
+
+
 def test_plan_min_intervals(tmp_path: Path):
     init_example_project(tmp_path, engine_type="duckdb", dialect="duckdb")
 
