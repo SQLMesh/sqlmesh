@@ -303,9 +303,9 @@ MODEL (
 ```
 
 #### not_null_proportion, not_null_proportion_non_blocking
-Ensures that the specified column's proportion of `NULL` values is no greater than a threshold.
+Ensures that the proportion of non-`NULL` values in the specified column is at least `threshold`, a number between 0 and 1.
 
-This example asserts that the `zip` column has no more than 80% `NULL` values:
+This example asserts that at least 80% of the `zip` column's values are not `NULL` (that is, no more than 20% are `NULL`):
 
 ```sql linenums="1"
 MODEL (
