@@ -110,9 +110,11 @@ class RestatementStage:
     Args:
         all_snapshots: All snapshots in the plan by name. Note that this does not include the snapshots from other environments that will get their
             intervals cleared, it's included here as an optimization to prevent having to re-fetch the current plan's snapshots
+        expected_previous_snapshots: The baseline snapshots by name in the target environment when the plan was created.
     """
 
     all_snapshots: t.Dict[str, Snapshot]
+    expected_previous_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
 
 
 @dataclass
@@ -377,7 +379,9 @@ class PlanStagesBuilder:
         # in addition, when we update intervals in state, we only clear intervals from dev snapshots to force dev models to be backfilled based on the new prod data.
         # we can leave prod intervals alone because by the time this plan finishes, the intervals in state have not actually changed, since restatement replaces
         # data for existing intervals and does not produce new ones
-        restatement_stage = self._get_restatement_stage(plan, snapshots_by_name)
+        restatement_stage = self._get_restatement_stage(
+            plan, snapshots_by_name, existing_environment
+        )
         if restatement_stage:
             stages.append(restatement_stage)
 
@@ -473,7 +477,10 @@ class PlanStagesBuilder:
         )
 
     def _get_restatement_stage(
-        self, plan: EvaluatablePlan, snapshots_by_name: t.Dict[str, Snapshot]
+        self,
+        plan: EvaluatablePlan,
+        snapshots_by_name: t.Dict[str, Snapshot],
+        existing_environment: t.Optional[Environment] = None,
     ) -> t.Optional[RestatementStage]:
         if plan.restate_all_snapshots:
             if plan.is_dev:
@@ -482,8 +489,40 @@ class PlanStagesBuilder:
                 )
 
             if plan.restatements:
+                expected_previous_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
+                previous_env_snapshots = getattr(plan, "previous_environment_snapshots", None)
+                if isinstance(previous_env_snapshots, dict):
+                    expected_previous_snapshots = previous_env_snapshots
+                else:
+                    ensure_finalized = getattr(plan, "ensure_finalized_snapshots", False) is True
+                    if existing_environment is None:
+                        existing_environment = self.state_reader.get_environment(
+                            plan.environment.name
+                        )
+                    if isinstance(existing_environment, Environment) and (
+                        plan.environment.previous_finalized_snapshots is None
+                        or existing_environment.plan_id == plan.environment.previous_plan_id
+                    ):
+                        if existing_environment.expired:
+                            expected_previous_snapshots = {}
+                        else:
+                            baseline = (
+                                existing_environment.finalized_or_current_snapshots
+                                if ensure_finalized
+                                else existing_environment.snapshots
+                            )
+                            expected_previous_snapshots = {s.name: s.table_info for s in baseline}
+                    elif plan.environment.previous_finalized_snapshots is not None:
+                        expected_previous_snapshots = {
+                            s.name: s.table_info
+                            for s in plan.environment.previous_finalized_snapshots
+                        }
+                    elif existing_environment is None:
+                        expected_previous_snapshots = {}
+
                 return RestatementStage(
                     all_snapshots=snapshots_by_name,
+                    expected_previous_snapshots=expected_previous_snapshots,
                 )
 
         return None

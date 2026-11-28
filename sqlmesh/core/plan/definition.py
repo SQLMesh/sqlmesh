@@ -67,6 +67,11 @@ class Plan(PydanticModel, frozen=True):
     Note that dev previews are also considered restatements, so :selected_models_to_restate can be empty
     while :restatements is still populated with dev previews
     """
+    start_extension_restatements: t.Set[SnapshotId] = set()
+    """
+    Models that are part of :restatements only because the start of one of their upstream models moved
+    earlier, i.e. the restatement wasn't requested by a user.
+    """
     restate_all_snapshots: bool
     """Whether or not to clear intervals from state for other versions of the models listed in :restatements"""
 
@@ -263,15 +268,25 @@ class Plan(PydanticModel, frozen=True):
         return self.models_to_backfill is None or model_fqn in self.models_to_backfill
 
     def to_evaluatable(self) -> EvaluatablePlan:
+        if not self.context_diff.is_new_environment:
+            previous_environment_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = {
+                s.name: s.table_info for s in self.context_diff.environment_snapshots
+            }
+        elif self.previous_plan_id is None:
+            previous_environment_snapshots = {}
+        else:
+            previous_environment_snapshots = None
         return EvaluatablePlan(
             start=self.start,
             end=self.end,
             new_snapshots=self.new_snapshots,
             environment=self.environment,
+            previous_environment_snapshots=previous_environment_snapshots,
             no_gaps=self.no_gaps,
             skip_backfill=self.skip_backfill,
             empty_backfill=self.empty_backfill,
             restatements={s.name: i for s, i in self.restatements.items()},
+            start_extension_restatements={s_id.name for s_id in self.start_extension_restatements},
             restate_all_snapshots=self.restate_all_snapshots,
             is_dev=self.is_dev,
             allow_destructive_models=self.allow_destructive_models,
@@ -313,10 +328,13 @@ class EvaluatablePlan(PydanticModel):
     end: TimeLike
     new_snapshots: t.List[Snapshot]
     environment: Environment
+    previous_environment_snapshots: t.Optional[t.Dict[str, SnapshotTableInfo]] = None
     no_gaps: bool
     skip_backfill: bool
     empty_backfill: bool
     restatements: t.Dict[str, Interval]
+    start_extension_restatements: t.Set[str] = set()
+    """Names of the models in :restatements that are only there because an upstream start moved earlier."""
     restate_all_snapshots: bool
     is_dev: bool
     allow_destructive_models: t.Set[str]
@@ -338,6 +356,11 @@ class EvaluatablePlan(PydanticModel):
     environment_statements: t.Optional[t.List[EnvironmentStatements]] = None
     user_provided_flags: t.Optional[t.Dict[str, UserProvidedFlags]] = None
     selected_models: t.Optional[t.Set[str]] = None
+
+    @property
+    def is_restatement(self) -> bool:
+        """Whether the plan restates data on request (or previews), as opposed to just refreshing extended ranges."""
+        return bool(set(self.restatements) - self.start_extension_restatements)
 
     def is_selected_for_backfill(self, model_fqn: str) -> bool:
         return self.models_to_backfill is None or model_fqn in self.models_to_backfill

@@ -137,6 +137,11 @@ def identify_restatement_intervals_across_snapshot_versions(
                         snapshot=affected_snapshot.id_and_version, interval=interval
                     )
                     snapshot_intervals_to_clear[affected_snapshot.snapshot_id] = clear_request
+                else:
+                    clear_request.interval = (
+                        min(clear_request.interval[0], interval[0]),
+                        max(clear_request.interval[1], interval[1]),
+                    )
 
                 clear_request.environment_names |= set([env.name])
 
