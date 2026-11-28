@@ -21,7 +21,11 @@ from sqlmesh.core import analytics
 from sqlmesh.core.execution_observation import action, console_observer_scope
 from sqlmesh.core import constants as c
 from sqlmesh.core.console import Console, get_console
-from sqlmesh.core.environment import EnvironmentNamingInfo, execute_environment_statements
+from sqlmesh.core.environment import (
+    Environment,
+    EnvironmentNamingInfo,
+    execute_environment_statements,
+)
 from sqlmesh.core.macros import RuntimeStage
 from sqlmesh.core.snapshot.definition import to_view_mapping, SnapshotTableInfo
 from sqlmesh.core.plan import stages
@@ -38,7 +42,11 @@ from sqlmesh.core.snapshot import (
 )
 from sqlmesh.utils import to_snake_case
 from sqlmesh.core.state_sync import StateSync
-from sqlmesh.core.plan.common import identify_restatement_intervals_across_snapshot_versions
+from sqlmesh.core.plan.common import (
+    identify_restatement_intervals_across_snapshot_versions,
+    is_breaking_kind_change,
+    is_seed_metadata_only_change,
+)
 from sqlmesh.utils import CorrelationId
 from sqlmesh.utils.concurrency import NodeExecutionFailedError
 from sqlmesh.utils.errors import PlanError, ConflictingPlanError, SQLMeshError
@@ -117,6 +125,7 @@ class BuiltInPlanEvaluator(PlanEvaluator):
     def _evaluate_stages(
         self, plan_stages: t.List[stages.PlanStage], plan: EvaluatablePlan
     ) -> None:
+        self._clear_stale_dev_only_intervals_in_prod(plan)
         for stage in plan_stages:
             stage_name = stage.__class__.__name__
             handler_name = f"visit_{to_snake_case(stage_name)}"
@@ -126,6 +135,115 @@ class BuiltInPlanEvaluator(PlanEvaluator):
             handler = getattr(self, handler_name)
             with action("stage", stage_name, native_plan_id=plan.plan_id):
                 handler(stage, plan)
+
+    def _clear_stale_dev_only_intervals_in_prod(self, plan: EvaluatablePlan) -> None:
+        if not isinstance(plan, EvaluatablePlan) or not plan.is_prod:
+            return
+
+        dev_only_infos = [
+            s
+            for s in plan.environment.snapshots
+            if s.is_model and not s.virtual_environment_mode.is_full
+        ]
+        if not dev_only_infos:
+            return
+
+        existing_prod = self.state_sync.get_environment(c.PROD)
+        if not isinstance(existing_prod, Environment) or existing_prod.expired:
+            return
+
+        existing_prod_by_name = {s.name: s for s in existing_prod.promoted_snapshots}
+        new_snapshots_by_id = {s.snapshot_id: s for s in plan.new_snapshots}
+
+        incremental_kind_change_ids: t.Set[SnapshotId] = set()
+        for s in dev_only_infos:
+            old_prod = existing_prod_by_name.get(s.name)
+            if old_prod is None or old_prod.snapshot_id == s.snapshot_id:
+                continue
+            if (
+                s.is_forward_only
+                and old_prod.is_incremental
+                and s.is_incremental
+                and old_prod.virtual_environment_mode == s.virtual_environment_mode
+                and old_prod.model_kind_name != s.model_kind_name
+            ):
+                incremental_kind_change_ids.add(old_prod.snapshot_id)
+                if s.snapshot_id not in new_snapshots_by_id:
+                    incremental_kind_change_ids.add(s.snapshot_id)
+
+        # Seeds that aren't new in this plan (eg created by an earlier dev plan) are fetched too, to tell
+        # metadata-only changes from seed data changes.
+        seed_ids_to_fetch = {
+            s.snapshot_id
+            for s in dev_only_infos
+            if s.is_seed
+            and not s.is_forward_only
+            and s.snapshot_id not in new_snapshots_by_id
+            and (old_prod := existing_prod_by_name.get(s.name)) is not None
+            and old_prod.snapshot_id != s.snapshot_id
+        }
+        ids_to_fetch = incremental_kind_change_ids | seed_ids_to_fetch
+
+        fetched_snapshots = self.state_sync.get_snapshots(ids_to_fetch) if ids_to_fetch else {}
+
+        rebuild_infos: t.List[SnapshotTableInfo] = []
+        for s in dev_only_infos:
+            old_prod = existing_prod_by_name.get(s.name)
+            if old_prod is None:
+                if not s.is_forward_only:
+                    rebuild_infos.append(s)
+                continue
+            if old_prod.snapshot_id == s.snapshot_id:
+                continue
+            if not s.is_forward_only:
+                new_full = new_snapshots_by_id.get(s.snapshot_id) or fetched_snapshots.get(
+                    s.snapshot_id
+                )
+                if not (
+                    new_full is not None
+                    and new_full.is_seed
+                    and old_prod.virtual_environment_mode == s.virtual_environment_mode
+                    and is_seed_metadata_only_change(old_prod.snapshot_id, new_full)
+                ):
+                    # Metadata-only seed changes keep their data, so their intervals must be preserved.
+                    rebuild_infos.append(s)
+                continue
+            old_target: SnapshotInfoLike = fetched_snapshots.get(old_prod.snapshot_id, old_prod)
+            new_target: SnapshotInfoLike = new_snapshots_by_id.get(
+                s.snapshot_id, fetched_snapshots.get(s.snapshot_id, s)
+            )
+            if is_breaking_kind_change(old_target, new_target):
+                rebuild_infos.append(s)
+
+        if not rebuild_infos:
+            return
+
+        missing_rebuild_ids = [
+            s.snapshot_id
+            for s in rebuild_infos
+            if s.snapshot_id not in new_snapshots_by_id and s.snapshot_id not in fetched_snapshots
+        ]
+        if missing_rebuild_ids:
+            fetched_snapshots.update(self.state_sync.get_snapshots(missing_rebuild_ids))
+
+        rebuild_snapshots = [
+            s_full.copy(update={"effective_from": None, "intervals": [], "dev_intervals": []})
+            for s in rebuild_infos
+            if (
+                s_full := new_snapshots_by_id.get(s.snapshot_id)
+                or fetched_snapshots.get(s.snapshot_id)
+            )
+            is not None
+        ]
+        if not rebuild_snapshots:
+            return
+
+        refreshed = self.state_sync.refresh_snapshot_intervals(rebuild_snapshots)
+        intervals_to_remove = [
+            (s, (s.intervals[0][0], s.intervals[-1][1])) for s in refreshed if s.intervals
+        ]
+        if intervals_to_remove:
+            self.state_sync.remove_intervals(intervals_to_remove, remove_shared_versions=True)
 
     def visit_before_all_stage(self, stage: stages.BeforeAllStage, plan: EvaluatablePlan) -> None:
         execute_environment_statements(

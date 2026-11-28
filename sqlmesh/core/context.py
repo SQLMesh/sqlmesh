@@ -62,6 +62,7 @@ from sqlmesh.core.config import (
     Config,
     load_configs,
 )
+from sqlmesh.core.config.common import VirtualEnvironmentMode
 from sqlmesh.core.config.connection import ConnectionConfig
 from sqlmesh.core.config.loader import C
 from sqlmesh.core.config.root import RegexKeyDict
@@ -550,8 +551,22 @@ class GenericContext(BaseContext, t.Generic[C]):
             raise SQLMeshError(f"The disabled model '{model.name}' cannot be upserted")
         path = model._path
 
+        if kwargs.get("virtual_environment_mode") is not None:
+            # model_copy(update=...) does not validate, so normalize strings to the enum here.
+            raw_mode = kwargs["virtual_environment_mode"]
+            try:
+                kwargs["virtual_environment_mode"] = VirtualEnvironmentMode(
+                    str(getattr(raw_mode, "value", raw_mode)).lower()
+                )
+            except ValueError:
+                raise ConfigError(
+                    f"Invalid virtual_environment_mode '{raw_mode}'. "
+                    f"Expected one of: {', '.join(m.value for m in VirtualEnvironmentMode)}."
+                )
+
         model = model.copy(update=kwargs)
         model._path = path
+        self._validate_model_virtual_environment_mode(model)
 
         self.dag.add(model.fqn, model.depends_on)
 
@@ -780,6 +795,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._uncached_model_names = uncached
 
         for model in self._models.values():
+            self._validate_model_virtual_environment_mode(model)
             self.dag.add(model.fqn, model.depends_on)
 
         if update_schemas:
@@ -856,7 +872,22 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         for model in models.values():
             # The model definition can be validated correctly only after the schema is set.
+            self._validate_model_virtual_environment_mode(model)
             model.validate_definition()
+
+    def _validate_model_virtual_environment_mode(self, model: Model) -> None:
+        if (
+            # Plan selection reads the root flag for every model, so check it alongside the model's own project flag.
+            (
+                self.config.plan.use_finalized_state
+                or self.config_for_node(model).plan.use_finalized_state
+            )
+            and not model.kind.is_symbolic
+            and not model.virtual_environment_mode.is_full
+        ):
+            raise ConfigError(
+                "Using the finalized state is only supported when `virtual_environment_mode` is set to `full`."
+            )
 
     @python_api_analytics
     def run(
@@ -1891,18 +1922,42 @@ class GenericContext(BaseContext, t.Generic[C]):
             max_interval_end_per_model,
         )
 
-        if not self.config.virtual_environment_mode.is_full:
+        model_snapshots = [
+            s for s in context_diff.snapshots.values() if s.is_model and not s.is_symbolic
+        ]
+        if model_snapshots and all(not s.virtual_environment_mode.is_full for s in model_snapshots):
+            forward_only = True
+        elif not model_snapshots and not self.config.virtual_environment_mode.is_full:
             forward_only = True
         elif forward_only is None:
             forward_only = self.config.plan.forward_only
 
         # When handling prod restatements, only clear intervals from other model versions if we are using full virtual environments
         # If we are not, then there is no point, because none of the data in dev environments can be promoted by definition
-        restate_all_snapshots = (
-            expanded_restate_models is not None
-            and not is_dev
-            and self.config.virtual_environment_mode.is_full
+        has_full_vde_snapshots = (
+            any(s.virtual_environment_mode.is_full for s in model_snapshots)
+            if model_snapshots
+            else self.config.virtual_environment_mode.is_full
         )
+        restate_all_snapshots = (
+            expanded_restate_models is not None and not is_dev and has_full_vde_snapshots
+        )
+
+        if is_dev and context_diff.prod_snapshots:
+            mismatched_modes = {
+                (prod_info.virtual_environment_mode.value, s.virtual_environment_mode.value)
+                for s in context_diff.snapshots.values()
+                if s.is_model
+                and not s.is_symbolic
+                and (prod_info := context_diff.prod_snapshots.get(s.name)) is not None
+                and prod_info.virtual_environment_mode != s.virtual_environment_mode
+            }
+            for prod_mode, local_mode in sorted(mismatched_modes):
+                self.console.log_warning(
+                    f"Local virtual_environment_mode ('{local_mode}') differs from the active `prod` "
+                    f"environment state ('{prod_mode}'). Affected models will be rebuilt in preview "
+                    f"and will require a full rebuild when applied to `prod`."
+                )
 
         return self.PLAN_BUILDER_TYPE(
             context_diff=context_diff,

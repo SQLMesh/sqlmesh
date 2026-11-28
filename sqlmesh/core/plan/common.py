@@ -4,7 +4,13 @@ import logging
 from dataclasses import dataclass, field
 
 from sqlmesh.core.state_sync import StateReader
-from sqlmesh.core.snapshot import Snapshot, SnapshotId, SnapshotIdAndVersion, SnapshotNameVersion
+from sqlmesh.core.snapshot import (
+    Snapshot,
+    SnapshotId,
+    SnapshotIdAndVersion,
+    SnapshotInfoLike,
+    SnapshotNameVersion,
+)
 from sqlmesh.core.snapshot.definition import Interval
 from sqlmesh.utils.dag import DAG
 from sqlmesh.utils.date import now_timestamp
@@ -16,18 +22,23 @@ def should_force_rebuild(old: Snapshot, new: Snapshot) -> bool:
     if new.is_view and new.is_indirect_non_breaking and not new.is_forward_only:
         # View models always need to be rebuilt to reflect updated upstream dependencies
         return True
-    if new.is_seed and not (
-        new.is_metadata
-        and new.previous_version
-        and new.previous_version.snapshot_id(new.name) == old.snapshot_id
-    ):
+    if new.is_seed and not is_seed_metadata_only_change(old.snapshot_id, new):
         # Seed models always need to be rebuilt to reflect changes in the seed file
         # Unless only their metadata has been updated (eg description added) and the seed file has not been touched
         return True
     return is_breaking_kind_change(old, new)
 
 
-def is_breaking_kind_change(old: Snapshot, new: Snapshot) -> bool:
+def is_seed_metadata_only_change(old_snapshot_id: SnapshotId, new: Snapshot) -> bool:
+    """Whether `new` only differs from the snapshot `old_snapshot_id` in its metadata (eg a description)."""
+    return bool(
+        new.is_metadata
+        and new.previous_version
+        and new.previous_version.snapshot_id(new.name) == old_snapshot_id
+    )
+
+
+def is_breaking_kind_change(old: SnapshotInfoLike, new: SnapshotInfoLike) -> bool:
     if new.is_model != old.is_model:
         # If one is a model and the other isn't, then we need to rebuild
         return True
@@ -38,15 +49,15 @@ def is_breaking_kind_change(old: Snapshot, new: Snapshot) -> bool:
     if old.virtual_environment_mode != new.virtual_environment_mode:
         # If the virtual environment mode has changed, then we need to rebuild
         return True
-    if old.model.kind.name == new.model.kind.name:
+    if old.model_kind_name == new.model_kind_name:
         # If the kind hasn't changed, then we don't need to rebuild
         return False
     if not old.is_incremental or not new.is_incremental:
         # If either is not incremental, then we need to rebuild
         return True
-    if old.model.partitioned_by == new.model.partitioned_by:
+    if isinstance(old, Snapshot) and isinstance(new, Snapshot):
         # If the partitioning hasn't changed, then we don't need to rebuild
-        return False
+        return old.model.partitioned_by != new.model.partitioned_by
     return True
 
 

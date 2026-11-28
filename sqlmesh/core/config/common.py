@@ -4,6 +4,8 @@ import typing as t
 from enum import Enum
 import re
 
+from sqlglot import exp
+
 from sqlmesh.utils import classproperty
 from sqlmesh.utils.errors import ConfigError
 from sqlmesh.utils.pydantic import field_validator
@@ -171,6 +173,25 @@ variables_validator = field_validator(
     mode="before",
     check_fields=False,
 )(_variables_validator)
+
+
+def _virtual_environment_mode_validator(cls: t.Type, v: t.Any) -> t.Any:
+    if v is None:
+        return cls.model_fields["virtual_environment_mode"].default
+    if isinstance(v, (exp.Identifier, exp.Var)):
+        return v.name.lower()
+    if isinstance(v, exp.Literal) and v.is_string:
+        return v.this.lower()
+    if isinstance(v, str) and not isinstance(v, VirtualEnvironmentMode):
+        return v.lower()
+    return v
+
+
+virtual_environment_mode_validator = field_validator(
+    "virtual_environment_mode",
+    mode="before",
+    check_fields=False,
+)(_virtual_environment_mode_validator)
 
 
 def compile_regex_mapping(value: t.Dict[str | re.Pattern, t.Any]) -> t.Dict[re.Pattern, t.Any]:

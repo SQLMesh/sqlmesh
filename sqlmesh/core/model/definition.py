@@ -239,7 +239,7 @@ class _Model(ModelMeta, frozen=True):
                     expressions.append(
                         exp.Property(
                             this=field_name,
-                            value=exp.to_table(field_value, dialect=self.dialect),
+                            value=d.parse_one(field_value, into=exp.Table, dialect=self.dialect),
                         )
                     )
                 elif field_name not in ("default_catalog", "enabled", "ignored_rules_"):
@@ -2296,6 +2296,13 @@ Learn more at https://sqlmesh.readthedocs.io/en/stable/concepts/models/overview
 
     rendered_defaults = parse_defaults_properties(rendered_defaults, dialect=dialect)
 
+    default_virtual_environment_mode = kwargs.pop("virtual_environment_mode", None)
+    if (
+        default_virtual_environment_mode is not None
+        and rendered_defaults.get("virtual_environment_mode") is None
+    ):
+        rendered_defaults["virtual_environment_mode"] = default_virtual_environment_mode
+
     # Extract the query and any pre/post statements
     query_or_seed_insert, pre_statements, post_statements, on_virtual_update, inline_audits = (
         _split_sql_model_statements(expressions[1:], path, dialect=dialect)
@@ -2308,8 +2315,8 @@ Learn more at https://sqlmesh.readthedocs.io/en/stable/concepts/models/overview
             if rendered_meta.comments
             else None
         ),
-        **{prop.name.lower(): prop.args.get("value") for prop in rendered_meta.expressions},
         **kwargs,
+        **{prop.name.lower(): prop.args.get("value") for prop in rendered_meta.expressions},
     }
 
     # Discard the potentially half-rendered versions of these properties and replace them with the
@@ -2609,11 +2616,14 @@ def _create_model(
         kwargs["kind"] = create_model_kind(raw_kind, dialect, defaults or {})
 
     defaults = {k: v for k, v in (defaults or {}).items() if k in klass.all_fields()}
+    if defaults.get("virtual_environment_mode") is None:
+        defaults.pop("virtual_environment_mode", None)
     if issubclass(klass, ExternalModel):
         # An external model's gateway selects a gateway-specific source definition in
         # external_models.yaml, so it must remain explicit rather than inheriting the
         # gateway used to execute managed models in the project.
         defaults.pop("gateway", None)
+        defaults.pop("virtual_environment_mode", None)
     if not issubclass(klass, SqlModel):
         defaults.pop("optimize_query", None)
 

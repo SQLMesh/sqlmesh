@@ -11,7 +11,7 @@ from sqlglot.helper import ensure_list
 
 from sqlmesh.core import dialect as d
 from sqlmesh.core.config.base import UpdateStrategy
-from sqlmesh.core.config.common import VirtualEnvironmentMode
+from sqlmesh.core.config.common import VirtualEnvironmentMode, virtual_environment_mode_validator
 from sqlmesh.core.model import Model
 from sqlmesh.core.model.common import ParsableSql
 from sqlmesh.core.node import DbtNodeInfo
@@ -126,6 +126,7 @@ class BaseModelConfig(GeneralConfig):
     tests: t.List[TestConfig] = []
     dialect_: t.Optional[str] = Field(None, alias="dialect")
     grain: t.Union[str, t.List[str]] = []
+    virtual_environment_mode: t.Optional[VirtualEnvironmentMode] = None
 
     # DBT configuration fields
     unique_id: str = ""
@@ -147,6 +148,8 @@ class BaseModelConfig(GeneralConfig):
     latest_version: t.Optional[int] = None
 
     _canonical_name: t.Optional[str] = None
+
+    _virtual_environment_mode_validator = virtual_environment_mode_validator
 
     @field_validator("pre_hook", "post_hook", mode="before")
     @classmethod
@@ -288,7 +291,13 @@ class BaseModelConfig(GeneralConfig):
 
     @property
     def sqlmesh_config_fields(self) -> t.Set[str]:
-        return {"description", "owner", "stamp", "storage_format"}
+        return {
+            "description",
+            "owner",
+            "stamp",
+            "storage_format",
+            "virtual_environment_mode",
+        }
 
     @property
     def node_info(self) -> DbtNodeInfo:
