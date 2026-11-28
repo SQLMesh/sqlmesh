@@ -45,7 +45,7 @@ Each step publishes immediately and there's no approval gate. Check `main` befor
 
 4. Watch the [Release](https://github.com/SQLMesh/sqlmesh/actions/workflows/release.yaml) run until it finishes.
 5. Check that the new version is on [PyPI](https://pypi.org/project/sqlmesh/#history).
-6. Edit the generated release on the [Releases page](https://github.com/SQLMesh/sqlmesh/releases). Under **Breaking changes**, add a short upgrade note for each entry. Say what users will see after upgrading, such as a migration or a metadata-only change in `sqlmesh plan`.
+6. Edit the generated release on the [Releases page](https://github.com/SQLMesh/sqlmesh/releases). Under **Breaking changes**, add a short upgrade note for each entry. Copy it from the `### Upgrade note` section of that pull request's description. If a pull request has none, write one that says what users will see after upgrading and what to do, such as running `sqlmesh migrate` or applying a metadata-only change in `sqlmesh plan`.
 
 If the workflow fails after the PyPI step, don't delete or reuse the tag. PyPI doesn't accept the same version twice. Fix the cause and release the next version.
 
